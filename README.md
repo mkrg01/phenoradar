@@ -1,6 +1,6 @@
 # phenoradar
 
-[![CI](https://github.com/mkrg01/phenoradar/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mkrg01/phenoradar/actions/workflows/ci.yml) [![PyPI](https://img.shields.io/pypi/v/phenoradar.svg)](https://pypi.org/project/phenoradar/) [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/) [![License](https://img.shields.io/github/license/mkrg01/phenoradar.svg)](LICENSE)
+[![CI](https://github.com/mkrg01/phenoradar/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mkrg01/phenoradar/actions/workflows/ci.yml) [![PyPI](https://img.shields.io/pypi/v/phenoradar.svg)](https://pypi.org/project/phenoradar/) [![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/downloads/) [![License](https://img.shields.io/github/license/mkrg01/phenoradar.svg)](LICENSE)
 
 ## Overview
 
