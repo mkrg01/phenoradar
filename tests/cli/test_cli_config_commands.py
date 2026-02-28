@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,10 +19,16 @@ from phenoradar.provenance import ProvenanceError
 from phenoradar.reporting import ReportError
 from phenoradar.split import SplitError
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
+
 
 def _write(path: Path, text: str) -> Path:
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def _plain_output(text: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 def _c4_tiny_source_uri() -> str:
@@ -297,16 +304,18 @@ def test_cli_accepts_short_help_option() -> None:
     runner = CliRunner()
 
     result = runner.invoke(app, ["-h"])
+    output = _plain_output(result.output)
 
-    assert result.exit_code == 0, result.output
-    assert "Usage: " in result.output
-    assert "PhenoRadar: orthogroup TPM-based phenotype prediction CLI" in result.output
-    assert "--version" in result.output
-    assert "-V" in result.output
+    assert result.exit_code == 0, output
+    assert "Usage: " in output
+    assert "PhenoRadar: orthogroup TPM-based phenotype prediction CLI" in output
+    assert "--version" in output
+    assert "-V" in output
 
     run_help = runner.invoke(app, ["run", "-h"])
-    assert run_help.exit_code == 0, run_help.output
-    assert "Run training/evaluation pipeline." in run_help.output
+    run_help_output = _plain_output(run_help.output)
+    assert run_help.exit_code == 0, run_help_output
+    assert "Run training/evaluation pipeline." in run_help_output
 
 
 def test_cli_accepts_global_version_option() -> None:
@@ -518,11 +527,12 @@ def test_run_requires_config_option() -> None:
     runner = CliRunner()
 
     result = runner.invoke(app, ["run"])
+    output = _plain_output(result.output)
 
     assert result.exit_code != 0
-    assert "Missing option" in result.output
-    assert "--config" in result.output
-    assert "-c" in result.output
+    assert "Missing option" in output
+    assert "--config" in output
+    assert "-c" in output
 
 
 def test_run_emits_model_selection_artifacts_when_selection_active(
@@ -697,10 +707,11 @@ data:
     )
 
     result = runner.invoke(app, ["run", "-c", str(config), "--verbose", "--quiet"])
+    output = _plain_output(result.output)
 
     assert result.exit_code != 0
-    assert "--verbose" in result.output
-    assert "--quiet" in result.output
+    assert "--verbose" in output
+    assert "--quiet" in output
 
 
 def test_predict_uses_model_bundle_and_emits_predict_artifacts(
@@ -973,9 +984,10 @@ def test_report_requires_run_selection_arguments(
     monkeypatch.chdir(tmp_path)
 
     result = runner.invoke(app, ["report"])
+    output = _plain_output(result.output)
 
     assert result.exit_code != 0
-    assert "Either --run-dir or --runs-root must be provided" in result.output
+    assert "Either --run-dir or --runs-root must be provided" in output
 
 
 def test_config_fails_for_invalid_yaml(
@@ -1521,9 +1533,10 @@ def test_dataset_requires_force_for_checksum_mismatch(tmp_path: Path) -> None:
             str(out_dir),
         ],
     )
+    output = _plain_output(result.output)
     assert result.exit_code != 0
-    assert "checksum" in result.output
-    assert "use --force" in result.output
+    assert "checksum" in output
+    assert "use --force" in output
 
     force_result = runner.invoke(
         app,
