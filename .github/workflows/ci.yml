@@ -20,8 +20,8 @@ env:
   POLARS_MAX_THREADS: "1"
 
 jobs:
-  linux:
-    name: linux / py${{ matrix.python-version }}
+  test:
+    name: test / py${{ matrix.python-version }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -41,34 +41,6 @@ jobs:
           key: uv-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}
           restore-keys: |
             uv-${{ runner.os }}-py${{ matrix.python-version }}-
-            uv-${{ runner.os }}-
-      - name: Install dependencies
-        run: uv sync --extra dev --frozen
-      - name: Ruff
-        run: uv run ruff check .
-      - name: Mypy
-        run: uv run mypy src
-      - name: Pytest
-        run: uv run pytest -q
-
-  macos-recommended:
-    name: macos (recommended) / py3.12
-    runs-on: macos-latest
-    timeout-minutes: 30
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - name: Cache uv
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/uv
-          key: uv-${{ runner.os }}-py3.12-${{ hashFiles('uv.lock') }}
-          restore-keys: |
-            uv-${{ runner.os }}-py3.12-
             uv-${{ runner.os }}-
       - name: Install dependencies
         run: uv sync --extra dev --frozen
