@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/mkrg01/phenoradar/compare/v0.1.0...v0.1.1) (2026-03-05)
+
+
+### Documentation
+
+* add active-development warning callout ([32461e0](https://github.com/mkrg01/phenoradar/commit/32461e041d68e324e0edd4e7aebbd285e6787275))
+
 ## 0.1.0 (2026-02-28)
 
 
