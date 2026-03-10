@@ -825,6 +825,7 @@ def run(
             coefficients=cv_artifacts.coefficients,
             ensemble_model_probs=cv_artifacts.ensemble_model_probs,
             model_selection_trials=cv_artifacts.model_selection_trials,
+            model_selection_trials_summary=cv_artifacts.model_selection_trials_summary,
             auto_threshold_metric=resolved.report.auto_threshold_selection_metric,
             loss_by_split_cv=cv_artifacts.loss_by_split_cv,
             loss_by_split_final_refit=(

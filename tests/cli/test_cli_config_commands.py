@@ -661,7 +661,7 @@ model_selection:
     assert selected_path.exists()
     assert trials_path.exists()
     assert trials_summary_path.exists()
-    assert not (run_dirs[0] / "figures" / "model_selection_trials.svg").exists()
+    assert (run_dirs[0] / "figures" / "model_selection_trials.svg").exists()
 
     selected_df = pl.read_csv(selected_path, separator="\t")
     scopes = set(selected_df.select("selection_scope").to_series().to_list())

@@ -76,6 +76,7 @@ Notes:
   - `coefficients_signed_top.svg`
   - `cv_species_probability_by_trait.svg`
   - `cv_fold_trait_probability.svg`
+  - `model_selection_trials.svg` (model selection enabled)
   - `roc_pr_curves_cv.svg` (may be skipped when degenerate)
   - `final_refit_loss_by_split.svg` (`full_run`)
   - `external_species_probability_by_trait.svg` (`full_run` when external test rows exist)

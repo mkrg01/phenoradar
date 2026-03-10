@@ -81,6 +81,7 @@ Always written:
     - `coefficients_signed_top.svg`
     - `cv_species_probability_by_trait.svg`
     - `cv_fold_trait_probability.svg`
+    - `model_selection_trials.svg` (candidate selection active)
     - `roc_pr_curves_cv.svg` (may be skipped with warning for degenerate folds)
     - `final_refit_loss_by_split.svg` (attempted in `full_run`)
     - `external_species_probability_by_trait.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
@@ -321,6 +322,12 @@ Conditionally written:
 - `cv_fold_trait_probability.svg`
   - Fold-level probability distribution grouped by trait.
   - Useful for checking fold-to-fold drift or fold-specific overlap.
+- `model_selection_trials.svg` (candidate selection active)
+  - Panels are laid out automatically in a compact grid.
+  - Candidate scores are shown as `metric_value_mean ± metric_value_std`.
+  - All folds are shown; per fold, only the first `sample_set_id` is plotted.
+  - Y-axis labels include `candidate_index` and parameter JSON
+    (keys fixed across candidates in the panel are omitted).
 - `external_species_probability_by_trait.svg` (`full_run` with external samples)
   - External-test species probabilities grouped by `true_label`.
   - Boxplot with per-species points and trait-wise mean markers.

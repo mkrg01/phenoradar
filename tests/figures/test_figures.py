@@ -387,6 +387,126 @@ def test_write_run_figures_ignores_empty_model_selection_trials_when_provided(
     assert warnings == []
 
 
+def test_write_run_figures_writes_model_selection_trials_when_summary_provided(
+    tmp_path: Path,
+) -> None:
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_minimal_oof(),
+        thresholds=_minimal_thresholds(),
+        feature_importance=_minimal_feature_importance(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        model_selection_trials_summary=pl.DataFrame(
+            {
+                "fold_id": ["0", "0", "1", "1"],
+                "sample_set_id": [0, 0, 0, 0],
+                "candidate_index": [0, 1, 0, 1],
+                "metric_name": ["mcc", "mcc", "mcc", "mcc"],
+                "params_json": ["{}", "{\"C\":1.0}", "{}", "{\"C\":1.0}"],
+                "n_inner_folds": [2, 2, 2, 2],
+                "n_valid_inner_folds": [2, 2, 2, 2],
+                "metric_value_mean": [0.40, 0.55, 0.38, 0.52],
+                "metric_value_std": [0.02, 0.03, 0.01, 0.02],
+            }
+        ),
+        auto_threshold_metric="mcc",
+    )
+
+    figures_dir = tmp_path / "run" / "figures"
+    svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
+    assert (figures_dir / "model_selection_trials.svg").exists()
+    assert '1: {"C":1.0}' in svg_text
+    assert warnings == []
+
+
+def test_write_run_figures_hides_fixed_params_in_model_selection_labels(
+    tmp_path: Path,
+) -> None:
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_minimal_oof(),
+        thresholds=_minimal_thresholds(),
+        feature_importance=_minimal_feature_importance(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        model_selection_trials_summary=pl.DataFrame(
+            {
+                "fold_id": ["0", "0"],
+                "sample_set_id": [0, 0],
+                "candidate_index": [0, 1],
+                "metric_name": ["mcc", "mcc"],
+                "params_json": [
+                    "{\"C\":1.0,\"l1_ratio\":0.5}",
+                    "{\"C\":2.0,\"l1_ratio\":0.5}",
+                ],
+                "n_inner_folds": [2, 2],
+                "n_valid_inner_folds": [2, 2],
+                "metric_value_mean": [0.41, 0.58],
+                "metric_value_std": [0.02, 0.03],
+            }
+        ),
+        auto_threshold_metric="mcc",
+    )
+
+    figures_dir = tmp_path / "run" / "figures"
+    svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
+    assert '0: {"C":1.0}' in svg_text
+    assert '1: {"C":2.0}' in svg_text
+    assert "l1_ratio" not in svg_text
+    assert warnings == []
+
+
+def test_write_run_figures_limits_model_selection_sample_sets_per_fold(
+    tmp_path: Path,
+) -> None:
+    summary_rows = []
+    for sample_set_id in range(7):
+        for candidate_index in (0, 1):
+            summary_rows.append(
+                {
+                    "fold_id": "0",
+                    "sample_set_id": sample_set_id,
+                    "candidate_index": candidate_index,
+                    "metric_name": "mcc",
+                    "params_json": (
+                        "{\"panel_param\":"
+                        f"{sample_set_id * 10 + candidate_index}"
+                        "}"
+                    ),
+                    "n_inner_folds": 2,
+                    "n_valid_inner_folds": 2,
+                    "metric_value_mean": 0.3 + sample_set_id * 0.01 + candidate_index * 0.02,
+                    "metric_value_std": 0.01,
+                }
+            )
+    summary = pl.DataFrame(summary_rows)
+
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_minimal_oof(),
+        thresholds=_minimal_thresholds(),
+        feature_importance=_minimal_feature_importance(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        model_selection_trials_summary=summary,
+        auto_threshold_metric="mcc",
+    )
+
+    figures_dir = tmp_path / "run" / "figures"
+    svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
+    assert "fold=0" in svg_text
+    assert '0: {"panel_param":0}' in svg_text
+    assert '"panel_param":10' not in svg_text
+    assert warnings == []
+
+
 def test_write_run_figures_ignores_empty_ensemble_inputs(tmp_path: Path) -> None:
     warnings = write_run_figures(
         run_dir=tmp_path / "run",

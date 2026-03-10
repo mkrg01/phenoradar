@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import matplotlib
 import numpy as np
@@ -39,6 +40,7 @@ class FigureError(ValueError):
 
 
 _FIG_DPI = 100
+_MODEL_SELECTION_SAMPLE_SET_LIMIT = 1
 
 
 def _figure_size_inches(width_px: int, height_px: int) -> tuple[float, float]:
@@ -1184,6 +1186,335 @@ def _report_stage_breakdown(report_runs: pl.DataFrame, out_path: Path) -> None:
     )
 
 
+def _summarize_model_selection_trials_for_figure(
+    model_selection_trials: pl.DataFrame,
+) -> pl.DataFrame:
+    required = {
+        "fold_id",
+        "sample_set_id",
+        "candidate_index",
+        "metric_name",
+        "metric_value",
+    }
+    if not required.issubset(model_selection_trials.columns):
+        raise FigureError(
+            "model_selection_trials.tsv schema is invalid for model_selection_trials.svg"
+        )
+
+    scored = model_selection_trials
+    if "params_json" not in scored.columns:
+        scored = scored.with_columns(pl.lit("{}").alias("params_json"))
+
+    scored = scored.with_columns(
+        pl.col("metric_value").cast(pl.Float64, strict=False).alias("_metric_value_raw")
+    ).with_columns(
+        pl.when(pl.col("_metric_value_raw").is_nan())
+        .then(None)
+        .otherwise(pl.col("_metric_value_raw"))
+        .alias("_metric_value_valid")
+    )
+    return scored.group_by(
+        ["fold_id", "sample_set_id", "candidate_index", "metric_name", "params_json"]
+    ).agg(
+        [
+            pl.len().alias("n_inner_folds"),
+            pl.col("_metric_value_valid").count().alias("n_valid_inner_folds"),
+            pl.col("_metric_value_valid").mean().alias("metric_value_mean"),
+            pl.col("_metric_value_valid").std(ddof=0).alias("metric_value_std"),
+        ]
+    ).sort(["fold_id", "sample_set_id", "candidate_index"])
+
+
+def _params_dict(params_json: str | None) -> dict[str, Any] | None:
+    if params_json is None:
+        return None
+    raw = params_json.strip()
+    if raw == "":
+        return None
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def _varying_param_keys(params_json_values: list[str | None]) -> set[str]:
+    dicts = [_params_dict(value) for value in params_json_values]
+    all_keys = sorted({key for item in dicts if item is not None for key in item})
+    varying: set[str] = set()
+    for key in all_keys:
+        observed: set[str] = set()
+        for item in dicts:
+            if item is None or key not in item:
+                observed.add("__MISSING__")
+                continue
+            value = item[key]
+            observed.add(
+                json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            )
+        if len(observed) > 1:
+            varying.add(key)
+    return varying
+
+
+def _compact_params_label(
+    params_json: str | None,
+    *,
+    include_keys: set[str] | None = None,
+) -> str:
+    if params_json is None:
+        return "{}"
+    raw = params_json.strip()
+    if raw == "":
+        return "{}"
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    if isinstance(parsed, dict):
+        if include_keys is not None:
+            parsed = {
+                key: value
+                for key, value in sorted(parsed.items())
+                if key in include_keys
+            }
+        if not parsed:
+            return "{}"
+        return json.dumps(parsed, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    if parsed is None:
+        return "null"
+    return json.dumps(parsed, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _model_selection_trials_summary_panels(
+    model_selection_trials_summary: pl.DataFrame,
+    out_path: Path,
+    *,
+    max_sample_sets_per_fold: int,
+) -> None:
+    required = {
+        "fold_id",
+        "sample_set_id",
+        "candidate_index",
+        "metric_name",
+        "metric_value_mean",
+        "metric_value_std",
+    }
+    if not required.issubset(model_selection_trials_summary.columns):
+        raise FigureError(
+            "model_selection_trials_summary.tsv schema is invalid for model_selection_trials.svg"
+        )
+
+    summary = model_selection_trials_summary
+    if "params_json" not in summary.columns:
+        summary = summary.with_columns(pl.lit("{}").alias("params_json"))
+
+    data = (
+        summary.select(
+            pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
+            pl.col("sample_set_id").cast(pl.Int64, strict=False).alias("__sample_set_id"),
+            pl.col("candidate_index").cast(pl.Int64, strict=False).alias("__candidate_index"),
+            pl.col("metric_name").cast(pl.String, strict=False).alias("__metric_name"),
+            pl.col("metric_value_mean").cast(pl.Float64, strict=False).alias("__mean"),
+            pl.col("metric_value_std").cast(pl.Float64, strict=False).alias("__std"),
+            pl.col("params_json").cast(pl.String, strict=False).alias("__params_json"),
+        )
+        .with_columns(
+            pl.when(
+                pl.col("__std").is_null() | pl.col("__std").is_nan() | (pl.col("__std") < 0.0)
+            )
+            .then(0.0)
+            .otherwise(pl.col("__std"))
+            .alias("__std_plot")
+        )
+        .filter(
+            pl.col("__fold_id").is_not_null()
+            & (pl.col("__fold_id") != "")
+            & pl.col("__sample_set_id").is_not_null()
+            & pl.col("__candidate_index").is_not_null()
+            & pl.col("__metric_name").is_not_null()
+            & (pl.col("__metric_name") != "")
+            & pl.col("__mean").is_not_null()
+            & pl.col("__mean").is_finite()
+        )
+    )
+    if data.height == 0:
+        return
+
+    if max_sample_sets_per_fold < 1:
+        raise FigureError("max_sample_sets_per_fold must be >= 1")
+
+    fold_ids = [str(v) for v in data.select("__fold_id").unique().to_series().to_list()]
+    fold_ids = sorted(
+        fold_ids,
+        key=lambda value: (0, int(value)) if value.isdigit() else (1, value),
+    )
+
+    sample_sets_by_fold: dict[str, list[int]] = {}
+    per_fold_total: dict[str, int] = {}
+    n_rows = 0
+    for fold_id in fold_ids:
+        sample_set_ids = sorted(
+            int(v)
+            for v in data.filter(pl.col("__fold_id") == fold_id)
+            .select("__sample_set_id")
+            .unique()
+            .to_series()
+            .to_list()
+        )
+        per_fold_total[fold_id] = len(sample_set_ids)
+        selected_sample_set_ids = sample_set_ids[:max_sample_sets_per_fold]
+        sample_sets_by_fold[fold_id] = selected_sample_set_ids
+        n_rows = max(n_rows, len(selected_sample_set_ids))
+    if n_rows == 0:
+        return
+
+    panels: list[dict[str, Any]] = []
+    x_values: list[float] = []
+    max_candidates = 1
+    max_label_length = 1
+    for fold_id in fold_ids:
+        selected_sample_set_ids = sample_sets_by_fold[fold_id]
+        if not selected_sample_set_ids:
+            continue
+        sample_set_id = selected_sample_set_ids[0]
+        panel_data = data.filter(
+            (pl.col("__fold_id") == fold_id) & (pl.col("__sample_set_id") == sample_set_id)
+        ).sort("__candidate_index")
+        if panel_data.height == 0:
+            continue
+
+        candidates = [int(v) for v in panel_data.select("__candidate_index").to_series().to_list()]
+        means = np.array(panel_data.select("__mean").to_series().to_list(), dtype=float)
+        stds = np.array(panel_data.select("__std_plot").to_series().to_list(), dtype=float)
+        params_json_values = [
+            None if value is None else str(value)
+            for value in panel_data.select("__params_json").to_series().to_list()
+        ]
+        varying_keys = _varying_param_keys(params_json_values)
+        params_labels = [
+            _compact_params_label(value, include_keys=varying_keys)
+            for value in params_json_values
+        ]
+        y_labels = [
+            f"{candidate}: {params_label}"
+            for candidate, params_label in zip(candidates, params_labels, strict=True)
+        ]
+
+        max_candidates = max(max_candidates, len(candidates))
+        max_label_length = max(max_label_length, max(len(label) for label in y_labels))
+        for mean_value, std_value in zip(means.tolist(), stds.tolist(), strict=True):
+            x_values.extend([mean_value - std_value, mean_value + std_value])
+
+        panels.append(
+            {
+                "fold_id": fold_id,
+                "sample_set_id": sample_set_id,
+                "candidates": candidates,
+                "means": means,
+                "stds": stds,
+                "y_labels": y_labels,
+            }
+        )
+
+    if not panels:
+        return
+
+    x_min, x_max = _padded_domain(x_values, include_zero=True)
+
+    n_panels = len(panels)
+    n_cols = max(1, min(5, int(np.ceil(np.sqrt(n_panels)))))
+    n_rows = int(np.ceil(n_panels / n_cols))
+
+    panel_width_px = 430
+    left_label_px = min(640, max(190, 40 + int(max_label_length * 4)))
+    right_pad_px = 24
+    fig_width_px = left_label_px + panel_width_px * n_cols + right_pad_px
+
+    panel_height_px = max(220, 104 + max_candidates * 20)
+    header_px = 92
+    footer_px = 38
+    fig_height_px = header_px + panel_height_px * n_rows + footer_px
+
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=_figure_size_inches(fig_width_px, fig_height_px),
+        dpi=_FIG_DPI,
+        squeeze=False,
+    )
+    fig.patch.set_facecolor("white")
+    fig.suptitle("Model Selection Trials", x=0.01, ha="left", fontsize=16)
+
+    metric_names = sorted(
+        {str(v) for v in data.select("__metric_name").unique().to_series().to_list()}
+    )
+    if len(metric_names) == 1:
+        metric_axis_label = {
+            "mcc": "MCC",
+            "balanced_accuracy": "Balanced Accuracy",
+        }.get(metric_names[0], metric_names[0].replace("_", " ").title())
+    else:
+        metric_axis_label = "Score"
+    fig.text(
+        0.01,
+        0.944,
+        "mean+-std across inner folds; sample_set=first_only",
+        fontsize=9,
+    )
+
+    for panel_index, panel in enumerate(panels):
+        row_index, col_index = divmod(panel_index, n_cols)
+        ax = axes[row_index][col_index]
+        y_pos = np.arange(len(panel["candidates"]), dtype=float)
+        ax.errorbar(
+            panel["means"],
+            y_pos,
+            xerr=panel["stds"],
+            fmt="o",
+            color="#1f77b4",
+            ecolor="#7fb6e6",
+            elinewidth=1.2,
+            capsize=2.5,
+            markersize=4.5,
+            markeredgecolor="#1f77b4",
+        )
+        ax.set_xlim(x_min, x_max)
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(panel["y_labels"], fontsize=6, fontfamily="monospace")
+        ax.tick_params(axis="y", pad=1.5)
+        ax.invert_yaxis()
+        ax.grid(axis="x", color="#ececec", linewidth=0.8)
+        ax.set_axisbelow(True)
+        ax.axvline(0.0, color="#555555", linewidth=1.0)
+        ax.set_title(f"fold={panel['fold_id']}", fontsize=10, pad=8.0)
+        if col_index == 0:
+            ax.set_ylabel("candidate_index:params", fontsize=9)
+        ax.set_xlabel(metric_axis_label, fontsize=9, labelpad=4.0)
+
+    for panel_index in range(n_panels, n_rows * n_cols):
+        row_index, col_index = divmod(panel_index, n_cols)
+        axes[row_index][col_index].axis("off")
+
+    left_margin = left_label_px / fig_width_px
+    right_margin = 1.0 - (right_pad_px / fig_width_px)
+    top_margin = min(0.96, 1.0 - (header_px / fig_height_px) + 0.01)
+    bottom_margin = footer_px / fig_height_px
+    fig.subplots_adjust(
+        left=left_margin,
+        right=right_margin,
+        top=top_margin,
+        bottom=bottom_margin,
+        wspace=0.32,
+        hspace=0.55,
+    )
+    _save_svg_figure(fig, out_path)
+
+
 def write_run_figures(
     *,
     run_dir: Path,
@@ -1199,6 +1530,7 @@ def write_run_figures(
     loss_by_split_final_refit: pl.DataFrame | None = None,
     pred_external_test: pl.DataFrame | None = None,
     trait_name: str = "trait",
+    model_selection_trials_summary: pl.DataFrame | None = None,
 ) -> list[str]:
     """Write run-level SVG figures under <run_dir>/figures."""
     warnings: list[str] = []
@@ -1238,6 +1570,15 @@ def write_run_figures(
         _roc_pr_curves_cv(oof_predictions, figures_dir / "roc_pr_curves_cv.svg")
     except FigureError as exc:
         warnings.append(str(exc))
+    selection_summary = model_selection_trials_summary
+    if selection_summary is None and model_selection_trials is not None:
+        selection_summary = _summarize_model_selection_trials_for_figure(model_selection_trials)
+    if selection_summary is not None:
+        _model_selection_trials_summary_panels(
+            selection_summary,
+            figures_dir / "model_selection_trials.svg",
+            max_sample_sets_per_fold=_MODEL_SELECTION_SAMPLE_SET_LIMIT,
+        )
     if pred_external_test is not None:
         try:
             _species_probability_by_trait(
