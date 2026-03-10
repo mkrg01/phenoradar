@@ -6,6 +6,7 @@ import numpy as np
 import polars as pl
 import pytest
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import log_loss
 
 import phenoradar.cv as cv_mod
 from phenoradar.config import load_and_resolve_config
@@ -1356,6 +1357,7 @@ model_selection:
   search_strategy: grid
   selected_candidate_count: 1
   inner_cv_strategy: logo
+  selection_metric: mcc
 runtime:
   n_jobs: 5
 """.strip(),
@@ -1396,6 +1398,59 @@ runtime:
     assert captured_n_jobs == [2, 2]
     assert result.selected_candidates[0].candidate.candidate_index == 1
     assert result.selected_candidate_count_effective == 1
+
+
+def test_prepare_source_selection_prefers_lower_log_loss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+model_selection:
+  selected_candidate_count: 1
+  inner_cv_strategy: logo
+  selection_metric: log_loss
+""".strip(),
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        cv_mod,
+        "generate_candidates",
+        lambda **_kwargs: [
+            Candidate(candidate_index=0, params={"C": 0.5}),
+            Candidate(candidate_index=1, params={"C": 1.0}),
+        ],
+    )
+
+    def _fake_score_candidate_inner_cv(**kwargs: object) -> tuple[float, list[dict[str, object]]]:
+        candidate = kwargs["candidate"]
+        if not isinstance(candidate, Candidate):
+            raise AssertionError("candidate must be a Candidate instance")
+        if candidate.candidate_index == 0:
+            return 0.25, []
+        return 0.40, []
+
+    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+
+    result = _prepare_source_selection(
+        config=config,
+        training_scope_id="fold_0",
+        source_sample_set_id=0,
+        sampled_idx=np.array([0, 1], dtype=int),
+        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
+        y_train=np.array([0, 1], dtype=int),
+        groups_train=np.array(["g1", "g2"], dtype=str),
+        feature_names=["OG1"],
+        warnings=[],
+    )
+
+    assert result.selected_candidates[0].candidate.candidate_index == 0
 
 
 def test_score_candidate_inner_cv_uses_estimator_n_jobs_for_native_thread_limit(
@@ -1835,6 +1890,86 @@ def test_prepare_source_selection_tpe_emits_capping_warnings_for_trials_and_sele
     )
 
 
+def test_prepare_source_selection_tpe_uses_minimize_direction_for_log_loss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeTrial:
+        def __init__(self, number: int) -> None:
+            self.number = number
+            self.user_attrs: dict[str, object] = {}
+            self.value: float | None = None
+
+        def suggest_categorical(self, _name: str, values: list[object]) -> object:
+            return values[min(self.number, len(values) - 1)]
+
+        def suggest_float(self, _name: str, low: float, _high: float) -> float:
+            return low
+
+        def set_user_attr(self, key: str, value: object) -> None:
+            self.user_attrs[key] = value
+
+    class _FakeStudy:
+        def __init__(self) -> None:
+            self.trials: list[_FakeTrial] = []
+
+        def optimize(self, objective: object, n_trials: int) -> None:
+            for number in range(n_trials):
+                trial = _FakeTrial(number)
+                trial.value = float(objective(trial))  # type: ignore[misc]
+                self.trials.append(trial)
+
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    config_tpe = config.model_copy(
+        update={
+            "model_selection": config.model_selection.model_copy(
+                update={
+                    "search_strategy": "tpe",
+                    "selection_metric": "log_loss",
+                    "trial_count": 2,
+                    "search_space": {"C": [0.1, 1.0]},
+                    "selected_candidate_count": 1,
+                }
+            )
+        }
+    )
+    directions: list[str] = []
+
+    def _fake_create_study(**kwargs: object) -> _FakeStudy:
+        direction = kwargs.get("direction")
+        if not isinstance(direction, str):
+            raise AssertionError("direction must be provided")
+        directions.append(direction)
+        return _FakeStudy()
+
+    monkeypatch.setattr(cv_mod.optuna, "create_study", _fake_create_study)
+
+    def _fake_score_candidate_inner_cv(**kwargs: object) -> tuple[float, list[dict[str, object]]]:
+        candidate = kwargs["candidate"]
+        if not isinstance(candidate, Candidate):
+            raise AssertionError("candidate must be a Candidate instance")
+        if candidate.candidate_index == 0:
+            return 0.2, []
+        return 0.8, []
+
+    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+
+    result = _prepare_source_selection_tpe(
+        config=config_tpe,
+        training_scope_id="outer_fold_0",
+        source_sample_set_id=0,
+        sampled_idx=np.array([0, 1], dtype=int),
+        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
+        y_train=np.array([0, 1], dtype=int),
+        groups_train=np.array(["g1", "g2"], dtype=str),
+        feature_names=["OG1"],
+        warnings=[],
+    )
+
+    assert directions == ["minimize"]
+    assert result.selected_candidates[0].candidate.candidate_index == 0
+
+
 def test_prepare_source_selection_tpe_rejects_trials_missing_candidate_params(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2251,6 +2386,28 @@ model_selection:
         prob=np.array([0.1, 0.9, 0.3, 0.2], dtype=float),
     )
     assert score == pytest.approx(0.75)
+
+
+def test_selection_metric_from_probability_supports_log_loss(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+model_selection:
+  selection_metric: log_loss
+""".strip(),
+            )
+        ]
+    )
+    y_true = np.array([0, 1, 1, 0], dtype=int)
+    prob = np.array([0.1, 0.9, 0.3, 0.2], dtype=float)
+    score = cv_mod._selection_metric_from_probability(config, y_true=y_true, prob=prob)
+    expected = float(log_loss(y_true, prob, labels=[0, 1]))
+    assert score == pytest.approx(expected)
 
 
 def test_inner_cv_splits_supports_group_kfold(tmp_path: Path) -> None:

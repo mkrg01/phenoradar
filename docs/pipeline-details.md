@@ -145,7 +145,8 @@ Inner-CV selection:
 
 - enabled only when `selected_candidate_count` is set.
 - `inner_cv_strategy`: `logo` or `group_kfold`.
-- scoring threshold for candidate metric uses `report.fixed_probability_threshold`.
+- threshold-dependent candidate metrics (`mcc`/`balanced_accuracy`) use
+  `report.fixed_probability_threshold`; `log_loss` is threshold-independent.
 
 ## Reproducibility and seeding
 

@@ -60,6 +60,7 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.sampling.max_samples_per_label_per_group == 1
     assert resolved.sampling.sampled_set_count == 10
     assert resolved.sampling.weighting == "none"
+    assert resolved.model_selection.selection_metric == "log_loss"
     assert resolved.preprocess.low_prevalence_filter.enabled is True
     assert resolved.preprocess.low_prevalence_filter.min_species_per_feature == 2
 
@@ -73,6 +74,7 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
     assert resolved.sampling.max_samples_per_label_per_group == 1
     assert resolved.sampling.sampled_set_count == 10
     assert resolved.sampling.weighting == "none"
+    assert resolved.model_selection.selection_metric == "log_loss"
 
 
 def test_unknown_key_is_rejected(tmp_path: Path) -> None:

@@ -1457,6 +1457,7 @@ def _model_selection_trials_summary_panels(
         metric_axis_label = {
             "mcc": "MCC",
             "balanced_accuracy": "Balanced Accuracy",
+            "log_loss": "Log Loss",
         }.get(metric_names[0], metric_names[0].replace("_", " ").title())
     else:
         metric_axis_label = "Score"

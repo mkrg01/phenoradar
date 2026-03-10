@@ -291,6 +291,9 @@ Conditionally written:
   - `outer_fold`: selections used in outer CV training.
   - `final_refit`: selections used for full-run refit.
 - `rank`: rank among selected candidates by inner-CV score.
+  - Direction depends on `metric_name`:
+    - `mcc` / `balanced_accuracy`: higher is better.
+    - `log_loss`: lower is better.
 - `selection_source_sample_set_id`:
   - indicates which sampled set produced the selected candidate list
     (important when candidate source policy is shared vs per-sample-set).

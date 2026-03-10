@@ -792,11 +792,48 @@ def _aggregate_probabilities(probs: list[np.ndarray], aggregation: str) -> np.nd
 def _selection_metric_from_probability(
     config: AppConfig, y_true: np.ndarray, prob: np.ndarray
 ) -> float:
+    metric_name = config.model_selection.selection_metric
+    if metric_name == "log_loss":
+        return _binary_log_loss(y_true, prob)
+
     threshold = float(config.report.fixed_probability_threshold)
     pred = (prob >= threshold).astype(int)
-    if config.model_selection.selection_metric == "mcc":
+    if metric_name == "mcc":
         return float(matthews_corrcoef(y_true, pred))
-    return float(balanced_accuracy_score(y_true, pred))
+    if metric_name == "balanced_accuracy":
+        return float(balanced_accuracy_score(y_true, pred))
+    raise CVError(f"Unsupported model_selection.selection_metric: {metric_name}")
+
+
+def _selection_metric_higher_is_better(metric_name: str) -> bool:
+    return metric_name != "log_loss"
+
+
+def _selection_metric_optuna_direction(metric_name: str) -> str:
+    return "maximize" if _selection_metric_higher_is_better(metric_name) else "minimize"
+
+
+def _selection_metric_nan_sentinel(metric_name: str) -> float:
+    return -1e12 if _selection_metric_higher_is_better(metric_name) else 1e12
+
+
+def _rank_selected_candidates(
+    scored: list[SelectedCandidate], metric_name: str
+) -> list[SelectedCandidate]:
+    def _score_for_sort(value: float | None) -> float:
+        if value is None:
+            return -np.inf if _selection_metric_higher_is_better(metric_name) else np.inf
+        return float(value)
+
+    if _selection_metric_higher_is_better(metric_name):
+        return sorted(
+            scored,
+            key=lambda item: (-_score_for_sort(item.score), item.candidate.candidate_index),
+        )
+    return sorted(
+        scored,
+        key=lambda item: (_score_for_sort(item.score), item.candidate.candidate_index),
+    )
 
 
 def _inner_cv_splits(
@@ -967,7 +1004,12 @@ def _prepare_source_selection_tpe(
     local_seed = _deterministic_int_seed(
         f"{runtime_seed}|{training_scope_id}|source_{source_sample_set_id}|tpe_selection"
     )
-    study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=local_seed))
+    metric_name = config.model_selection.selection_metric
+    study = optuna.create_study(
+        direction=_selection_metric_optuna_direction(metric_name),
+        sampler=TPESampler(seed=local_seed),
+    )
+    nan_sentinel = _selection_metric_nan_sentinel(metric_name)
     trial_rows: list[dict[str, Any]] = []
 
     def _objective(trial: optuna.Trial) -> float:
@@ -1002,7 +1044,9 @@ def _prepare_source_selection_tpe(
             )
         trial.set_user_attr("candidate_params", params)
         if np.isnan(mean_score):
-            return -1e12
+            trial.set_user_attr("valid_metric_value", False)
+            return nan_sentinel
+        trial.set_user_attr("valid_metric_value", True)
         return float(mean_score)
 
     study.optimize(_objective, n_trials=effective_trials)
@@ -1013,7 +1057,7 @@ def _prepare_source_selection_tpe(
         if not isinstance(params_raw, dict):
             raise CVError("TPE trial is missing candidate_params user attribute")
         score_value: float | None = None
-        if trial.value is not None and float(trial.value) > -1e11:
+        if trial.value is not None and bool(trial.user_attrs.get("valid_metric_value", False)):
             score_value = float(trial.value)
         scored.append(
             SelectedCandidate(
@@ -1034,13 +1078,7 @@ def _prepare_source_selection_tpe(
             f"for source sample_set_id={source_sample_set_id}"
         )
 
-    def _score_for_sort(value: float | None) -> float:
-        return -np.inf if value is None else float(value)
-
-    ranked = sorted(
-        scored,
-        key=lambda item: (-_score_for_sort(item.score), item.candidate.candidate_index),
-    )
+    ranked = _rank_selected_candidates(scored, metric_name)
     return SourceSelectionResult(
         selected_candidates=ranked[:effective_count],
         n_available_candidates=available,
@@ -1195,13 +1233,7 @@ def _prepare_source_selection(
             f"for source sample_set_id={source_sample_set_id}"
         )
 
-    def _score_for_sort(value: float | None) -> float:
-        return -np.inf if value is None else float(value)
-
-    ranked = sorted(
-        scored,
-        key=lambda item: (-_score_for_sort(item.score), item.candidate.candidate_index),
-    )
+    ranked = _rank_selected_candidates(scored, config.model_selection.selection_metric)
     return SourceSelectionResult(
         selected_candidates=ranked[:effective_count],
         n_available_candidates=available,
