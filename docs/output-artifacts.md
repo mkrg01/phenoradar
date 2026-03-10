@@ -74,7 +74,10 @@ Always written:
     - `threshold_selection_curve.svg`
     - `feature_importance_top.svg`
     - `coefficients_signed_top.svg`
+    - `cv_species_probability_by_trait.svg`
+    - `cv_fold_trait_probability.svg`
     - `roc_pr_curves_cv.svg` (may be skipped with warning for degenerate folds)
+    - `external_species_probability_by_trait.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
 
 Conditionally written:
 
@@ -277,6 +280,15 @@ Conditionally written:
 - `coefficients_signed_top.svg`
   - Top 30 by absolute coefficient magnitude.
   - Right (blue): positive, left (red): negative.
+- `cv_species_probability_by_trait.svg`
+  - Out-of-fold species probabilities grouped by trait (`label`).
+  - Boxplot with per-species points and trait-wise mean markers.
+- `cv_fold_trait_probability.svg`
+  - Fold-level probability distribution grouped by trait.
+  - Useful for checking fold-to-fold drift or fold-specific overlap.
+- `external_species_probability_by_trait.svg` (`full_run` with external samples)
+  - External-test species probabilities grouped by `true_label`.
+  - Boxplot with per-species points and trait-wise mean markers.
 
 ## `predict` artifacts (schemas and interpretation)
 

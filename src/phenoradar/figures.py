@@ -589,6 +589,271 @@ def _predict_uncertainty(pred_predict: pl.DataFrame, out_path: Path, *, required
     _save_svg_figure(fig, out_path)
 
 
+def _deterministic_offsets(count: int, spread: float) -> np.ndarray:
+    if count <= 1:
+        return np.array([0.0], dtype=float)
+    return np.linspace(-spread, spread, num=count, dtype=float)
+
+
+def _binary_trait_color_map(
+    traits: list[int], *, source_table_name: str, figure_name: str
+) -> dict[int, str]:
+    non_binary = sorted({int(value) for value in traits if int(value) not in (0, 1)})
+    if non_binary:
+        values = ", ".join(str(value) for value in non_binary)
+        raise FigureError(
+            f"{source_table_name} contains non-binary trait values for {figure_name}: {values}"
+        )
+    return {
+        0: "#d62728",
+        1: "#1f77b4",
+    }
+
+
+def _species_probability_by_trait(
+    *,
+    predictions: pl.DataFrame,
+    trait_col: str,
+    trait_name: str = "trait",
+    out_path: Path,
+    title: str,
+    subtitle: str,
+    source_table_name: str,
+    figure_name: str,
+) -> None:
+    required = {"species", trait_col, "prob"}
+    if not required.issubset(predictions.columns):
+        raise FigureError(f"{source_table_name} schema is invalid for {figure_name}")
+
+    data = (
+        predictions.select(
+            pl.col("species").cast(pl.String, strict=False).alias("__species"),
+            pl.col(trait_col).cast(pl.Int64, strict=False).alias("__trait"),
+            pl.col("prob").cast(pl.Float64, strict=False).alias("__prob"),
+        )
+        .filter(
+            pl.col("__species").is_not_null()
+            & (pl.col("__species") != "")
+            & pl.col("__trait").is_not_null()
+            & pl.col("__prob").is_not_null()
+            & pl.col("__prob").is_finite()
+        )
+        .sort(["__trait", "__species"])
+    )
+    if data.height == 0:
+        raise FigureError(f"{source_table_name} is empty; cannot draw {figure_name}")
+
+    traits = [int(v) for v in data.select("__trait").unique().sort("__trait").to_series().to_list()]
+    if not traits:
+        raise FigureError(f"{source_table_name} is empty; cannot draw {figure_name}")
+
+    trait_to_color = _binary_trait_color_map(
+        traits,
+        source_table_name=source_table_name,
+        figure_name=figure_name,
+    )
+
+    group_probs: list[list[float]] = []
+    x_labels: list[str] = []
+    positions = np.arange(1, len(traits) + 1, dtype=float)
+    for trait in traits:
+        trait_df = data.filter(pl.col("__trait") == trait).sort(["__prob", "__species"])
+        probs = [float(v) for v in trait_df.select("__prob").to_series().to_list()]
+        if not probs:
+            continue
+        group_probs.append(probs)
+        x_labels.append(f"{trait_name}={trait}\nn={len(probs)}, mean={float(np.mean(probs)):.3f}")
+
+    if not group_probs:
+        raise FigureError(f"{source_table_name} is empty; cannot draw {figure_name}")
+
+    fig, ax = plt.subplots(figsize=_figure_size_inches(980, 560), dpi=_FIG_DPI)
+    fig.patch.set_facecolor("white")
+    fig.suptitle(title, x=0.01, ha="left", fontsize=16)
+    fig.text(
+        0.01,
+        0.90,
+        (
+            f"{subtitle}; trait={trait_name}; "
+            "box=IQR/median, marker=mean, points=species "
+            f"(n={data.height})"
+        ),
+        fontsize=10,
+    )
+
+    box = ax.boxplot(
+        group_probs,
+        positions=positions,
+        widths=0.55,
+        patch_artist=True,
+        showmeans=True,
+        showfliers=False,
+        manage_ticks=False,
+        meanprops={"marker": "D", "markerfacecolor": "#222222", "markeredgecolor": "#222222"},
+        medianprops={"linewidth": 1.6, "color": "#222222"},
+        whiskerprops={"linewidth": 1.2, "color": "#444444"},
+        capprops={"linewidth": 1.2, "color": "#444444"},
+    )
+    for idx, patch in enumerate(box["boxes"]):
+        color = trait_to_color[traits[idx]]
+        patch.set_facecolor(color)
+        patch.set_alpha(0.30)
+        patch.set_edgecolor(color)
+        patch.set_linewidth(1.2)
+
+    for idx, trait in enumerate(traits):
+        trait_df = data.filter(pl.col("__trait") == trait).sort(["__prob", "__species"])
+        probs = np.array(trait_df.select("__prob").to_series().to_list(), dtype=float)
+        offsets = _deterministic_offsets(probs.size, 0.17)
+        x_values = np.full(probs.shape[0], positions[idx], dtype=float) + offsets
+        ax.scatter(
+            x_values,
+            probs,
+            s=32,
+            color=trait_to_color[trait],
+            edgecolors="white",
+            linewidths=0.5,
+            alpha=0.78,
+            zorder=3,
+        )
+
+    ax.set_xlim(0.5, len(traits) + 0.5)
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_xticks(positions)
+    ax.set_xticklabels(x_labels, fontsize=10)
+    ax.set_xlabel("Trait")
+    ax.set_ylabel("Predicted probability")
+    ax.grid(axis="y", color="#ececec", linewidth=0.8)
+    ax.set_axisbelow(True)
+
+    fig.subplots_adjust(left=0.10, right=0.98, top=0.83, bottom=0.24)
+    _save_svg_figure(fig, out_path)
+
+
+def _cv_fold_trait_probability(
+    oof_predictions: pl.DataFrame, out_path: Path, *, trait_name: str = "trait"
+) -> None:
+    required = {"fold_id", "label", "prob"}
+    if not required.issubset(oof_predictions.columns):
+        raise FigureError("prediction_cv.tsv schema is invalid for cv_fold_trait_probability.svg")
+
+    data = (
+        oof_predictions.select(
+            pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
+            pl.col("label").cast(pl.Int64, strict=False).alias("__trait"),
+            pl.col("prob").cast(pl.Float64, strict=False).alias("__prob"),
+        )
+        .filter(
+            pl.col("__fold_id").is_not_null()
+            & (pl.col("__fold_id") != "")
+            & pl.col("__trait").is_not_null()
+            & pl.col("__prob").is_not_null()
+            & pl.col("__prob").is_finite()
+        )
+        .sort(["__fold_id", "__trait", "__prob"])
+    )
+    if data.height == 0:
+        raise FigureError("prediction_cv.tsv is empty; cannot draw cv_fold_trait_probability.svg")
+
+    fold_ids = [str(v) for v in data.select("__fold_id").unique().to_series().to_list()]
+    fold_ids = sorted(
+        fold_ids,
+        key=lambda value: (0, int(value)) if value.isdigit() else (1, value),
+    )
+    traits = [int(v) for v in data.select("__trait").unique().sort("__trait").to_series().to_list()]
+    if not fold_ids or not traits:
+        raise FigureError("prediction_cv.tsv is empty; cannot draw cv_fold_trait_probability.svg")
+
+    fold_centers = np.arange(1, len(fold_ids) + 1, dtype=float)
+    if len(traits) == 1:
+        trait_offsets = np.array([0.0], dtype=float)
+    else:
+        trait_offsets = np.linspace(-0.25, 0.25, num=len(traits), dtype=float)
+    box_width = min(0.36, 0.72 / max(1, len(traits)))
+
+    trait_to_color = _binary_trait_color_map(
+        traits,
+        source_table_name="prediction_cv.tsv",
+        figure_name="cv_fold_trait_probability.svg",
+    )
+
+    width_px = max(980, 260 + len(fold_ids) * 150)
+    fig, ax = plt.subplots(figsize=_figure_size_inches(width_px, 560), dpi=_FIG_DPI)
+    fig.patch.set_facecolor("white")
+    fig.suptitle("CV Fold Trait Probability", x=0.01, ha="left", fontsize=16)
+    fig.text(
+        0.01,
+        0.90,
+        (
+            f"Fold-wise probability distribution by {trait_name} "
+            "(box=IQR/median, marker=mean, points=species)"
+        ),
+        fontsize=10,
+    )
+
+    for trait_idx, trait in enumerate(traits):
+        label_set = False
+        values_for_box: list[list[float]] = []
+        positions_for_box: list[float] = []
+        for fold_idx, fold_id in enumerate(fold_ids):
+            subset = data.filter((pl.col("__fold_id") == fold_id) & (pl.col("__trait") == trait))
+            probs = np.array(subset.select("__prob").to_series().to_list(), dtype=float)
+            if probs.size == 0:
+                continue
+            x_position = fold_centers[fold_idx] + trait_offsets[trait_idx]
+            values_for_box.append(probs.tolist())
+            positions_for_box.append(float(x_position))
+
+            offsets = _deterministic_offsets(probs.size, min(0.08, box_width * 0.42))
+            ax.scatter(
+                np.full(probs.shape[0], x_position, dtype=float) + offsets,
+                probs,
+                s=25,
+                color=trait_to_color[trait],
+                edgecolors="white",
+                linewidths=0.5,
+                alpha=0.75,
+                zorder=3,
+                label=f"{trait_name}={trait}" if not label_set else "_nolegend_",
+            )
+            label_set = True
+
+        if not values_for_box:
+            continue
+
+        box = ax.boxplot(
+            values_for_box,
+            positions=positions_for_box,
+            widths=box_width,
+            patch_artist=True,
+            showmeans=True,
+            showfliers=False,
+            manage_ticks=False,
+            meanprops={"marker": "D", "markerfacecolor": "#222222", "markeredgecolor": "#222222"},
+            medianprops={"linewidth": 1.6, "color": "#222222"},
+            whiskerprops={"linewidth": 1.2, "color": "#444444"},
+            capprops={"linewidth": 1.2, "color": "#444444"},
+        )
+        for patch in box["boxes"]:
+            patch.set_facecolor(trait_to_color[trait])
+            patch.set_alpha(0.28)
+            patch.set_edgecolor(trait_to_color[trait])
+            patch.set_linewidth(1.2)
+
+    ax.set_xlim(0.4, len(fold_ids) + 0.6)
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_xticks(fold_centers)
+    ax.set_xticklabels([f"fold={fold_id}" for fold_id in fold_ids], fontsize=10)
+    ax.set_xlabel("CV fold")
+    ax.set_ylabel("Predicted probability")
+    ax.grid(axis="y", color="#ececec", linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.legend(loc="upper right", frameon=False, title=trait_name)
+
+    fig.subplots_adjust(left=0.09, right=0.98, top=0.83, bottom=0.18)
+    _save_svg_figure(fig, out_path)
+
+
 def _roc_pr_curves_cv(oof_predictions: pl.DataFrame, out_path: Path) -> None:
     required = {"fold_id", "label", "prob"}
     if not required.issubset(oof_predictions.columns):
@@ -771,6 +1036,8 @@ def write_run_figures(
     ensemble_model_probs: pl.DataFrame | None,
     model_selection_trials: pl.DataFrame | None,
     auto_threshold_metric: Literal["mcc", "balanced_accuracy"],
+    pred_external_test: pl.DataFrame | None = None,
+    trait_name: str = "trait",
 ) -> list[str]:
     """Write run-level SVG figures under <run_dir>/figures."""
     warnings: list[str] = []
@@ -785,10 +1052,39 @@ def write_run_figures(
     )
     _feature_importance_top(feature_importance, figures_dir / "feature_importance_top.svg")
     _coefficients_signed_top(coefficients, figures_dir / "coefficients_signed_top.svg")
+    _species_probability_by_trait(
+        predictions=oof_predictions,
+        trait_col="label",
+        trait_name=trait_name,
+        out_path=figures_dir / "cv_species_probability_by_trait.svg",
+        title="CV Species Probability by Trait",
+        subtitle="Out-of-fold probabilities grouped by observed trait labels",
+        source_table_name="prediction_cv.tsv",
+        figure_name="cv_species_probability_by_trait.svg",
+    )
+    _cv_fold_trait_probability(
+        oof_predictions,
+        figures_dir / "cv_fold_trait_probability.svg",
+        trait_name=trait_name,
+    )
     try:
         _roc_pr_curves_cv(oof_predictions, figures_dir / "roc_pr_curves_cv.svg")
     except FigureError as exc:
         warnings.append(str(exc))
+    if pred_external_test is not None:
+        try:
+            _species_probability_by_trait(
+                predictions=pred_external_test,
+                trait_col="true_label",
+                trait_name=trait_name,
+                out_path=figures_dir / "external_species_probability_by_trait.svg",
+                title="External Test Species Probability by Trait",
+                subtitle="Final-refit probabilities grouped by external-test true labels",
+                source_table_name="prediction_external_test.tsv",
+                figure_name="external_species_probability_by_trait.svg",
+            )
+        except FigureError as exc:
+            warnings.append(str(exc))
     return warnings
 
 

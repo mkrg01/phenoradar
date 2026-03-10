@@ -817,6 +817,10 @@ def run(
             ensemble_model_probs=cv_artifacts.ensemble_model_probs,
             model_selection_trials=cv_artifacts.model_selection_trials,
             auto_threshold_metric=resolved.report.auto_threshold_selection_metric,
+            pred_external_test=(
+                None if final_refit_artifacts is None else final_refit_artifacts.pred_external_test
+            ),
+            trait_name=resolved.data.trait_col,
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc

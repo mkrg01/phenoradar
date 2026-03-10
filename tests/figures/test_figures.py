@@ -235,7 +235,35 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
     assert (figures_dir / "threshold_selection_curve.svg").exists()
     assert (figures_dir / "feature_importance_top.svg").exists()
     assert (figures_dir / "coefficients_signed_top.svg").exists()
+    assert (figures_dir / "cv_species_probability_by_trait.svg").exists()
+    assert (figures_dir / "cv_fold_trait_probability.svg").exists()
     assert (figures_dir / "roc_pr_curves_cv.svg").exists()
+    assert not (figures_dir / "external_species_probability_by_trait.svg").exists()
+    assert warnings == []
+
+
+def test_write_run_figures_writes_external_trait_probability_when_available(tmp_path: Path) -> None:
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_minimal_oof(),
+        thresholds=_minimal_thresholds(),
+        feature_importance=_minimal_feature_importance(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        auto_threshold_metric="mcc",
+        pred_external_test=pl.DataFrame(
+            {
+                "species": ["sp5", "sp6"],
+                "true_label": [0, 1],
+                "prob": [0.3, 0.7],
+            }
+        ),
+    )
+
+    figures_dir = tmp_path / "run" / "figures"
+    assert (figures_dir / "external_species_probability_by_trait.svg").exists()
     assert warnings == []
 
 
@@ -575,6 +603,93 @@ def test_threshold_selection_curve_handles_all_nan_scores(
     )
 
     assert "No valid threshold scores" in out_path.read_text(encoding="utf-8")
+
+
+def test_species_probability_by_trait_rejects_invalid_schema(tmp_path: Path) -> None:
+    with pytest.raises(FigureError, match="schema is invalid"):
+        figures_mod._species_probability_by_trait(
+            predictions=pl.DataFrame({"species": ["sp1"], "prob": [0.2]}),
+            trait_col="label",
+            out_path=tmp_path / "cv_species_probability_by_trait.svg",
+            title="CV Species Probability by Trait",
+            subtitle="test",
+            source_table_name="prediction_cv.tsv",
+            figure_name="cv_species_probability_by_trait.svg",
+        )
+
+
+def test_binary_trait_color_map_uses_expected_colors() -> None:
+    assert figures_mod._binary_trait_color_map(
+        [0, 1],
+        source_table_name="prediction_cv.tsv",
+        figure_name="cv_species_probability_by_trait.svg",
+    ) == {0: "#d62728", 1: "#1f77b4"}
+
+
+def test_binary_trait_color_map_rejects_non_binary_values() -> None:
+    with pytest.raises(FigureError, match="non-binary trait values"):
+        figures_mod._binary_trait_color_map(
+            [0, 1, 2],
+            source_table_name="prediction_cv.tsv",
+            figure_name="cv_species_probability_by_trait.svg",
+        )
+
+
+def test_species_probability_by_trait_writes_svg(tmp_path: Path) -> None:
+    out_path = tmp_path / "cv_species_probability_by_trait.svg"
+    figures_mod._species_probability_by_trait(
+        predictions=pl.DataFrame(
+            {
+                "species": ["sp1", "sp2", "sp3", "sp4"],
+                "label": [0, 0, 1, 1],
+                "prob": [0.2, 0.4, 0.7, 0.9],
+            }
+        ),
+        trait_col="label",
+        out_path=out_path,
+        title="CV Species Probability by Trait",
+        subtitle="test",
+        source_table_name="prediction_cv.tsv",
+        figure_name="cv_species_probability_by_trait.svg",
+    )
+    assert out_path.exists()
+
+
+def test_cv_fold_trait_probability_rejects_invalid_schema(tmp_path: Path) -> None:
+    with pytest.raises(FigureError, match="schema is invalid"):
+        figures_mod._cv_fold_trait_probability(
+            oof_predictions=pl.DataFrame({"label": [0, 1], "prob": [0.2, 0.8]}),
+            out_path=tmp_path / "cv_fold_trait_probability.svg",
+        )
+
+
+def test_cv_fold_trait_probability_rejects_empty_table(tmp_path: Path) -> None:
+    with pytest.raises(FigureError, match="prediction_cv.tsv is empty"):
+        figures_mod._cv_fold_trait_probability(
+            oof_predictions=pl.DataFrame(
+                schema={
+                    "fold_id": pl.String,
+                    "label": pl.Int64,
+                    "prob": pl.Float64,
+                }
+            ),
+            out_path=tmp_path / "cv_fold_trait_probability.svg",
+        )
+
+
+def test_cv_fold_trait_probability_writes_svg(tmp_path: Path) -> None:
+    out_path = tmp_path / "cv_fold_trait_probability.svg"
+    figures_mod._cv_fold_trait_probability(
+        oof_predictions=pl.DataFrame(
+            {
+                "fold_id": ["0", "0", "1", "1"],
+                "label": [0, 1, 0, 1],
+                "prob": [0.2, 0.8, 0.3, 0.7],
+            }
+        ),
+        out_path=out_path,
+    )
+    assert out_path.exists()
 
 
 def test_feature_importance_top_rejects_invalid_schema(tmp_path: Path) -> None:

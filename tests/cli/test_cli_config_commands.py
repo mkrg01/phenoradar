@@ -74,7 +74,11 @@ def _stub_resolved_config(*, execution_stage: str) -> SimpleNamespace:
         runtime=SimpleNamespace(execution_stage=execution_stage, seed=42),
         report=SimpleNamespace(auto_threshold_selection_metric="mcc"),
         model_selection=SimpleNamespace(),
-        data=SimpleNamespace(metadata_path="metadata.tsv", tpm_path="tpm.tsv"),
+        data=SimpleNamespace(
+            metadata_path="metadata.tsv",
+            tpm_path="tpm.tsv",
+            trait_col="C4",
+        ),
     )
 
 
@@ -377,7 +381,15 @@ data:
     assert (run_dirs[0] / "figures" / "threshold_selection_curve.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_importance_top.svg").exists()
     assert (run_dirs[0] / "figures" / "coefficients_signed_top.svg").exists()
+    assert (run_dirs[0] / "figures" / "cv_species_probability_by_trait.svg").exists()
+    assert (run_dirs[0] / "figures" / "cv_fold_trait_probability.svg").exists()
     assert (run_dirs[0] / "figures" / "roc_pr_curves_cv.svg").exists()
+    assert (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()
+    cv_trait_svg = (run_dirs[0] / "figures" / "cv_species_probability_by_trait.svg").read_text(
+        encoding="utf-8"
+    )
+    assert "C4=0" in cv_trait_svg
+    assert "C4=1" in cv_trait_svg
 
     metrics = pl.read_csv(run_dirs[0] / "metrics_cv.tsv", separator="\t")
     assert {"aggregate_scope", "fold_id", "metric", "metric_value"}.issubset(metrics.columns)
@@ -485,7 +497,10 @@ data:
     assert (run_dirs[0] / "figures" / "threshold_selection_curve.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_importance_top.svg").exists()
     assert (run_dirs[0] / "figures" / "coefficients_signed_top.svg").exists()
+    assert (run_dirs[0] / "figures" / "cv_species_probability_by_trait.svg").exists()
+    assert (run_dirs[0] / "figures" / "cv_fold_trait_probability.svg").exists()
     assert (run_dirs[0] / "figures" / "roc_pr_curves_cv.svg").exists()
+    assert not (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()
     assert (run_dirs[0] / "classification_summary.tsv").exists()
     assert not (run_dirs[0] / "prediction_external_test.tsv").exists()
     assert not (run_dirs[0] / "prediction_inference.tsv").exists()
