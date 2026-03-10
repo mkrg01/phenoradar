@@ -56,6 +56,7 @@ Always written:
 - `resolved_config.yml`
 - `split_manifest.tsv`
 - `metrics_cv.tsv`
+- `loss_by_split_cv.tsv`
 - `thresholds.tsv`
 - `feature_importance.tsv`
 - `coefficients.tsv`
@@ -69,6 +70,7 @@ Notes:
 - `prediction_cv.tsv` may include optional `uncertainty_std` when ensemble size > 1.
 - `figures/` includes:
   - `cv_metrics_overview.svg`
+  - `cv_loss_by_split.svg`
   - `threshold_selection_curve.svg`
   - `feature_importance_top.svg`
   - `coefficients_signed_top.svg`

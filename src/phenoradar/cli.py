@@ -718,6 +718,9 @@ def run(
     cv_artifacts.metrics_cv.write_csv(
         run_dir / "metrics_cv.tsv", separator="\t", float_precision=8, null_value="NA"
     )
+    cv_artifacts.loss_by_split_cv.write_csv(
+        run_dir / "loss_by_split_cv.tsv", separator="\t", float_precision=8, null_value="NA"
+    )
     cv_artifacts.thresholds.write_csv(
         run_dir / "thresholds.tsv", separator="\t", float_precision=8, null_value="NA"
     )
@@ -817,6 +820,7 @@ def run(
             ensemble_model_probs=cv_artifacts.ensemble_model_probs,
             model_selection_trials=cv_artifacts.model_selection_trials,
             auto_threshold_metric=resolved.report.auto_threshold_selection_metric,
+            loss_by_split_cv=cv_artifacts.loss_by_split_cv,
             pred_external_test=(
                 None if final_refit_artifacts is None else final_refit_artifacts.pred_external_test
             ),
@@ -887,7 +891,8 @@ def run(
         )
     typer.echo(
         f"Wrote run artifacts at {run_dir} "
-        "(resolved_config.yml, split_manifest.tsv, metrics_cv.tsv, thresholds.tsv, "
+        "(resolved_config.yml, split_manifest.tsv, metrics_cv.tsv, loss_by_split_cv.tsv, "
+        "thresholds.tsv, "
         "feature_importance.tsv, coefficients.tsv, prediction_cv.tsv, "
         "classification_summary.tsv, "
         "run_metadata.json"

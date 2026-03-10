@@ -114,6 +114,14 @@ def _stub_cv_artifacts(
                 "metric_value": [0.5],
             }
         ),
+        loss_by_split_cv=pl.DataFrame(
+            {
+                "fold_id": ["0", "0"],
+                "split": ["train", "validation"],
+                "metric": ["log_loss", "log_loss"],
+                "metric_value": [0.42, 0.56],
+            }
+        ),
         feature_importance=pl.DataFrame(
             {
                 "feature": ["OG1"],
@@ -370,6 +378,7 @@ data:
     assert resolved["runtime"]["execution_stage"] == "full_run"
     assert (run_dirs[0] / "split_manifest.tsv").exists()
     assert (run_dirs[0] / "metrics_cv.tsv").exists()
+    assert (run_dirs[0] / "loss_by_split_cv.tsv").exists()
     assert (run_dirs[0] / "thresholds.tsv").exists()
     assert (run_dirs[0] / "feature_importance.tsv").exists()
     assert (run_dirs[0] / "coefficients.tsv").exists()
@@ -378,6 +387,7 @@ data:
     assert (run_dirs[0] / "classification_summary.tsv").exists()
     assert (run_dirs[0] / "model_bundle").exists()
     assert (run_dirs[0] / "figures" / "cv_metrics_overview.svg").exists()
+    assert (run_dirs[0] / "figures" / "cv_loss_by_split.svg").exists()
     assert (run_dirs[0] / "figures" / "threshold_selection_curve.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_importance_top.svg").exists()
     assert (run_dirs[0] / "figures" / "coefficients_signed_top.svg").exists()
@@ -494,6 +504,7 @@ data:
     assert (run_dirs[0] / "feature_importance.tsv").exists()
     assert (run_dirs[0] / "coefficients.tsv").exists()
     assert (run_dirs[0] / "figures" / "cv_metrics_overview.svg").exists()
+    assert (run_dirs[0] / "figures" / "cv_loss_by_split.svg").exists()
     assert (run_dirs[0] / "figures" / "threshold_selection_curve.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_importance_top.svg").exists()
     assert (run_dirs[0] / "figures" / "coefficients_signed_top.svg").exists()

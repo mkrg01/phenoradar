@@ -136,6 +136,17 @@ def _minimal_thresholds() -> pl.DataFrame:
     )
 
 
+def _minimal_loss_by_split() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "fold_id": ["0", "0", "1", "1"],
+            "split": ["train", "validation", "train", "validation"],
+            "metric": ["log_loss", "log_loss", "log_loss", "log_loss"],
+            "metric_value": [0.30, 0.45, 0.35, 0.50],
+        }
+    )
+
+
 def _minimal_feature_importance() -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -228,10 +239,12 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
         ensemble_model_probs=None,
         model_selection_trials=None,
         auto_threshold_metric="mcc",
+        loss_by_split_cv=_minimal_loss_by_split(),
     )
 
     figures_dir = tmp_path / "run" / "figures"
     assert (figures_dir / "cv_metrics_overview.svg").exists()
+    assert (figures_dir / "cv_loss_by_split.svg").exists()
     assert (figures_dir / "threshold_selection_curve.svg").exists()
     assert (figures_dir / "feature_importance_top.svg").exists()
     assert (figures_dir / "coefficients_signed_top.svg").exists()

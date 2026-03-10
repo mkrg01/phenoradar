@@ -8,8 +8,8 @@ them for `run` / `predict` / `report`.
 For one `run` result directory, a practical order is:
 
 1. `run_metadata.json` (status, warnings, pool counts, timing)
-2. `metrics_cv.tsv`, `thresholds.tsv`, and `classification_summary.tsv`
-   (overall quality, thresholds, and threshold-wise classification tradeoffs)
+2. `metrics_cv.tsv`, `loss_by_split_cv.tsv`, `thresholds.tsv`, and `classification_summary.tsv`
+   (overall quality, train/validation loss gap, thresholds, and threshold-wise classification tradeoffs)
 3. `prediction_cv.tsv` and `figures/roc_pr_curves_cv.svg` (overall CV ranking behavior)
 4. `prediction_external_test.tsv` / `prediction_inference.tsv` (`full_run` only)
 5. `feature_importance.tsv` and `coefficients.tsv` (model interpretation)
@@ -42,6 +42,10 @@ Always written:
 - `metrics_cv.tsv`
   - columns: `aggregate_scope`, `fold_id`, `metric`, `metric_value`, `n_pos`, `n_neg`, `n_valid_folds`
   - `aggregate_scope`: per-fold rows use `NA`, aggregate rows use `macro`/`micro`
+- `loss_by_split_cv.tsv`
+  - columns: `fold_id`, `split`, `metric`, `metric_value`
+  - current `split` values: `train`, `validation`
+  - current `metric` value: `log_loss`
 - `thresholds.tsv`
   - columns: `threshold_name`, `threshold_value`, `source`, `selection_metric`, `selection_scope`
   - threshold names: `fixed_probability_threshold`, `cv_derived_threshold`
@@ -71,6 +75,7 @@ Always written:
 - `figures/`
   - always attempts:
     - `cv_metrics_overview.svg`
+    - `cv_loss_by_split.svg`
     - `threshold_selection_curve.svg`
     - `feature_importance_top.svg`
     - `coefficients_signed_top.svg`
@@ -160,6 +165,17 @@ Conditionally written:
   - Used for `pred_label_cv_derived_threshold`.
 - `selection_scope`:
   - `outer_cv` indicates threshold was derived from CV OOF predictions.
+
+#### `loss_by_split_cv.tsv`
+
+- Fold-level final loss diagnostics using `log_loss`.
+- `train`:
+  - loss on sampled training subsets used for model fitting.
+  - when multiple sampled sets exist, reported value is the mean across sampled-set ensembles.
+- `validation`:
+  - loss on fold validation data.
+  - when multiple sampled sets exist, reported value is the mean across sampled-set ensembles.
+- Use this table to compare train/validation gap by fold as an overfitting check.
 
 #### `prediction_cv.tsv`
 
@@ -272,6 +288,9 @@ Conditionally written:
 - `threshold_selection_curve.svg`
   - x-axis: threshold, y-axis: selected score metric.
   - Red marker is the chosen `cv_derived_threshold`.
+- `cv_loss_by_split.svg`
+  - Fold-wise final `log_loss` comparison of `train` vs `validation`.
+  - Useful for quick overfitting diagnostics without per-iteration learning curves.
 - `roc_pr_curves_cv.svg`
   - Left: pooled OOF ROC, right: pooled OOF PR.
   - Curves summarize all folds together (not per-fold overlays).

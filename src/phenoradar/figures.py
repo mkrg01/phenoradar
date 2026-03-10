@@ -281,6 +281,101 @@ def _cv_metrics_overview(metrics_cv: pl.DataFrame, out_path: Path) -> None:
     _save_svg_figure(fig, out_path)
 
 
+def _cv_loss_by_split(loss_by_split_cv: pl.DataFrame, out_path: Path) -> None:
+    required_columns = {"fold_id", "split", "metric", "metric_value"}
+    if not required_columns.issubset(loss_by_split_cv.columns):
+        raise FigureError("loss_by_split_cv.tsv schema is invalid for cv_loss_by_split.svg")
+
+    data = (
+        loss_by_split_cv.select(
+            pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
+            pl.col("split").cast(pl.String, strict=False).alias("__split"),
+            pl.col("metric").cast(pl.String, strict=False).alias("__metric"),
+            pl.col("metric_value").cast(pl.Float64, strict=False).alias("__metric_value"),
+        )
+        .filter(
+            pl.col("__fold_id").is_not_null()
+            & (pl.col("__fold_id") != "")
+            & pl.col("__split").is_not_null()
+            & (pl.col("__split") != "")
+            & (pl.col("__metric") == "log_loss")
+            & pl.col("__metric_value").is_not_null()
+            & pl.col("__metric_value").is_finite()
+        )
+        .sort(["__fold_id", "__split"])
+    )
+    if data.height == 0:
+        raise FigureError("loss_by_split_cv.tsv is empty; cannot draw cv_loss_by_split.svg")
+
+    fold_ids = [str(v) for v in data.select("__fold_id").unique().to_series().to_list()]
+    fold_ids = sorted(
+        fold_ids,
+        key=lambda value: (0, int(value)) if value.isdigit() else (1, value),
+    )
+    split_values = [str(v) for v in data.select("__split").unique().to_series().to_list()]
+    split_order = [value for value in ["train", "validation"] if value in split_values]
+    split_order.extend(sorted(set(split_values) - set(split_order)))
+    if not fold_ids or not split_order:
+        raise FigureError("loss_by_split_cv.tsv is empty; cannot draw cv_loss_by_split.svg")
+
+    split_to_color = {
+        "train": "#1f77b4",
+        "validation": "#d62728",
+    }
+    x_positions = np.arange(len(fold_ids), dtype=float)
+    y_values: list[float] = []
+
+    fig, ax = plt.subplots(figsize=_figure_size_inches(1180, 520), dpi=_FIG_DPI)
+    fig.patch.set_facecolor("white")
+    fig.suptitle("CV Loss by Split", x=0.01, ha="left", fontsize=16)
+    fig.text(
+        0.01,
+        0.90,
+        "Final log_loss per fold (train vs validation)",
+        fontsize=10,
+    )
+
+    for split in split_order:
+        values: list[float] = []
+        for fold_id in fold_ids:
+            subset = data.filter((pl.col("__fold_id") == fold_id) & (pl.col("__split") == split))
+            if subset.height == 0:
+                values.append(np.nan)
+                continue
+            value = subset.select("__metric_value").to_series().to_list()[0]
+            values.append(float(value))
+        series = np.array(values, dtype=float)
+        mask = np.isfinite(series)
+        if np.any(mask):
+            ax.plot(
+                x_positions[mask],
+                series[mask],
+                linewidth=2.0,
+                marker="o",
+                markersize=4.5,
+                color=split_to_color.get(split, "#444444"),
+                label=split,
+            )
+            y_values.extend(series[mask].tolist())
+
+    if not y_values:
+        raise FigureError("loss_by_split_cv.tsv has no finite rows for cv_loss_by_split.svg")
+
+    y_min, y_max = _padded_domain(y_values, include_zero=False, min_pad=0.01)
+    ax.set_xlim(-0.4, len(fold_ids) - 0.6)
+    ax.set_ylim(y_min, y_max)
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels([f"fold={fold_id}" for fold_id in fold_ids], fontsize=10)
+    ax.set_xlabel("CV fold")
+    ax.set_ylabel("log_loss")
+    ax.grid(axis="y", color="#ececec", linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.legend(loc="upper right", frameon=False)
+
+    fig.subplots_adjust(left=0.09, right=0.98, top=0.82, bottom=0.18)
+    _save_svg_figure(fig, out_path)
+
+
 def _threshold_selection_curve(
     oof_predictions: pl.DataFrame,
     thresholds: pl.DataFrame,
@@ -1036,6 +1131,7 @@ def write_run_figures(
     ensemble_model_probs: pl.DataFrame | None,
     model_selection_trials: pl.DataFrame | None,
     auto_threshold_metric: Literal["mcc", "balanced_accuracy"],
+    loss_by_split_cv: pl.DataFrame | None = None,
     pred_external_test: pl.DataFrame | None = None,
     trait_name: str = "trait",
 ) -> list[str]:
@@ -1044,6 +1140,8 @@ def write_run_figures(
     figures_dir = run_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=False)
     _cv_metrics_overview(metrics_cv, figures_dir / "cv_metrics_overview.svg")
+    if loss_by_split_cv is not None:
+        _cv_loss_by_split(loss_by_split_cv, figures_dir / "cv_loss_by_split.svg")
     _threshold_selection_curve(
         oof_predictions,
         thresholds,

@@ -103,6 +103,20 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
     assert cv_artifacts.oof_predictions.height == 4
     scopes = set(cv_artifacts.metrics_cv.select("aggregate_scope").to_series().to_list())
     assert {"NA", "macro", "micro"}.issubset(scopes)
+    assert {
+        "fold_id",
+        "split",
+        "metric",
+        "metric_value",
+    }.issubset(cv_artifacts.loss_by_split_cv.columns)
+    assert cv_artifacts.loss_by_split_cv.height > 0
+    assert set(cv_artifacts.loss_by_split_cv.select("metric").to_series().to_list()) == {
+        "log_loss"
+    }
+    assert set(cv_artifacts.loss_by_split_cv.select("split").to_series().to_list()) == {
+        "train",
+        "validation",
+    }
     threshold_names = set(cv_artifacts.thresholds.select("threshold_name").to_series().to_list())
     assert threshold_names == {"fixed_probability_threshold", "cv_derived_threshold"}
     assert {
@@ -678,6 +692,7 @@ def test_outer_cv_is_deterministic_for_same_input_config_and_seed(tmp_path: Path
     second = run_outer_cv(config, split_artifacts.split_manifest)
 
     assert first.metrics_cv.to_dicts() == second.metrics_cv.to_dicts()
+    assert first.loss_by_split_cv.to_dicts() == second.loss_by_split_cv.to_dicts()
     assert first.thresholds.to_dicts() == second.thresholds.to_dicts()
     assert first.oof_predictions.to_dicts() == second.oof_predictions.to_dicts()
     assert first.feature_importance.to_dicts() == second.feature_importance.to_dicts()
