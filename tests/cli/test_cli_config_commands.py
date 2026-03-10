@@ -176,6 +176,13 @@ def _stub_final_refit_artifacts() -> SimpleNamespace:
                 "pred_label_cv_derived_threshold": [1],
             }
         ),
+        loss_by_split_final_refit=pl.DataFrame(
+            {
+                "split": ["train", "external_test"],
+                "metric": ["log_loss", "log_loss"],
+                "metric_value": [0.33, 0.55],
+            }
+        ),
         warnings=[],
         model_selection_selected=None,
         ensemble_size=1,
@@ -384,6 +391,7 @@ data:
     assert (run_dirs[0] / "coefficients.tsv").exists()
     assert (run_dirs[0] / "prediction_external_test.tsv").exists()
     assert (run_dirs[0] / "prediction_inference.tsv").exists()
+    assert (run_dirs[0] / "loss_by_split_final_refit.tsv").exists()
     assert (run_dirs[0] / "classification_summary.tsv").exists()
     assert (run_dirs[0] / "model_bundle").exists()
     assert (run_dirs[0] / "figures" / "cv_metrics_overview.svg").exists()
@@ -394,6 +402,7 @@ data:
     assert (run_dirs[0] / "figures" / "cv_species_probability_by_trait.svg").exists()
     assert (run_dirs[0] / "figures" / "cv_fold_trait_probability.svg").exists()
     assert (run_dirs[0] / "figures" / "roc_pr_curves_cv.svg").exists()
+    assert (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
     assert (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()
     cv_trait_svg = (run_dirs[0] / "figures" / "cv_species_probability_by_trait.svg").read_text(
         encoding="utf-8"
@@ -511,6 +520,7 @@ data:
     assert (run_dirs[0] / "figures" / "cv_species_probability_by_trait.svg").exists()
     assert (run_dirs[0] / "figures" / "cv_fold_trait_probability.svg").exists()
     assert (run_dirs[0] / "figures" / "roc_pr_curves_cv.svg").exists()
+    assert not (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
     assert not (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()
     assert (run_dirs[0] / "classification_summary.tsv").exists()
     assert not (run_dirs[0] / "prediction_external_test.tsv").exists()

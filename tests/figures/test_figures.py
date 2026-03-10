@@ -147,6 +147,16 @@ def _minimal_loss_by_split() -> pl.DataFrame:
     )
 
 
+def _minimal_final_refit_loss_by_split() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "split": ["train", "external_test"],
+            "metric": ["log_loss", "log_loss"],
+            "metric_value": [0.32, 0.51],
+        }
+    )
+
+
 def _minimal_feature_importance() -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -251,6 +261,7 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
     assert (figures_dir / "cv_species_probability_by_trait.svg").exists()
     assert (figures_dir / "cv_fold_trait_probability.svg").exists()
     assert (figures_dir / "roc_pr_curves_cv.svg").exists()
+    assert not (figures_dir / "final_refit_loss_by_split.svg").exists()
     assert not (figures_dir / "external_species_probability_by_trait.svg").exists()
     assert warnings == []
 
@@ -266,6 +277,7 @@ def test_write_run_figures_writes_external_trait_probability_when_available(tmp_
         ensemble_model_probs=None,
         model_selection_trials=None,
         auto_threshold_metric="mcc",
+        loss_by_split_final_refit=_minimal_final_refit_loss_by_split(),
         pred_external_test=pl.DataFrame(
             {
                 "species": ["sp5", "sp6"],
@@ -276,6 +288,7 @@ def test_write_run_figures_writes_external_trait_probability_when_available(tmp_
     )
 
     figures_dir = tmp_path / "run" / "figures"
+    assert (figures_dir / "final_refit_loss_by_split.svg").exists()
     assert (figures_dir / "external_species_probability_by_trait.svg").exists()
     assert warnings == []
 

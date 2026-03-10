@@ -376,6 +376,70 @@ def _cv_loss_by_split(loss_by_split_cv: pl.DataFrame, out_path: Path) -> None:
     _save_svg_figure(fig, out_path)
 
 
+def _final_refit_loss_by_split(loss_by_split_final_refit: pl.DataFrame, out_path: Path) -> None:
+    required_columns = {"split", "metric", "metric_value"}
+    if not required_columns.issubset(loss_by_split_final_refit.columns):
+        raise FigureError(
+            "loss_by_split_final_refit.tsv schema is invalid for final_refit_loss_by_split.svg"
+        )
+
+    data = (
+        loss_by_split_final_refit.select(
+            pl.col("split").cast(pl.String, strict=False).alias("__split"),
+            pl.col("metric").cast(pl.String, strict=False).alias("__metric"),
+            pl.col("metric_value").cast(pl.Float64, strict=False).alias("__metric_value"),
+        )
+        .filter(
+            pl.col("__split").is_not_null()
+            & (pl.col("__split") != "")
+            & (pl.col("__metric") == "log_loss")
+            & pl.col("__metric_value").is_not_null()
+            & pl.col("__metric_value").is_finite()
+        )
+        .group_by("__split")
+        .agg(pl.col("__metric_value").mean().alias("__metric_value"))
+    )
+    if data.height == 0:
+        raise FigureError(
+            "loss_by_split_final_refit.tsv is empty; cannot draw final_refit_loss_by_split.svg"
+        )
+
+    split_values = [str(v) for v in data.select("__split").to_series().to_list()]
+    split_order = [value for value in ["train", "external_test"] if value in split_values]
+    split_order.extend(sorted(set(split_values) - set(split_order)))
+
+    labels: list[str] = []
+    values: list[float] = []
+    for split in split_order:
+        subset = data.filter(pl.col("__split") == split)
+        if subset.height == 0:
+            continue
+        labels.append(split)
+        values.append(float(subset.select("__metric_value").to_series().to_list()[0]))
+
+    if not values:
+        raise FigureError(
+            "loss_by_split_final_refit.tsv is empty; cannot draw final_refit_loss_by_split.svg"
+        )
+
+    _plot_horizontal_values(
+        title="Final Refit Loss by Split",
+        subtitle="Final log_loss on refit train and external_test",
+        labels=labels,
+        values=values,
+        out_path=out_path,
+        color="#2ca02c",
+        width_px=1040,
+        min_height_px=220,
+        row_height_px=42,
+        base_height_px=90,
+        left_margin=0.26,
+        right_margin=0.93,
+        x_label="log_loss",
+        y_tick_fontsize=11,
+    )
+
+
 def _threshold_selection_curve(
     oof_predictions: pl.DataFrame,
     thresholds: pl.DataFrame,
@@ -798,12 +862,12 @@ def _species_probability_by_trait(
 
     for idx, trait in enumerate(traits):
         trait_df = data.filter(pl.col("__trait") == trait).sort(["__prob", "__species"])
-        probs = np.array(trait_df.select("__prob").to_series().to_list(), dtype=float)
-        offsets = _deterministic_offsets(probs.size, 0.17)
-        x_values = np.full(probs.shape[0], positions[idx], dtype=float) + offsets
+        probs_array = np.array(trait_df.select("__prob").to_series().to_list(), dtype=float)
+        offsets = _deterministic_offsets(probs_array.size, 0.17)
+        x_values = np.full(probs_array.shape[0], positions[idx], dtype=float) + offsets
         ax.scatter(
             x_values,
-            probs,
+            probs_array,
             s=32,
             color=trait_to_color[trait],
             edgecolors="white",
@@ -1132,6 +1196,7 @@ def write_run_figures(
     model_selection_trials: pl.DataFrame | None,
     auto_threshold_metric: Literal["mcc", "balanced_accuracy"],
     loss_by_split_cv: pl.DataFrame | None = None,
+    loss_by_split_final_refit: pl.DataFrame | None = None,
     pred_external_test: pl.DataFrame | None = None,
     trait_name: str = "trait",
 ) -> list[str]:
@@ -1142,6 +1207,10 @@ def write_run_figures(
     _cv_metrics_overview(metrics_cv, figures_dir / "cv_metrics_overview.svg")
     if loss_by_split_cv is not None:
         _cv_loss_by_split(loss_by_split_cv, figures_dir / "cv_loss_by_split.svg")
+    if loss_by_split_final_refit is not None:
+        _final_refit_loss_by_split(
+            loss_by_split_final_refit, figures_dir / "final_refit_loss_by_split.svg"
+        )
     _threshold_selection_curve(
         oof_predictions,
         thresholds,

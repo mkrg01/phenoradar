@@ -88,6 +88,7 @@ class FinalRefitArtifacts:
 
     pred_external_test: pl.DataFrame
     pred_inference: pl.DataFrame
+    loss_by_split_final_refit: pl.DataFrame
     model_selection_selected: pl.DataFrame | None
     warnings: list[str]
     ensemble_size: int
@@ -177,6 +178,7 @@ class FinalSampleSetFitResult:
     """Final-refit fit/predict outputs for one sampled set."""
 
     model_probs: list[np.ndarray]
+    train_model_probs: list[np.ndarray]
     fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
     selected_features: list[str]
     scaler: StandardScaler
@@ -1617,10 +1619,12 @@ def _fit_final_refit_sample_set(
         int,
         LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
         np.ndarray,
+        np.ndarray,
     ]:
         def _fit_one_limited() -> tuple[
             int,
             LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+            np.ndarray,
             np.ndarray,
         ]:
             model_index = base_model_index + selected_offset
@@ -1636,7 +1640,8 @@ def _fit_final_refit_sample_set(
                 model_prob = np.array([], dtype=float)
             else:
                 model_prob = _predict_positive_probability(estimator, x_target)
-            return selected_offset, estimator, model_prob
+            train_model_prob = _predict_positive_probability(estimator, x_sampled)
+            return selected_offset, estimator, model_prob, train_model_prob
 
         return _with_native_thread_limit_for_config(model_config, _fit_one_limited)
 
@@ -1644,6 +1649,7 @@ def _fit_final_refit_sample_set(
         tuple[
             int,
             LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+            np.ndarray,
             np.ndarray,
         ]
     ] = []
@@ -1662,12 +1668,15 @@ def _fit_final_refit_sample_set(
     ordered_results = sorted(results, key=lambda item: item[0])
     fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
     model_probs: list[np.ndarray] = []
-    for _selected_offset, model, prob in ordered_results:
+    train_model_probs: list[np.ndarray] = []
+    for _selected_offset, model, prob, train_prob in ordered_results:
         fitted_models.append(model)
         model_probs.append(prob)
+        train_model_probs.append(train_prob)
 
     return FinalSampleSetFitResult(
         model_probs=model_probs,
+        train_model_probs=train_model_probs,
         fitted_models=fitted_models,
         selected_features=selected_features,
         scaler=scaler,
@@ -1898,10 +1907,28 @@ def run_final_refit(
     scaler = first_sample_result.scaler
 
     model_entries: list[FinalModelEntry] = []
+    sampled_train_loss_values: list[float] = []
+    sampled_external_loss_values: list[float] = []
     for sample_set_id in range(len(sampled_sets)):
         fit_result = sample_results[sample_set_id]
         fitted_models.extend(fit_result.fitted_models)
         model_probs.extend(fit_result.model_probs)
+        sampled_idx = sampled_sets[sample_set_id]
+        y_sampled = y_train[sampled_idx]
+        sampled_train_prob = _aggregate_probabilities(
+            probs=fit_result.train_model_probs,
+            aggregation=config.ensemble.probability_aggregation,
+        )
+        sampled_train_loss_values.append(_binary_log_loss(y_sampled, sampled_train_prob))
+        if external_count > 0:
+            sampled_target_prob = _aggregate_probabilities(
+                probs=fit_result.model_probs,
+                aggregation=config.ensemble.probability_aggregation,
+            )
+            sampled_external_prob = sampled_target_prob[:external_count]
+            sampled_external_loss_values.append(
+                _binary_log_loss(external_true_label, sampled_external_prob)
+            )
         for model in fit_result.fitted_models:
             model_entries.append(
                 FinalModelEntry(
@@ -1910,6 +1937,33 @@ def run_final_refit(
                     model=model,
                 )
             )
+
+    sampled_train_loss_array = np.asarray(sampled_train_loss_values, dtype=float)
+    if np.all(np.isnan(sampled_train_loss_array)):
+        train_loss = np.nan
+    else:
+        train_loss = float(np.nanmean(sampled_train_loss_array))
+    loss_rows: list[dict[str, float | str]] = [
+        {
+            "split": "train",
+            "metric": "log_loss",
+            "metric_value": train_loss,
+        }
+    ]
+    if external_count > 0:
+        sampled_external_loss_array = np.asarray(sampled_external_loss_values, dtype=float)
+        if np.all(np.isnan(sampled_external_loss_array)):
+            external_loss = np.nan
+        else:
+            external_loss = float(np.nanmean(sampled_external_loss_array))
+        loss_rows.append(
+            {
+                "split": "external_test",
+                "metric": "log_loss",
+                "metric_value": external_loss,
+            }
+        )
+    loss_by_split_final_refit = pl.DataFrame(loss_rows)
 
     if target_count == 0:
         mean_prob = np.array([], dtype=float)
@@ -1963,6 +2017,7 @@ def run_final_refit(
     return FinalRefitArtifacts(
         pred_external_test=pred_external,
         pred_inference=pred_inference,
+        loss_by_split_final_refit=loss_by_split_final_refit,
         model_selection_selected=model_selection_selected,
         warnings=warnings,
         ensemble_size=len(model_probs),

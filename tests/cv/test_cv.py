@@ -540,6 +540,17 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
         refit_artifacts.pred_external_test.columns
     )
     assert {
+        "split",
+        "metric",
+        "metric_value",
+    }.issubset(refit_artifacts.loss_by_split_final_refit.columns)
+    assert set(
+        refit_artifacts.loss_by_split_final_refit.select("metric").to_series().to_list()
+    ) == {"log_loss"}
+    assert set(
+        refit_artifacts.loss_by_split_final_refit.select("split").to_series().to_list()
+    ) == {"train", "external_test"}
+    assert {
         "species",
         "prob",
         "pred_label_fixed_threshold",
@@ -1621,6 +1632,7 @@ def test_run_final_refit_supports_no_external_or_inference_species(tmp_path: Pat
 
     assert refit.pred_external_test.height == 0
     assert refit.pred_inference.height == 0
+    assert set(refit.loss_by_split_final_refit.select("split").to_series().to_list()) == {"train"}
 
 
 def test_run_final_refit_rejects_empty_training_pool(tmp_path: Path) -> None:

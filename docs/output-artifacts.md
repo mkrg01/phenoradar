@@ -82,6 +82,7 @@ Always written:
     - `cv_species_probability_by_trait.svg`
     - `cv_fold_trait_probability.svg`
     - `roc_pr_curves_cv.svg` (may be skipped with warning for degenerate folds)
+    - `final_refit_loss_by_split.svg` (attempted in `full_run`)
     - `external_species_probability_by_trait.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
 
 Conditionally written:
@@ -97,6 +98,10 @@ Conditionally written:
     - `pred_label_fixed_threshold`, `pred_label_cv_derived_threshold`
     - optional `uncertainty_std`
   - `true_label` values are `NA` because inference labels are unknown
+- `loss_by_split_final_refit.tsv` (`full_run` only)
+  - columns: `split`, `metric`, `metric_value`
+  - current `split` values: `train`, `external_test` (external row is omitted when external pool is empty)
+  - current `metric` value: `log_loss`
 - `model_bundle/` (`full_run` only)
   - reusable inference bundle (see bundle section below)
 - `ensemble_model_probs.tsv` (ensemble size > 1)
@@ -176,6 +181,17 @@ Conditionally written:
   - loss on fold validation data.
   - when multiple sampled sets exist, reported value is the mean across sampled-set ensembles.
 - Use this table to compare train/validation gap by fold as an overfitting check.
+
+#### `loss_by_split_final_refit.tsv` (`full_run`)
+
+- Final-refit loss diagnostics using `log_loss`.
+- `train`:
+  - loss on sampled training subsets used in final refit.
+  - when multiple sampled sets exist, reported value is the mean across sampled-set ensembles.
+- `external_test`:
+  - loss on external labeled data.
+  - omitted when external-test pool is empty.
+- Use this table to compare final-refit train vs external generalization gap.
 
 #### `prediction_cv.tsv`
 
@@ -308,6 +324,9 @@ Conditionally written:
 - `external_species_probability_by_trait.svg` (`full_run` with external samples)
   - External-test species probabilities grouped by `true_label`.
   - Boxplot with per-species points and trait-wise mean markers.
+- `final_refit_loss_by_split.svg` (`full_run`)
+  - Final-refit `log_loss` comparison of `train` and `external_test`.
+  - Useful for quick train-vs-external generalization diagnostics.
 
 ## `predict` artifacts (schemas and interpretation)
 

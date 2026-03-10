@@ -771,6 +771,12 @@ def run(
             float_precision=8,
             null_value="NA",
         )
+        final_refit_artifacts.loss_by_split_final_refit.write_csv(
+            run_dir / "loss_by_split_final_refit.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
         if final_refit_artifacts.model_selection_selected is not None:
             selected_tables.append(final_refit_artifacts.model_selection_selected)
         _log("Export model bundle.")
@@ -821,6 +827,11 @@ def run(
             model_selection_trials=cv_artifacts.model_selection_trials,
             auto_threshold_metric=resolved.report.auto_threshold_selection_metric,
             loss_by_split_cv=cv_artifacts.loss_by_split_cv,
+            loss_by_split_final_refit=(
+                None
+                if final_refit_artifacts is None
+                else final_refit_artifacts.loss_by_split_final_refit
+            ),
             pred_external_test=(
                 None if final_refit_artifacts is None else final_refit_artifacts.pred_external_test
             ),
@@ -887,6 +898,7 @@ def run(
             "; full_run outputs: "
             "prediction_external_test.tsv, "
             "prediction_inference.tsv, "
+            "loss_by_split_final_refit.tsv, "
             "model_bundle/"
         )
     typer.echo(

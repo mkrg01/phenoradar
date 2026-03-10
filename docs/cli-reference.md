@@ -77,12 +77,14 @@ Notes:
   - `cv_species_probability_by_trait.svg`
   - `cv_fold_trait_probability.svg`
   - `roc_pr_curves_cv.svg` (may be skipped when degenerate)
+  - `final_refit_loss_by_split.svg` (`full_run`)
   - `external_species_probability_by_trait.svg` (`full_run` when external test rows exist)
 
 Conditionally written:
 
 - `prediction_external_test.tsv` (`full_run` only)
 - `prediction_inference.tsv` (`full_run` only)
+- `loss_by_split_final_refit.tsv` (`full_run` only)
 - `model_bundle/` (`full_run` only)
 - `ensemble_model_probs.tsv` (ensemble size > 1)
 - `model_selection_trials.tsv` (model selection enabled)
