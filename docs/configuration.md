@@ -76,7 +76,7 @@ model_selection:
   search_space: {}
   inner_cv_strategy: null
   inner_cv_n_splits: null
-  selection_metric: mcc
+  selection_metric: log_loss
 ensemble:
   probability_aggregation: mean
 report:
@@ -109,7 +109,7 @@ runtime:
 - `sampling.weighting`: `none` | `group_label_inverse`
 - `ensemble.probability_aggregation`: `mean` | `median`
 - `model_selection.search_strategy`: `grid` | `random` | `tpe`
-- `model_selection.selection_metric`: `mcc` | `balanced_accuracy`
+- `model_selection.selection_metric`: `mcc` | `balanced_accuracy` | `log_loss`
 - `report.auto_threshold_selection_metric`: `mcc` | `balanced_accuracy`
 
 ## `data`
@@ -253,8 +253,8 @@ Compatibility rules:
     - must be `>= 2`
     - must be `null` when `inner_cv_strategy=logo|null`
 - `model_selection.selection_metric`
-  - type: `mcc | balanced_accuracy`
-  - default: `mcc`
+  - type: `mcc | balanced_accuracy | log_loss`
+  - default: `log_loss`
 
 Compatibility rules:
 

@@ -56,6 +56,7 @@ Always written:
 - `resolved_config.yml`
 - `split_manifest.tsv`
 - `metrics_cv.tsv`
+- `loss_by_split_cv.tsv`
 - `thresholds.tsv`
 - `feature_importance.tsv`
 - `coefficients.tsv`
@@ -67,11 +68,24 @@ Always written:
 Notes:
 
 - `prediction_cv.tsv` may include optional `uncertainty_std` when ensemble size > 1.
+- `figures/` includes:
+  - `cv_metrics_overview.svg`
+  - `cv_loss_by_split.svg`
+  - `threshold_selection_curve.svg`
+  - `feature_importance_top.svg`
+  - `coefficients_signed_top.svg`
+  - `cv_species_probability_by_trait.svg`
+  - `cv_fold_trait_probability.svg`
+  - `model_selection_trials.svg` (model selection enabled)
+  - `roc_pr_curves_cv.svg` (may be skipped when degenerate)
+  - `final_refit_loss_by_split.svg` (`full_run`)
+  - `external_species_probability_by_trait.svg` (`full_run` when external test rows exist)
 
 Conditionally written:
 
 - `prediction_external_test.tsv` (`full_run` only)
 - `prediction_inference.tsv` (`full_run` only)
+- `loss_by_split_final_refit.tsv` (`full_run` only)
 - `model_bundle/` (`full_run` only)
 - `ensemble_model_probs.tsv` (ensemble size > 1)
 - `model_selection_trials.tsv` (model selection enabled)

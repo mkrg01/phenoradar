@@ -74,7 +74,11 @@ def _stub_resolved_config(*, execution_stage: str) -> SimpleNamespace:
         runtime=SimpleNamespace(execution_stage=execution_stage, seed=42),
         report=SimpleNamespace(auto_threshold_selection_metric="mcc"),
         model_selection=SimpleNamespace(),
-        data=SimpleNamespace(metadata_path="metadata.tsv", tpm_path="tpm.tsv"),
+        data=SimpleNamespace(
+            metadata_path="metadata.tsv",
+            tpm_path="tpm.tsv",
+            trait_col="C4",
+        ),
     )
 
 
@@ -108,6 +112,14 @@ def _stub_cv_artifacts(
                 "fold_id": ["NA"],
                 "metric": ["mcc"],
                 "metric_value": [0.5],
+            }
+        ),
+        loss_by_split_cv=pl.DataFrame(
+            {
+                "fold_id": ["0", "0"],
+                "split": ["train", "validation"],
+                "metric": ["log_loss", "log_loss"],
+                "metric_value": [0.42, 0.56],
             }
         ),
         feature_importance=pl.DataFrame(
@@ -162,6 +174,13 @@ def _stub_final_refit_artifacts() -> SimpleNamespace:
                 "prob": [0.6],
                 "pred_label_fixed_threshold": [1],
                 "pred_label_cv_derived_threshold": [1],
+            }
+        ),
+        loss_by_split_final_refit=pl.DataFrame(
+            {
+                "split": ["train", "external_test"],
+                "metric": ["log_loss", "log_loss"],
+                "metric_value": [0.33, 0.55],
             }
         ),
         warnings=[],
@@ -366,18 +385,30 @@ data:
     assert resolved["runtime"]["execution_stage"] == "full_run"
     assert (run_dirs[0] / "split_manifest.tsv").exists()
     assert (run_dirs[0] / "metrics_cv.tsv").exists()
+    assert (run_dirs[0] / "loss_by_split_cv.tsv").exists()
     assert (run_dirs[0] / "thresholds.tsv").exists()
     assert (run_dirs[0] / "feature_importance.tsv").exists()
     assert (run_dirs[0] / "coefficients.tsv").exists()
     assert (run_dirs[0] / "prediction_external_test.tsv").exists()
     assert (run_dirs[0] / "prediction_inference.tsv").exists()
+    assert (run_dirs[0] / "loss_by_split_final_refit.tsv").exists()
     assert (run_dirs[0] / "classification_summary.tsv").exists()
     assert (run_dirs[0] / "model_bundle").exists()
     assert (run_dirs[0] / "figures" / "cv_metrics_overview.svg").exists()
+    assert (run_dirs[0] / "figures" / "cv_loss_by_split.svg").exists()
     assert (run_dirs[0] / "figures" / "threshold_selection_curve.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_importance_top.svg").exists()
     assert (run_dirs[0] / "figures" / "coefficients_signed_top.svg").exists()
+    assert (run_dirs[0] / "figures" / "cv_species_probability_by_trait.svg").exists()
+    assert (run_dirs[0] / "figures" / "cv_fold_trait_probability.svg").exists()
     assert (run_dirs[0] / "figures" / "roc_pr_curves_cv.svg").exists()
+    assert (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
+    assert (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()
+    cv_trait_svg = (run_dirs[0] / "figures" / "cv_species_probability_by_trait.svg").read_text(
+        encoding="utf-8"
+    )
+    assert "C4=0" in cv_trait_svg
+    assert "C4=1" in cv_trait_svg
 
     metrics = pl.read_csv(run_dirs[0] / "metrics_cv.tsv", separator="\t")
     assert {"aggregate_scope", "fold_id", "metric", "metric_value"}.issubset(metrics.columns)
@@ -482,10 +513,15 @@ data:
     assert (run_dirs[0] / "feature_importance.tsv").exists()
     assert (run_dirs[0] / "coefficients.tsv").exists()
     assert (run_dirs[0] / "figures" / "cv_metrics_overview.svg").exists()
+    assert (run_dirs[0] / "figures" / "cv_loss_by_split.svg").exists()
     assert (run_dirs[0] / "figures" / "threshold_selection_curve.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_importance_top.svg").exists()
     assert (run_dirs[0] / "figures" / "coefficients_signed_top.svg").exists()
+    assert (run_dirs[0] / "figures" / "cv_species_probability_by_trait.svg").exists()
+    assert (run_dirs[0] / "figures" / "cv_fold_trait_probability.svg").exists()
     assert (run_dirs[0] / "figures" / "roc_pr_curves_cv.svg").exists()
+    assert not (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
+    assert not (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()
     assert (run_dirs[0] / "classification_summary.tsv").exists()
     assert not (run_dirs[0] / "prediction_external_test.tsv").exists()
     assert not (run_dirs[0] / "prediction_inference.tsv").exists()
@@ -625,7 +661,7 @@ model_selection:
     assert selected_path.exists()
     assert trials_path.exists()
     assert trials_summary_path.exists()
-    assert not (run_dirs[0] / "figures" / "model_selection_trials.svg").exists()
+    assert (run_dirs[0] / "figures" / "model_selection_trials.svg").exists()
 
     selected_df = pl.read_csv(selected_path, separator="\t")
     scopes = set(selected_df.select("selection_scope").to_series().to_list())

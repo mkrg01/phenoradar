@@ -14,7 +14,8 @@ ModelName = Literal["logistic_elasticnet", "linear_svm", "random_forest"]
 ProbabilityAggregation = Literal["mean", "median"]
 SearchStrategy = Literal["grid", "random", "tpe"]
 CandidateSourcePolicy = Literal["per_sample_set", "reuse_first_sample_set"]
-MetricName = Literal["mcc", "balanced_accuracy"]
+SelectionMetricName = Literal["mcc", "balanced_accuracy", "log_loss"]
+ThresholdSelectionMetricName = Literal["mcc", "balanced_accuracy"]
 CorrelationMethod = Literal["pearson", "spearman"]
 
 
@@ -259,7 +260,7 @@ class ModelSelectionConfig(StrictModel):
     search_space: dict[str, SearchSpaceValue] = Field(default_factory=dict)
     inner_cv_strategy: OuterCvStrategy | None = None
     inner_cv_n_splits: PositiveInt | None = None
-    selection_metric: MetricName = "mcc"
+    selection_metric: SelectionMetricName = "log_loss"
 
     @property
     def has_continuous_search_space(self) -> bool:
@@ -314,7 +315,7 @@ class ReportConfig(StrictModel):
     """Threshold derivation settings."""
 
     fixed_probability_threshold: float = 0.5
-    auto_threshold_selection_metric: MetricName = "mcc"
+    auto_threshold_selection_metric: ThresholdSelectionMetricName = "mcc"
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> ReportConfig:
