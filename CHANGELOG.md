@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/mkrg01/phenoradar/compare/v0.2.0...v0.3.0) (2026-03-11)
+
+
+### Features
+
+* add feature-filter/sparsity artifacts and visualization ([a05b6ac](https://github.com/mkrg01/phenoradar/commit/a05b6ac937aa7023d0091fb4a026400d4c5593b4))
+* add feature-filter/sparsity artifacts and visualization ([8e423c5](https://github.com/mkrg01/phenoradar/commit/8e423c52587cdbd92497cc62a639ab6dab864717))
+
+
+### Documentation
+
+* remove release automation documentation ([98029bb](https://github.com/mkrg01/phenoradar/commit/98029bb6c3bf2ed532dddadb9dadf947c667ee2c))
+
 ## [0.2.0](https://github.com/mkrg01/phenoradar/compare/v0.1.0...v0.2.0) (2026-03-10)
 
 
