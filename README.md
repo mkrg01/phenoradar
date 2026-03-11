@@ -33,4 +33,3 @@ phenoradar run -c config.yml
 4. [docs/cli-reference.md](docs/cli-reference.md): all commands and options.
 5. [docs/output-artifacts.md](docs/output-artifacts.md): output files, column-level details, and interpretation guidance.
 6. [docs/pipeline-details.md](docs/pipeline-details.md): internal execution behavior.
-7. [docs/release-automation.md](docs/release-automation.md): release workflow and PyPI publishing.
