@@ -169,6 +169,62 @@ def _minimal_feature_importance() -> pl.DataFrame:
     )
 
 
+def _minimal_feature_filter_counts() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "scope": ["outer_fold", "outer_fold", "outer_fold", "outer_fold"],
+            "fold_id": ["0", "0", "1", "1"],
+            "sample_set_id": [0, 1, 0, 1],
+            "n_features_before": [100, 100, 100, 100],
+            "n_features_after_low_prevalence": [80, 82, 78, 79],
+            "n_features_after_low_variance": [60, 61, 59, 60],
+            "n_features_after_correlation": [52, 53, 50, 52],
+            "n_features_after_all": [52, 53, 50, 52],
+        }
+    )
+
+
+def _minimal_feature_filter_counts_summary() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "scope": ["outer_fold"] * 5,
+            "stage": [
+                "n_features_before",
+                "n_features_after_low_prevalence",
+                "n_features_after_low_variance",
+                "n_features_after_correlation",
+                "n_features_after_all",
+            ],
+            "n_records": [4, 4, 4, 4, 4],
+            "n_features_min": [100, 78, 59, 50, 50],
+            "n_features_median": [100.0, 79.5, 60.0, 52.0, 52.0],
+            "n_features_mean": [100.0, 79.75, 60.0, 51.75, 51.75],
+            "n_features_max": [100, 82, 61, 53, 53],
+            "retained_ratio_min": [1.0, 0.78, 0.59, 0.50, 0.50],
+            "retained_ratio_median": [1.0, 0.795, 0.60, 0.52, 0.52],
+            "retained_ratio_mean": [1.0, 0.7975, 0.60, 0.5175, 0.5175],
+            "retained_ratio_max": [1.0, 0.82, 0.61, 0.53, 0.53],
+        }
+    )
+
+
+def _minimal_model_sparsity() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "scope": ["outer_fold", "outer_fold", "outer_fold", "outer_fold"],
+            "fold_id": ["0", "0", "1", "1"],
+            "sample_set_id": [0, 1, 0, 1],
+            "model_index": [0, 1, 2, 3],
+            "model_name": ["logistic_elasticnet"] * 4,
+            "n_features_after_all": [52, 53, 50, 52],
+            "n_nonzero_features": [24, 25, 21, 22],
+            "nonzero_ratio": [24 / 52, 25 / 53, 21 / 50, 22 / 52],
+            "count_method": ["coef_abs_gt_tol"] * 4,
+            "reason": ["ok"] * 4,
+        }
+    )
+
+
 def test_format_float_returns_nan_for_none_and_nan() -> None:
     assert figures_mod._format_float(None) == "NaN"
     assert figures_mod._format_float(float("nan")) == "NaN"
@@ -263,6 +319,27 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
     assert (figures_dir / "roc_pr_curves_cv.svg").exists()
     assert not (figures_dir / "final_refit_loss_by_split.svg").exists()
     assert not (figures_dir / "external_species_probability_by_trait.svg").exists()
+    assert warnings == []
+
+
+def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: Path) -> None:
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_minimal_oof(),
+        thresholds=_minimal_thresholds(),
+        feature_importance=_minimal_feature_importance(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        auto_threshold_metric="mcc",
+        feature_filter_counts_summary=_minimal_feature_filter_counts_summary(),
+        model_sparsity=_minimal_model_sparsity(),
+    )
+
+    figures_dir = tmp_path / "run" / "figures"
+    assert (figures_dir / "feature_filter_funnel.svg").exists()
+    assert (figures_dir / "model_sparsity_scatter.svg").exists()
     assert warnings == []
 
 

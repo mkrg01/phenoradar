@@ -800,6 +800,99 @@ def run(
             float_precision=8,
             null_value="NA",
         )
+
+    feature_filter_counts_tables: list[pl.DataFrame] = []
+    cv_feature_filter_counts = getattr(cv_artifacts, "feature_filter_counts", None)
+    if isinstance(cv_feature_filter_counts, pl.DataFrame):
+        feature_filter_counts_tables.append(cv_feature_filter_counts)
+    final_feature_filter_counts = (
+        None
+        if final_refit_artifacts is None
+        else getattr(final_refit_artifacts, "feature_filter_counts", None)
+    )
+    if isinstance(final_feature_filter_counts, pl.DataFrame):
+        feature_filter_counts_tables.append(final_feature_filter_counts)
+    feature_filter_counts_table: pl.DataFrame | None = None
+    if feature_filter_counts_tables:
+        feature_filter_counts_table = pl.concat(
+            feature_filter_counts_tables, how="vertical_relaxed"
+        ).sort(["scope", "fold_id", "sample_set_id"])
+        feature_filter_counts_table.write_csv(
+            run_dir / "feature_filter_counts.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
+
+    feature_filter_summary_tables: list[pl.DataFrame] = []
+    cv_feature_filter_summary = getattr(cv_artifacts, "feature_filter_counts_summary", None)
+    if isinstance(cv_feature_filter_summary, pl.DataFrame):
+        feature_filter_summary_tables.append(cv_feature_filter_summary)
+    final_feature_filter_summary = (
+        None
+        if final_refit_artifacts is None
+        else getattr(final_refit_artifacts, "feature_filter_counts_summary", None)
+    )
+    if isinstance(final_feature_filter_summary, pl.DataFrame):
+        feature_filter_summary_tables.append(final_feature_filter_summary)
+    feature_filter_counts_summary_table: pl.DataFrame | None = None
+    if feature_filter_summary_tables:
+        feature_filter_counts_summary_table = pl.concat(
+            feature_filter_summary_tables, how="vertical_relaxed"
+        ).sort(["scope", "stage"])
+        feature_filter_counts_summary_table.write_csv(
+            run_dir / "feature_filter_counts_summary.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
+
+    model_sparsity_tables: list[pl.DataFrame] = []
+    cv_model_sparsity = getattr(cv_artifacts, "model_sparsity", None)
+    if isinstance(cv_model_sparsity, pl.DataFrame):
+        model_sparsity_tables.append(cv_model_sparsity)
+    final_model_sparsity = (
+        None
+        if final_refit_artifacts is None
+        else getattr(final_refit_artifacts, "model_sparsity", None)
+    )
+    if isinstance(final_model_sparsity, pl.DataFrame):
+        model_sparsity_tables.append(final_model_sparsity)
+    model_sparsity_table: pl.DataFrame | None = None
+    if model_sparsity_tables:
+        model_sparsity_table = pl.concat(model_sparsity_tables, how="vertical_relaxed").sort(
+            ["scope", "fold_id", "sample_set_id", "model_index"]
+        )
+        model_sparsity_table.write_csv(
+            run_dir / "model_sparsity.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
+
+    model_sparsity_summary_tables: list[pl.DataFrame] = []
+    cv_model_sparsity_summary = getattr(cv_artifacts, "model_sparsity_summary", None)
+    if isinstance(cv_model_sparsity_summary, pl.DataFrame):
+        model_sparsity_summary_tables.append(cv_model_sparsity_summary)
+    final_model_sparsity_summary = (
+        None
+        if final_refit_artifacts is None
+        else getattr(final_refit_artifacts, "model_sparsity_summary", None)
+    )
+    if isinstance(final_model_sparsity_summary, pl.DataFrame):
+        model_sparsity_summary_tables.append(final_model_sparsity_summary)
+    model_sparsity_summary_table: pl.DataFrame | None = None
+    if model_sparsity_summary_tables:
+        model_sparsity_summary_table = pl.concat(
+            model_sparsity_summary_tables, how="vertical_relaxed"
+        ).sort(["scope", "model_name"])
+        model_sparsity_summary_table.write_csv(
+            run_dir / "model_sparsity_summary.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
+
     classification_summary = _classification_summary(
         oof_predictions=cv_artifacts.oof_predictions,
         thresholds=cv_artifacts.thresholds,
@@ -837,6 +930,9 @@ def run(
                 None if final_refit_artifacts is None else final_refit_artifacts.pred_external_test
             ),
             trait_name=resolved.data.trait_col,
+            feature_filter_counts_summary=feature_filter_counts_summary_table,
+            model_sparsity=model_sparsity_table,
+            model_sparsity_summary=model_sparsity_summary_table,
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -907,6 +1003,8 @@ def run(
         "(resolved_config.yml, split_manifest.tsv, metrics_cv.tsv, loss_by_split_cv.tsv, "
         "thresholds.tsv, "
         "feature_importance.tsv, coefficients.tsv, prediction_cv.tsv, "
+        "feature_filter_counts.tsv, feature_filter_counts_summary.tsv, "
+        "model_sparsity.tsv, model_sparsity_summary.tsv, "
         "classification_summary.tsv, "
         "run_metadata.json"
         f"{full_run_suffix}; warnings={len(warnings)}).",
