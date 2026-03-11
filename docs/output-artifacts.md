@@ -57,6 +57,30 @@ Always written:
 - `prediction_cv.tsv`
   - columns: `fold_id`, `species`, `label`, `prob`
   - optional `uncertainty_std` (ensemble size > 1)
+- `feature_filter_counts.tsv`
+  - columns:
+    - `scope`, `fold_id`, `sample_set_id`
+    - `n_features_before`
+    - `n_features_after_low_prevalence`
+    - `n_features_after_low_variance`
+    - `n_features_after_correlation`
+    - `n_features_after_all`
+- `feature_filter_counts_summary.tsv`
+  - columns:
+    - `scope`, `stage`, `n_records`
+    - `n_features_min`, `n_features_median`, `n_features_mean`, `n_features_max`
+    - `retained_ratio_min`, `retained_ratio_median`, `retained_ratio_mean`, `retained_ratio_max`
+- `model_sparsity.tsv`
+  - columns:
+    - `scope`, `fold_id`, `sample_set_id`, `model_index`, `model_name`
+    - `n_features_after_all`, `n_nonzero_features`, `nonzero_ratio`
+    - `count_method`, `reason`
+- `model_sparsity_summary.tsv`
+  - columns:
+    - `scope`, `model_name`
+    - `n_models`, `n_models_with_nonzero_count`
+    - `n_nonzero_min`, `n_nonzero_median`, `n_nonzero_mean`, `n_nonzero_max`
+    - `nonzero_ratio_min`, `nonzero_ratio_median`, `nonzero_ratio_mean`, `nonzero_ratio_max`
 - `classification_summary.tsv`
   - columns:
     - `pool`, `fold_id`
@@ -81,6 +105,8 @@ Always written:
     - `coefficients_signed_top.svg`
     - `cv_species_probability_by_trait.svg`
     - `cv_fold_trait_probability.svg`
+    - `feature_filter_funnel.svg`
+    - `model_sparsity_scatter.svg`
     - `model_selection_trials.svg` (candidate selection active)
     - `roc_pr_curves_cv.svg` (may be skipped with warning for degenerate folds)
     - `final_refit_loss_by_split.svg` (attempted in `full_run`)
@@ -216,6 +242,38 @@ Conditionally written:
   - Standard deviation of per-model probabilities in ensemble.
   - Larger value means lower ensemble agreement.
 
+#### `feature_filter_counts.tsv`
+
+- One row per preprocessing result (`scope`, `fold_id`, `sample_set_id`).
+- Values are stage-wise feature counts through:
+  - raw (`n_features_before`)
+  - low prevalence
+  - low variance
+  - correlation
+  - final (`n_features_after_all`)
+- Use this table to inspect fold/sample-set-specific filtering behavior.
+
+#### `feature_filter_counts_summary.tsv`
+
+- Summary of `feature_filter_counts.tsv` grouped by (`scope`, `stage`).
+- `retained_ratio_*` is the ratio relative to `n_features_before`.
+- Use this table for quick stage-wise trend checks without scanning all folds/sample sets.
+
+#### `model_sparsity.tsv`
+
+- One row per fitted model in CV/final-refit scopes.
+- `n_nonzero_features`:
+  - count of non-zero features derived from model-specific signals
+    (`coef_` for linear models, `feature_importances_` for random forest).
+  - can be `NA` when unavailable, with the reason in `reason`.
+- `nonzero_ratio`:
+  - `n_nonzero_features / n_features_after_all` when count is available.
+
+#### `model_sparsity_summary.tsv`
+
+- Summary grouped by (`scope`, `model_name`).
+- `n_models_with_nonzero_count` helps identify how many models exposed usable sparsity counts.
+
 #### `feature_importance.tsv`
 
 - `importance_mean`:
@@ -325,6 +383,12 @@ Conditionally written:
 - `cv_fold_trait_probability.svg`
   - Fold-level probability distribution grouped by trait.
   - Useful for checking fold-to-fold drift or fold-specific overlap.
+- `feature_filter_funnel.svg`
+  - Stage-wise feature-count trend by scope.
+  - Line is median count; shaded range is min-max.
+- `model_sparsity_scatter.svg`
+  - Scatter of `n_features_after_all` vs `n_nonzero_features`.
+  - Useful for comparing preprocessing output size vs model sparsity.
 - `model_selection_trials.svg` (candidate selection active)
   - Panels are laid out automatically in a compact grid.
   - Candidate scores are shown as `metric_value_mean ± metric_value_std`.

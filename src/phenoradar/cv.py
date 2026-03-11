@@ -79,6 +79,10 @@ class CVArtifacts:
     model_selection_selected: pl.DataFrame | None
     model_selection_trials: pl.DataFrame | None
     model_selection_trials_summary: pl.DataFrame | None
+    feature_filter_counts: pl.DataFrame
+    feature_filter_counts_summary: pl.DataFrame
+    model_sparsity: pl.DataFrame
+    model_sparsity_summary: pl.DataFrame
     warnings: list[str]
 
 
@@ -90,6 +94,10 @@ class FinalRefitArtifacts:
     pred_inference: pl.DataFrame
     loss_by_split_final_refit: pl.DataFrame
     model_selection_selected: pl.DataFrame | None
+    feature_filter_counts: pl.DataFrame
+    feature_filter_counts_summary: pl.DataFrame
+    model_sparsity: pl.DataFrame
+    model_sparsity_summary: pl.DataFrame
     warnings: list[str]
     ensemble_size: int
     feature_names: list[str]
@@ -130,6 +138,8 @@ class OuterFoldResult:
     ensemble_model_prob_rows: list[dict[str, float | int | str]]
     model_selection_selected_rows: list[dict[str, Any]]
     model_selection_trial_rows: list[dict[str, Any]]
+    feature_filter_count_rows: list[dict[str, Any]]
+    model_sparsity_rows: list[dict[str, Any]]
     fold_model_count: int
     n_features_before_preprocess: int
     n_features_after_low_prevalence: int
@@ -168,6 +178,7 @@ class OuterSampleSetFitResult:
     fold_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
     interpretation_entries: list[ModelFeatureEntry]
     ensemble_model_prob_rows: list[dict[str, float | int | str]]
+    model_sparsity_rows: list[dict[str, Any]]
     selected_features: list[str]
     filter_counts: FeatureFilterCounts
     model_count: int
@@ -180,6 +191,7 @@ class FinalSampleSetFitResult:
     model_probs: list[np.ndarray]
     train_model_probs: list[np.ndarray]
     fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
+    model_sparsity_rows: list[dict[str, Any]]
     selected_features: list[str]
     scaler: StandardScaler
     filter_counts: FeatureFilterCounts
@@ -193,6 +205,248 @@ class FinalModelEntry:
     feature_names: list[str]
     scaler: StandardScaler
     model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier
+
+
+_FEATURE_FILTER_STAGE_COLUMNS = [
+    "n_features_before",
+    "n_features_after_low_prevalence",
+    "n_features_after_low_variance",
+    "n_features_after_correlation",
+    "n_features_after_all",
+]
+_FEATURE_FILTER_STAGE_ORDER = {
+    "n_features_before": 0,
+    "n_features_after_low_prevalence": 1,
+    "n_features_after_low_variance": 2,
+    "n_features_after_correlation": 3,
+    "n_features_after_all": 4,
+}
+_NONZERO_TOLERANCE = 1e-12
+
+
+def _empty_feature_filter_counts() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "scope": pl.String,
+            "fold_id": pl.String,
+            "sample_set_id": pl.Int64,
+            "n_features_before": pl.Int64,
+            "n_features_after_low_prevalence": pl.Int64,
+            "n_features_after_low_variance": pl.Int64,
+            "n_features_after_correlation": pl.Int64,
+            "n_features_after_all": pl.Int64,
+        }
+    )
+
+
+def _empty_feature_filter_counts_summary() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "scope": pl.String,
+            "stage": pl.String,
+            "n_records": pl.Int64,
+            "n_features_min": pl.Int64,
+            "n_features_median": pl.Float64,
+            "n_features_mean": pl.Float64,
+            "n_features_max": pl.Int64,
+            "retained_ratio_min": pl.Float64,
+            "retained_ratio_median": pl.Float64,
+            "retained_ratio_mean": pl.Float64,
+            "retained_ratio_max": pl.Float64,
+        }
+    )
+
+
+def _feature_filter_count_row(
+    *,
+    scope: str,
+    fold_id: str,
+    sample_set_id: int,
+    counts: FeatureFilterCounts,
+) -> dict[str, Any]:
+    return {
+        "scope": scope,
+        "fold_id": fold_id,
+        "sample_set_id": int(sample_set_id),
+        "n_features_before": int(counts.n_features_before),
+        "n_features_after_low_prevalence": int(counts.n_features_after_low_prevalence),
+        "n_features_after_low_variance": int(counts.n_features_after_low_variance),
+        "n_features_after_correlation": int(counts.n_features_after_correlation),
+        "n_features_after_all": int(counts.n_features_after_all),
+    }
+
+
+def _build_feature_filter_counts(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    if not rows:
+        return _empty_feature_filter_counts()
+    return pl.DataFrame(rows).sort(["scope", "fold_id", "sample_set_id"])
+
+
+def _summarize_feature_filter_counts(feature_filter_counts: pl.DataFrame) -> pl.DataFrame:
+    if feature_filter_counts.height == 0:
+        return _empty_feature_filter_counts_summary()
+    long = feature_filter_counts.unpivot(
+        on=_FEATURE_FILTER_STAGE_COLUMNS,
+        index=["scope", "fold_id", "sample_set_id", "n_features_before"],
+        variable_name="stage",
+        value_name="n_features",
+    ).with_columns(
+        (pl.col("n_features") / pl.col("n_features_before")).alias("retained_ratio"),
+    )
+    summary = long.group_by(["scope", "stage"]).agg(
+        [
+            pl.len().alias("n_records"),
+            pl.col("n_features").min().alias("n_features_min"),
+            pl.col("n_features").median().alias("n_features_median"),
+            pl.col("n_features").mean().alias("n_features_mean"),
+            pl.col("n_features").max().alias("n_features_max"),
+            pl.col("retained_ratio").min().alias("retained_ratio_min"),
+            pl.col("retained_ratio").median().alias("retained_ratio_median"),
+            pl.col("retained_ratio").mean().alias("retained_ratio_mean"),
+            pl.col("retained_ratio").max().alias("retained_ratio_max"),
+        ]
+    )
+    return summary.with_columns(
+        pl.col("stage").replace(_FEATURE_FILTER_STAGE_ORDER).alias("_stage_order"),
+    ).sort(["scope", "_stage_order"]).drop("_stage_order")
+
+
+def _empty_model_sparsity() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "scope": pl.String,
+            "fold_id": pl.String,
+            "sample_set_id": pl.Int64,
+            "model_index": pl.Int64,
+            "model_name": pl.String,
+            "n_features_after_all": pl.Int64,
+            "n_nonzero_features": pl.Int64,
+            "nonzero_ratio": pl.Float64,
+            "count_method": pl.String,
+            "reason": pl.String,
+        }
+    )
+
+
+def _empty_model_sparsity_summary() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "scope": pl.String,
+            "model_name": pl.String,
+            "n_models": pl.Int64,
+            "n_models_with_nonzero_count": pl.Int64,
+            "n_nonzero_min": pl.Int64,
+            "n_nonzero_median": pl.Float64,
+            "n_nonzero_mean": pl.Float64,
+            "n_nonzero_max": pl.Int64,
+            "nonzero_ratio_min": pl.Float64,
+            "nonzero_ratio_median": pl.Float64,
+            "nonzero_ratio_mean": pl.Float64,
+            "nonzero_ratio_max": pl.Float64,
+        }
+    )
+
+
+def _coef_nonzero_count(coefficients: np.ndarray, *, tolerance: float) -> int:
+    abs_coef = np.abs(np.asarray(coefficients, dtype=float))
+    per_feature = abs_coef if abs_coef.ndim == 1 else np.max(abs_coef, axis=0)
+    return int(np.count_nonzero(per_feature > tolerance))
+
+
+def _model_nonzero_count(
+    model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+) -> tuple[int | None, str, str]:
+    if isinstance(model, LogisticRegression):
+        count = _coef_nonzero_count(model.coef_, tolerance=_NONZERO_TOLERANCE)
+        return count, "coef_abs_gt_tol", "ok"
+
+    if isinstance(model, CalibratedClassifierCV):
+        calibrated_entries = getattr(model, "calibrated_classifiers_", None)
+        if not calibrated_entries:
+            return None, "coef_abs_gt_tol_union", "no_calibrated_estimators"
+        per_estimator: list[np.ndarray] = []
+        for entry in calibrated_entries:
+            estimator = getattr(entry, "estimator", None)
+            if estimator is None:
+                estimator = getattr(entry, "base_estimator", None)
+            if estimator is None or not hasattr(estimator, "coef_"):
+                continue
+            coef = np.asarray(estimator.coef_, dtype=float)
+            abs_coef = np.abs(coef)
+            if abs_coef.ndim == 1:
+                per_estimator.append(abs_coef)
+            else:
+                per_estimator.append(np.max(abs_coef, axis=0))
+        if not per_estimator:
+            return None, "coef_abs_gt_tol_union", "coef_not_available"
+        stacked = np.vstack(per_estimator)
+        per_feature = np.max(stacked, axis=0)
+        count = int(np.count_nonzero(per_feature > _NONZERO_TOLERANCE))
+        return count, "coef_abs_gt_tol_union", "ok"
+
+    if isinstance(model, RandomForestClassifier):
+        if not hasattr(model, "feature_importances_"):
+            return None, "feature_importance_gt_tol", "importance_not_available"
+        importance = np.asarray(model.feature_importances_, dtype=float)
+        count = int(np.count_nonzero(importance > _NONZERO_TOLERANCE))
+        return count, "feature_importance_gt_tol", "ok"
+
+    return None, "unsupported", "unsupported_model"
+
+
+def _model_sparsity_row(
+    *,
+    scope: str,
+    fold_id: str,
+    sample_set_id: int,
+    model_index: int,
+    model_name: str,
+    n_features_after_all: int,
+    model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+) -> dict[str, Any]:
+    n_nonzero, count_method, reason = _model_nonzero_count(model)
+    if n_nonzero is None:
+        nonzero_ratio: float | None = None
+    else:
+        denominator = max(1, int(n_features_after_all))
+        nonzero_ratio = float(n_nonzero) / float(denominator)
+    return {
+        "scope": scope,
+        "fold_id": fold_id,
+        "sample_set_id": int(sample_set_id),
+        "model_index": int(model_index),
+        "model_name": model_name,
+        "n_features_after_all": int(n_features_after_all),
+        "n_nonzero_features": n_nonzero,
+        "nonzero_ratio": nonzero_ratio,
+        "count_method": count_method,
+        "reason": reason,
+    }
+
+
+def _build_model_sparsity(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    if not rows:
+        return _empty_model_sparsity()
+    return pl.DataFrame(rows).sort(["scope", "fold_id", "sample_set_id", "model_index"])
+
+
+def _summarize_model_sparsity(model_sparsity: pl.DataFrame) -> pl.DataFrame:
+    if model_sparsity.height == 0:
+        return _empty_model_sparsity_summary()
+    return model_sparsity.group_by(["scope", "model_name"]).agg(
+        [
+            pl.len().alias("n_models"),
+            pl.col("n_nonzero_features").count().alias("n_models_with_nonzero_count"),
+            pl.col("n_nonzero_features").min().alias("n_nonzero_min"),
+            pl.col("n_nonzero_features").median().alias("n_nonzero_median"),
+            pl.col("n_nonzero_features").mean().alias("n_nonzero_mean"),
+            pl.col("n_nonzero_features").max().alias("n_nonzero_max"),
+            pl.col("nonzero_ratio").min().alias("nonzero_ratio_min"),
+            pl.col("nonzero_ratio").median().alias("nonzero_ratio_median"),
+            pl.col("nonzero_ratio").mean().alias("nonzero_ratio_mean"),
+            pl.col("nonzero_ratio").max().alias("nonzero_ratio_max"),
+        ]
+    ).sort(["scope", "model_name"])
 
 
 def _deterministic_int_seed(seed_text: str) -> int:
@@ -1549,6 +1803,7 @@ def _fit_outer_sample_set(
     fold_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
     interpretation_entries: list[ModelFeatureEntry] = []
     ensemble_model_prob_rows: list[dict[str, float | int | str]] = []
+    model_sparsity_rows: list[dict[str, Any]] = []
     for selected_offset, selected in enumerate(source_result.selected_candidates):
         model_index = base_model_index + selected_offset
         model_seed = _ensemble_seed(
@@ -1564,6 +1819,17 @@ def _fit_outer_sample_set(
         )
         _fit_estimator(estimator, x_sampled, y_sampled, sample_weight)
         fold_models.append(estimator)
+        model_sparsity_rows.append(
+            _model_sparsity_row(
+                scope="outer_fold",
+                fold_id=fold_id,
+                sample_set_id=sample_set_id,
+                model_index=model_index,
+                model_name=config.model.name,
+                n_features_after_all=len(selected_features),
+                model=estimator,
+            )
+        )
         train_model_probs.append(_predict_positive_probability(estimator, x_sampled))
         interpretation_entries.append(
             ModelFeatureEntry(
@@ -1593,6 +1859,7 @@ def _fit_outer_sample_set(
         fold_models=fold_models,
         interpretation_entries=interpretation_entries,
         ensemble_model_prob_rows=ensemble_model_prob_rows,
+        model_sparsity_rows=model_sparsity_rows,
         selected_features=selected_features,
         filter_counts=filter_counts,
         model_count=len(source_result.selected_candidates),
@@ -1602,6 +1869,7 @@ def _fit_outer_sample_set(
 def _fit_final_refit_sample_set(
     *,
     config: AppConfig,
+    sample_set_id: int,
     sampled_idx: np.ndarray,
     source_result: SourceSelectionResult,
     base_model_index: int,
@@ -1701,8 +1969,21 @@ def _fit_final_refit_sample_set(
     fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
     model_probs: list[np.ndarray] = []
     train_model_probs: list[np.ndarray] = []
-    for _selected_offset, model, prob, train_prob in ordered_results:
+    model_sparsity_rows: list[dict[str, Any]] = []
+    for selected_offset, model, prob, train_prob in ordered_results:
+        model_index = base_model_index + selected_offset
         fitted_models.append(model)
+        model_sparsity_rows.append(
+            _model_sparsity_row(
+                scope="final_refit",
+                fold_id="NA",
+                sample_set_id=sample_set_id,
+                model_index=model_index,
+                model_name=config.model.name,
+                n_features_after_all=len(selected_features),
+                model=model,
+            )
+        )
         model_probs.append(prob)
         train_model_probs.append(train_prob)
 
@@ -1710,6 +1991,7 @@ def _fit_final_refit_sample_set(
         model_probs=model_probs,
         train_model_probs=train_model_probs,
         fitted_models=fitted_models,
+        model_sparsity_rows=model_sparsity_rows,
         selected_features=selected_features,
         scaler=scaler,
         filter_counts=filter_counts,
@@ -1905,6 +2187,7 @@ def run_final_refit(
             sample_config,
             _fit_final_refit_sample_set,
             config=sample_config,
+            sample_set_id=sample_set_id,
             sampled_idx=sampled_idx,
             source_result=source_results[source_sample_set_id],
             base_model_index=model_index_offsets[sample_set_id],
@@ -1939,10 +2222,21 @@ def run_final_refit(
     scaler = first_sample_result.scaler
 
     model_entries: list[FinalModelEntry] = []
+    feature_filter_count_rows: list[dict[str, Any]] = []
+    model_sparsity_rows: list[dict[str, Any]] = []
     sampled_train_loss_values: list[float] = []
     sampled_external_loss_values: list[float] = []
     for sample_set_id in range(len(sampled_sets)):
         fit_result = sample_results[sample_set_id]
+        feature_filter_count_rows.append(
+            _feature_filter_count_row(
+                scope="final_refit",
+                fold_id="NA",
+                sample_set_id=sample_set_id,
+                counts=fit_result.filter_counts,
+            )
+        )
+        model_sparsity_rows.extend(fit_result.model_sparsity_rows)
         fitted_models.extend(fit_result.fitted_models)
         model_probs.extend(fit_result.model_probs)
         sampled_idx = sampled_sets[sample_set_id]
@@ -2045,12 +2339,20 @@ def run_final_refit(
                 "candidate_index",
             ]
         )
+    feature_filter_counts = _build_feature_filter_counts(feature_filter_count_rows)
+    feature_filter_counts_summary = _summarize_feature_filter_counts(feature_filter_counts)
+    model_sparsity = _build_model_sparsity(model_sparsity_rows)
+    model_sparsity_summary = _summarize_model_sparsity(model_sparsity)
 
     return FinalRefitArtifacts(
         pred_external_test=pred_external,
         pred_inference=pred_inference,
         loss_by_split_final_refit=loss_by_split_final_refit,
         model_selection_selected=model_selection_selected,
+        feature_filter_counts=feature_filter_counts,
+        feature_filter_counts_summary=feature_filter_counts_summary,
+        model_sparsity=model_sparsity,
+        model_sparsity_summary=model_sparsity_summary,
         warnings=warnings,
         ensemble_size=len(model_probs),
         feature_names=selected_features,
@@ -2317,9 +2619,21 @@ def _run_outer_fold(
         return sample_set_id, fit_result
 
     sample_results: dict[int, OuterSampleSetFitResult] = {}
+    feature_filter_count_rows: list[dict[str, Any]] = []
+    model_sparsity_rows: list[dict[str, Any]] = []
+
     def _record_sample_fit_result(sample_set_id: int, fit_result: OuterSampleSetFitResult) -> None:
         sample_results[sample_set_id] = fit_result
         counts = fit_result.filter_counts
+        feature_filter_count_rows.append(
+            _feature_filter_count_row(
+                scope="outer_fold",
+                fold_id=fold_id,
+                sample_set_id=sample_set_id,
+                counts=counts,
+            )
+        )
+        model_sparsity_rows.extend(fit_result.model_sparsity_rows)
         _emit_fold_progress(
             "preprocess_sample_set_done",
             (
@@ -2478,6 +2792,8 @@ def _run_outer_fold(
         ensemble_model_prob_rows=ensemble_model_prob_rows,
         model_selection_selected_rows=model_selection_selected_rows,
         model_selection_trial_rows=model_selection_trial_rows,
+        feature_filter_count_rows=feature_filter_count_rows,
+        model_sparsity_rows=model_sparsity_rows,
         fold_model_count=fold_model_count,
         n_features_before_preprocess=n_features_before_preprocess,
         n_features_after_low_prevalence=n_features_after_low_prevalence,
@@ -2509,6 +2825,8 @@ def run_outer_cv(
     ensemble_model_prob_rows: list[dict[str, float | int | str]] = []
     model_selection_selected_rows: list[dict[str, Any]] = []
     model_selection_trial_rows: list[dict[str, Any]] = []
+    feature_filter_count_rows: list[dict[str, Any]] = []
+    model_sparsity_rows: list[dict[str, Any]] = []
     max_fold_ensemble_size = 0
 
     fold_ids = _fold_ids(split_manifest)
@@ -2542,6 +2860,8 @@ def run_outer_cv(
         ensemble_model_prob_rows.extend(fold_result.ensemble_model_prob_rows)
         model_selection_selected_rows.extend(fold_result.model_selection_selected_rows)
         model_selection_trial_rows.extend(fold_result.model_selection_trial_rows)
+        feature_filter_count_rows.extend(fold_result.feature_filter_count_rows)
+        model_sparsity_rows.extend(fold_result.model_sparsity_rows)
         max_fold_ensemble_size = max(max_fold_ensemble_size, fold_result.fold_model_count)
 
     if fold_workers == 1:
@@ -2682,6 +3002,10 @@ def run_outer_cv(
             ["fold_id", "sample_set_id", "candidate_index", "inner_fold_id"]
         )
         model_selection_trials_summary = _summarize_model_selection_trials(model_selection_trials)
+    feature_filter_counts = _build_feature_filter_counts(feature_filter_count_rows)
+    feature_filter_counts_summary = _summarize_feature_filter_counts(feature_filter_counts)
+    model_sparsity = _build_model_sparsity(model_sparsity_rows)
+    model_sparsity_summary = _summarize_model_sparsity(model_sparsity)
 
     return CVArtifacts(
         metrics_cv=metrics_df,
@@ -2694,5 +3018,9 @@ def run_outer_cv(
         model_selection_selected=model_selection_selected,
         model_selection_trials=model_selection_trials,
         model_selection_trials_summary=model_selection_trials_summary,
+        feature_filter_counts=feature_filter_counts,
+        feature_filter_counts_summary=feature_filter_counts_summary,
+        model_sparsity=model_sparsity,
+        model_sparsity_summary=model_sparsity_summary,
         warnings=warnings,
     )

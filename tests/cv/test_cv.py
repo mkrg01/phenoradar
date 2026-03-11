@@ -143,6 +143,43 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
     assert cv_artifacts.model_selection_selected is None
     assert cv_artifacts.model_selection_trials is None
     assert cv_artifacts.model_selection_trials_summary is None
+    assert cv_artifacts.feature_filter_counts.height > 0
+    assert {
+        "scope",
+        "fold_id",
+        "sample_set_id",
+        "n_features_before",
+        "n_features_after_low_prevalence",
+        "n_features_after_low_variance",
+        "n_features_after_correlation",
+        "n_features_after_all",
+    }.issubset(cv_artifacts.feature_filter_counts.columns)
+    assert cv_artifacts.feature_filter_counts_summary.height > 0
+    assert {
+        "scope",
+        "stage",
+        "n_records",
+        "n_features_median",
+        "retained_ratio_median",
+    }.issubset(cv_artifacts.feature_filter_counts_summary.columns)
+    assert cv_artifacts.model_sparsity.height > 0
+    assert {
+        "scope",
+        "fold_id",
+        "sample_set_id",
+        "model_index",
+        "model_name",
+        "n_features_after_all",
+        "n_nonzero_features",
+        "nonzero_ratio",
+    }.issubset(cv_artifacts.model_sparsity.columns)
+    assert cv_artifacts.model_sparsity_summary.height > 0
+    assert {
+        "scope",
+        "model_name",
+        "n_models",
+        "n_models_with_nonzero_count",
+    }.issubset(cv_artifacts.model_sparsity_summary.columns)
 
 
 def test_run_outer_cv_oof_species_and_fold_match_validation_manifest(tmp_path: Path) -> None:
@@ -562,6 +599,25 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
     )
     assert refit_artifacts.pred_inference.get_column("true_label").null_count() == 1
     assert refit_artifacts.model_selection_selected is None
+    assert refit_artifacts.feature_filter_counts.height > 0
+    assert {
+        "scope",
+        "fold_id",
+        "sample_set_id",
+        "n_features_before",
+        "n_features_after_all",
+    }.issubset(refit_artifacts.feature_filter_counts.columns)
+    assert refit_artifacts.feature_filter_counts_summary.height > 0
+    assert refit_artifacts.model_sparsity.height > 0
+    assert {
+        "scope",
+        "fold_id",
+        "sample_set_id",
+        "model_index",
+        "model_name",
+        "n_nonzero_features",
+    }.issubset(refit_artifacts.model_sparsity.columns)
+    assert refit_artifacts.model_sparsity_summary.height > 0
 
 
 def test_group_label_inverse_weights_are_normalized_and_group_label_balanced() -> None:
@@ -1630,6 +1686,7 @@ runtime:
 
     fit_result = cv_mod._fit_final_refit_sample_set(
         config=config,
+        sample_set_id=0,
         sampled_idx=np.array([0, 1, 2, 3], dtype=int),
         source_result=source_result,
         base_model_index=0,

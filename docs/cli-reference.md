@@ -61,6 +61,10 @@ Always written:
 - `feature_importance.tsv`
 - `coefficients.tsv`
 - `prediction_cv.tsv`
+- `feature_filter_counts.tsv`
+- `feature_filter_counts_summary.tsv`
+- `model_sparsity.tsv`
+- `model_sparsity_summary.tsv`
 - `classification_summary.tsv`
 - `run_metadata.json`
 - `figures/` (SVG files)
@@ -76,6 +80,8 @@ Notes:
   - `coefficients_signed_top.svg`
   - `cv_species_probability_by_trait.svg`
   - `cv_fold_trait_probability.svg`
+  - `feature_filter_funnel.svg`
+  - `model_sparsity_scatter.svg`
   - `model_selection_trials.svg` (model selection enabled)
   - `roc_pr_curves_cv.svg` (may be skipped when degenerate)
   - `final_refit_loss_by_split.svg` (`full_run`)

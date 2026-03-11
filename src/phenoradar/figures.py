@@ -1516,6 +1516,185 @@ def _model_selection_trials_summary_panels(
     _save_svg_figure(fig, out_path)
 
 
+def _feature_filter_funnel(feature_filter_counts_summary: pl.DataFrame, out_path: Path) -> None:
+    required = {
+        "scope",
+        "stage",
+        "n_features_min",
+        "n_features_median",
+        "n_features_max",
+    }
+    if not required.issubset(feature_filter_counts_summary.columns):
+        raise FigureError(
+            "feature_filter_counts_summary.tsv schema is invalid for feature_filter_funnel.svg"
+        )
+    stage_order = [
+        "n_features_before",
+        "n_features_after_low_prevalence",
+        "n_features_after_low_variance",
+        "n_features_after_correlation",
+        "n_features_after_all",
+    ]
+    stage_labels = {
+        "n_features_before": "before",
+        "n_features_after_low_prevalence": "low_prev",
+        "n_features_after_low_variance": "low_var",
+        "n_features_after_correlation": "corr",
+        "n_features_after_all": "all",
+    }
+    data = feature_filter_counts_summary.filter(pl.col("stage").is_in(stage_order))
+    if data.height == 0:
+        _write_message_figure(
+            title="Feature Filter Funnel",
+            message="No feature-filter summary rows are available.",
+            out_path=out_path,
+            width_px=1080,
+            height_px=460,
+        )
+        return
+
+    scopes = sorted(str(v) for v in data.select("scope").unique().to_series().to_list())
+    x_positions = np.arange(len(stage_order), dtype=float)
+    fig, ax = plt.subplots(figsize=_figure_size_inches(1080, 460), dpi=_FIG_DPI)
+    fig.patch.set_facecolor("white")
+    fig.suptitle("Feature Filter Funnel", x=0.01, ha="left", fontsize=16)
+    fig.text(
+        0.01,
+        0.90,
+        "median feature count per stage; shaded band is min-max across fold/sample_set",
+        fontsize=10,
+    )
+
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+    for scope_index, scope in enumerate(scopes):
+        scope_rows = data.filter(pl.col("scope") == scope)
+        stage_to_stats: dict[str, tuple[float, float, float]] = {}
+        for row in scope_rows.iter_rows(named=True):
+            stage = str(row["stage"])
+            minimum = float(row["n_features_min"])
+            median_raw = row["n_features_median"]
+            maximum = float(row["n_features_max"])
+            median = np.nan if median_raw is None else float(median_raw)
+            stage_to_stats[stage] = (minimum, median, maximum)
+        y_min: list[float] = []
+        y_median: list[float] = []
+        y_max: list[float] = []
+        for stage in stage_order:
+            stats = stage_to_stats.get(stage)
+            if stats is None:
+                y_min.append(np.nan)
+                y_median.append(np.nan)
+                y_max.append(np.nan)
+                continue
+            y_min.append(stats[0])
+            y_median.append(stats[1])
+            y_max.append(stats[2])
+        color = colors[scope_index % len(colors)]
+        y_min_array = np.array(y_min, dtype=float)
+        y_median_array = np.array(y_median, dtype=float)
+        y_max_array = np.array(y_max, dtype=float)
+        finite_mask = np.isfinite(y_median_array)
+        if not np.any(finite_mask):
+            continue
+        ax.plot(
+            x_positions[finite_mask],
+            y_median_array[finite_mask],
+            marker="o",
+            linewidth=2.0,
+            color=color,
+            label=f"{scope} (median)",
+        )
+        ax.fill_between(
+            x_positions[finite_mask],
+            y_min_array[finite_mask],
+            y_max_array[finite_mask],
+            color=color,
+            alpha=0.18,
+        )
+        ax.plot(
+            x_positions[finite_mask],
+            y_min_array[finite_mask],
+            linestyle="--",
+            linewidth=1.1,
+            color=color,
+            alpha=0.9,
+        )
+        ax.plot(
+            x_positions[finite_mask],
+            y_max_array[finite_mask],
+            linestyle="--",
+            linewidth=1.1,
+            color=color,
+            alpha=0.9,
+        )
+
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels([stage_labels[stage] for stage in stage_order], fontfamily="monospace")
+    ax.set_ylabel("Feature Count")
+    ax.set_ylim(bottom=0.0)
+    ax.grid(axis="y", color="#ececec", linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.legend(loc="best", frameon=False)
+    fig.subplots_adjust(left=0.07, right=0.98, top=0.83, bottom=0.16)
+    _save_svg_figure(fig, out_path)
+
+
+def _model_sparsity_scatter(model_sparsity: pl.DataFrame, out_path: Path) -> None:
+    required = {"model_name", "n_features_after_all", "n_nonzero_features", "scope"}
+    if not required.issubset(model_sparsity.columns):
+        raise FigureError("model_sparsity.tsv schema is invalid for model_sparsity_scatter.svg")
+    data = model_sparsity.filter(pl.col("n_nonzero_features").is_not_null())
+    if data.height == 0:
+        _write_message_figure(
+            title="Model Sparsity Scatter",
+            message="No models expose non-zero feature counts in model_sparsity.tsv.",
+            out_path=out_path,
+            width_px=980,
+            height_px=520,
+        )
+        return
+
+    fig, ax = plt.subplots(figsize=_figure_size_inches(980, 520), dpi=_FIG_DPI)
+    fig.patch.set_facecolor("white")
+    fig.suptitle("Model Sparsity Scatter", x=0.01, ha="left", fontsize=16)
+    scope_values = sorted(str(v) for v in data.select("scope").unique().to_series().to_list())
+    model_values = sorted(str(v) for v in data.select("model_name").unique().to_series().to_list())
+
+    def _preview(values: list[str], *, max_items: int = 4) -> str:
+        if len(values) <= max_items:
+            return ",".join(values)
+        visible = ",".join(values[:max_items])
+        return f"{visible},...(+{len(values) - max_items})"
+
+    fig.text(
+        0.01,
+        0.90,
+        (
+            f"points={data.height}, "
+            f"scopes={_preview(scope_values)}, "
+            f"models={_preview(model_values)}"
+        ),
+        fontsize=10,
+    )
+
+    x_values = np.array(data.select("n_features_after_all").to_series().to_list(), dtype=float)
+    y_values = np.array(data.select("n_nonzero_features").to_series().to_list(), dtype=float)
+    ax.scatter(
+        x_values,
+        y_values,
+        s=30,
+        alpha=0.78,
+        color="#1f77b4",
+        edgecolors="none",
+    )
+    ax.set_xlabel("n_features_after_all")
+    ax.set_ylabel("n_nonzero_features")
+    ax.grid(color="#ececec", linewidth=0.8)
+    ax.set_axisbelow(True)
+    fig.subplots_adjust(left=0.09, right=0.98, top=0.83, bottom=0.14)
+    _save_svg_figure(fig, out_path)
+
+
 def write_run_figures(
     *,
     run_dir: Path,
@@ -1532,6 +1711,9 @@ def write_run_figures(
     pred_external_test: pl.DataFrame | None = None,
     trait_name: str = "trait",
     model_selection_trials_summary: pl.DataFrame | None = None,
+    feature_filter_counts_summary: pl.DataFrame | None = None,
+    model_sparsity: pl.DataFrame | None = None,
+    model_sparsity_summary: pl.DataFrame | None = None,
 ) -> list[str]:
     """Write run-level SVG figures under <run_dir>/figures."""
     warnings: list[str] = []
@@ -1579,6 +1761,16 @@ def write_run_figures(
             selection_summary,
             figures_dir / "model_selection_trials.svg",
             max_sample_sets_per_fold=_MODEL_SELECTION_SAMPLE_SET_LIMIT,
+        )
+    if feature_filter_counts_summary is not None:
+        _feature_filter_funnel(
+            feature_filter_counts_summary,
+            figures_dir / "feature_filter_funnel.svg",
+        )
+    if model_sparsity is not None:
+        _model_sparsity_scatter(
+            model_sparsity,
+            figures_dir / "model_sparsity_scatter.svg",
         )
     if pred_external_test is not None:
         try:
