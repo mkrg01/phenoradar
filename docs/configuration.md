@@ -280,6 +280,107 @@ For `grid`, explicit lists are expanded as-is. If a parameter list has exactly
 one value (for example, `max_iter: [200]`), that parameter is effectively fixed
 while other parameters are searched.
 
+#### `range` (discrete float values)
+
+Use this when you want evenly spaced floating-point candidates.
+
+Fields:
+
+- `type`: must be `range`
+- `start`: first value
+- `stop`: upper boundary
+- `step`: increment (`> 0`)
+- `inclusive_stop`: whether `stop` can be included (default `false`)
+
+Behavior:
+
+- `inclusive_stop=false`:
+  - generate `start, start + step, ...` while value `< stop`
+- `inclusive_stop=true`:
+  - generate `start, start + step, ...` while value `<= stop`
+- if `stop < start`, config validation fails
+- if expansion produces zero values, run fails (for example:
+  `start=1.0, stop=1.0, step=0.1, inclusive_stop=false`)
+
+Example:
+
+```yaml
+search_space:
+  C:
+    type: range
+    start: 0.1
+    stop: 1.1
+    step: 0.2
+    inclusive_stop: true
+```
+
+Expanded values: `0.1, 0.3, 0.5, 0.7, 0.9, 1.1`
+
+#### `int_range` (discrete integer values)
+
+Same idea as `range`, but integer-only.
+
+Fields:
+
+- `type`: must be `int_range`
+- `start`: first integer value
+- `stop`: upper boundary
+- `step`: increment (`> 0`)
+- `inclusive_stop`: whether `stop` can be included (default `false`)
+
+Example:
+
+```yaml
+search_space:
+  max_iter:
+    type: int_range
+    start: 100
+    stop: 301
+    step: 100
+    inclusive_stop: false
+```
+
+Expanded values: `100, 200, 300`
+
+#### `log_range` (discrete logarithmic values)
+
+Use this for multiplicative spacing such as `0.001, 0.01, 0.1, ...`.
+
+Fields:
+
+- `type`: must be `log_range`
+- `base`: logarithm base (`> 0`, and not `1`)
+- `start_exp`: first exponent
+- `stop_exp`: exponent upper boundary
+- `step_exp`: exponent increment (`> 0`)
+- `inclusive_stop`: whether `stop_exp` can be included (default `false`)
+
+Values are generated as `base ** exponent`.
+
+Example:
+
+```yaml
+search_space:
+  C:
+    type: log_range
+    base: 10
+    start_exp: -3
+    stop_exp: 1
+    step_exp: 1
+    inclusive_stop: true
+```
+
+Expanded values: `0.001, 0.01, 0.1, 1.0, 10.0`
+
+#### `continuous_range` and `continuous_log_range`
+
+These are sampled continuously (not expanded into a full discrete list), and
+can be used only with `search_strategy=random|tpe`.
+
+- `continuous_range`: uniform sample in `[start, stop]`
+- `continuous_log_range`: sample exponent in `[start_exp, stop_exp]`, then
+  transform with `base ** exponent`
+
 Example (`random` + spec-based ranges):
 
 ```yaml
