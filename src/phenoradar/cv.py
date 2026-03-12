@@ -156,6 +156,7 @@ class OuterFoldResult:
     n_features_before_preprocess: int
     n_features_after_low_prevalence: int
     n_features_after_low_variance: int
+    n_features_after_pair_aware: int
     n_features_after_correlation: int
     n_features_after_preprocess: int
     warnings: list[str]
@@ -177,6 +178,7 @@ class FeatureFilterCounts:
     n_features_before: int
     n_features_after_low_prevalence: int
     n_features_after_low_variance: int
+    n_features_after_pair_aware: int
     n_features_after_correlation: int
     n_features_after_all: int
 
@@ -194,6 +196,7 @@ class OuterSampleSetFitResult:
     selected_features: list[str]
     filter_counts: FeatureFilterCounts
     model_count: int
+    warnings: list[str]
 
 
 @dataclass(frozen=True)
@@ -208,6 +211,7 @@ class FinalSampleSetFitResult:
     scaler: StandardScaler
     filter_counts: FeatureFilterCounts
     model_count: int
+    warnings: list[str]
 
 
 @dataclass(frozen=True)
@@ -223,6 +227,7 @@ _FEATURE_FILTER_STAGE_COLUMNS = [
     "n_features_before",
     "n_features_after_low_prevalence",
     "n_features_after_low_variance",
+    "n_features_after_pair_aware",
     "n_features_after_correlation",
     "n_features_after_all",
 ]
@@ -230,10 +235,13 @@ _FEATURE_FILTER_STAGE_ORDER = {
     "n_features_before": 0,
     "n_features_after_low_prevalence": 1,
     "n_features_after_low_variance": 2,
-    "n_features_after_correlation": 3,
-    "n_features_after_all": 4,
+    "n_features_after_pair_aware": 3,
+    "n_features_after_correlation": 4,
+    "n_features_after_all": 5,
 }
 _NONZERO_TOLERANCE = 1e-12
+_PAIR_AWARE_SE_QUANTILE = 0.1
+_PAIR_AWARE_SCORE_FLOOR = 1e-12
 
 
 def _empty_feature_filter_counts() -> pl.DataFrame:
@@ -245,6 +253,7 @@ def _empty_feature_filter_counts() -> pl.DataFrame:
             "n_features_before": pl.Int64,
             "n_features_after_low_prevalence": pl.Int64,
             "n_features_after_low_variance": pl.Int64,
+            "n_features_after_pair_aware": pl.Int64,
             "n_features_after_correlation": pl.Int64,
             "n_features_after_all": pl.Int64,
         }
@@ -283,6 +292,7 @@ def _feature_filter_count_row(
         "n_features_before": int(counts.n_features_before),
         "n_features_after_low_prevalence": int(counts.n_features_after_low_prevalence),
         "n_features_after_low_variance": int(counts.n_features_after_low_variance),
+        "n_features_after_pair_aware": int(counts.n_features_after_pair_aware),
         "n_features_after_correlation": int(counts.n_features_after_correlation),
         "n_features_after_all": int(counts.n_features_after_all),
     }
@@ -692,8 +702,103 @@ class ExpressionMatrixBuilder:
         return matrix, feature_names
 
 
+def _pair_group_contrasts(
+    x_train_log: np.ndarray,
+    y_train: np.ndarray,
+    groups_train: np.ndarray,
+    selected: np.ndarray,
+) -> np.ndarray:
+    groups_str = groups_train.astype(str)
+    unique_groups = sorted(set(groups_str.tolist()))
+    contrast_rows: list[np.ndarray] = []
+
+    for group in unique_groups:
+        group_indices = np.where(groups_str == group)[0]
+        label0_idx = group_indices[y_train[group_indices] == 0]
+        label1_idx = group_indices[y_train[group_indices] == 1]
+        if label0_idx.size == 0 or label1_idx.size == 0:
+            raise CVError(
+                "pair_aware_filter requires both labels within each training group; "
+                f"offending group={group}"
+            )
+        label1_mean = np.mean(x_train_log[label1_idx][:, selected], axis=0)
+        label0_mean = np.mean(x_train_log[label0_idx][:, selected], axis=0)
+        contrast_rows.append(np.asarray(label1_mean - label0_mean, dtype=float))
+
+    if not contrast_rows:
+        return np.empty((0, selected.size), dtype=float)
+    return np.vstack(contrast_rows)
+
+
+def _apply_pair_aware_filter(
+    config: AppConfig,
+    x_train_log: np.ndarray,
+    y_train: np.ndarray,
+    groups_train: np.ndarray,
+    selected: np.ndarray,
+    feature_names: list[str],
+    warnings: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    max_features = config.preprocess.pair_aware_filter.max_features
+    if max_features is None:
+        raise CVError("pair_aware_filter is enabled but max_features is missing")
+    if selected.size == 0:
+        return selected, np.empty(0, dtype=float)
+
+    contrasts = _pair_group_contrasts(x_train_log, y_train, groups_train, selected)
+    n_groups = int(contrasts.shape[0])
+    if n_groups < 2:
+        if warnings is not None:
+            warnings.append(
+                "pair_aware_filter skipped because fewer than 2 training groups were available "
+                "in a split"
+            )
+        return selected, None
+
+    effect = np.asarray(np.mean(contrasts, axis=0), dtype=float)
+    se = np.asarray(np.std(contrasts, axis=0, ddof=1), dtype=float) / np.sqrt(float(n_groups))
+    positive_se = se[np.isfinite(se) & (se > 0.0)]
+    if positive_se.size == 0:
+        if warnings is not None:
+            warnings.append(
+                "pair_aware_filter used absolute mean group contrast because all per-feature "
+                "standard errors were zero"
+            )
+        score = np.abs(effect)
+    else:
+        s0 = max(float(np.quantile(positive_se, _PAIR_AWARE_SE_QUANTILE)), _PAIR_AWARE_SCORE_FLOOR)
+        score = np.abs(effect) / np.maximum(se, s0)
+    score = np.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0)
+    if np.all(np.isclose(score, 0.0)):
+        if warnings is not None:
+            warnings.append(
+                "pair_aware_filter skipped because all pair-aware scores were zero or non-finite "
+                "in a split"
+            )
+        return selected, None
+
+    keep_count = min(int(max_features), int(selected.size))
+    order = sorted(
+        range(selected.size),
+        key=lambda idx: (-score[idx], -abs(effect[idx]), feature_names[selected[idx]]),
+    )
+    kept_local = np.array(order[:keep_count], dtype=int)
+    kept_global = selected[kept_local]
+    kept_priority = score[kept_local]
+
+    order_by_feature = np.argsort(kept_global)
+    kept_global = np.asarray(kept_global[order_by_feature], dtype=int)
+    kept_priority = np.asarray(kept_priority[order_by_feature], dtype=float)
+    return kept_global, kept_priority
+
+
 def _select_feature_indices_with_counts(
-    config: AppConfig, x_train_log: np.ndarray, feature_names: list[str]
+    config: AppConfig,
+    x_train_log: np.ndarray,
+    feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
 ) -> tuple[np.ndarray, FeatureFilterCounts]:
     selected = np.arange(x_train_log.shape[1], dtype=int)
     n_features_before = int(selected.size)
@@ -714,8 +819,29 @@ def _select_feature_indices_with_counts(
         selected = selected[variances >= float(min_variance)]
     n_features_after_low_variance = int(selected.size)
 
+    pair_aware_priority_scores: np.ndarray | None = None
+    if config.preprocess.pair_aware_filter.enabled and selected.size > 0:
+        if y_train is None or groups_train is None:
+            raise CVError("pair_aware_filter requires y_train and groups_train in preprocessing")
+        selected, pair_aware_priority_scores = _apply_pair_aware_filter(
+            config,
+            x_train_log,
+            y_train,
+            groups_train,
+            selected,
+            feature_names,
+            warnings=warnings,
+        )
+    n_features_after_pair_aware = int(selected.size)
+
     if config.preprocess.correlation_filter.enabled and selected.size > 1:
-        selected = _apply_correlation_filter(config, x_train_log, selected, feature_names)
+        selected = _apply_correlation_filter(
+            config,
+            x_train_log,
+            selected,
+            feature_names,
+            priority_scores=pair_aware_priority_scores,
+        )
     n_features_after_correlation = int(selected.size)
 
     if selected.size == 0:
@@ -724,15 +850,28 @@ def _select_feature_indices_with_counts(
         n_features_before=n_features_before,
         n_features_after_low_prevalence=n_features_after_low_prevalence,
         n_features_after_low_variance=n_features_after_low_variance,
+        n_features_after_pair_aware=n_features_after_pair_aware,
         n_features_after_correlation=n_features_after_correlation,
         n_features_after_all=int(selected.size),
     )
 
 
 def _select_feature_indices(
-    config: AppConfig, x_train_log: np.ndarray, feature_names: list[str]
+    config: AppConfig,
+    x_train_log: np.ndarray,
+    feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
 ) -> np.ndarray:
-    selected, _counts = _select_feature_indices_with_counts(config, x_train_log, feature_names)
+    selected, _counts = _select_feature_indices_with_counts(
+        config,
+        x_train_log,
+        feature_names,
+        y_train=y_train,
+        groups_train=groups_train,
+        warnings=warnings,
+    )
     return selected
 
 
@@ -741,10 +880,13 @@ def _apply_correlation_filter(
     x_train_log: np.ndarray,
     selected: np.ndarray,
     feature_names: list[str],
+    priority_scores: np.ndarray | None = None,
 ) -> np.ndarray:
     max_abs_corr = config.preprocess.correlation_filter.max_abs_correlation
     if max_abs_corr is None:
         raise CVError("correlation_filter is enabled but max_abs_correlation is missing")
+    if priority_scores is not None and priority_scores.shape[0] != selected.size:
+        raise CVError("pair-aware priority scores must align with the selected feature set")
 
     train_selected = x_train_log[:, selected]
     if config.preprocess.correlation_filter.method == "spearman":
@@ -757,7 +899,15 @@ def _apply_correlation_filter(
     local_variances = np.var(train_selected, axis=0)
     order = sorted(
         range(selected.size),
-        key=lambda idx: (-local_variances[idx], feature_names[selected[idx]]),
+        key=lambda idx: (
+            -(
+                0.0
+                if priority_scores is None
+                else float(priority_scores[idx])
+            ),
+            -local_variances[idx],
+            feature_names[selected[idx]],
+        ),
     )
 
     kept_local: list[int] = []
@@ -779,6 +929,9 @@ def _preprocess_fold_with_counts(
     x_train_raw: np.ndarray,
     x_valid_raw: np.ndarray,
     feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts]:
     if np.any(x_train_raw < 0) or np.any(x_valid_raw < 0):
         raise CVError("TPM values must be non-negative before log1p transform")
@@ -786,7 +939,14 @@ def _preprocess_fold_with_counts(
     x_train_log = np.log1p(x_train_raw)
     x_valid_log = np.log1p(x_valid_raw)
 
-    selected, counts = _select_feature_indices_with_counts(config, x_train_log, feature_names)
+    selected, counts = _select_feature_indices_with_counts(
+        config,
+        x_train_log,
+        feature_names,
+        y_train=y_train,
+        groups_train=groups_train,
+        warnings=warnings,
+    )
     selected_features = [feature_names[idx] for idx in selected]
 
     x_train_selected = x_train_log[:, selected]
@@ -803,12 +963,18 @@ def _preprocess_fold(
     x_train_raw: np.ndarray,
     x_valid_raw: np.ndarray,
     feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     x_train_scaled, x_valid_scaled, selected_features, _counts = _preprocess_fold_with_counts(
         config,
         x_train_raw,
         x_valid_raw,
         feature_names,
+        y_train=y_train,
+        groups_train=groups_train,
+        warnings=warnings,
     )
     return x_train_scaled, x_valid_scaled, selected_features
 
@@ -1199,6 +1365,7 @@ def _build_inner_cv_preprocessed_folds(
     y_source: np.ndarray,
     groups_source: np.ndarray,
     feature_names: list[str],
+    warnings: list[str] | None = None,
 ) -> list[InnerCvPreprocessedFold]:
     def _build() -> list[InnerCvPreprocessedFold]:
         preprocessed_folds: list[InnerCvPreprocessedFold] = []
@@ -1212,7 +1379,13 @@ def _build_inner_cv_preprocessed_folds(
             groups_train = groups_source[train_idx]
 
             x_train, x_valid, _selected = _preprocess_fold(
-                config, x_train_raw, x_valid_raw, feature_names
+                config,
+                x_train_raw,
+                x_valid_raw,
+                feature_names,
+                y_train=y_train,
+                groups_train=groups_train,
+                warnings=warnings,
             )
             sample_weight = _fit_sample_weights(config, y_train, groups_train)
             preprocessed_folds.append(
@@ -1341,6 +1514,7 @@ def _prepare_source_selection_tpe(
         y_source=y_source,
         groups_source=groups_source,
         feature_names=feature_names,
+        warnings=warnings,
     )
 
     trial_count = int(config.model_selection.trial_count)
@@ -1528,6 +1702,7 @@ def _prepare_source_selection(
         y_source=y_source,
         groups_source=groups_source,
         feature_names=feature_names,
+        warnings=warnings,
     )
 
     worker_count, estimator_n_jobs = _selection_parallel_plan(config, available)
@@ -1824,6 +1999,9 @@ def _preprocess_train_and_target(
     x_train_raw: np.ndarray,
     x_target_raw: np.ndarray,
     feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str], StandardScaler]:
     x_train_scaled, x_target_scaled, selected_features, scaler, _counts = (
         _preprocess_train_and_target_with_counts(
@@ -1831,6 +2009,9 @@ def _preprocess_train_and_target(
             x_train_raw,
             x_target_raw,
             feature_names,
+            y_train=y_train,
+            groups_train=groups_train,
+            warnings=warnings,
         )
     )
     return x_train_scaled, x_target_scaled, selected_features, scaler
@@ -1841,6 +2022,9 @@ def _preprocess_train_and_target_with_counts(
     x_train_raw: np.ndarray,
     x_target_raw: np.ndarray,
     feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str], StandardScaler, FeatureFilterCounts]:
     if np.any(x_train_raw < 0) or np.any(x_target_raw < 0):
         raise CVError("TPM values must be non-negative before log1p transform")
@@ -1848,7 +2032,14 @@ def _preprocess_train_and_target_with_counts(
     x_train_log = np.log1p(x_train_raw)
     x_target_log = np.log1p(x_target_raw)
 
-    selected, counts = _select_feature_indices_with_counts(config, x_train_log, feature_names)
+    selected, counts = _select_feature_indices_with_counts(
+        config,
+        x_train_log,
+        feature_names,
+        y_train=y_train,
+        groups_train=groups_train,
+        warnings=warnings,
+    )
     selected_features = [feature_names[idx] for idx in selected]
 
     x_train_selected = x_train_log[:, selected]
@@ -1913,6 +2104,7 @@ def _fit_outer_sample_set(
     x_sampled_raw = x_train_raw[sampled_idx, :]
     y_sampled = y_train[sampled_idx]
     groups_sampled = groups_train[sampled_idx]
+    warnings: list[str] = []
     if np.unique(y_sampled).size < 2:
         raise CVError(f"Fold {fold_id} sampled training set became single-class")
     try:
@@ -1921,6 +2113,9 @@ def _fit_outer_sample_set(
             x_sampled_raw,
             x_valid_raw,
             feature_names,
+            y_train=y_sampled,
+            groups_train=groups_sampled,
+            warnings=warnings,
         )
     except CVError as exc:
         raise CVError(
@@ -1993,6 +2188,7 @@ def _fit_outer_sample_set(
         selected_features=selected_features,
         filter_counts=filter_counts,
         model_count=len(source_result.selected_candidates),
+        warnings=warnings,
     )
 
 
@@ -2022,6 +2218,7 @@ def _fit_final_refit_sample_set(
     x_sampled_raw = resolved_x_train_raw[sampled_idx, :]
     y_sampled = y_train[sampled_idx]
     groups_sampled = groups_train[sampled_idx]
+    warnings: list[str] = []
     if np.unique(y_sampled).size < 2:
         raise CVError("Final refit sampled training set became single-class")
     (
@@ -2035,6 +2232,9 @@ def _fit_final_refit_sample_set(
         x_sampled_raw,
         resolved_x_target_raw,
         feature_names,
+        y_train=y_sampled,
+        groups_train=groups_sampled,
+        warnings=warnings,
     )
     sample_weight = _fit_sample_weights(config, y_sampled, groups_sampled)
 
@@ -2126,6 +2326,7 @@ def _fit_final_refit_sample_set(
         scaler=scaler,
         filter_counts=filter_counts,
         model_count=selected_count,
+        warnings=warnings,
     )
 
 
@@ -2345,6 +2546,7 @@ def run_final_refit(
                 counts=fit_result.filter_counts,
             )
         )
+        warnings.extend(fit_result.warnings)
         model_sparsity_rows.extend(fit_result.model_sparsity_rows)
         fitted_models.extend(fit_result.fitted_models)
         model_probs.extend(fit_result.model_probs)
@@ -2722,6 +2924,7 @@ def _run_outer_fold(
             )
         )
         model_sparsity_rows.extend(fit_result.model_sparsity_rows)
+        warnings.extend(fit_result.warnings)
         _emit_fold_progress(
             "preprocess_sample_set_done",
             (
@@ -2729,6 +2932,7 @@ def _run_outer_fold(
                 f"features_before={counts.n_features_before}, "
                 f"features_after_low_prevalence={counts.n_features_after_low_prevalence}, "
                 f"features_after_low_variance={counts.n_features_after_low_variance}, "
+                f"features_after_pair_aware={counts.n_features_after_pair_aware}, "
                 f"features_after_correlation={counts.n_features_after_correlation}, "
                 f"features_after={counts.n_features_after_all}"
             ),
@@ -2755,6 +2959,7 @@ def _run_outer_fold(
     n_features_before_preprocess = first_filter_counts.n_features_before
     n_features_after_low_prevalence = first_filter_counts.n_features_after_low_prevalence
     n_features_after_low_variance = first_filter_counts.n_features_after_low_variance
+    n_features_after_pair_aware = first_filter_counts.n_features_after_pair_aware
     n_features_after_correlation = first_filter_counts.n_features_after_correlation
     n_features_after_preprocess = first_filter_counts.n_features_after_all
     _emit_fold_progress("preprocess_done")
@@ -2886,6 +3091,7 @@ def _run_outer_fold(
         n_features_before_preprocess=n_features_before_preprocess,
         n_features_after_low_prevalence=n_features_after_low_prevalence,
         n_features_after_low_variance=n_features_after_low_variance,
+        n_features_after_pair_aware=n_features_after_pair_aware,
         n_features_after_correlation=n_features_after_correlation,
         n_features_after_preprocess=n_features_after_preprocess,
         warnings=warnings,

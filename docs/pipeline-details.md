@@ -100,6 +100,7 @@ For each outer fold:
   - `log1p`
   - optional low-prevalence filter
   - optional low-variance filter
+  - optional pair-aware filter (train-only group-contrast ranking)
   - optional correlation filter (pearson/spearman)
   - standard scaling (fit on sampled train, transform valid)
   - fit selected model(s), predict fold-valid probabilities
@@ -121,6 +122,7 @@ After all folds:
   - `log1p`
   - optional low-prevalence filter
   - optional low-variance filter
+  - optional pair-aware filter (train-only group-contrast ranking)
   - optional correlation filter (pearson/spearman)
   - standard scaling (fit on sampled train, transform target pools)
 - within each sampled set, selected model fits can also run in parallel.

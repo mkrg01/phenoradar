@@ -62,6 +62,9 @@ preprocess:
   low_variance_filter:
     enabled: false
     min_variance: null
+  pair_aware_filter:
+    enabled: false
+    max_features: null
   correlation_filter:
     enabled: false
     method: pearson
@@ -203,6 +206,22 @@ Compatibility rules:
   - type: `float >= 0 | null`
   - default: `null`
   - rule: required when `enabled=true`
+
+### `preprocess.pair_aware_filter`
+
+- `enabled`
+  - type: `bool`
+  - default: `false`
+- `max_features`
+  - type: `int >= 1 | null`
+  - default: `null`
+  - rule: required when `enabled=true`
+- behavior:
+  - computes train-only per-group label contrasts after `log1p`
+  - ranks features by an internal paired t-like score
+  - keeps the top `max_features`
+  - when fewer than 2 training groups are available in a split, the filter is
+    skipped with a warning
 
 ### `preprocess.correlation_filter`
 

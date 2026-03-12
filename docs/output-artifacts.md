@@ -63,6 +63,7 @@ Always written:
     - `n_features_before`
     - `n_features_after_low_prevalence`
     - `n_features_after_low_variance`
+    - `n_features_after_pair_aware`
     - `n_features_after_correlation`
     - `n_features_after_all`
 - `feature_filter_counts_summary.tsv`
@@ -249,6 +250,7 @@ Conditionally written:
   - raw (`n_features_before`)
   - low prevalence
   - low variance
+  - pair aware
   - correlation
   - final (`n_features_after_all`)
 - Use this table to inspect fold/sample-set-specific filtering behavior.

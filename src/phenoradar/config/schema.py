@@ -211,6 +211,21 @@ class CorrelationFilterConfig(StrictModel):
         return self
 
 
+class PairAwareFilterConfig(StrictModel):
+    """Train-only group-contrast feature filter settings."""
+
+    enabled: bool = False
+    max_features: PositiveInt | None = None
+
+    @model_validator(mode="after")
+    def validate_enabled_args(self) -> PairAwareFilterConfig:
+        if self.enabled and self.max_features is None:
+            raise ValueError(
+                "preprocess.pair_aware_filter.max_features is required when enabled=true"
+            )
+        return self
+
+
 class PreprocessConfig(StrictModel):
     """Preprocessing settings."""
 
@@ -219,6 +234,7 @@ class PreprocessConfig(StrictModel):
         default_factory=LowPrevalenceFilterConfig
     )
     low_variance_filter: LowVarianceFilterConfig = Field(default_factory=LowVarianceFilterConfig)
+    pair_aware_filter: PairAwareFilterConfig = Field(default_factory=PairAwareFilterConfig)
     correlation_filter: CorrelationFilterConfig = Field(default_factory=CorrelationFilterConfig)
 
 

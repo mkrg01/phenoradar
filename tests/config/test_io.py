@@ -348,6 +348,21 @@ preprocess:
         load_and_resolve_config([cfg])
 
 
+def test_pair_aware_filter_requires_max_features_when_enabled(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+preprocess:
+  pair_aware_filter:
+    enabled: true
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
 def test_report_fixed_probability_threshold_must_be_between_zero_and_one(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path / "invalid.yml",

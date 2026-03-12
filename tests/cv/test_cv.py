@@ -159,6 +159,7 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "n_features_before",
         "n_features_after_low_prevalence",
         "n_features_after_low_variance",
+        "n_features_after_pair_aware",
         "n_features_after_correlation",
         "n_features_after_all",
     }.issubset(cv_artifacts.feature_filter_counts.columns)
@@ -694,6 +695,7 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
         "fold_id",
         "sample_set_id",
         "n_features_before",
+        "n_features_after_pair_aware",
         "n_features_after_all",
     }.issubset(refit_artifacts.feature_filter_counts.columns)
     assert refit_artifacts.feature_filter_counts_summary.height > 0
@@ -2777,6 +2779,96 @@ preprocess:
     assert selected.tolist() == [1]
 
 
+def test_select_feature_indices_pair_aware_filter_prefers_consistent_signal(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  low_prevalence_filter:
+    enabled: false
+  pair_aware_filter:
+    enabled: true
+    max_features: 1
+""".strip(),
+            )
+        ]
+    )
+    warnings: list[str] = []
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [0.0, 0.0],
+                [2.0, 10.0],
+                [0.0, 0.0],
+                [2.2, 0.0],
+                [0.0, 0.0],
+                [1.8, 0.0],
+                [0.0, 0.0],
+                [2.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        ["OG1", "OG2"],
+        y_train=np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=int),
+        groups_train=np.array(["g1", "g1", "g2", "g2", "g3", "g3", "g4", "g4"], dtype=str),
+        warnings=warnings,
+    )
+
+    assert selected.tolist() == [0]
+    assert warnings == []
+
+
+def test_select_feature_indices_pair_aware_filter_skips_when_too_few_groups(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  low_prevalence_filter:
+    enabled: false
+  pair_aware_filter:
+    enabled: true
+    max_features: 1
+""".strip(),
+            )
+        ]
+    )
+    warnings: list[str] = []
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [1.0, 0.0],
+                [2.0, 3.0],
+            ],
+            dtype=float,
+        ),
+        ["OG1", "OG2"],
+        y_train=np.array([0, 1], dtype=int),
+        groups_train=np.array(["g1", "g1"], dtype=str),
+        warnings=warnings,
+    )
+
+    assert selected.tolist() == [0, 1]
+    assert any("fewer than 2 training groups" in item for item in warnings)
+
+
 def test_select_feature_indices_calls_correlation_filter_when_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2813,6 +2905,45 @@ preprocess:
 
     assert called["value"] is True
     assert selected.tolist() == [1]
+
+
+def test_apply_correlation_filter_prefers_pair_aware_priority_when_provided(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  correlation_filter:
+    enabled: true
+    max_abs_correlation: 0.9
+""".strip(),
+            )
+        ]
+    )
+
+    kept = _apply_correlation_filter(
+        config,
+        x_train_log=np.array(
+            [
+                [0.0, 0.0],
+                [2.0, 1.0],
+                [4.0, 2.0],
+                [6.0, 3.0],
+            ],
+            dtype=float,
+        ),
+        selected=np.array([0, 1], dtype=int),
+        feature_names=["OG1", "OG2"],
+        priority_scores=np.array([0.1, 0.9], dtype=float),
+    )
+
+    assert kept.tolist() == [1]
 
 
 def test_apply_correlation_filter_rejects_missing_threshold_when_mutated(tmp_path: Path) -> None:
