@@ -70,7 +70,8 @@ model:
   name: logistic_elasticnet
 model_selection:
   selected_candidate_count: null
-  candidate_source_policy: reuse_first_sample_set
+  selected_candidate_percent: null
+  candidate_source_policy: per_sample_set
   search_strategy: grid
   trial_count: null
   search_space: {}
@@ -229,9 +230,13 @@ Compatibility rules:
 - `model_selection.selected_candidate_count`
   - type: `int >= 1 | null`
   - default: `null`
+- `model_selection.selected_candidate_percent`
+  - type: `float > 0 and <= 100 | null`
+  - default: `null`
+  - rule: mutually exclusive with `selected_candidate_count`
 - `model_selection.candidate_source_policy`
   - type: `per_sample_set | reuse_first_sample_set`
-  - default: `reuse_first_sample_set`
+  - default: `per_sample_set`
 - `model_selection.search_strategy`
   - type: `grid | random | tpe`
   - default: `grid`
@@ -258,7 +263,11 @@ Compatibility rules:
 
 Compatibility rules:
 
-- `selected_candidate_count` requires `inner_cv_strategy`.
+- `selected_candidate_count` and `selected_candidate_percent` are mutually exclusive.
+- `selected_candidate_count` or `selected_candidate_percent` requires `inner_cv_strategy`.
+- when selection is active, top-N selection is applied per sampled set and selected models are always distinct by hyperparameter set.
+- `candidate_source_policy=per_sample_set`: select candidates independently for each sampled set.
+- `candidate_source_policy=reuse_first_sample_set`: select candidates once from sampled set `0` and reuse them for all sampled sets.
 - `search_strategy=grid` cannot use
   `continuous_range`/`continuous_log_range`.
 - search-space list values cannot be empty.
@@ -450,7 +459,7 @@ Unknown parameter names are rejected at training time.
     - global CPU upper bound for training-time parallel work.
     - outer-CV folds can run in parallel up to this limit.
     - within each running fold, model-selection candidate scoring
-      (`search_strategy=grid|random` with `selected_candidate_count` set) can
+      (`search_strategy=grid|random` with selection active) can
       also run in parallel.
     - per-model `random_forest` threads are auto-adjusted against the remaining
       fold budget so combined fold/candidate/model parallel work stays within
@@ -471,6 +480,6 @@ Unknown parameter names are rejected at training time.
 
 - Empty `search_space` is valid and means "no hyperparameter variation".
 - With default config, model selection is effectively disabled
-  (`selected_candidate_count: null`).
+  (`selected_candidate_count: null` and `selected_candidate_percent: null`).
 - Use `phenoradar config` to inspect resolved and validated config before a long
   run.

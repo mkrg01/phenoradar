@@ -61,6 +61,7 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.sampling.sampled_set_count == 10
     assert resolved.sampling.weighting == "none"
     assert resolved.model_selection.selection_metric == "log_loss"
+    assert resolved.model_selection.candidate_source_policy == "per_sample_set"
     assert resolved.preprocess.low_prevalence_filter.enabled is True
     assert resolved.preprocess.low_prevalence_filter.min_species_per_feature == 2
 
@@ -75,6 +76,7 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
     assert resolved.sampling.sampled_set_count == 10
     assert resolved.sampling.weighting == "none"
     assert resolved.model_selection.selection_metric == "log_loss"
+    assert resolved.model_selection.candidate_source_policy == "per_sample_set"
 
 
 def test_unknown_key_is_rejected(tmp_path: Path) -> None:
@@ -186,6 +188,51 @@ def test_selected_candidate_count_requires_inner_cv_strategy(tmp_path: Path) -> 
         """
 model_selection:
   selected_candidate_count: 2
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_selected_candidate_percent_requires_inner_cv_strategy(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+model_selection:
+  selected_candidate_percent: 25
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_selected_candidate_count_and_percent_are_mutually_exclusive(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+model_selection:
+  selected_candidate_count: 2
+  selected_candidate_percent: 25
+  inner_cv_strategy: logo
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_selected_candidate_percent_must_be_lte_100(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+model_selection:
+  selected_candidate_percent: 120
+  inner_cv_strategy: logo
 """.strip()
         + "\n",
     )

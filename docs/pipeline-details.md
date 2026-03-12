@@ -83,11 +83,15 @@ For each outer fold:
   - `group_balanced`: deterministic per-group balanced subsets
   - sampled sets can execute in parallel within each fold budget
 3. Candidate handling:
-  - when `selected_candidate_count` is null:
+  - when both `selected_candidate_count` and `selected_candidate_percent` are null:
     - generate candidates and fit them directly (no inner CV ranking)
-  - when `selected_candidate_count` is set:
+  - when selection is active (`selected_candidate_count` or `selected_candidate_percent` is set):
     - score candidates on inner CV
     - keep top-K by `selection_metric`
+    - selection source depends on `model_selection.candidate_source_policy`:
+      - `per_sample_set`: select independently per sampled set
+      - `reuse_first_sample_set`: select once from sampled set `0` and reuse
+    - selected candidates are deduplicated by hyperparameter set (no duplicate params in one sampled-set selection)
     - for `search_strategy=grid|random`, candidate scoring can run in parallel within each fold budget
     - during that parallel scoring, per-model `random_forest` threads are auto-limited so combined fold/candidate/model concurrency stays within `runtime.n_jobs`
     - NumPy/SciPy/scikit-learn native thread pools are also limited to the active runtime budget in these execution paths
@@ -143,7 +147,7 @@ Search-space notes:
 
 Inner-CV selection:
 
-- enabled only when `selected_candidate_count` is set.
+- enabled only when selection is active (`selected_candidate_count` or `selected_candidate_percent` is set).
 - `inner_cv_strategy`: `logo` or `group_kfold`.
 - threshold-dependent candidate metrics (`mcc`/`balanced_accuracy`) use
   `report.fixed_probability_threshold`; `log_loss` is threshold-independent.

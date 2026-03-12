@@ -549,6 +549,87 @@ model_selection:
     assert cv_artifacts.model_selection_trials_summary.height > 0
 
 
+def test_outer_cv_selection_active_with_percent_emits_selected_and_trials_tables(
+    tmp_path: Path,
+) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\tcontrast_pair_id",
+                "g1_pos\t1\tg1",
+                "g1_neg\t0\tg1",
+                "g2_pos\t1\tg2",
+                "g2_neg\t0\tg2",
+                "g3_pos\t1\tg3",
+                "g3_neg\t0\tg3",
+                "g4_pos\t1\tg4",
+                "g4_neg\t0\tg4",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "g1_pos\tOG1\t5.0",
+                "g1_pos\tOG2\t1.5",
+                "g1_neg\tOG1\t1.0",
+                "g1_neg\tOG2\t0.2",
+                "g2_pos\tOG1\t4.8",
+                "g2_pos\tOG2\t1.7",
+                "g2_neg\tOG1\t0.8",
+                "g2_neg\tOG2\t0.4",
+                "g3_pos\tOG1\t5.2",
+                "g3_pos\tOG2\t1.8",
+                "g3_neg\tOG1\t1.1",
+                "g3_neg\tOG2\t0.3",
+                "g4_pos\tOG1\t5.1",
+                "g4_pos\tOG2\t1.6",
+                "g4_neg\tOG1\t0.9",
+                "g4_neg\tOG2\t0.1",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+split:
+  outer_cv_strategy: group_kfold
+  outer_cv_n_splits: 2
+model_selection:
+  search_strategy: grid
+  search_space:
+    C: [0.5, 1.0]
+  selected_candidate_percent: 50
+  inner_cv_strategy: logo
+""".strip(),
+            )
+        ]
+    )
+    split_artifacts = build_split_artifacts(config)
+    cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
+
+    assert cv_artifacts.model_selection_selected is not None
+    assert cv_artifacts.model_selection_trials is not None
+    selected = cv_artifacts.model_selection_selected
+    assert selected.height > 0
+    requested_values = set(
+        selected.select("selected_candidate_count_requested").to_series().to_list()
+    )
+    assert requested_values == {1}
+    source_values = set(selected.select("selection_source_sample_set_id").to_series().to_list())
+    sample_set_values = set(selected.select("sample_set_id").to_series().to_list())
+    assert source_values == sample_set_values
+
+
 def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: Path) -> None:
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
@@ -635,7 +716,97 @@ def test_group_label_inverse_weights_are_normalized_and_group_label_balanced() -
     assert float(weights[4]) > float(weights[3])
 
 
-def test_outer_cv_reuse_first_sample_set_uses_source_zero_for_all_sample_sets(
+def test_outer_cv_selection_runs_per_sample_set(
+    tmp_path: Path,
+) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\tcontrast_pair_id",
+                "g1_pos1\t1\tg1",
+                "g1_pos2\t1\tg1",
+                "g1_neg1\t0\tg1",
+                "g1_neg2\t0\tg1",
+                "g2_pos1\t1\tg2",
+                "g2_pos2\t1\tg2",
+                "g2_neg1\t0\tg2",
+                "g2_neg2\t0\tg2",
+                "g3_pos1\t1\tg3",
+                "g3_pos2\t1\tg3",
+                "g3_neg1\t0\tg3",
+                "g3_neg2\t0\tg3",
+                "g4_pos1\t1\tg4",
+                "g4_pos2\t1\tg4",
+                "g4_neg1\t0\tg4",
+                "g4_neg2\t0\tg4",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "g1_pos1\tOG1\t5.0",
+                "g1_pos2\tOG1\t5.1",
+                "g1_neg1\tOG1\t1.0",
+                "g1_neg2\tOG1\t1.1",
+                "g2_pos1\tOG1\t4.8",
+                "g2_pos2\tOG1\t4.9",
+                "g2_neg1\tOG1\t0.8",
+                "g2_neg2\tOG1\t0.9",
+                "g3_pos1\tOG1\t5.2",
+                "g3_pos2\tOG1\t5.3",
+                "g3_neg1\tOG1\t1.2",
+                "g3_neg2\tOG1\t1.3",
+                "g4_pos1\tOG1\t5.4",
+                "g4_pos2\tOG1\t5.5",
+                "g4_neg1\tOG1\t1.4",
+                "g4_neg2\tOG1\t1.5",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+sampling:
+  strategy: group_balanced
+  max_samples_per_label_per_group: 1
+  sampled_set_count: 2
+model_selection:
+  search_strategy: grid
+  search_space:
+    C: [0.5, 1.0]
+  selected_candidate_count: 1
+  inner_cv_strategy: logo
+""".strip(),
+            )
+        ]
+    )
+    split_artifacts = build_split_artifacts(config)
+
+    cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
+
+    assert cv_artifacts.model_selection_selected is not None
+    assert cv_artifacts.model_selection_trials is not None
+    assert cv_artifacts.model_selection_trials_summary is not None
+    selected = cv_artifacts.model_selection_selected
+    trials = cv_artifacts.model_selection_trials
+    trials_summary = cv_artifacts.model_selection_trials_summary
+    assert set(selected.select("sample_set_id").to_series().to_list()) == {0, 1}
+    assert set(selected.select("selection_source_sample_set_id").to_series().to_list()) == {0, 1}
+    assert set(trials.select("sample_set_id").to_series().to_list()) == {0, 1}
+    assert set(trials_summary.select("sample_set_id").to_series().to_list()) == {0, 1}
+
+
+def test_outer_cv_selection_can_reuse_first_sample_set(
     tmp_path: Path,
 ) -> None:
     metadata = _write(
@@ -1396,6 +1567,121 @@ model_selection:
     )
 
 
+def test_prepare_source_selection_deduplicates_selected_candidates_by_params(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+model_selection:
+  selected_candidate_count: 2
+  inner_cv_strategy: logo
+""".strip(),
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        cv_mod,
+        "generate_candidates",
+        lambda **_kwargs: [
+            Candidate(candidate_index=0, params={"C": 1.0}),
+            Candidate(candidate_index=1, params={"C": 1.0}),
+        ],
+    )
+
+    def _fake_score_candidate_inner_cv(**kwargs: object) -> tuple[float, list[dict[str, object]]]:
+        candidate = kwargs["candidate"]
+        if not isinstance(candidate, Candidate):
+            raise AssertionError("candidate must be a Candidate instance")
+        if candidate.candidate_index == 0:
+            return 0.20, []
+        return 0.40, []
+
+    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+    warnings: list[str] = []
+
+    result = _prepare_source_selection(
+        config=config,
+        training_scope_id="fold_0",
+        source_sample_set_id=0,
+        sampled_idx=np.array([0, 1], dtype=int),
+        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
+        y_train=np.array([0, 1], dtype=int),
+        groups_train=np.array(["g1", "g2"], dtype=str),
+        feature_names=["OG1"],
+        warnings=warnings,
+    )
+
+    assert result.n_scored_candidates == 2
+    assert result.n_available_candidates == 1
+    assert result.selected_candidate_count_effective == 1
+    assert len(result.selected_candidates) == 1
+    assert result.selected_candidates[0].candidate.candidate_index == 0
+    assert any("deduplicated candidates with identical params" in item for item in warnings)
+    assert any(
+        "selected_candidate_count exceeded available candidates" in item for item in warnings
+    )
+
+
+def test_prepare_source_selection_supports_selected_candidate_percent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+model_selection:
+  selected_candidate_percent: 50
+  inner_cv_strategy: logo
+""".strip(),
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        cv_mod,
+        "generate_candidates",
+        lambda **_kwargs: [
+            Candidate(candidate_index=0, params={"C": 0.1}),
+            Candidate(candidate_index=1, params={"C": 1.0}),
+            Candidate(candidate_index=2, params={"C": 10.0}),
+        ],
+    )
+
+    def _fake_score_candidate_inner_cv(**kwargs: object) -> tuple[float, list[dict[str, object]]]:
+        candidate = kwargs["candidate"]
+        if not isinstance(candidate, Candidate):
+            raise AssertionError("candidate must be a Candidate instance")
+        return float(candidate.candidate_index), []
+
+    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+
+    result = _prepare_source_selection(
+        config=config,
+        training_scope_id="fold_0",
+        source_sample_set_id=0,
+        sampled_idx=np.array([0, 1], dtype=int),
+        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
+        y_train=np.array([0, 1], dtype=int),
+        groups_train=np.array(["g1", "g2"], dtype=str),
+        feature_names=["OG1"],
+        warnings=[],
+    )
+
+    assert result.n_available_candidates == 3
+    assert result.selected_candidate_count_requested == 2
+    assert result.selected_candidate_count_effective == 2
+    assert [item.candidate.candidate_index for item in result.selected_candidates] == [0, 1]
+
+
 def test_prepare_source_selection_parallel_scoring_caps_rf_n_jobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1793,7 +2079,7 @@ def test_run_outer_cv_appends_threshold_warning(
     assert "warn" in artifacts.warnings
 
 
-def test_prepare_source_selection_tpe_requires_selected_candidate_count(
+def test_prepare_source_selection_tpe_requires_selection_setting(
     tmp_path: Path,
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
@@ -1810,7 +2096,10 @@ def test_prepare_source_selection_tpe_requires_selected_candidate_count(
         }
     )
 
-    with pytest.raises(CVError, match="selected_candidate_count is required"):
+    with pytest.raises(
+        CVError,
+        match="selected_candidate_count/selected_candidate_percent is required",
+    ):
         _prepare_source_selection_tpe(
             config=config_missing_selected,
             training_scope_id="outer_fold_0",
@@ -1945,6 +2234,155 @@ def test_prepare_source_selection_tpe_emits_capping_warnings_for_trials_and_sele
     assert any(
         "selected_candidate_count exceeded available candidates" in item for item in warnings
     )
+
+
+def test_prepare_source_selection_tpe_deduplicates_selected_candidates_by_params(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeTrial:
+        def __init__(self, number: int) -> None:
+            self.number = number
+            self.user_attrs: dict[str, object] = {}
+            self.value: float | None = None
+
+        def suggest_categorical(self, _name: str, values: list[object]) -> object:
+            return values[0]
+
+        def suggest_float(self, _name: str, low: float, _high: float) -> float:
+            return low
+
+        def set_user_attr(self, key: str, value: object) -> None:
+            self.user_attrs[key] = value
+
+    class _FakeStudy:
+        def __init__(self) -> None:
+            self.trials: list[_FakeTrial] = []
+
+        def optimize(self, objective: object, n_trials: int) -> None:
+            for number in range(n_trials):
+                trial = _FakeTrial(number)
+                trial.value = float(objective(trial))  # type: ignore[misc]
+                self.trials.append(trial)
+
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    config_tpe = config.model_copy(
+        update={
+            "model_selection": config.model_selection.model_copy(
+                update={
+                    "search_strategy": "tpe",
+                    "trial_count": 2,
+                    "search_space": {"C": [0.1, 1.0]},
+                    "selected_candidate_count": 2,
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(cv_mod.optuna, "create_study", lambda **_kwargs: _FakeStudy())
+
+    def _fake_score_candidate_inner_cv(**kwargs: object) -> tuple[float, list[dict[str, object]]]:
+        candidate = kwargs["candidate"]
+        if not isinstance(candidate, Candidate):
+            raise AssertionError("candidate must be a Candidate instance")
+        if candidate.candidate_index == 0:
+            return 0.50, []
+        return 0.30, []
+
+    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+    warnings: list[str] = []
+
+    result = _prepare_source_selection_tpe(
+        config=config_tpe,
+        training_scope_id="outer_fold_0",
+        source_sample_set_id=0,
+        sampled_idx=np.array([0, 1], dtype=int),
+        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
+        y_train=np.array([0, 1], dtype=int),
+        groups_train=np.array(["g1", "g2"], dtype=str),
+        feature_names=["OG1"],
+        warnings=warnings,
+    )
+
+    assert result.n_scored_candidates == 2
+    assert result.n_available_candidates == 1
+    assert result.selected_candidate_count_effective == 1
+    assert len(result.selected_candidates) == 1
+    assert result.selected_candidates[0].candidate.candidate_index == 1
+    assert any("deduplicated candidates with identical params" in item for item in warnings)
+    assert any(
+        "selected_candidate_count exceeded available candidates" in item for item in warnings
+    )
+
+
+def test_prepare_source_selection_tpe_supports_selected_candidate_percent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeTrial:
+        def __init__(self, number: int) -> None:
+            self.number = number
+            self.user_attrs: dict[str, object] = {}
+            self.value: float | None = None
+
+        def suggest_categorical(self, _name: str, values: list[object]) -> object:
+            return values[min(self.number, len(values) - 1)]
+
+        def suggest_float(self, _name: str, low: float, _high: float) -> float:
+            return low
+
+        def set_user_attr(self, key: str, value: object) -> None:
+            self.user_attrs[key] = value
+
+    class _FakeStudy:
+        def __init__(self) -> None:
+            self.trials: list[_FakeTrial] = []
+
+        def optimize(self, objective: object, n_trials: int) -> None:
+            for number in range(n_trials):
+                trial = _FakeTrial(number)
+                trial.value = float(objective(trial))  # type: ignore[misc]
+                self.trials.append(trial)
+
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    config_tpe = config.model_copy(
+        update={
+            "model_selection": config.model_selection.model_copy(
+                update={
+                    "search_strategy": "tpe",
+                    "trial_count": 3,
+                    "search_space": {"C": [0.1, 1.0, 10.0]},
+                    "selected_candidate_count": None,
+                    "selected_candidate_percent": 50,
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(cv_mod.optuna, "create_study", lambda **_kwargs: _FakeStudy())
+
+    def _fake_score_candidate_inner_cv(**kwargs: object) -> tuple[float, list[dict[str, object]]]:
+        candidate = kwargs["candidate"]
+        if not isinstance(candidate, Candidate):
+            raise AssertionError("candidate must be a Candidate instance")
+        return float(candidate.candidate_index), []
+
+    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+
+    result = _prepare_source_selection_tpe(
+        config=config_tpe,
+        training_scope_id="outer_fold_0",
+        source_sample_set_id=0,
+        sampled_idx=np.array([0, 1], dtype=int),
+        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
+        y_train=np.array([0, 1], dtype=int),
+        groups_train=np.array(["g1", "g2"], dtype=str),
+        feature_names=["OG1"],
+        warnings=[],
+    )
+
+    assert result.n_available_candidates == 3
+    assert result.selected_candidate_count_requested == 2
+    assert result.selected_candidate_count_effective == 2
+    assert [item.candidate.candidate_index for item in result.selected_candidates] == [0, 1]
 
 
 def test_prepare_source_selection_tpe_uses_minimize_direction_for_log_loss(

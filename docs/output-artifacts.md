@@ -353,10 +353,11 @@ Conditionally written:
     - `mcc` / `balanced_accuracy`: higher is better.
     - `log_loss`: lower is better.
 - `selection_source_sample_set_id`:
-  - indicates which sampled set produced the selected candidate list
-    (important when candidate source policy is shared vs per-sample-set).
+  - sampled set used for candidate selection (`reuse_first_sample_set` uses `0` for all rows).
 - `selected_candidate_count_requested` vs `selected_candidate_count_effective`:
-  - shows whether requested top-K was capped by candidate availability.
+  - shows requested vs effective top-K after candidate availability and deduplication.
+  - when `selected_candidate_percent` is used, `selected_candidate_count_requested`
+    is the per-sampled-set count derived from that percentage.
 
 ### Run figures
 

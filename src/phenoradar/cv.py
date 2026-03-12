@@ -1090,6 +1090,62 @@ def _rank_selected_candidates(
     )
 
 
+def _candidate_params_key(candidate: Candidate) -> str:
+    return json.dumps(candidate.params, ensure_ascii=True, sort_keys=True)
+
+
+def _dedupe_ranked_candidates_by_params(
+    ranked_candidates: list[SelectedCandidate],
+) -> list[SelectedCandidate]:
+    unique: list[SelectedCandidate] = []
+    seen_params: set[str] = set()
+    for selected in ranked_candidates:
+        params_key = _candidate_params_key(selected.candidate)
+        if params_key in seen_params:
+            continue
+        seen_params.add(params_key)
+        unique.append(selected)
+    return unique
+
+
+def _selection_is_active(config: AppConfig) -> bool:
+    return (
+        config.model_selection.selected_candidate_count is not None
+        or config.model_selection.selected_candidate_percent is not None
+    )
+
+
+def _selection_source_sample_set_id(config: AppConfig, sample_set_id: int) -> int:
+    if config.model_selection.candidate_source_policy == "per_sample_set":
+        return int(sample_set_id)
+    return 0
+
+
+def _selection_source_sample_set_ids(config: AppConfig, sampled_set_count: int) -> list[int]:
+    return sorted(
+        {
+            _selection_source_sample_set_id(config, sample_set_id)
+            for sample_set_id in range(sampled_set_count)
+        }
+    )
+
+
+def _requested_selected_candidate_count(
+    *,
+    config: AppConfig,
+    available_unique_candidates: int,
+) -> int | None:
+    if config.model_selection.selected_candidate_count is not None:
+        return int(config.model_selection.selected_candidate_count)
+    if config.model_selection.selected_candidate_percent is None:
+        return None
+    if available_unique_candidates < 1:
+        raise CVError("available_unique_candidates must be >= 1")
+    percent = float(config.model_selection.selected_candidate_percent)
+    requested = int(np.ceil((float(available_unique_candidates) * percent) / 100.0))
+    return max(1, requested)
+
+
 def _inner_cv_splits(
     config: AppConfig, y: np.ndarray, groups: np.ndarray
 ) -> list[tuple[np.ndarray, np.ndarray, str]]:
@@ -1225,9 +1281,11 @@ def _prepare_source_selection_tpe(
     warnings: list[str],
     progress_callback: Callable[[str, str | None], None] | None = None,
 ) -> SourceSelectionResult:
-    requested = config.model_selection.selected_candidate_count
-    if requested is None:
-        raise CVError("selected_candidate_count is required for TPE selection flow")
+    if not _selection_is_active(config):
+        raise CVError(
+            "selected_candidate_count/selected_candidate_percent is required "
+            "for TPE selection flow"
+        )
     if config.model_selection.trial_count is None:
         raise CVError("trial_count is required for TPE strategy")
     runtime_seed = int(config.runtime.seed)
@@ -1320,10 +1378,22 @@ def _prepare_source_selection_tpe(
             )
         )
 
-    available = len(scored)
-    if requested is None:
-        raise CVError("selected_candidate_count resolved to null unexpectedly")
-    requested_count = int(requested)
+    scored_count = len(scored)
+    ranked = _rank_selected_candidates(scored, metric_name)
+    ranked_unique = _dedupe_ranked_candidates_by_params(ranked)
+    available = len(ranked_unique)
+    if available < scored_count:
+        warnings.append(
+            "model_selection deduplicated candidates with identical params; "
+            f"reduced from {scored_count} to {available} "
+            f"for source sample_set_id={source_sample_set_id}"
+        )
+    requested_count = _requested_selected_candidate_count(
+        config=config,
+        available_unique_candidates=available,
+    )
+    if requested_count is None:
+        raise CVError("selected candidate count resolved to null unexpectedly")
     effective_count = min(requested_count, available)
     if effective_count < requested_count:
         warnings.append(
@@ -1332,11 +1402,10 @@ def _prepare_source_selection_tpe(
             f"for source sample_set_id={source_sample_set_id}"
         )
 
-    ranked = _rank_selected_candidates(scored, metric_name)
     return SourceSelectionResult(
-        selected_candidates=ranked[:effective_count],
+        selected_candidates=ranked_unique[:effective_count],
         n_available_candidates=available,
-        n_scored_candidates=available,
+        n_scored_candidates=scored_count,
         selected_candidate_count_requested=requested_count,
         selected_candidate_count_effective=effective_count,
         trial_rows=trial_rows,
@@ -1356,8 +1425,7 @@ def _prepare_source_selection(
     warnings: list[str],
     progress_callback: Callable[[str, str | None], None] | None = None,
 ) -> SourceSelectionResult:
-    requested = config.model_selection.selected_candidate_count
-    selection_active = requested is not None
+    selection_active = _selection_is_active(config)
     if selection_active and config.model_selection.search_strategy == "tpe":
         return _prepare_source_selection_tpe(
             config=config,
@@ -1388,13 +1456,20 @@ def _prepare_source_selection(
     available = len(candidates)
 
     if not selection_active:
-        selected_candidates = [SelectedCandidate(candidate=item, score=None) for item in candidates]
+        ranked = [SelectedCandidate(candidate=item, score=None) for item in candidates]
+        selected_candidates = _dedupe_ranked_candidates_by_params(ranked)
+        if len(selected_candidates) < available:
+            warnings.append(
+                "model_selection deduplicated candidates with identical params; "
+                f"reduced from {available} to {len(selected_candidates)} "
+                f"for source sample_set_id={source_sample_set_id}"
+            )
         return SourceSelectionResult(
             selected_candidates=selected_candidates,
-            n_available_candidates=available,
+            n_available_candidates=len(selected_candidates),
             n_scored_candidates=0,
             selected_candidate_count_requested=None,
-            selected_candidate_count_effective=available,
+            selected_candidate_count_effective=len(selected_candidates),
             trial_rows=[],
         )
 
@@ -1476,10 +1551,24 @@ def _prepare_source_selection(
         scored.append(SelectedCandidate(candidate=candidate, score=score_value))
         trial_rows.extend(rows)
 
-    if requested is None:
-        raise CVError("selected_candidate_count resolved to null unexpectedly")
-    requested_count = int(requested)
-    effective_count = min(requested_count, available)
+    scored_count = len(scored)
+    ranked = _rank_selected_candidates(scored, config.model_selection.selection_metric)
+    ranked_unique = _dedupe_ranked_candidates_by_params(ranked)
+    available_unique = len(ranked_unique)
+    if available_unique < scored_count:
+        warnings.append(
+            "model_selection deduplicated candidates with identical params; "
+            f"reduced from {scored_count} to {available_unique} "
+            f"for source sample_set_id={source_sample_set_id}"
+        )
+
+    requested_count = _requested_selected_candidate_count(
+        config=config,
+        available_unique_candidates=available_unique,
+    )
+    if requested_count is None:
+        raise CVError("selected candidate count resolved to null unexpectedly")
+    effective_count = min(requested_count, available_unique)
     if effective_count < requested_count:
         warnings.append(
             "model_selection.selected_candidate_count exceeded available candidates; "
@@ -1487,11 +1576,10 @@ def _prepare_source_selection(
             f"for source sample_set_id={source_sample_set_id}"
         )
 
-    ranked = _rank_selected_candidates(scored, config.model_selection.selection_metric)
     return SourceSelectionResult(
-        selected_candidates=ranked[:effective_count],
-        n_available_candidates=available,
-        n_scored_candidates=available,
+        selected_candidates=ranked_unique[:effective_count],
+        n_available_candidates=available_unique,
+        n_scored_candidates=scored_count,
         selected_candidate_count_requested=requested_count,
         selected_candidate_count_effective=effective_count,
         trial_rows=trial_rows,
@@ -2072,19 +2160,10 @@ def run_final_refit(
 
     model_probs: list[np.ndarray] = []
     fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
-    selection_active = config.model_selection.selected_candidate_count is not None
+    selection_active = _selection_is_active(config)
     model_selection_selected_rows: list[dict[str, Any]] = []
 
-    source_sample_set_ids = sorted(
-        {
-            (
-                sample_set_id
-                if config.model_selection.candidate_source_policy == "per_sample_set"
-                else 0
-            )
-            for sample_set_id in range(len(sampled_sets))
-        }
-    )
+    source_sample_set_ids = _selection_source_sample_set_ids(config, len(sampled_sets))
     source_workers, per_source_n_jobs = _sample_set_parallel_plan(
         config, len(source_sample_set_ids)
     )
@@ -2123,11 +2202,7 @@ def run_final_refit(
                 warnings.extend(local_warnings)
 
     for sample_set_id, _sampled_idx in enumerate(sampled_sets):
-        source_sample_set_id = (
-            sample_set_id
-            if config.model_selection.candidate_source_policy == "per_sample_set"
-            else 0
-        )
+        source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
         source_result = source_results[source_sample_set_id]
         if not source_result.selected_candidates:
             raise CVError("No candidates were selected for final_refit")
@@ -2163,11 +2238,7 @@ def run_final_refit(
     model_index_offsets: dict[int, int] = {}
     model_index = 0
     for sample_set_id, _sampled_idx in enumerate(sampled_sets):
-        source_sample_set_id = (
-            sample_set_id
-            if config.model_selection.candidate_source_policy == "per_sample_set"
-            else 0
-        )
+        source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
         model_index_offsets[sample_set_id] = model_index
         model_index += len(source_results[source_sample_set_id].selected_candidates)
 
@@ -2178,11 +2249,7 @@ def run_final_refit(
         sample_set_id: int,
         sampled_idx: np.ndarray,
     ) -> tuple[int, FinalSampleSetFitResult]:
-        source_sample_set_id = (
-            sample_set_id
-            if config.model_selection.candidate_source_policy == "per_sample_set"
-            else 0
-        )
+        source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
         fit_result = _with_native_thread_limit_for_config(
             sample_config,
             _fit_final_refit_sample_set,
@@ -2423,16 +2490,7 @@ def _run_outer_fold(
         warnings=warnings,
     )
     _emit_fold_progress("sampling_done", f"sampled_set_count={len(sampled_sets)}")
-    source_sample_set_ids = sorted(
-        {
-            (
-                sample_set_id
-                if config.model_selection.candidate_source_policy == "per_sample_set"
-                else 0
-            )
-            for sample_set_id in range(len(sampled_sets))
-        }
-    )
+    source_sample_set_ids = _selection_source_sample_set_ids(config, len(sampled_sets))
     source_workers, per_source_n_jobs = _sample_set_parallel_plan(
         config, len(source_sample_set_ids)
     )
@@ -2539,11 +2597,7 @@ def _run_outer_fold(
 
     model_selection_selected_rows: list[dict[str, Any]] = []
     for sample_set_id, _sampled_idx in enumerate(sampled_sets):
-        source_sample_set_id = (
-            sample_set_id
-            if config.model_selection.candidate_source_policy == "per_sample_set"
-            else 0
-        )
+        source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
         source_result = source_results[source_sample_set_id]
         if not source_result.selected_candidates:
             raise CVError(
@@ -2581,11 +2635,7 @@ def _run_outer_fold(
     model_index_offsets: dict[int, int] = {}
     model_index = 0
     for sample_set_id, _sampled_idx in enumerate(sampled_sets):
-        source_sample_set_id = (
-            sample_set_id
-            if config.model_selection.candidate_source_policy == "per_sample_set"
-            else 0
-        )
+        source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
         model_index_offsets[sample_set_id] = model_index
         model_index += len(source_results[source_sample_set_id].selected_candidates)
 
@@ -2595,11 +2645,7 @@ def _run_outer_fold(
     def _fit_sample_set(
         sample_set_id: int, sampled_idx: np.ndarray
     ) -> tuple[int, OuterSampleSetFitResult]:
-        source_sample_set_id = (
-            sample_set_id
-            if config.model_selection.candidate_source_policy == "per_sample_set"
-            else 0
-        )
+        source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
         fit_result = _with_native_thread_limit_for_config(
             sample_config,
             _fit_outer_sample_set,
@@ -2815,7 +2861,7 @@ def run_outer_cv(
     if polars_warning is not None:
         warnings.append(polars_warning)
     fixed_threshold = float(config.report.fixed_probability_threshold)
-    selection_active = config.model_selection.selected_candidate_count is not None
+    selection_active = _selection_is_active(config)
 
     fold_metric_list: list[dict[str, float]] = []
     metric_rows: list[dict[str, float | int | str | None]] = []

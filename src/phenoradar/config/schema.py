@@ -9,6 +9,7 @@ from pydantic import (
     ConfigDict,
     Field,
     NonNegativeFloat,
+    PositiveFloat,
     PositiveInt,
     model_validator,
 )
@@ -261,7 +262,8 @@ class ModelSelectionConfig(StrictModel):
     """Hyperparameter candidate generation and selection settings."""
 
     selected_candidate_count: PositiveInt | None = None
-    candidate_source_policy: CandidateSourcePolicy = "reuse_first_sample_set"
+    selected_candidate_percent: PositiveFloat | None = None
+    candidate_source_policy: CandidateSourcePolicy = "per_sample_set"
     search_strategy: SearchStrategy = "grid"
     trial_count: PositiveInt | None = None
     search_space: dict[str, SearchSpaceValue] = Field(default_factory=dict)
@@ -284,6 +286,20 @@ class ModelSelectionConfig(StrictModel):
                 raise ValueError(
                     f"model_selection.search_space.{param_name} cannot be an empty list"
                 )
+
+        if (
+            self.selected_candidate_count is not None
+            and self.selected_candidate_percent is not None
+        ):
+            raise ValueError(
+                "model_selection.selected_candidate_count and "
+                "model_selection.selected_candidate_percent are mutually exclusive"
+            )
+        if (
+            self.selected_candidate_percent is not None
+            and float(self.selected_candidate_percent) > 100.0
+        ):
+            raise ValueError("model_selection.selected_candidate_percent must be <= 100")
 
         if self.search_strategy in {"random", "tpe"} and self.trial_count is None:
             raise ValueError(
@@ -310,9 +326,13 @@ class ModelSelectionConfig(StrictModel):
                 "model_selection.inner_cv_n_splits is only valid when inner_cv_strategy=group_kfold"
             )
 
-        if self.selected_candidate_count is not None and self.inner_cv_strategy is None:
+        if (
+            self.selected_candidate_count is not None
+            or self.selected_candidate_percent is not None
+        ) and self.inner_cv_strategy is None:
             raise ValueError(
-                "model_selection.inner_cv_strategy is required when selected_candidate_count is set"
+                "model_selection.inner_cv_strategy is required when "
+                "selected_candidate_count/selected_candidate_percent is set"
             )
 
         return self
