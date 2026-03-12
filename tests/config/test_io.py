@@ -144,6 +144,33 @@ model_selection:
     C:
       type: continuous_range
       start: 0.1
+      end: 1.0
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_search_space_legacy_stop_keys_are_rejected(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "legacy_alias.yml",
+        """
+model_selection:
+  search_strategy: random
+  trial_count: 2
+  search_space:
+    C:
+      type: log_range
+      base: 10
+      start_exp: -1
+      stop_exp: 1
+      step_exp: 1
+      inclusive_stop: true
+    l1_ratio:
+      type: continuous_range
+      start: 0.0
       stop: 1.0
 """.strip()
         + "\n",
@@ -349,7 +376,7 @@ model_selection:
         load_and_resolve_config([cfg])
 
 
-def test_log_range_rejects_stop_exp_less_than_start_exp(tmp_path: Path) -> None:
+def test_log_range_rejects_end_exp_less_than_start_exp(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path / "invalid.yml",
         """
@@ -359,7 +386,7 @@ model_selection:
       type: log_range
       base: 10
       start_exp: 1.0
-      stop_exp: 0.0
+      end_exp: 0.0
       step_exp: 0.5
 """.strip()
         + "\n",
@@ -369,7 +396,7 @@ model_selection:
         load_and_resolve_config([cfg])
 
 
-def test_continuous_log_range_rejects_stop_exp_less_than_start_exp(tmp_path: Path) -> None:
+def test_continuous_log_range_rejects_end_exp_less_than_start_exp(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path / "invalid.yml",
         """
@@ -381,7 +408,7 @@ model_selection:
       type: continuous_log_range
       base: 10
       start_exp: 1.0
-      stop_exp: 0.0
+      end_exp: 0.0
 """.strip()
         + "\n",
     )
@@ -443,7 +470,7 @@ model_selection:
     C:
       type: range
       start: 1.0
-      stop: 0.1
+      end: 0.1
       step: 0.1
 """.strip()
         + "\n",
@@ -462,7 +489,7 @@ model_selection:
     max_iter:
       type: int_range
       start: 10
-      stop: 1
+      end: 1
       step: 1
 """.strip()
         + "\n",
@@ -482,7 +509,7 @@ model_selection:
       type: log_range
       base: 1
       start_exp: -1
-      stop_exp: 1
+      end_exp: 1
       step_exp: 1
 """.strip()
         + "\n",
@@ -504,7 +531,7 @@ model_selection:
       type: continuous_log_range
       base: 1
       start_exp: -1
-      stop_exp: 1
+      end_exp: 1
 """.strip()
         + "\n",
     )
@@ -524,7 +551,7 @@ model_selection:
     l1_ratio:
       type: continuous_range
       start: 1.0
-      stop: 0.0
+      end: 0.0
 """.strip()
         + "\n",
     )

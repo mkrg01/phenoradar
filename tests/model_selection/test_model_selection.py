@@ -57,9 +57,9 @@ def test_generate_candidates_grid_expands_discrete_space_deterministically(tmp_p
       type: log_range
       base: 10
       start_exp: -1
-      stop_exp: 1
+      end_exp: 1
       step_exp: 1
-      inclusive_stop: true
+      inclusive_end: true
 """,
     )
     warnings: list[str] = []
@@ -128,7 +128,7 @@ def test_generate_candidates_random_with_continuous_space_is_deterministic(
     l1_ratio:
       type: continuous_range
       start: 0.0
-      stop: 1.0
+      end: 1.0
 """,
     )
     warnings_first: list[str] = []
@@ -168,11 +168,11 @@ def test_generate_candidates_tpe_with_continuous_space_is_deterministic(tmp_path
       type: continuous_log_range
       base: 10
       start_exp: -1
-      stop_exp: 1
+      end_exp: 1
     l1_ratio:
       type: continuous_range
       start: 0.0
-      stop: 1.0
+      end: 1.0
 """,
     )
     warnings_first: list[str] = []
@@ -236,7 +236,7 @@ def test_generate_candidates_uses_runtime_seed(tmp_path: Path) -> None:
     C:
       type: continuous_range
       start: 0.0
-      stop: 1.0
+      end: 1.0
 """,
     )
     config_seed_124 = config_seed_123.model_copy(
@@ -275,9 +275,9 @@ def test_generate_candidates_fails_when_discrete_range_expands_to_zero_values(
     C:
       type: range
       start: 1.0
-      stop: 1.0
+      end: 1.0
       step: 0.1
-      inclusive_stop: false
+      inclusive_end: false
 """,
     )
 
@@ -301,14 +301,14 @@ def test_expanded_search_space_and_discrete_size_helpers(tmp_path: Path) -> None
       type: log_range
       base: 10
       start_exp: -1
-      stop_exp: 1
+      end_exp: 1
       step_exp: 1
-      inclusive_stop: true
+      inclusive_end: true
     l1_ratio: [0.0, 0.5]
     alpha:
       type: continuous_range
       start: 0.0
-      stop: 1.0
+      end: 1.0
 """,
     )
 
@@ -418,7 +418,7 @@ def test_generate_candidates_random_with_continuous_log_space_is_deterministic(
       type: continuous_log_range
       base: 10
       start_exp: -2
-      stop_exp: 0
+      end_exp: 0
 """,
     )
     first = generate_candidates(
@@ -481,13 +481,13 @@ def test_generate_candidates_tpe_raises_when_trial_did_not_store_params(
         )
 
 
-def test_expand_float_range_inclusive_stop_includes_endpoint() -> None:
+def test_expand_float_range_inclusive_end_includes_endpoint() -> None:
     spec = DiscreteRangeSpec(
         type="range",
         start=0.0,
-        stop=0.2,
+        end=0.2,
         step=0.1,
-        inclusive_stop=True,
+        inclusive_end=True,
     )
 
     values = model_selection_mod._expand_float_range(spec)
@@ -495,13 +495,13 @@ def test_expand_float_range_inclusive_stop_includes_endpoint() -> None:
     assert values == pytest.approx([0.0, 0.1, 0.2])
 
 
-def test_expand_int_range_inclusive_stop_includes_endpoint() -> None:
+def test_expand_int_range_inclusive_end_includes_endpoint() -> None:
     spec = IntRangeSpec(
         type="int_range",
         start=1,
-        stop=3,
+        end=3,
         step=1,
-        inclusive_stop=True,
+        inclusive_end=True,
     )
 
     values = model_selection_mod._expand_int_range(spec)
@@ -513,23 +513,23 @@ def test_expand_int_range_rejects_zero_values() -> None:
     spec = IntRangeSpec(
         type="int_range",
         start=1,
-        stop=1,
+        end=1,
         step=1,
-        inclusive_stop=False,
+        inclusive_end=False,
     )
 
     with pytest.raises(ModelSelectionError, match="int_range expansion produced zero values"):
         model_selection_mod._expand_int_range(spec)
 
 
-def test_expand_log_range_exclusive_stop_excludes_endpoint() -> None:
+def test_expand_log_range_exclusive_end_excludes_endpoint() -> None:
     spec = LogRangeSpec(
         type="log_range",
         base=10.0,
         start_exp=0.0,
-        stop_exp=2.0,
+        end_exp=2.0,
         step_exp=1.0,
-        inclusive_stop=False,
+        inclusive_end=False,
     )
 
     values = model_selection_mod._expand_log_range(spec)
@@ -542,9 +542,9 @@ def test_expand_log_range_rejects_zero_values() -> None:
         type="log_range",
         base=10.0,
         start_exp=0.0,
-        stop_exp=0.0,
+        end_exp=0.0,
         step_exp=1.0,
-        inclusive_stop=False,
+        inclusive_end=False,
     )
 
     with pytest.raises(ModelSelectionError, match="log_range expansion produced zero values"):
@@ -555,9 +555,9 @@ def test_expand_discrete_value_accepts_int_range_spec() -> None:
     spec = IntRangeSpec(
         type="int_range",
         start=1,
-        stop=3,
+        end=3,
         step=1,
-        inclusive_stop=False,
+        inclusive_end=False,
     )
 
     values = model_selection_mod._expand_discrete_value(spec)
@@ -566,7 +566,7 @@ def test_expand_discrete_value_accepts_int_range_spec() -> None:
 
 
 def test_expand_discrete_value_rejects_continuous_spec() -> None:
-    spec = ContinuousRangeSpec(type="continuous_range", start=0.0, stop=1.0)
+    spec = ContinuousRangeSpec(type="continuous_range", start=0.0, end=1.0)
 
     with pytest.raises(
         ModelSelectionError, match="continuous search-space values are not discrete"

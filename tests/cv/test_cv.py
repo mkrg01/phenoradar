@@ -522,11 +522,11 @@ model_selection:
       type: continuous_log_range
       base: 10
       start_exp: -1
-      stop_exp: 1
+      end_exp: 1
     l1_ratio:
       type: continuous_range
       start: 0.0
-      stop: 1.0
+      end: 1.0
   selected_candidate_count: 2
   inner_cv_strategy: logo
 """.strip(),

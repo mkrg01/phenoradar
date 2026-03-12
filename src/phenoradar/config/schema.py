@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, NonNegativeFloat, PositiveInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    NonNegativeFloat,
+    PositiveInt,
+    model_validator,
+)
 
 ExecutionStage = Literal["cv_only", "full_run"]
 OuterCvStrategy = Literal["logo", "group_kfold"]
@@ -30,14 +37,14 @@ class DiscreteRangeSpec(StrictModel):
 
     type: Literal["range"]
     start: float
-    stop: float
+    end: float
     step: float = Field(gt=0)
-    inclusive_stop: bool = False
+    inclusive_end: bool = False
 
     @model_validator(mode="after")
     def validate_bounds(self) -> DiscreteRangeSpec:
-        if self.stop < self.start:
-            raise ValueError("range requires stop >= start")
+        if self.end < self.start:
+            raise ValueError("range requires end >= start")
         return self
 
 
@@ -46,14 +53,14 @@ class IntRangeSpec(StrictModel):
 
     type: Literal["int_range"]
     start: int
-    stop: int
+    end: int
     step: int = Field(gt=0)
-    inclusive_stop: bool = False
+    inclusive_end: bool = False
 
     @model_validator(mode="after")
     def validate_bounds(self) -> IntRangeSpec:
-        if self.stop < self.start:
-            raise ValueError("int_range requires stop >= start")
+        if self.end < self.start:
+            raise ValueError("int_range requires end >= start")
         return self
 
 
@@ -63,16 +70,16 @@ class LogRangeSpec(StrictModel):
     type: Literal["log_range"]
     base: float
     start_exp: float
-    stop_exp: float
+    end_exp: float
     step_exp: float = Field(gt=0)
-    inclusive_stop: bool = False
+    inclusive_end: bool = False
 
     @model_validator(mode="after")
     def validate_bounds(self) -> LogRangeSpec:
         if self.base <= 0 or self.base == 1:
             raise ValueError("log_range requires base > 0 and base != 1")
-        if self.stop_exp < self.start_exp:
-            raise ValueError("log_range requires stop_exp >= start_exp")
+        if self.end_exp < self.start_exp:
+            raise ValueError("log_range requires end_exp >= start_exp")
         return self
 
 
@@ -81,12 +88,12 @@ class ContinuousRangeSpec(StrictModel):
 
     type: Literal["continuous_range"]
     start: float
-    stop: float
+    end: float
 
     @model_validator(mode="after")
     def validate_bounds(self) -> ContinuousRangeSpec:
-        if self.stop < self.start:
-            raise ValueError("continuous_range requires stop >= start")
+        if self.end < self.start:
+            raise ValueError("continuous_range requires end >= start")
         return self
 
 
@@ -96,14 +103,14 @@ class ContinuousLogRangeSpec(StrictModel):
     type: Literal["continuous_log_range"]
     base: float
     start_exp: float
-    stop_exp: float
+    end_exp: float
 
     @model_validator(mode="after")
     def validate_bounds(self) -> ContinuousLogRangeSpec:
         if self.base <= 0 or self.base == 1:
             raise ValueError("continuous_log_range requires base > 0 and base != 1")
-        if self.stop_exp < self.start_exp:
-            raise ValueError("continuous_log_range requires stop_exp >= start_exp")
+        if self.end_exp < self.start_exp:
+            raise ValueError("continuous_log_range requires end_exp >= start_exp")
         return self
 
 

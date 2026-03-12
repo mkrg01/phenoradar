@@ -1203,11 +1203,11 @@ def _tpe_trial_params(
         params[param_name] = trial.suggest_categorical(param_name, discrete_values[param_name])
     for param_name in sorted(continuous_values.keys()):
         spec = continuous_values[param_name]
-        if hasattr(spec, "start") and hasattr(spec, "stop"):
-            params[param_name] = trial.suggest_float(param_name, spec.start, spec.stop)
+        if hasattr(spec, "start") and hasattr(spec, "end"):
+            params[param_name] = trial.suggest_float(param_name, spec.start, spec.end)
         else:
             exponent_name = f"{param_name}__exp"
-            exponent = trial.suggest_float(exponent_name, spec.start_exp, spec.stop_exp)
+            exponent = trial.suggest_float(exponent_name, spec.start_exp, spec.end_exp)
             params[param_name] = float(spec.base**exponent)
     return params
 

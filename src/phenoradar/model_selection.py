@@ -61,10 +61,10 @@ def _expand_float_range(spec: DiscreteRangeSpec) -> list[float]:
     tolerance = abs(spec.step) * 1e-9 + 1e-12
     while index < _MAX_GENERATED_VALUES:
         value = float(spec.start + spec.step * index)
-        if spec.inclusive_stop:
-            if value > float(spec.stop) + tolerance:
+        if spec.inclusive_end:
+            if value > float(spec.end) + tolerance:
                 break
-        elif value >= float(spec.stop) - tolerance:
+        elif value >= float(spec.end) - tolerance:
             break
         values.append(value)
         index += 1
@@ -74,8 +74,8 @@ def _expand_float_range(spec: DiscreteRangeSpec) -> list[float]:
 
 
 def _expand_int_range(spec: IntRangeSpec) -> list[int]:
-    stop_value = spec.stop + (1 if spec.inclusive_stop else 0)
-    values = list(range(spec.start, stop_value, spec.step))
+    end_value = spec.end + (1 if spec.inclusive_end else 0)
+    values = list(range(spec.start, end_value, spec.step))
     if not values:
         raise ModelSelectionError("int_range expansion produced zero values")
     return _dedupe_preserve_order(values)
@@ -87,10 +87,10 @@ def _expand_log_range(spec: LogRangeSpec) -> list[float]:
     tolerance = abs(spec.step_exp) * 1e-9 + 1e-12
     while index < _MAX_GENERATED_VALUES:
         exponent = float(spec.start_exp + spec.step_exp * index)
-        if spec.inclusive_stop:
-            if exponent > float(spec.stop_exp) + tolerance:
+        if spec.inclusive_end:
+            if exponent > float(spec.end_exp) + tolerance:
                 break
-        elif exponent >= float(spec.stop_exp) - tolerance:
+        elif exponent >= float(spec.end_exp) - tolerance:
             break
         exponents.append(exponent)
         index += 1
@@ -172,9 +172,9 @@ def _draw_continuous_random(
         for param_name in sorted(continuous_values.keys()):
             spec = continuous_values[param_name]
             if isinstance(spec, ContinuousRangeSpec):
-                params[param_name] = float(rng.uniform(spec.start, spec.stop))
+                params[param_name] = float(rng.uniform(spec.start, spec.end))
             else:
-                exponent = float(rng.uniform(spec.start_exp, spec.stop_exp))
+                exponent = float(rng.uniform(spec.start_exp, spec.end_exp))
                 params[param_name] = float(spec.base**exponent)
         candidates.append(params)
     return candidates
@@ -199,10 +199,10 @@ def _draw_tpe_candidates(
         for param_name in sorted(continuous_values.keys()):
             spec = continuous_values[param_name]
             if isinstance(spec, ContinuousRangeSpec):
-                params[param_name] = trial.suggest_float(param_name, spec.start, spec.stop)
+                params[param_name] = trial.suggest_float(param_name, spec.start, spec.end)
             else:
                 exponent_name = f"{param_name}__exp"
-                exponent = trial.suggest_float(exponent_name, spec.start_exp, spec.stop_exp)
+                exponent = trial.suggest_float(exponent_name, spec.start_exp, spec.end_exp)
                 params[param_name] = float(spec.base**exponent)
         trial.set_user_attr("params", params)
         return 0.0
