@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.1](https://github.com/mkrg01/phenoradar/compare/v0.3.0...v0.3.1) (2026-03-12)
+
+
+### Bug Fixes
+
+* standardize model selection ranges on end/end_exp ([5cec7eb](https://github.com/mkrg01/phenoradar/commit/5cec7ebebe82077b6bb98b4a252addd7297e8d5e))
+
+
+### Documentation
+
+* clarify model selection search space range semantics ([cc56b66](https://github.com/mkrg01/phenoradar/commit/cc56b664f24f9d434d026d37217ef2b17f971b4c))
+
 ## [0.3.0](https://github.com/mkrg01/phenoradar/compare/v0.2.0...v0.3.0) (2026-03-11)
 
 
