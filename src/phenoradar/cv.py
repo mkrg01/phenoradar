@@ -127,6 +127,18 @@ class SourceSelectionResult:
 
 
 @dataclass(frozen=True)
+class InnerCvPreprocessedFold:
+    """One inner-CV split with train-only preprocessing already applied."""
+
+    inner_fold_id: str
+    x_train: np.ndarray
+    x_valid: np.ndarray
+    y_train: np.ndarray
+    y_valid: np.ndarray
+    sample_weight: np.ndarray | None
+
+
+@dataclass(frozen=True)
 class OuterFoldResult:
     """Fold-local outputs returned from one outer-CV fold execution."""
 
@@ -1180,29 +1192,16 @@ def _inner_cv_splits(
     return rows
 
 
-def _score_candidate_inner_cv(
+def _build_inner_cv_preprocessed_folds(
     *,
     config: AppConfig,
-    training_scope_id: str,
-    source_sample_set_id: int,
-    candidate: Candidate,
     x_source_raw: np.ndarray,
     y_source: np.ndarray,
     groups_source: np.ndarray,
     feature_names: list[str],
-    estimator_n_jobs: int | None = None,
-) -> tuple[float, list[dict[str, Any]]]:
-    resolved_estimator_n_jobs = (
-        _runtime_n_jobs(config) if estimator_n_jobs is None else int(estimator_n_jobs)
-    )
-    if resolved_estimator_n_jobs < 1:
-        raise CVError("estimator_n_jobs must be >= 1")
-
-    def _score() -> tuple[float, list[dict[str, Any]]]:
-        fold_scores: list[float] = []
-        trial_rows: list[dict[str, Any]] = []
-        params_json = json.dumps(candidate.params, ensure_ascii=True, sort_keys=True)
-
+) -> list[InnerCvPreprocessedFold]:
+    def _build() -> list[InnerCvPreprocessedFold]:
+        preprocessed_folds: list[InnerCvPreprocessedFold] = []
         for train_idx, valid_idx, inner_fold_id in _inner_cv_splits(
             config, y_source, groups_source
         ):
@@ -1216,25 +1215,61 @@ def _score_candidate_inner_cv(
                 config, x_train_raw, x_valid_raw, feature_names
             )
             sample_weight = _fit_sample_weights(config, y_train, groups_train)
+            preprocessed_folds.append(
+                InnerCvPreprocessedFold(
+                    inner_fold_id=inner_fold_id,
+                    x_train=x_train,
+                    x_valid=x_valid,
+                    y_train=y_train,
+                    y_valid=y_valid,
+                    sample_weight=sample_weight,
+                )
+            )
+        return preprocessed_folds
+
+    return _with_native_thread_limit_for_config(config, _build)
+
+
+def _score_candidate_inner_cv(
+    *,
+    config: AppConfig,
+    training_scope_id: str,
+    source_sample_set_id: int,
+    candidate: Candidate,
+    preprocessed_folds: list[InnerCvPreprocessedFold],
+    estimator_n_jobs: int | None = None,
+) -> tuple[float, list[dict[str, Any]]]:
+    resolved_estimator_n_jobs = (
+        _runtime_n_jobs(config) if estimator_n_jobs is None else int(estimator_n_jobs)
+    )
+    if resolved_estimator_n_jobs < 1:
+        raise CVError("estimator_n_jobs must be >= 1")
+
+    def _score() -> tuple[float, list[dict[str, Any]]]:
+        fold_scores: list[float] = []
+        trial_rows: list[dict[str, Any]] = []
+        params_json = json.dumps(candidate.params, ensure_ascii=True, sort_keys=True)
+
+        for fold in preprocessed_folds:
             seed = _deterministic_int_seed(
                 f"{config.runtime.seed}|{training_scope_id}|source_{source_sample_set_id}|"
-                f"candidate_{candidate.candidate_index}|inner_{inner_fold_id}"
+                f"candidate_{candidate.candidate_index}|inner_{fold.inner_fold_id}"
             )
             estimator = _build_estimator(
                 config,
                 seed,
-                y_train,
+                fold.y_train,
                 model_params=candidate.params,
                 rf_n_jobs=resolved_estimator_n_jobs,
             )
-            _fit_estimator(estimator, x_train, y_train, sample_weight)
-            prob = _predict_positive_probability(estimator, x_valid)
-            score = _selection_metric_from_probability(config, y_valid, prob)
+            _fit_estimator(estimator, fold.x_train, fold.y_train, fold.sample_weight)
+            prob = _predict_positive_probability(estimator, fold.x_valid)
+            score = _selection_metric_from_probability(config, fold.y_valid, prob)
             fold_scores.append(score)
             trial_rows.append(
                 {
                     "candidate_index": candidate.candidate_index,
-                    "inner_fold_id": inner_fold_id,
+                    "inner_fold_id": fold.inner_fold_id,
                     "metric_name": config.model_selection.selection_metric,
                     "metric_value": score,
                     "params_json": params_json,
@@ -1300,6 +1335,14 @@ def _prepare_source_selection_tpe(
             f"source_sample_set_id={source_sample_set_id}"
         )
 
+    preprocessed_folds = _build_inner_cv_preprocessed_folds(
+        config=config,
+        x_source_raw=x_source_raw,
+        y_source=y_source,
+        groups_source=groups_source,
+        feature_names=feature_names,
+    )
+
     trial_count = int(config.model_selection.trial_count)
     discrete_values, continuous_values = expanded_search_space(config.model_selection.search_space)
     effective_trials = trial_count
@@ -1336,10 +1379,7 @@ def _prepare_source_selection_tpe(
             training_scope_id=training_scope_id,
             source_sample_set_id=source_sample_set_id,
             candidate=candidate,
-            x_source_raw=x_source_raw,
-            y_source=y_source,
-            groups_source=groups_source,
-            feature_names=feature_names,
+            preprocessed_folds=preprocessed_folds,
             estimator_n_jobs=estimator_n_jobs,
         )
         trial_rows.extend(rows)
@@ -1482,6 +1522,14 @@ def _prepare_source_selection(
             f"source_sample_set_id={source_sample_set_id}"
         )
 
+    preprocessed_folds = _build_inner_cv_preprocessed_folds(
+        config=config,
+        x_source_raw=x_source_raw,
+        y_source=y_source,
+        groups_source=groups_source,
+        feature_names=feature_names,
+    )
+
     worker_count, estimator_n_jobs = _selection_parallel_plan(config, available)
     scored: list[SelectedCandidate] = []
     trial_rows: list[dict[str, Any]] = []
@@ -1493,10 +1541,7 @@ def _prepare_source_selection(
                 training_scope_id=training_scope_id,
                 source_sample_set_id=source_sample_set_id,
                 candidate=candidate,
-                x_source_raw=x_source_raw,
-                y_source=y_source,
-                groups_source=groups_source,
-                feature_names=feature_names,
+                preprocessed_folds=preprocessed_folds,
                 estimator_n_jobs=estimator_n_jobs,
             )
             scored_rows.append((mean_score, rows))
@@ -1521,10 +1566,7 @@ def _prepare_source_selection(
                     training_scope_id=training_scope_id,
                     source_sample_set_id=source_sample_set_id,
                     candidate=candidate,
-                    x_source_raw=x_source_raw,
-                    y_source=y_source,
-                    groups_source=groups_source,
-                    feature_names=feature_names,
+                    preprocessed_folds=preprocessed_folds,
                     estimator_n_jobs=estimator_n_jobs,
                 ): candidate
                 for candidate in candidates

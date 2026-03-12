@@ -94,6 +94,14 @@ data:
     )
 
 
+def _selection_source_arrays() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return (
+        np.array([[1.0], [2.0], [3.0], [4.0]], dtype=float),
+        np.array([0, 1, 0, 1], dtype=int),
+        np.array(["g1", "g1", "g2", "g2"], dtype=str),
+    )
+
+
 def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
@@ -1519,10 +1527,92 @@ def test_prepare_source_selection_rejects_empty_candidate_list(
         )
 
 
+def test_prepare_source_selection_reuses_inner_fold_preprocessing_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+model_selection:
+  selected_candidate_count: 1
+  inner_cv_strategy: logo
+""".strip(),
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        cv_mod,
+        "generate_candidates",
+        lambda **_kwargs: [
+            Candidate(candidate_index=0, params={"C": 0.1}),
+            Candidate(candidate_index=1, params={"C": 1.0}),
+            Candidate(candidate_index=2, params={"C": 10.0}),
+        ],
+    )
+
+    original_preprocess_fold = cv_mod._preprocess_fold
+    preprocess_call_count = 0
+
+    def _counting_preprocess_fold(
+        *args: object, **kwargs: object
+    ) -> tuple[np.ndarray, np.ndarray, list[str]]:
+        nonlocal preprocess_call_count
+        preprocess_call_count += 1
+        return original_preprocess_fold(*args, **kwargs)
+
+    monkeypatch.setattr(cv_mod, "_preprocess_fold", _counting_preprocess_fold)
+
+    seen_cache_ids: list[int] = []
+
+    def _fake_score_candidate_inner_cv(**kwargs: object) -> tuple[float, list[dict[str, object]]]:
+        preprocessed_folds = kwargs["preprocessed_folds"]
+        if not isinstance(preprocessed_folds, list):
+            raise AssertionError("preprocessed_folds must be a list")
+        seen_cache_ids.append(id(preprocessed_folds))
+        candidate = kwargs["candidate"]
+        if not isinstance(candidate, Candidate):
+            raise AssertionError("candidate must be a Candidate instance")
+        return float(candidate.candidate_index), []
+
+    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+
+    result = _prepare_source_selection(
+        config=config,
+        training_scope_id="fold_0",
+        source_sample_set_id=0,
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=np.array(
+            [
+                [1.0, 4.0],
+                [2.0, 3.0],
+                [3.0, 2.0],
+                [4.0, 1.0],
+            ],
+            dtype=float,
+        ),
+        y_train=np.array([1, 0, 1, 0], dtype=int),
+        groups_train=np.array(["g1", "g1", "g2", "g2"], dtype=str),
+        feature_names=["OG1", "OG2"],
+        warnings=[],
+    )
+
+    assert preprocess_call_count == 2
+    assert seen_cache_ids
+    assert len(seen_cache_ids) == 3
+    assert len(set(seen_cache_ids)) == 1
+    assert result.n_scored_candidates == 3
+
+
 def test_prepare_source_selection_warns_when_selected_candidate_count_is_capped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config(
         [
             _config_path(
@@ -1553,10 +1643,10 @@ model_selection:
         config=config,
         training_scope_id="fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=warnings,
     )
@@ -1571,6 +1661,7 @@ def test_prepare_source_selection_deduplicates_selected_candidates_by_params(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config(
         [
             _config_path(
@@ -1609,10 +1700,10 @@ model_selection:
         config=config,
         training_scope_id="fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=warnings,
     )
@@ -1632,6 +1723,7 @@ def test_prepare_source_selection_supports_selected_candidate_percent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config(
         [
             _config_path(
@@ -1668,10 +1760,10 @@ model_selection:
         config=config,
         training_scope_id="fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=[],
     )
@@ -1686,6 +1778,7 @@ def test_prepare_source_selection_parallel_scoring_caps_rf_n_jobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config(
         [
             _config_path(
@@ -1729,10 +1822,10 @@ runtime:
         config=config,
         training_scope_id="fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=[],
     )
@@ -1746,6 +1839,7 @@ def test_prepare_source_selection_prefers_lower_log_loss(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config(
         [
             _config_path(
@@ -1784,10 +1878,10 @@ model_selection:
         config=config,
         training_scope_id="fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=[],
     )
@@ -1832,15 +1926,31 @@ runtime:
 
     monkeypatch.setattr(cv_mod, "_with_native_thread_limit", _fake_with_native_thread_limit)
 
+    preprocessed_folds = [
+        cv_mod.InnerCvPreprocessedFold(
+            inner_fold_id="0",
+            x_train=np.array([[0.0], [1.0]], dtype=float),
+            x_valid=np.array([[0.5], [1.5]], dtype=float),
+            y_train=np.array([0, 1], dtype=int),
+            y_valid=np.array([0, 1], dtype=int),
+            sample_weight=None,
+        ),
+        cv_mod.InnerCvPreprocessedFold(
+            inner_fold_id="1",
+            x_train=np.array([[1.0], [2.0]], dtype=float),
+            x_valid=np.array([[1.5], [2.5]], dtype=float),
+            y_train=np.array([0, 1], dtype=int),
+            y_valid=np.array([0, 1], dtype=int),
+            sample_weight=None,
+        ),
+    ]
+
     score, trial_rows = cv_mod._score_candidate_inner_cv(
         config=config,
         training_scope_id="fold_0",
         source_sample_set_id=0,
         candidate=Candidate(candidate_index=0, params={"n_estimators": 10}),
-        x_source_raw=np.array([[1.0], [2.0], [3.0], [4.0]], dtype=float),
-        y_source=np.array([0, 1, 0, 1], dtype=int),
-        groups_source=np.array(["g1", "g1", "g2", "g2"], dtype=str),
-        feature_names=["OG1"],
+        preprocessed_folds=preprocessed_folds,
         estimator_n_jobs=2,
     )
 
@@ -2199,6 +2309,7 @@ def test_prepare_source_selection_tpe_emits_capping_warnings_for_trials_and_sele
                 self.trials.append(trial)
 
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     config_tpe = config.model_copy(
         update={
@@ -2208,6 +2319,7 @@ def test_prepare_source_selection_tpe_emits_capping_warnings_for_trials_and_sele
                     "trial_count": 5,
                     "search_space": {"C": [0.1]},
                     "selected_candidate_count": 3,
+                    "inner_cv_strategy": "logo",
                 }
             )
         }
@@ -2220,10 +2332,10 @@ def test_prepare_source_selection_tpe_emits_capping_warnings_for_trials_and_sele
         config=config_tpe,
         training_scope_id="outer_fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=warnings,
     )
@@ -2265,6 +2377,7 @@ def test_prepare_source_selection_tpe_deduplicates_selected_candidates_by_params
                 self.trials.append(trial)
 
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     config_tpe = config.model_copy(
         update={
@@ -2274,6 +2387,7 @@ def test_prepare_source_selection_tpe_deduplicates_selected_candidates_by_params
                     "trial_count": 2,
                     "search_space": {"C": [0.1, 1.0]},
                     "selected_candidate_count": 2,
+                    "inner_cv_strategy": "logo",
                 }
             )
         }
@@ -2295,10 +2409,10 @@ def test_prepare_source_selection_tpe_deduplicates_selected_candidates_by_params
         config=config_tpe,
         training_scope_id="outer_fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=warnings,
     )
@@ -2343,6 +2457,7 @@ def test_prepare_source_selection_tpe_supports_selected_candidate_percent(
                 self.trials.append(trial)
 
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     config_tpe = config.model_copy(
         update={
@@ -2353,6 +2468,7 @@ def test_prepare_source_selection_tpe_supports_selected_candidate_percent(
                     "search_space": {"C": [0.1, 1.0, 10.0]},
                     "selected_candidate_count": None,
                     "selected_candidate_percent": 50,
+                    "inner_cv_strategy": "logo",
                 }
             )
         }
@@ -2371,10 +2487,10 @@ def test_prepare_source_selection_tpe_supports_selected_candidate_percent(
         config=config_tpe,
         training_scope_id="outer_fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=[],
     )
@@ -2414,6 +2530,7 @@ def test_prepare_source_selection_tpe_uses_minimize_direction_for_log_loss(
                 self.trials.append(trial)
 
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     config_tpe = config.model_copy(
         update={
@@ -2424,6 +2541,7 @@ def test_prepare_source_selection_tpe_uses_minimize_direction_for_log_loss(
                     "trial_count": 2,
                     "search_space": {"C": [0.1, 1.0]},
                     "selected_candidate_count": 1,
+                    "inner_cv_strategy": "logo",
                 }
             )
         }
@@ -2453,10 +2571,10 @@ def test_prepare_source_selection_tpe_uses_minimize_direction_for_log_loss(
         config=config_tpe,
         training_scope_id="outer_fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=[],
     )
@@ -2482,11 +2600,17 @@ def test_prepare_source_selection_tpe_rejects_trials_missing_candidate_params(
             _ = n_trials
 
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     config_tpe = config.model_copy(
         update={
             "model_selection": config.model_selection.model_copy(
-                update={"search_strategy": "tpe", "trial_count": 1, "selected_candidate_count": 1}
+                update={
+                    "search_strategy": "tpe",
+                    "trial_count": 1,
+                    "selected_candidate_count": 1,
+                    "inner_cv_strategy": "logo",
+                }
             )
         }
     )
@@ -2497,10 +2621,10 @@ def test_prepare_source_selection_tpe_rejects_trials_missing_candidate_params(
             config=config_tpe,
             training_scope_id="outer_fold_0",
             source_sample_set_id=0,
-            sampled_idx=np.array([0, 1], dtype=int),
-            x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-            y_train=np.array([0, 1], dtype=int),
-            groups_train=np.array(["g1", "g2"], dtype=str),
+            sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+            x_train_raw=x_train_raw,
+            y_train=y_train,
+            groups_train=groups_train,
             feature_names=["OG1"],
             warnings=[],
         )
@@ -2985,17 +3109,13 @@ def test_score_candidate_inner_cv_returns_nan_when_no_inner_folds(
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
-    monkeypatch.setattr(cv_mod, "_inner_cv_splits", lambda *_args, **_kwargs: [])
 
     score, rows = cv_mod._score_candidate_inner_cv(
         config=config,
         training_scope_id="fold_0",
         source_sample_set_id=0,
         candidate=Candidate(candidate_index=0, params={}),
-        x_source_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_source=np.array([0, 1], dtype=int),
-        groups_source=np.array(["g1", "g2"], dtype=str),
-        feature_names=["OG1"],
+        preprocessed_folds=[],
     )
 
     assert np.isnan(score)
@@ -3031,6 +3151,7 @@ def test_prepare_source_selection_tpe_maps_nan_objective_score_to_none(
                 self.trials.append(trial)
 
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     config_tpe = config.model_copy(
         update={
@@ -3040,6 +3161,7 @@ def test_prepare_source_selection_tpe_maps_nan_objective_score_to_none(
                     "trial_count": 1,
                     "search_space": {"C": [0.1]},
                     "selected_candidate_count": 1,
+                    "inner_cv_strategy": "logo",
                 }
             )
         }
@@ -3051,10 +3173,10 @@ def test_prepare_source_selection_tpe_maps_nan_objective_score_to_none(
         config=config_tpe,
         training_scope_id="outer_fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=[],
     )
