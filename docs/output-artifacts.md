@@ -76,6 +76,13 @@ Always written:
     - `scope`, `stage`, `n_records`
     - `n_features_min`, `n_features_median`, `n_features_mean`, `n_features_max`
     - `retained_ratio_min`, `retained_ratio_median`, `retained_ratio_mean`, `retained_ratio_max`
+- `retained_features.tsv`
+  - columns:
+    - `scope`, `fold_id`, `sample_set_id`, `feature`
+- `retained_features_summary.tsv`
+  - columns:
+    - `scope`, `fold_id`, `feature`
+    - `retained_count`, `n_sample_sets`, `retained_rate`
 - `model_sparsity.tsv`
   - columns:
     - `scope`, `fold_id`, `sample_set_id`, `model_index`, `model_name`
@@ -112,6 +119,7 @@ Always written:
     - `cv_species_probability_by_trait.svg`
     - `cv_fold_trait_probability.svg`
     - `feature_filter_funnel.svg`
+    - `retained_features_by_fold.svg`
     - `model_sparsity_scatter.svg`
     - `model_selection_trials.svg` (candidate selection active)
     - `roc_pr_curves_cv.svg` (may be skipped with warning for degenerate folds)
@@ -273,6 +281,20 @@ Conditionally written:
 - `retained_ratio_*` is the ratio relative to `n_features_before`.
 - Use this table for quick stage-wise trend checks without scanning all folds/sample sets.
 
+#### `retained_features.tsv`
+
+- One row per retained feature after preprocessing for a given
+  (`scope`, `fold_id`, `sample_set_id`).
+- `feature` is the feature name that survived all preprocessing filters.
+- Use this table when you need the exact retained-feature list for each fold/sample set.
+
+#### `retained_features_summary.tsv`
+
+- Summary of `retained_features.tsv` grouped by (`scope`, `fold_id`, `feature`).
+- `retained_count` is how many sampled sets retained that feature in the fold.
+- `retained_rate = retained_count / n_sample_sets`.
+- Use this table to compare feature retention across folds without scanning every sample set.
+
 #### `model_sparsity.tsv`
 
 - One row per fitted model in CV/final-refit scopes.
@@ -401,6 +423,10 @@ Conditionally written:
 - `feature_filter_funnel.svg`
   - Stage-wise feature-count trend by scope.
   - Line is median count; shaded range is min-max.
+- `retained_features_by_fold.svg`
+  - Outer-fold retained-feature heatmap.
+  - Rows are features, columns are folds, color is `retained_rate`.
+  - Useful for spotting fold-specific feature retention differences.
 - `model_sparsity_scatter.svg`
   - Scatter of `n_features_after_all` vs `n_nonzero_features`.
   - Useful for comparing preprocessing output size vs model sparsity.

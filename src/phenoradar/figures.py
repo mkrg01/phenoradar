@@ -41,6 +41,7 @@ class FigureError(ValueError):
 
 _FIG_DPI = 100
 _MODEL_SELECTION_SAMPLE_SET_LIMIT = 1
+_RETAINED_FEATURE_LIMIT = 40
 
 
 def _figure_size_inches(width_px: int, height_px: int) -> tuple[float, float]:
@@ -1639,6 +1640,145 @@ def _feature_filter_funnel(feature_filter_counts_summary: pl.DataFrame, out_path
     _save_svg_figure(fig, out_path)
 
 
+def _retained_features_by_fold(retained_features_summary: pl.DataFrame, out_path: Path) -> None:
+    required = {"scope", "fold_id", "feature", "retained_count", "n_sample_sets", "retained_rate"}
+    if not required.issubset(retained_features_summary.columns):
+        raise FigureError(
+            "retained_features_summary.tsv schema is invalid for retained_features_by_fold.svg"
+        )
+    data = (
+        retained_features_summary.select(
+            pl.col("scope").cast(pl.String, strict=False).alias("__scope"),
+            pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
+            pl.col("feature").cast(pl.String, strict=False).alias("__feature"),
+            pl.col("retained_count").cast(pl.Int64, strict=False).alias("__retained_count"),
+            pl.col("n_sample_sets").cast(pl.Int64, strict=False).alias("__n_sample_sets"),
+            pl.col("retained_rate").cast(pl.Float64, strict=False).alias("__retained_rate"),
+        )
+        .filter(
+            (pl.col("__scope") == "outer_fold")
+            & pl.col("__fold_id").is_not_null()
+            & (pl.col("__fold_id") != "")
+            & pl.col("__feature").is_not_null()
+            & (pl.col("__feature") != "")
+            & pl.col("__retained_count").is_not_null()
+            & pl.col("__n_sample_sets").is_not_null()
+            & (pl.col("__n_sample_sets") > 0)
+            & pl.col("__retained_rate").is_not_null()
+            & pl.col("__retained_rate").is_finite()
+        )
+    )
+    if data.height == 0:
+        _write_message_figure(
+            title="Retained Features by Fold",
+            message="No outer-fold retained-feature summary rows are available.",
+            out_path=out_path,
+            width_px=980,
+            height_px=520,
+        )
+        return
+
+    fold_ids = [str(v) for v in data.select("__fold_id").unique().to_series().to_list()]
+    fold_ids = sorted(
+        fold_ids,
+        key=lambda value: (0, int(value)) if value.isdigit() else (1, value),
+    )
+    ranked_features = (
+        data.group_by("__feature")
+        .agg(
+            pl.col("__retained_rate").max().alias("__retained_rate_max"),
+            pl.col("__retained_rate").mean().alias("__retained_rate_mean"),
+            pl.len().alias("__n_folds_retained"),
+        )
+        .sort(
+            [
+                "__retained_rate_max",
+                "__retained_rate_mean",
+                "__n_folds_retained",
+                "__feature",
+            ],
+            descending=[True, True, True, False],
+        )
+    )
+    total_features = ranked_features.height
+    shown_feature_table = ranked_features.head(_RETAINED_FEATURE_LIMIT)
+    features = [str(v) for v in shown_feature_table.select("__feature").to_series().to_list()]
+    omitted_count = max(0, total_features - len(features))
+    if not fold_ids or not features:
+        _write_message_figure(
+            title="Retained Features by Fold",
+            message="No retained features are available after filtering.",
+            out_path=out_path,
+            width_px=980,
+            height_px=520,
+        )
+        return
+
+    feature_index = {feature: idx for idx, feature in enumerate(features)}
+    fold_index = {fold_id: idx for idx, fold_id in enumerate(fold_ids)}
+    rate_matrix = np.zeros((len(features), len(fold_ids)), dtype=float)
+    count_labels: dict[tuple[int, int], str] = {}
+    visible = data.filter(pl.col("__feature").is_in(features))
+    for row in visible.iter_rows(named=True):
+        feature_name = str(row["__feature"])
+        fold_id = str(row["__fold_id"])
+        row_index = feature_index[feature_name]
+        col_index = fold_index[fold_id]
+        rate_matrix[row_index, col_index] = float(row["__retained_rate"])
+        retained_count = int(row["__retained_count"])
+        n_sample_sets = int(row["__n_sample_sets"])
+        count_labels[(row_index, col_index)] = f"{retained_count}/{n_sample_sets}"
+
+    height_px = max(340, 170 + len(features) * 22)
+    width_px = max(980, 260 + len(fold_ids) * 92)
+    fig, ax = plt.subplots(figsize=_figure_size_inches(width_px, height_px), dpi=_FIG_DPI)
+    fig.patch.set_facecolor("white")
+    fig.suptitle("Retained Features by Fold", x=0.01, ha="left", fontsize=16)
+    summary_text = (
+        f"outer_fold retained_rate per feature (shown={len(features)}/{total_features}, "
+        f"folds={len(fold_ids)}, omitted={omitted_count})"
+    )
+    fig.text(0.01, 0.90, summary_text, fontsize=10)
+
+    image = ax.imshow(
+        rate_matrix,
+        aspect="auto",
+        cmap="Blues",
+        interpolation="nearest",
+        vmin=0.0,
+        vmax=1.0,
+    )
+    ax.set_xticks(np.arange(len(fold_ids), dtype=float))
+    ax.set_xticklabels([f"fold={fold_id}" for fold_id in fold_ids], fontsize=9)
+    ax.set_yticks(np.arange(len(features), dtype=float))
+    ax.set_yticklabels(features, fontsize=8, fontfamily="monospace")
+    ax.set_xlabel("CV fold")
+    ax.set_ylabel("Retained feature")
+    ax.set_xticks(np.arange(-0.5, len(fold_ids), 1.0), minor=True)
+    ax.set_yticks(np.arange(-0.5, len(features), 1.0), minor=True)
+    ax.grid(which="minor", color="#ffffff", linewidth=0.8)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    if len(features) <= 12 and len(fold_ids) <= 8:
+        for (row_index, col_index), label in count_labels.items():
+            color = "#222222" if rate_matrix[row_index, col_index] < 0.6 else "#ffffff"
+            ax.text(
+                col_index,
+                row_index,
+                label,
+                ha="center",
+                va="center",
+                fontsize=8,
+                color=color,
+                fontfamily="monospace",
+            )
+
+    colorbar = fig.colorbar(image, ax=ax, fraction=0.025, pad=0.02)
+    colorbar.set_label("retained_rate", rotation=90)
+    fig.subplots_adjust(left=0.28, right=0.92, top=0.84, bottom=0.12)
+    _save_svg_figure(fig, out_path)
+
+
 def _model_sparsity_scatter(model_sparsity: pl.DataFrame, out_path: Path) -> None:
     required = {"model_name", "n_features_after_all", "n_nonzero_features", "scope"}
     if not required.issubset(model_sparsity.columns):
@@ -1712,6 +1852,7 @@ def write_run_figures(
     trait_name: str = "trait",
     model_selection_trials_summary: pl.DataFrame | None = None,
     feature_filter_counts_summary: pl.DataFrame | None = None,
+    retained_features_summary: pl.DataFrame | None = None,
     model_sparsity: pl.DataFrame | None = None,
     model_sparsity_summary: pl.DataFrame | None = None,
 ) -> list[str]:
@@ -1766,6 +1907,11 @@ def write_run_figures(
         _feature_filter_funnel(
             feature_filter_counts_summary,
             figures_dir / "feature_filter_funnel.svg",
+        )
+    if retained_features_summary is not None:
+        _retained_features_by_fold(
+            retained_features_summary,
+            figures_dir / "retained_features_by_fold.svg",
         )
     if model_sparsity is not None:
         _model_sparsity_scatter(

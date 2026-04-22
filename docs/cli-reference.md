@@ -64,6 +64,8 @@ Always written:
 - `prediction_cv.tsv`
 - `feature_filter_counts.tsv`
 - `feature_filter_counts_summary.tsv`
+- `retained_features.tsv`
+- `retained_features_summary.tsv`
 - `model_sparsity.tsv`
 - `model_sparsity_summary.tsv`
 - `classification_summary.tsv`
@@ -82,6 +84,7 @@ Notes:
   - `cv_species_probability_by_trait.svg`
   - `cv_fold_trait_probability.svg`
   - `feature_filter_funnel.svg`
+  - `retained_features_by_fold.svg`
   - `model_sparsity_scatter.svg`
   - `model_selection_trials.svg` (model selection enabled)
   - `roc_pr_curves_cv.svg` (may be skipped when degenerate)

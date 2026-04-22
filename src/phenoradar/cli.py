@@ -850,6 +850,55 @@ def run(
             null_value="NA",
         )
 
+    retained_features_tables: list[pl.DataFrame] = []
+    cv_retained_features = getattr(cv_artifacts, "retained_features", None)
+    if isinstance(cv_retained_features, pl.DataFrame):
+        retained_features_tables.append(cv_retained_features)
+    final_retained_features = (
+        None
+        if final_refit_artifacts is None
+        else getattr(final_refit_artifacts, "retained_features", None)
+    )
+    if isinstance(final_retained_features, pl.DataFrame):
+        retained_features_tables.append(final_retained_features)
+    retained_features_table: pl.DataFrame | None = None
+    if retained_features_tables:
+        retained_features_table = pl.concat(retained_features_tables, how="vertical_relaxed").sort(
+            ["scope", "fold_id", "sample_set_id", "feature"]
+        )
+        retained_features_table.write_csv(
+            run_dir / "retained_features.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
+
+    retained_feature_summary_tables: list[pl.DataFrame] = []
+    cv_retained_features_summary = getattr(cv_artifacts, "retained_features_summary", None)
+    if isinstance(cv_retained_features_summary, pl.DataFrame):
+        retained_feature_summary_tables.append(cv_retained_features_summary)
+    final_retained_features_summary = (
+        None
+        if final_refit_artifacts is None
+        else getattr(final_refit_artifacts, "retained_features_summary", None)
+    )
+    if isinstance(final_retained_features_summary, pl.DataFrame):
+        retained_feature_summary_tables.append(final_retained_features_summary)
+    retained_features_summary_table: pl.DataFrame | None = None
+    if retained_feature_summary_tables:
+        retained_features_summary_table = pl.concat(
+            retained_feature_summary_tables, how="vertical_relaxed"
+        ).sort(
+            ["scope", "fold_id", "retained_rate", "retained_count", "feature"],
+            descending=[False, False, True, True, False],
+        )
+        retained_features_summary_table.write_csv(
+            run_dir / "retained_features_summary.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
+
     model_sparsity_tables: list[pl.DataFrame] = []
     cv_model_sparsity = getattr(cv_artifacts, "model_sparsity", None)
     if isinstance(cv_model_sparsity, pl.DataFrame):
@@ -934,6 +983,7 @@ def run(
             ),
             trait_name=resolved.data.trait_col,
             feature_filter_counts_summary=feature_filter_counts_summary_table,
+            retained_features_summary=retained_features_summary_table,
             model_sparsity=model_sparsity_table,
             model_sparsity_summary=model_sparsity_summary_table,
         )
@@ -1007,6 +1057,7 @@ def run(
         "metrics_cv.tsv, loss_by_split_cv.tsv, thresholds.tsv, "
         "feature_importance.tsv, coefficients.tsv, prediction_cv.tsv, "
         "feature_filter_counts.tsv, feature_filter_counts_summary.tsv, "
+        "retained_features.tsv, retained_features_summary.tsv, "
         "model_sparsity.tsv, model_sparsity_summary.tsv, "
         "classification_summary.tsv, "
         "run_metadata.json"

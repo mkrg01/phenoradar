@@ -172,6 +172,22 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "n_features_median",
         "retained_ratio_median",
     }.issubset(cv_artifacts.feature_filter_counts_summary.columns)
+    assert cv_artifacts.retained_features.height > 0
+    assert {
+        "scope",
+        "fold_id",
+        "sample_set_id",
+        "feature",
+    }.issubset(cv_artifacts.retained_features.columns)
+    assert cv_artifacts.retained_features_summary.height > 0
+    assert {
+        "scope",
+        "fold_id",
+        "feature",
+        "retained_count",
+        "n_sample_sets",
+        "retained_rate",
+    }.issubset(cv_artifacts.retained_features_summary.columns)
     assert cv_artifacts.model_sparsity.height > 0
     assert {
         "scope",
@@ -700,6 +716,22 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
         "n_features_after_all",
     }.issubset(refit_artifacts.feature_filter_counts.columns)
     assert refit_artifacts.feature_filter_counts_summary.height > 0
+    assert refit_artifacts.retained_features.height > 0
+    assert {
+        "scope",
+        "fold_id",
+        "sample_set_id",
+        "feature",
+    }.issubset(refit_artifacts.retained_features.columns)
+    assert refit_artifacts.retained_features_summary.height > 0
+    assert {
+        "scope",
+        "fold_id",
+        "feature",
+        "retained_count",
+        "n_sample_sets",
+        "retained_rate",
+    }.issubset(refit_artifacts.retained_features_summary.columns)
     assert refit_artifacts.model_sparsity.height > 0
     assert {
         "scope",
@@ -710,6 +742,66 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
         "n_nonzero_features",
     }.issubset(refit_artifacts.model_sparsity.columns)
     assert refit_artifacts.model_sparsity_summary.height > 0
+
+
+def test_summarize_retained_features_aggregates_count_and_rate() -> None:
+    retained_features = cv_mod._build_retained_features(
+        [
+            {
+                "scope": "outer_fold",
+                "fold_id": "0",
+                "sample_set_id": 0,
+                "feature": "OG1",
+            },
+            {
+                "scope": "outer_fold",
+                "fold_id": "0",
+                "sample_set_id": 1,
+                "feature": "OG1",
+            },
+            {
+                "scope": "outer_fold",
+                "fold_id": "0",
+                "sample_set_id": 1,
+                "feature": "OG2",
+            },
+            {
+                "scope": "outer_fold",
+                "fold_id": "1",
+                "sample_set_id": 0,
+                "feature": "OG2",
+            },
+        ]
+    )
+
+    summary = cv_mod._summarize_retained_features(retained_features)
+
+    assert summary.to_dicts() == [
+        {
+            "scope": "outer_fold",
+            "fold_id": "0",
+            "feature": "OG1",
+            "retained_count": 2,
+            "n_sample_sets": 2,
+            "retained_rate": 1.0,
+        },
+        {
+            "scope": "outer_fold",
+            "fold_id": "0",
+            "feature": "OG2",
+            "retained_count": 1,
+            "n_sample_sets": 2,
+            "retained_rate": 0.5,
+        },
+        {
+            "scope": "outer_fold",
+            "fold_id": "1",
+            "feature": "OG2",
+            "retained_count": 1,
+            "n_sample_sets": 1,
+            "retained_rate": 1.0,
+        },
+    ]
 
 
 def test_group_label_inverse_weights_are_normalized_and_group_label_balanced() -> None:
@@ -1173,6 +1265,45 @@ def test_preprocess_fold_rejects_negative_tpm_values(tmp_path: Path) -> None:
         _preprocess_fold(config, x_train_raw, x_valid_raw, ["OG1", "OG2"])
 
 
+def test_preprocess_fold_scales_validation_with_training_statistics(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    x_train_raw = np.array(
+        [
+            [1.0, 3.0],
+            [2.0, 5.0],
+            [4.0, 9.0],
+        ],
+        dtype=float,
+    )
+    x_valid_raw = np.array(
+        [
+            [6.0, 2.0],
+            [8.0, 7.0],
+        ],
+        dtype=float,
+    )
+
+    x_train_scaled, x_valid_scaled, selected_features = _preprocess_fold(
+        config,
+        x_train_raw,
+        x_valid_raw,
+        ["OG1", "OG2"],
+    )
+
+    x_train_log = np.log1p(x_train_raw)
+    x_valid_log = np.log1p(x_valid_raw)
+    train_mean = np.mean(x_train_log, axis=0)
+    train_std = np.std(x_train_log, axis=0, ddof=0)
+
+    expected_train = (x_train_log - train_mean) / train_std
+    expected_valid = (x_valid_log - train_mean) / train_std
+
+    assert selected_features == ["OG1", "OG2"]
+    assert x_train_scaled == pytest.approx(expected_train)
+    assert x_valid_scaled == pytest.approx(expected_valid)
+
+
 def test_select_feature_indices_raises_when_filters_remove_all_features(
     tmp_path: Path,
 ) -> None:
@@ -1281,6 +1412,47 @@ def test_preprocess_train_and_target_rejects_negative_tpm_values(tmp_path: Path)
             np.array([[1.0, 0.2]], dtype=float),
             ["OG1", "OG2"],
         )
+
+
+def test_preprocess_train_and_target_returns_training_fitted_scaler(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    x_train_raw = np.array(
+        [
+            [1.0, 10.0],
+            [3.0, 14.0],
+            [7.0, 18.0],
+        ],
+        dtype=float,
+    )
+    x_target_raw = np.array(
+        [
+            [2.0, 11.0],
+            [9.0, 20.0],
+        ],
+        dtype=float,
+    )
+
+    x_train_scaled, x_target_scaled, selected_features, scaler = _preprocess_train_and_target(
+        config,
+        x_train_raw,
+        x_target_raw,
+        ["OG1", "OG2"],
+    )
+
+    x_train_log = np.log1p(x_train_raw)
+    x_target_log = np.log1p(x_target_raw)
+    train_mean = np.mean(x_train_log, axis=0)
+    train_std = np.std(x_train_log, axis=0, ddof=0)
+
+    expected_train = (x_train_log - train_mean) / train_std
+    expected_target = (x_target_log - train_mean) / train_std
+
+    assert selected_features == ["OG1", "OG2"]
+    assert scaler.mean_ == pytest.approx(train_mean)
+    assert scaler.scale_ == pytest.approx(train_std)
+    assert x_train_scaled == pytest.approx(expected_train)
+    assert x_target_scaled == pytest.approx(expected_target)
 
 
 def test_build_prediction_table_rejects_probability_length_mismatch() -> None:

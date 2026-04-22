@@ -208,6 +208,19 @@ def _minimal_feature_filter_counts_summary() -> pl.DataFrame:
     )
 
 
+def _minimal_retained_features_summary() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "scope": ["outer_fold", "outer_fold", "outer_fold", "outer_fold"],
+            "fold_id": ["0", "0", "1", "1"],
+            "feature": ["OG1", "OG2", "OG1", "OG3"],
+            "retained_count": [2, 1, 2, 1],
+            "n_sample_sets": [2, 2, 2, 2],
+            "retained_rate": [1.0, 0.5, 1.0, 0.5],
+        }
+    )
+
+
 def _minimal_model_sparsity() -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -334,11 +347,13 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
         model_selection_trials=None,
         auto_threshold_metric="mcc",
         feature_filter_counts_summary=_minimal_feature_filter_counts_summary(),
+        retained_features_summary=_minimal_retained_features_summary(),
         model_sparsity=_minimal_model_sparsity(),
     )
 
     figures_dir = tmp_path / "run" / "figures"
     assert (figures_dir / "feature_filter_funnel.svg").exists()
+    assert (figures_dir / "retained_features_by_fold.svg").exists()
     assert (figures_dir / "model_sparsity_scatter.svg").exists()
     assert warnings == []
 
@@ -944,6 +959,23 @@ def test_cv_fold_trait_probability_writes_svg(tmp_path: Path) -> None:
                 "prob": [0.2, 0.8, 0.3, 0.7],
             }
         ),
+        out_path=out_path,
+    )
+    assert out_path.exists()
+
+
+def test_retained_features_by_fold_rejects_invalid_schema(tmp_path: Path) -> None:
+    with pytest.raises(FigureError, match="schema is invalid"):
+        figures_mod._retained_features_by_fold(
+            retained_features_summary=pl.DataFrame({"feature": ["OG1"]}),
+            out_path=tmp_path / "retained_features_by_fold.svg",
+        )
+
+
+def test_retained_features_by_fold_writes_svg(tmp_path: Path) -> None:
+    out_path = tmp_path / "retained_features_by_fold.svg"
+    figures_mod._retained_features_by_fold(
+        retained_features_summary=_minimal_retained_features_summary(),
         out_path=out_path,
     )
     assert out_path.exists()

@@ -162,6 +162,24 @@ def _stub_cv_artifacts(
         model_selection_trials=None,
         model_selection_trials_summary=None,
         model_selection_selected=None,
+        retained_features=pl.DataFrame(
+            {
+                "scope": ["outer_fold"],
+                "fold_id": ["0"],
+                "sample_set_id": [0],
+                "feature": ["OG1"],
+            }
+        ),
+        retained_features_summary=pl.DataFrame(
+            {
+                "scope": ["outer_fold"],
+                "fold_id": ["0"],
+                "feature": ["OG1"],
+                "retained_count": [1],
+                "n_sample_sets": [1],
+                "retained_rate": [1.0],
+            }
+        ),
     )
 
 
@@ -194,6 +212,24 @@ def _stub_final_refit_artifacts() -> SimpleNamespace:
         ),
         warnings=[],
         model_selection_selected=None,
+        retained_features=pl.DataFrame(
+            {
+                "scope": ["final_refit"],
+                "fold_id": ["NA"],
+                "sample_set_id": [0],
+                "feature": ["OG1"],
+            }
+        ),
+        retained_features_summary=pl.DataFrame(
+            {
+                "scope": ["final_refit"],
+                "fold_id": ["NA"],
+                "feature": ["OG1"],
+                "retained_count": [1],
+                "n_sample_sets": [1],
+                "retained_rate": [1.0],
+            }
+        ),
         ensemble_size=1,
     )
 
@@ -401,6 +437,8 @@ data:
     assert (run_dirs[0] / "coefficients.tsv").exists()
     assert (run_dirs[0] / "feature_filter_counts.tsv").exists()
     assert (run_dirs[0] / "feature_filter_counts_summary.tsv").exists()
+    assert (run_dirs[0] / "retained_features.tsv").exists()
+    assert (run_dirs[0] / "retained_features_summary.tsv").exists()
     assert (run_dirs[0] / "model_sparsity.tsv").exists()
     assert (run_dirs[0] / "model_sparsity_summary.tsv").exists()
     assert (run_dirs[0] / "prediction_external_test.tsv").exists()
@@ -417,6 +455,7 @@ data:
     assert (run_dirs[0] / "figures" / "cv_fold_trait_probability.svg").exists()
     assert (run_dirs[0] / "figures" / "roc_pr_curves_cv.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_filter_funnel.svg").exists()
+    assert (run_dirs[0] / "figures" / "retained_features_by_fold.svg").exists()
     assert (run_dirs[0] / "figures" / "model_sparsity_scatter.svg").exists()
     assert (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
     assert (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()
@@ -541,6 +580,8 @@ data:
     assert (run_dirs[0] / "coefficients.tsv").exists()
     assert (run_dirs[0] / "feature_filter_counts.tsv").exists()
     assert (run_dirs[0] / "feature_filter_counts_summary.tsv").exists()
+    assert (run_dirs[0] / "retained_features.tsv").exists()
+    assert (run_dirs[0] / "retained_features_summary.tsv").exists()
     assert (run_dirs[0] / "model_sparsity.tsv").exists()
     assert (run_dirs[0] / "model_sparsity_summary.tsv").exists()
     assert (run_dirs[0] / "figures" / "cv_metrics_overview.svg").exists()
@@ -552,6 +593,7 @@ data:
     assert (run_dirs[0] / "figures" / "cv_fold_trait_probability.svg").exists()
     assert (run_dirs[0] / "figures" / "roc_pr_curves_cv.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_filter_funnel.svg").exists()
+    assert (run_dirs[0] / "figures" / "retained_features_by_fold.svg").exists()
     assert (run_dirs[0] / "figures" / "model_sparsity_scatter.svg").exists()
     assert not (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
     assert not (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()

@@ -81,6 +81,8 @@ class CVArtifacts:
     model_selection_trials_summary: pl.DataFrame | None
     feature_filter_counts: pl.DataFrame
     feature_filter_counts_summary: pl.DataFrame
+    retained_features: pl.DataFrame
+    retained_features_summary: pl.DataFrame
     model_sparsity: pl.DataFrame
     model_sparsity_summary: pl.DataFrame
     warnings: list[str]
@@ -96,6 +98,8 @@ class FinalRefitArtifacts:
     model_selection_selected: pl.DataFrame | None
     feature_filter_counts: pl.DataFrame
     feature_filter_counts_summary: pl.DataFrame
+    retained_features: pl.DataFrame
+    retained_features_summary: pl.DataFrame
     model_sparsity: pl.DataFrame
     model_sparsity_summary: pl.DataFrame
     warnings: list[str]
@@ -151,6 +155,7 @@ class OuterFoldResult:
     model_selection_selected_rows: list[dict[str, Any]]
     model_selection_trial_rows: list[dict[str, Any]]
     feature_filter_count_rows: list[dict[str, Any]]
+    retained_feature_rows: list[dict[str, Any]]
     model_sparsity_rows: list[dict[str, Any]]
     fold_model_count: int
     n_features_before_preprocess: int
@@ -278,6 +283,30 @@ def _empty_feature_filter_counts_summary() -> pl.DataFrame:
     )
 
 
+def _empty_retained_features() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "scope": pl.String,
+            "fold_id": pl.String,
+            "sample_set_id": pl.Int64,
+            "feature": pl.String,
+        }
+    )
+
+
+def _empty_retained_features_summary() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "scope": pl.String,
+            "fold_id": pl.String,
+            "feature": pl.String,
+            "retained_count": pl.Int64,
+            "n_sample_sets": pl.Int64,
+            "retained_rate": pl.Float64,
+        }
+    )
+
+
 def _feature_filter_count_row(
     *,
     scope: str,
@@ -331,6 +360,55 @@ def _summarize_feature_filter_counts(feature_filter_counts: pl.DataFrame) -> pl.
     return summary.with_columns(
         pl.col("stage").replace(_FEATURE_FILTER_STAGE_ORDER).alias("_stage_order"),
     ).sort(["scope", "_stage_order"]).drop("_stage_order")
+
+
+def _retained_feature_rows(
+    *,
+    scope: str,
+    fold_id: str,
+    sample_set_id: int,
+    features: list[str],
+) -> list[dict[str, Any]]:
+    unique_features = list(dict.fromkeys(str(feature) for feature in features))
+    return [
+        {
+            "scope": scope,
+            "fold_id": fold_id,
+            "sample_set_id": int(sample_set_id),
+            "feature": feature,
+        }
+        for feature in unique_features
+    ]
+
+
+def _build_retained_features(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    if not rows:
+        return _empty_retained_features()
+    return pl.DataFrame(rows).sort(["scope", "fold_id", "sample_set_id", "feature"])
+
+
+def _summarize_retained_features(retained_features: pl.DataFrame) -> pl.DataFrame:
+    if retained_features.height == 0:
+        return _empty_retained_features_summary()
+    unique_rows = retained_features.unique(["scope", "fold_id", "sample_set_id", "feature"])
+    sample_set_counts = (
+        unique_rows.select(["scope", "fold_id", "sample_set_id"])
+        .unique()
+        .group_by(["scope", "fold_id"])
+        .agg(pl.len().alias("n_sample_sets"))
+    )
+    return (
+        unique_rows.group_by(["scope", "fold_id", "feature"])
+        .agg(pl.len().alias("retained_count"))
+        .join(sample_set_counts, on=["scope", "fold_id"], how="left")
+        .with_columns(
+            (pl.col("retained_count") / pl.col("n_sample_sets")).alias("retained_rate"),
+        )
+        .sort(
+            ["scope", "fold_id", "retained_rate", "retained_count", "feature"],
+            descending=[False, False, True, True, False],
+        )
+    )
 
 
 def _empty_model_sparsity() -> pl.DataFrame:
@@ -2533,6 +2611,7 @@ def run_final_refit(
 
     model_entries: list[FinalModelEntry] = []
     feature_filter_count_rows: list[dict[str, Any]] = []
+    retained_feature_rows: list[dict[str, Any]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
     sampled_train_loss_values: list[float] = []
     sampled_external_loss_values: list[float] = []
@@ -2544,6 +2623,14 @@ def run_final_refit(
                 fold_id="NA",
                 sample_set_id=sample_set_id,
                 counts=fit_result.filter_counts,
+            )
+        )
+        retained_feature_rows.extend(
+            _retained_feature_rows(
+                scope="final_refit",
+                fold_id="NA",
+                sample_set_id=sample_set_id,
+                features=fit_result.selected_features,
             )
         )
         warnings.extend(fit_result.warnings)
@@ -2652,6 +2739,8 @@ def run_final_refit(
         )
     feature_filter_counts = _build_feature_filter_counts(feature_filter_count_rows)
     feature_filter_counts_summary = _summarize_feature_filter_counts(feature_filter_counts)
+    retained_features = _build_retained_features(retained_feature_rows)
+    retained_features_summary = _summarize_retained_features(retained_features)
     model_sparsity = _build_model_sparsity(model_sparsity_rows)
     model_sparsity_summary = _summarize_model_sparsity(model_sparsity)
 
@@ -2662,6 +2751,8 @@ def run_final_refit(
         model_selection_selected=model_selection_selected,
         feature_filter_counts=feature_filter_counts,
         feature_filter_counts_summary=feature_filter_counts_summary,
+        retained_features=retained_features,
+        retained_features_summary=retained_features_summary,
         model_sparsity=model_sparsity,
         model_sparsity_summary=model_sparsity_summary,
         warnings=warnings,
@@ -2910,6 +3001,7 @@ def _run_outer_fold(
 
     sample_results: dict[int, OuterSampleSetFitResult] = {}
     feature_filter_count_rows: list[dict[str, Any]] = []
+    retained_feature_rows: list[dict[str, Any]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
 
     def _record_sample_fit_result(sample_set_id: int, fit_result: OuterSampleSetFitResult) -> None:
@@ -2921,6 +3013,14 @@ def _run_outer_fold(
                 fold_id=fold_id,
                 sample_set_id=sample_set_id,
                 counts=counts,
+            )
+        )
+        retained_feature_rows.extend(
+            _retained_feature_rows(
+                scope="outer_fold",
+                fold_id=fold_id,
+                sample_set_id=sample_set_id,
+                features=fit_result.selected_features,
             )
         )
         model_sparsity_rows.extend(fit_result.model_sparsity_rows)
@@ -3086,6 +3186,7 @@ def _run_outer_fold(
         model_selection_selected_rows=model_selection_selected_rows,
         model_selection_trial_rows=model_selection_trial_rows,
         feature_filter_count_rows=feature_filter_count_rows,
+        retained_feature_rows=retained_feature_rows,
         model_sparsity_rows=model_sparsity_rows,
         fold_model_count=fold_model_count,
         n_features_before_preprocess=n_features_before_preprocess,
@@ -3120,6 +3221,7 @@ def run_outer_cv(
     model_selection_selected_rows: list[dict[str, Any]] = []
     model_selection_trial_rows: list[dict[str, Any]] = []
     feature_filter_count_rows: list[dict[str, Any]] = []
+    retained_feature_rows: list[dict[str, Any]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
     max_fold_ensemble_size = 0
 
@@ -3155,6 +3257,7 @@ def run_outer_cv(
         model_selection_selected_rows.extend(fold_result.model_selection_selected_rows)
         model_selection_trial_rows.extend(fold_result.model_selection_trial_rows)
         feature_filter_count_rows.extend(fold_result.feature_filter_count_rows)
+        retained_feature_rows.extend(fold_result.retained_feature_rows)
         model_sparsity_rows.extend(fold_result.model_sparsity_rows)
         max_fold_ensemble_size = max(max_fold_ensemble_size, fold_result.fold_model_count)
 
@@ -3298,6 +3401,8 @@ def run_outer_cv(
         model_selection_trials_summary = _summarize_model_selection_trials(model_selection_trials)
     feature_filter_counts = _build_feature_filter_counts(feature_filter_count_rows)
     feature_filter_counts_summary = _summarize_feature_filter_counts(feature_filter_counts)
+    retained_features = _build_retained_features(retained_feature_rows)
+    retained_features_summary = _summarize_retained_features(retained_features)
     model_sparsity = _build_model_sparsity(model_sparsity_rows)
     model_sparsity_summary = _summarize_model_sparsity(model_sparsity)
 
@@ -3314,6 +3419,8 @@ def run_outer_cv(
         model_selection_trials_summary=model_selection_trials_summary,
         feature_filter_counts=feature_filter_counts,
         feature_filter_counts_summary=feature_filter_counts_summary,
+        retained_features=retained_features,
+        retained_features_summary=retained_features_summary,
         model_sparsity=model_sparsity,
         model_sparsity_summary=model_sparsity_summary,
         warnings=warnings,
