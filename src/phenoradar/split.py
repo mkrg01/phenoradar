@@ -25,6 +25,7 @@ class SplitArtifacts:
     """Generated split metadata artifacts for one run."""
 
     split_manifest: pl.DataFrame
+    fold_validation_groups: pl.DataFrame
     pool_counts: dict[str, int]
     fold_count: int
     expression_rows_excluded: int
@@ -287,6 +288,51 @@ def _build_split_manifest(
     return manifest.sort(by=["pool", "fold_id", "group_id", "species"], nulls_last=False)
 
 
+def _build_fold_validation_groups(
+    training_df: pl.DataFrame,
+    folds: list[tuple[list[int], list[int]]],
+) -> pl.DataFrame:
+    groups = training_df.select("__group").to_series().to_list()
+    labels = training_df.select("__label").to_series().to_list()
+
+    rows: list[dict[str, Any]] = []
+    for fold_id, (_train_idx, valid_idx) in enumerate(folds):
+        for idx in valid_idx:
+            rows.append(
+                {
+                    "fold_id": str(fold_id),
+                    "group_id": str(groups[idx]),
+                    "label": int(labels[idx]),
+                }
+            )
+
+    if not rows:
+        raise SplitError("Fold validation-group manifest is empty")
+
+    manifest = pl.DataFrame(rows).group_by(["fold_id", "group_id"]).agg(
+        pl.len().alias("n_validation_species"),
+        pl.col("label").sum().alias("n_validation_pos"),
+    )
+    return (
+        manifest.with_columns(
+            (
+                pl.col("n_validation_species") - pl.col("n_validation_pos")
+            ).alias("n_validation_neg"),
+            pl.col("fold_id").cast(pl.Int64).alias("__fold_order"),
+        )
+        .select(
+            "fold_id",
+            "group_id",
+            "n_validation_species",
+            "n_validation_pos",
+            "n_validation_neg",
+            "__fold_order",
+        )
+        .sort(["__fold_order", "group_id"])
+        .drop("__fold_order")
+    )
+
+
 def build_split_artifacts(config: AppConfig) -> SplitArtifacts:
     """Build split manifest and related counts from input config."""
     metadata = _normalize_metadata(config)
@@ -303,6 +349,7 @@ def build_split_artifacts(config: AppConfig) -> SplitArtifacts:
     _preflight_group_labels(training_df)
     folds = _build_fold_indices(config, training_df)
     manifest = _build_split_manifest(training_df, external_df, inference_df, folds)
+    fold_validation_groups = _build_fold_validation_groups(training_df, folds)
 
     pool_counts = {
         _POOL_TRAINING_VALIDATION: training_df.height,
@@ -312,6 +359,7 @@ def build_split_artifacts(config: AppConfig) -> SplitArtifacts:
 
     return SplitArtifacts(
         split_manifest=manifest,
+        fold_validation_groups=fold_validation_groups,
         pool_counts=pool_counts,
         fold_count=len(folds),
         expression_rows_excluded=excluded_rows,

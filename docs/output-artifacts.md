@@ -39,6 +39,11 @@ Always written:
   - pools: `train`, `validation`, `external_test`, `discovery_inference`
   - `train` / `validation` rows are the per-fold expansion of the internal
     `training_validation` pool.
+- `fold_validation_groups.tsv`
+  - columns: `fold_id`, `group_id`, `n_validation_species`, `n_validation_pos`, `n_validation_neg`
+  - one row per validation-side group in each outer fold
+  - for `logo`, each `fold_id` has exactly one row
+  - for `group_kfold`, a `fold_id` can have multiple rows
 - `metrics_cv.tsv`
   - columns: `aggregate_scope`, `fold_id`, `metric`, `metric_value`, `n_pos`, `n_neg`, `n_valid_folds`
   - `aggregate_scope`: per-fold rows use `NA`, aggregate rows use `macro`/`micro`
@@ -186,6 +191,13 @@ Conditionally written:
   - `NA` for `external_test` and `discovery_inference`.
 - `group_id`: only meaningful for CV pools (`train`/`validation`).
 - `label`: known only where metadata has trait label.
+
+#### `fold_validation_groups.tsv`
+
+- Lookup table from outer `fold_id` to validation-side `group_id`.
+- Use this when numeric `fold_id` values need to be interpreted later.
+- In `logo`, this is the held-out group for each fold.
+- In `group_kfold`, multiple validation groups can map to the same fold.
 
 #### `thresholds.tsv`
 

@@ -73,6 +73,38 @@ def test_build_split_artifacts_success(tmp_path: Path) -> None:
     assert artifacts.pool_counts["discovery_inference"] == 1
     assert artifacts.expression_rows_excluded == 0
     assert artifacts.split_manifest.height > 0
+    assert artifacts.fold_validation_groups.height == 2
+
+
+def test_fold_validation_groups_map_logo_folds_to_held_out_groups(tmp_path: Path) -> None:
+    metadata, tpm = _fixture_data(tmp_path)
+    config = load_and_resolve_config([_write_config(tmp_path, metadata, tpm)])
+
+    fold_validation_groups = build_split_artifacts(config).fold_validation_groups
+
+    assert fold_validation_groups.columns == [
+        "fold_id",
+        "group_id",
+        "n_validation_species",
+        "n_validation_pos",
+        "n_validation_neg",
+    ]
+    assert fold_validation_groups.to_dicts() == [
+        {
+            "fold_id": "0",
+            "group_id": "g1",
+            "n_validation_species": 2,
+            "n_validation_pos": 1,
+            "n_validation_neg": 1,
+        },
+        {
+            "fold_id": "1",
+            "group_id": "g2",
+            "n_validation_species": 2,
+            "n_validation_pos": 1,
+            "n_validation_neg": 1,
+        },
+    ]
 
 
 def test_split_manifest_fold_train_validation_are_disjoint_by_group_and_species(

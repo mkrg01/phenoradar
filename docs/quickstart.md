@@ -116,6 +116,7 @@ Core outputs include:
 
 - `resolved_config.yml`
 - `split_manifest.tsv`
+- `fold_validation_groups.tsv`
 - `metrics_cv.tsv`
 - `thresholds.tsv`
 - `feature_importance.tsv`

@@ -55,6 +55,7 @@ Always written:
 
 - `resolved_config.yml`
 - `split_manifest.tsv`
+- `fold_validation_groups.tsv`
 - `metrics_cv.tsv`
 - `loss_by_split_cv.tsv`
 - `thresholds.tsv`

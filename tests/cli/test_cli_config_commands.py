@@ -85,6 +85,15 @@ def _stub_resolved_config(*, execution_stage: str) -> SimpleNamespace:
 def _stub_split_artifacts() -> SimpleNamespace:
     return SimpleNamespace(
         split_manifest=pl.DataFrame({"fold_id": ["0"], "species": ["sp1"], "pool": ["validation"]}),
+        fold_validation_groups=pl.DataFrame(
+            {
+                "fold_id": ["0"],
+                "group_id": ["g1"],
+                "n_validation_species": [1],
+                "n_validation_pos": [1],
+                "n_validation_neg": [0],
+            }
+        ),
         fold_count=1,
         pool_counts={"validation": 1},
         expression_rows_excluded=0,
@@ -384,6 +393,7 @@ data:
     resolved = yaml.safe_load(resolved_path.read_text(encoding="utf-8"))
     assert resolved["runtime"]["execution_stage"] == "full_run"
     assert (run_dirs[0] / "split_manifest.tsv").exists()
+    assert (run_dirs[0] / "fold_validation_groups.tsv").exists()
     assert (run_dirs[0] / "metrics_cv.tsv").exists()
     assert (run_dirs[0] / "loss_by_split_cv.tsv").exists()
     assert (run_dirs[0] / "thresholds.tsv").exists()
@@ -418,6 +428,17 @@ data:
 
     metrics = pl.read_csv(run_dirs[0] / "metrics_cv.tsv", separator="\t")
     assert {"aggregate_scope", "fold_id", "metric", "metric_value"}.issubset(metrics.columns)
+    fold_validation_groups = pl.read_csv(
+        run_dirs[0] / "fold_validation_groups.tsv",
+        separator="\t",
+    )
+    assert {
+        "fold_id",
+        "group_id",
+        "n_validation_species",
+        "n_validation_pos",
+        "n_validation_neg",
+    }.issubset(fold_validation_groups.columns)
     thresholds = pl.read_csv(run_dirs[0] / "thresholds.tsv", separator="\t")
     assert set(thresholds.select("threshold_name").to_series().to_list()) == {
         "fixed_probability_threshold",
@@ -1075,7 +1096,10 @@ def test_run_fails_when_cv_threshold_is_missing(
     )
     monkeypatch.setattr(
         "phenoradar.cli.build_split_artifacts",
-        lambda *_args, **_kwargs: SimpleNamespace(split_manifest=pl.DataFrame()),
+        lambda *_args, **_kwargs: SimpleNamespace(
+            split_manifest=pl.DataFrame(),
+            fold_validation_groups=pl.DataFrame(),
+        ),
     )
     monkeypatch.setattr(
         "phenoradar.cli.run_outer_cv",

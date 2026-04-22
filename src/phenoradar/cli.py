@@ -715,6 +715,9 @@ def run(
     run_dir = _build_run_dir("run")
     write_resolved_config(resolved, run_dir / "resolved_config.yml")
     split_artifacts.split_manifest.write_csv(run_dir / "split_manifest.tsv", separator="\t")
+    split_artifacts.fold_validation_groups.write_csv(
+        run_dir / "fold_validation_groups.tsv", separator="\t"
+    )
     cv_artifacts.metrics_cv.write_csv(
         run_dir / "metrics_cv.tsv", separator="\t", float_precision=8, null_value="NA"
     )
@@ -1000,8 +1003,8 @@ def run(
         )
     typer.echo(
         f"Wrote run artifacts at {run_dir} "
-        "(resolved_config.yml, split_manifest.tsv, metrics_cv.tsv, loss_by_split_cv.tsv, "
-        "thresholds.tsv, "
+        "(resolved_config.yml, split_manifest.tsv, fold_validation_groups.tsv, "
+        "metrics_cv.tsv, loss_by_split_cv.tsv, thresholds.tsv, "
         "feature_importance.tsv, coefficients.tsv, prediction_cv.tsv, "
         "feature_filter_counts.tsv, feature_filter_counts_summary.tsv, "
         "model_sparsity.tsv, model_sparsity_summary.tsv, "
