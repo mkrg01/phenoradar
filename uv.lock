@@ -828,7 +828,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0,<6.0.0" },
     { name = "pyyaml", specifier = ">=6.0.2,<7.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.9,<1.0.0" },
-    { name = "scikit-learn", specifier = ">=1.5.2,<2.0.0" },
+    { name = "scikit-learn", specifier = ">=1.8.0,<2.0.0" },
     { name = "typer", specifier = ">=0.12.5,<1.0.0" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12.20250915,<7.0.0" },
 ]

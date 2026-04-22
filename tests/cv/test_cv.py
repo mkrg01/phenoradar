@@ -6,6 +6,7 @@ import numpy as np
 import polars as pl
 import pytest
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss
 
 import phenoradar.cv as cv_mod
@@ -1386,6 +1387,49 @@ model:
 
     with pytest.raises(CVError, match="calibration requires at least 2 samples per class"):
         _build_estimator(config, model_seed=123, y_train=np.array([1, 1, 1], dtype=int))
+
+
+def test_build_estimator_logistic_elasticnet_uses_l1_ratio_semantics() -> None:
+    config = load_and_resolve_config([], allow_empty=True)
+    x_train = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+        ],
+        dtype=float,
+    )
+    y_train = np.array([0, 0, 0, 1, 0, 1, 1, 1], dtype=int)
+
+    l2_estimator = _build_estimator(
+        config,
+        model_seed=123,
+        y_train=y_train,
+        model_params={"C": 0.7, "l1_ratio": 0.0, "max_iter": 5000},
+    )
+    elasticnet_estimator = _build_estimator(
+        config,
+        model_seed=123,
+        y_train=y_train,
+        model_params={"C": 0.7, "l1_ratio": 0.5, "max_iter": 5000},
+    )
+
+    assert isinstance(l2_estimator, LogisticRegression)
+    assert isinstance(elasticnet_estimator, LogisticRegression)
+    assert l2_estimator.solver == "saga"
+    assert elasticnet_estimator.solver == "saga"
+    assert l2_estimator.l1_ratio == pytest.approx(0.0)
+    assert elasticnet_estimator.l1_ratio == pytest.approx(0.5)
+
+    _fit_estimator(l2_estimator, x_train, y_train, sample_weight=None)
+    _fit_estimator(elasticnet_estimator, x_train, y_train, sample_weight=None)
+
+    assert not np.allclose(l2_estimator.coef_, elasticnet_estimator.coef_)
 
 
 def test_build_estimator_random_forest_respects_explicit_n_jobs(tmp_path: Path) -> None:

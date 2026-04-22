@@ -243,6 +243,10 @@ Compatibility rules:
 - `model.name`
   - type: `logistic_elasticnet | linear_svm | random_forest`
   - default: `logistic_elasticnet`
+  - note:
+    - `logistic_elasticnet` assumes scikit-learn `>= 1.8`.
+    - with the built-in `saga` solver, `l1_ratio=0` gives L2, `l1_ratio=1`
+      gives L1, and `0 < l1_ratio < 1` gives elastic-net.
 
 ## `model_selection`
 
