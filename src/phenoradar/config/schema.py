@@ -130,6 +130,7 @@ class DataConfig(StrictModel):
 
     metadata_path: str = "testdata/c4_tiny/species_metadata.tsv"
     tpm_path: str = "testdata/c4_tiny/tpm.tsv"
+    tree_path: str | None = None
     species_col: str = "species"
     feature_col: str = "orthogroup"
     value_col: str = "tpm"

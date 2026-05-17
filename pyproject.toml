@@ -35,6 +35,10 @@ dev = [
   "pre-commit>=3.8.0,<4.0.0",
   "types-PyYAML>=6.0.12.20250915,<7.0.0",
 ]
+tree = [
+  "toytree>=3.0.0,<4.0.0",
+  "toyplot>=2.0.0,<3.0.0",
+]
 
 [dependency-groups]
 taxonomy = [

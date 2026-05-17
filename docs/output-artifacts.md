@@ -251,6 +251,14 @@ Conditionally written:
   - Larger value means lower ensemble agreement.
 - Use this file to inspect separation, calibration, and threshold effects without touching final-refit outputs.
 
+#### `tree_prediction_cv_annotation.tsv` (optional)
+
+- Written when `data.tree_path` is set.
+- ggtree/Toytree-friendly tip annotation for CV species with non-empty `contrast_pair_id`.
+- Columns: `label`, `species`, `true_label`, `prob`, `pred_label`, `uncertainty_std`,
+  `contrast_pair_id`, `fold_id`.
+- `pred_label` uses the CV-derived threshold when available.
+
 #### `prediction_external_test.tsv` / `prediction_inference.tsv`
 
 - `prob`: predicted probability of label `1`.
@@ -262,6 +270,17 @@ Conditionally written:
 - `uncertainty_std` (optional):
   - Standard deviation of per-model probabilities in ensemble.
   - Larger value means lower ensemble agreement.
+
+#### `tree_prediction_external_annotation.tsv` / `tree_prediction_predict_annotation.tsv` (optional)
+
+- Written when `data.tree_path` is set and the corresponding prediction table exists.
+- External-test columns: `label`, `species`, `true_label`, `prob`, `pred_label`,
+  `uncertainty_std`, `contrast_pair_id`.
+- Predict columns: `label`, `species`, `true_label`, `prob`,
+  `pred_label_fixed_threshold`, `pred_label_cv_derived_threshold`, `uncertainty_std`,
+  `contrast_pair_id`.
+- The annotation TSV retains predicted species even when a species is absent from the tree;
+  Toytree SVG output is pruned to species present in the tree.
 
 #### `feature_filter_counts.tsv`
 
@@ -442,6 +461,10 @@ Conditionally written:
 - `final_refit_loss_by_split.svg` (`full_run`)
   - Final-refit `log_loss` comparison of `train` and `external_test`.
   - Useful for quick train-vs-external generalization diagnostics.
+- `tree_prediction_cv.svg` / `tree_prediction_external.svg` (optional)
+  - Written when `data.tree_path` is set and `phenoradar[tree]` is installed.
+  - Rectangular Toytree view with aligned tracks for trait label, probability,
+    predicted label, uncertainty, contrast pair, and fold where applicable.
 
 ## `predict` artifacts (schemas and interpretation)
 
@@ -465,6 +488,10 @@ Conditionally written:
   - Histogram of predicted probabilities in bins `[0.0, 0.1), ... , [0.9, 1.0]`.
 - `predict_uncertainty.svg` (ensemble only)
   - Top species by `uncertainty_std`; high bars indicate less stable predictions.
+- `tree_prediction_predict.svg` (optional)
+  - Written when `data.tree_path` is set and `phenoradar[tree]` is installed.
+  - Tree view with aligned tracks for true label when known, probability,
+    CV-threshold prediction, uncertainty, and contrast pair when available.
 
 ## `report` artifacts (schemas and interpretation)
 

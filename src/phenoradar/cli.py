@@ -52,6 +52,11 @@ from phenoradar.testdata import (
     TestDataError,
     fetch_c4_tiny_test_data,
 )
+from phenoradar.tree_prediction import (
+    TreePredictionError,
+    write_predict_tree_prediction_artifacts,
+    write_run_tree_prediction_artifacts,
+)
 
 app = typer.Typer(
     help="PhenoRadar: orthogroup TPM-based phenotype prediction CLI",
@@ -961,6 +966,7 @@ def run(
     )
     figure_warnings: list[str] = []
     _log("Generate run figures.")
+    tree_path = getattr(resolved.data, "tree_path", None)
     try:
         figure_warnings = write_run_figures(
             run_dir=run_dir,
@@ -990,6 +996,26 @@ def run(
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    if tree_path is not None:
+        try:
+            tree_warnings = write_run_tree_prediction_artifacts(
+                run_dir=run_dir,
+                tree_path=Path(tree_path),
+                metadata_path=Path(resolved.data.metadata_path),
+                species_col=resolved.data.species_col,
+                trait_col=resolved.data.trait_col,
+                group_col=resolved.data.group_col,
+                oof_predictions=cv_artifacts.oof_predictions,
+                thresholds=cv_artifacts.thresholds,
+                pred_external_test=(
+                    None
+                    if final_refit_artifacts is None
+                    else final_refit_artifacts.pred_external_test
+                ),
+            )
+        except TreePredictionError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        figure_warnings.extend(tree_warnings)
     warnings.extend(figure_warnings)
     _log(f"Run figures generated (figure_warnings={len(figure_warnings)}).")
 
@@ -1001,6 +1027,7 @@ def run(
                 *config_paths,
                 Path(resolved.data.metadata_path),
                 Path(resolved.data.tpm_path),
+                *([] if tree_path is None else [Path(tree_path)]),
             ]
         )
     except ProvenanceError as exc:
@@ -1419,6 +1446,7 @@ def predict(
         null_value="NA",
     )
     _log("Generate prediction figures.")
+    tree_path = getattr(resolved.data, "tree_path", None)
     try:
         write_predict_figures(
             run_dir=run_dir,
@@ -1427,6 +1455,20 @@ def predict(
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    if tree_path is not None:
+        try:
+            tree_warnings = write_predict_tree_prediction_artifacts(
+                run_dir=run_dir,
+                tree_path=Path(tree_path),
+                metadata_path=Path(resolved.data.metadata_path),
+                species_col=resolved.data.species_col,
+                trait_col=resolved.data.trait_col,
+                group_col=resolved.data.group_col,
+                pred_predict=pred_predict,
+            )
+        except TreePredictionError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        predict_warnings.extend(tree_warnings)
     end_time = datetime.now(UTC)
     _log("Collect provenance metadata.")
     try:
@@ -1435,6 +1477,7 @@ def predict(
                 config_path,
                 Path(resolved.data.metadata_path),
                 Path(resolved.data.tpm_path),
+                *([] if tree_path is None else [Path(tree_path)]),
                 model_bundle / "bundle_manifest.json",
             ]
         )

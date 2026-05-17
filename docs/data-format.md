@@ -98,6 +98,21 @@ Pool assignment is derived from `(trait, group)`:
 - `trait` present and `group` missing -> `external_test`
 - `trait` missing -> `discovery_inference`
 
+## Tree Newick
+
+Optional path/key:
+
+- `data.tree_path` (default: `null`)
+
+When `data.tree_path` is set, `phenoradar run` and `phenoradar predict` write
+ggtree-friendly tree prediction annotation TSV files. If the optional tree visualization
+dependencies are installed with `pip install "phenoradar[tree]"`, Toytree SVG figures are
+also written under `figures/`.
+
+Tree tip labels must match metadata and prediction `species` values. In CV runs, tree
+prediction artifacts focus on species with non-empty `contrast_pair_id`. In external-test
+and predict outputs, all predicted species are included in the annotation TSV.
+
 Training preflight requirement:
 
 - each training group must include both labels (`0` and `1`)

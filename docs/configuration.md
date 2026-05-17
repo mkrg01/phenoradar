@@ -124,6 +124,11 @@ runtime:
 - `data.tpm_path`
   - type: `str`
   - default: `testdata/c4_tiny/tpm.tsv`
+- `data.tree_path`
+  - type: `str | null`
+  - default: `null`
+  - optional Newick tree used to write tree prediction annotation TSVs and, when
+    `phenoradar[tree]` is installed, Toytree SVG figures.
 - `data.species_col`
   - type: `str`
   - default: `species`
