@@ -134,16 +134,33 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "importance_mean",
         "importance_std",
         "n_models",
+        "n_folds",
         "method",
     }.issubset(cv_artifacts.feature_importance.columns)
+    assert {
+        "fold_id",
+        "feature",
+        "importance_mean",
+        "n_models",
+        "method",
+    }.issubset(cv_artifacts.feature_importance_by_fold.columns)
     assert {
         "feature",
         "coef_mean",
         "coef_std",
         "n_models",
+        "n_folds",
         "method",
         "reason",
     }.issubset(cv_artifacts.coefficients.columns)
+    assert {
+        "fold_id",
+        "feature",
+        "coef_mean",
+        "n_models",
+        "method",
+        "reason",
+    }.issubset(cv_artifacts.coefficients_by_fold.columns)
     aggregate_rows = cv_artifacts.metrics_cv.filter(pl.col("fold_id") == "NA")
     assert aggregate_rows.height > 0
     assert aggregate_rows.filter(pl.col("n_valid_folds").is_null()).height == 0

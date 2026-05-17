@@ -24,6 +24,7 @@ class ModelFeatureEntry:
 
     feature_names: list[str]
     model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier
+    fold_id: str = "NA"
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,8 @@ class InterpretationArtifacts:
 
     feature_importance: pl.DataFrame
     coefficients: pl.DataFrame
+    feature_importance_by_fold: pl.DataFrame
+    coefficients_by_fold: pl.DataFrame
     warnings: list[str]
 
 
@@ -146,26 +149,94 @@ def build_interpretation_tables(entries: list[ModelFeatureEntry]) -> Interpretat
         )
     importance_method = next(iter(methods))
 
-    importance_mean = np.mean(importance_matrix, axis=0)
-    importance_std = np.std(importance_matrix, axis=0)
+    fold_ids = [str(entry.fold_id) for entry in entries]
+    unique_fold_ids = sorted(
+        set(fold_ids),
+        key=lambda value: (0, int(value)) if value.isdigit() else (1, value),
+    )
+    fold_importance_rows: list[dict[str, float | int | str]] = []
+    fold_coefficient_rows: list[dict[str, float | int | str | None]] = []
+    fold_importance_matrix = np.zeros((len(unique_fold_ids), len(all_features)), dtype=float)
+    fold_coefficient_matrix = np.zeros((len(unique_fold_ids), len(all_features)), dtype=float)
+    for fold_idx, fold_id in enumerate(unique_fold_ids):
+        model_mask = np.array([entry_fold_id == fold_id for entry_fold_id in fold_ids], dtype=bool)
+        fold_importance = np.mean(importance_matrix[model_mask, :], axis=0)
+        fold_importance_matrix[fold_idx, :] = fold_importance
+        fold_model_count = int(np.count_nonzero(model_mask))
+        for feature_name, importance_value in zip(
+            all_features,
+            fold_importance.tolist(),
+            strict=True,
+        ):
+            fold_importance_rows.append(
+                {
+                    "fold_id": fold_id,
+                    "feature": feature_name,
+                    "importance_mean": float(importance_value),
+                    "n_models": fold_model_count,
+                    "method": importance_method,
+                }
+            )
+
+        if coefficient_supported:
+            fold_coefficient = np.mean(coefficient_matrix[model_mask, :], axis=0)
+            fold_coefficient_matrix[fold_idx, :] = fold_coefficient
+            for feature_name, coefficient_value in zip(
+                all_features,
+                fold_coefficient.tolist(),
+                strict=True,
+            ):
+                fold_coefficient_rows.append(
+                    {
+                        "fold_id": fold_id,
+                        "feature": feature_name,
+                        "coef_mean": float(coefficient_value),
+                        "n_models": fold_model_count,
+                        "method": "coef_signed",
+                        "reason": "NA",
+                    }
+                )
+        else:
+            for feature_name in all_features:
+                fold_coefficient_rows.append(
+                    {
+                        "fold_id": fold_id,
+                        "feature": feature_name,
+                        "coef_mean": None,
+                        "n_models": fold_model_count,
+                        "method": "NA",
+                        "reason": "unsupported_model_non_linear",
+                    }
+                )
+
+    importance_mean = np.mean(fold_importance_matrix, axis=0)
+    importance_std = np.std(fold_importance_matrix, axis=0)
+    feature_importance_by_fold = pl.DataFrame(fold_importance_rows).sort(["fold_id", "feature"])
     feature_importance = pl.DataFrame(
         {
             "feature": all_features,
             "importance_mean": importance_mean.astype(float, copy=False).tolist(),
             "importance_std": importance_std.astype(float, copy=False).tolist(),
             "n_models": [n_models] * len(all_features),
+            "n_folds": [len(unique_fold_ids)] * len(all_features),
             "method": [importance_method] * len(all_features),
         }
     ).sort("feature")
 
     coefficients_df: pl.DataFrame
+    coefficients_by_fold = pl.DataFrame(fold_coefficient_rows).sort(["fold_id", "feature"])
     if coefficient_supported:
         coefficients_df = pl.DataFrame(
             {
                 "feature": all_features,
-                "coef_mean": np.mean(coefficient_matrix, axis=0).astype(float, copy=False).tolist(),
-                "coef_std": np.std(coefficient_matrix, axis=0).astype(float, copy=False).tolist(),
+                "coef_mean": np.mean(fold_coefficient_matrix, axis=0)
+                .astype(float, copy=False)
+                .tolist(),
+                "coef_std": np.std(fold_coefficient_matrix, axis=0)
+                .astype(float, copy=False)
+                .tolist(),
                 "n_models": [n_models] * len(all_features),
+                "n_folds": [len(unique_fold_ids)] * len(all_features),
                 "method": ["coef_signed"] * len(all_features),
                 "reason": ["NA"] * len(all_features),
             }
@@ -177,6 +248,7 @@ def build_interpretation_tables(entries: list[ModelFeatureEntry]) -> Interpretat
                 "coef_mean": [None] * len(all_features),
                 "coef_std": [None] * len(all_features),
                 "n_models": [n_models] * len(all_features),
+                "n_folds": [len(unique_fold_ids)] * len(all_features),
                 "method": ["NA"] * len(all_features),
                 "reason": ["unsupported_model_non_linear"] * len(all_features),
             }
@@ -185,5 +257,7 @@ def build_interpretation_tables(entries: list[ModelFeatureEntry]) -> Interpretat
     return InterpretationArtifacts(
         feature_importance=feature_importance,
         coefficients=coefficients_df,
+        feature_importance_by_fold=feature_importance_by_fold,
+        coefficients_by_fold=coefficients_by_fold,
         warnings=warnings,
     )

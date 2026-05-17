@@ -527,7 +527,11 @@ def _threshold_selection_curve(
     _save_svg_figure(fig, out_path)
 
 
-def _feature_importance_top(feature_importance: pl.DataFrame, out_path: Path) -> None:
+def _feature_importance_top(
+    feature_importance: pl.DataFrame,
+    out_path: Path,
+    feature_importance_by_fold: pl.DataFrame | None = None,
+) -> None:
     required = {"feature", "importance_mean"}
     if not required.issubset(feature_importance.columns):
         raise FigureError("feature_importance.tsv schema is invalid for feature_importance_top.svg")
@@ -541,6 +545,109 @@ def _feature_importance_top(feature_importance: pl.DataFrame, out_path: Path) ->
 
     features = [str(v) for v in top.select("feature").to_series().to_list()]
     values = [float(v) for v in top.select("importance_mean").to_series().to_list()]
+    if feature_importance_by_fold is not None:
+        fold_required = {"fold_id", "feature", "importance_mean"}
+        if not fold_required.issubset(feature_importance_by_fold.columns):
+            raise FigureError(
+                "feature_importance_by_fold.tsv schema is invalid for feature_importance_top.svg"
+            )
+        fold_data = (
+            feature_importance_by_fold.select(
+                pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
+                pl.col("feature").cast(pl.String, strict=False).alias("__feature"),
+                pl.col("importance_mean").cast(pl.Float64, strict=False).alias("__value"),
+            )
+            .filter(
+                pl.col("__feature").is_in(features)
+                & pl.col("__value").is_not_null()
+                & pl.col("__value").is_finite()
+            )
+        )
+        if fold_data.height > 0:
+            feature_to_values = {
+                feature: np.array(
+                    fold_data.filter(pl.col("__feature") == feature)
+                    .sort("__fold_id")
+                    .select("__value")
+                    .to_series()
+                    .to_list(),
+                    dtype=float,
+                )
+                for feature in features
+            }
+            max_value = max(
+                [max(values) if values else 0.0]
+                + [
+                    float(np.max(feature_values))
+                    for feature_values in feature_to_values.values()
+                    if feature_values.size > 0
+                ]
+            )
+            if np.isclose(max_value, 0.0):
+                max_value = 1.0
+
+            height_px = max(340, 155 + len(features) * 27)
+            fig, ax = plt.subplots(figsize=_figure_size_inches(1300, height_px), dpi=_FIG_DPI)
+            fig.patch.set_facecolor("white")
+            fig.suptitle("Feature Importance Top", x=0.01, ha="left", fontsize=16)
+            fig.text(
+                0.01,
+                0.90,
+                "Top 30 by mean fold-level importance (box=IQR/median, marker=mean, points=folds)",
+                fontsize=10,
+            )
+
+            y_pos = np.arange(len(features), dtype=float)
+            plot_values = [
+                feature_to_values[feature]
+                if feature_to_values[feature].size > 0
+                else np.array([0.0], dtype=float)
+                for feature in features
+            ]
+            ax.boxplot(
+                plot_values,
+                orientation="horizontal",
+                positions=y_pos,
+                widths=0.58,
+                patch_artist=True,
+                showmeans=True,
+                boxprops={"facecolor": "#d8ead2", "edgecolor": "#2ca02c", "linewidth": 1.1},
+                whiskerprops={"color": "#2ca02c", "linewidth": 1.0},
+                capprops={"color": "#2ca02c", "linewidth": 1.0},
+                medianprops={"color": "#222222", "linewidth": 1.4},
+                meanprops={
+                    "marker": "D",
+                    "markerfacecolor": "#222222",
+                    "markeredgecolor": "#222222",
+                    "markersize": 4.5,
+                },
+                flierprops={"marker": ""},
+            )
+            for y, feature in zip(y_pos, features, strict=True):
+                feature_values = feature_to_values[feature]
+                if feature_values.size == 0:
+                    continue
+                offsets = np.linspace(-0.16, 0.16, feature_values.size)
+                ax.scatter(
+                    feature_values,
+                    y + offsets,
+                    s=22,
+                    color="#222222",
+                    alpha=0.72,
+                    edgecolors="none",
+                    zorder=3,
+                )
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(features, fontsize=9, fontfamily="monospace")
+            ax.invert_yaxis()
+            ax.set_xlim(0.0, max_value * 1.15)
+            ax.set_xlabel("fold-level importance_mean")
+            ax.grid(axis="x", color="#ececec", linewidth=0.8)
+            ax.set_axisbelow(True)
+            fig.subplots_adjust(left=0.33, right=0.96, top=0.84, bottom=0.12)
+            _save_svg_figure(fig, out_path)
+            return
+
     max_value = max(values) if values else 1.0
     if np.isclose(max_value, 0.0):
         max_value = 1.0
@@ -580,7 +687,11 @@ def _feature_importance_top(feature_importance: pl.DataFrame, out_path: Path) ->
     _save_svg_figure(fig, out_path)
 
 
-def _coefficients_signed_top(coefficients: pl.DataFrame, out_path: Path) -> None:
+def _coefficients_signed_top(
+    coefficients: pl.DataFrame,
+    out_path: Path,
+    coefficients_by_fold: pl.DataFrame | None = None,
+) -> None:
     required = {"feature", "coef_mean", "method"}
     if not required.issubset(coefficients.columns):
         raise FigureError("coefficients.tsv schema is invalid for coefficients_signed_top.svg")
@@ -596,6 +707,113 @@ def _coefficients_signed_top(coefficients: pl.DataFrame, out_path: Path) -> None
 
     features = [str(v) for v in top.select("feature").to_series().to_list()]
     values = [float(v) for v in top.select("coef_mean").to_series().to_list()]
+    if coefficients_by_fold is not None:
+        fold_required = {"fold_id", "feature", "coef_mean", "method"}
+        if not fold_required.issubset(coefficients_by_fold.columns):
+            raise FigureError(
+                "coefficients_by_fold.tsv schema is invalid for coefficients_signed_top.svg"
+            )
+        fold_data = (
+            coefficients_by_fold.filter(pl.col("method") == "coef_signed")
+            .select(
+                pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
+                pl.col("feature").cast(pl.String, strict=False).alias("__feature"),
+                pl.col("coef_mean").cast(pl.Float64, strict=False).alias("__value"),
+            )
+            .filter(
+                pl.col("__feature").is_in(features)
+                & pl.col("__value").is_not_null()
+                & pl.col("__value").is_finite()
+            )
+        )
+        if fold_data.height > 0:
+            feature_to_values = {
+                feature: np.array(
+                    fold_data.filter(pl.col("__feature") == feature)
+                    .sort("__fold_id")
+                    .select("__value")
+                    .to_series()
+                    .to_list(),
+                    dtype=float,
+                )
+                for feature in features
+            }
+            max_abs = max(
+                [max(abs(value) for value in values) if values else 0.0]
+                + [
+                    float(np.max(np.abs(feature_values)))
+                    for feature_values in feature_to_values.values()
+                    if feature_values.size > 0
+                ]
+            )
+            if np.isclose(max_abs, 0.0):
+                max_abs = 1.0
+
+            height_px = max(340, 160 + len(features) * 27)
+            fig, ax = plt.subplots(figsize=_figure_size_inches(1340, height_px), dpi=_FIG_DPI)
+            fig.patch.set_facecolor("white")
+            fig.suptitle("Coefficients Signed Top", x=0.01, ha="left", fontsize=16)
+            fig.text(
+                0.01,
+                0.90,
+                "Top 30 by |mean fold-level coef| (box=IQR/median, marker=mean, points=folds)",
+                fontsize=10,
+            )
+
+            y_pos = np.arange(len(features), dtype=float)
+            plot_values = [
+                feature_to_values[feature]
+                if feature_to_values[feature].size > 0
+                else np.array([0.0], dtype=float)
+                for feature in features
+            ]
+            ax.boxplot(
+                plot_values,
+                orientation="horizontal",
+                positions=y_pos,
+                widths=0.58,
+                patch_artist=True,
+                showmeans=True,
+                boxprops={"facecolor": "#d9e8f5", "edgecolor": "#1f77b4", "linewidth": 1.1},
+                whiskerprops={"color": "#1f77b4", "linewidth": 1.0},
+                capprops={"color": "#1f77b4", "linewidth": 1.0},
+                medianprops={"color": "#222222", "linewidth": 1.4},
+                meanprops={
+                    "marker": "D",
+                    "markerfacecolor": "#222222",
+                    "markeredgecolor": "#222222",
+                    "markersize": 4.5,
+                },
+                flierprops={"marker": ""},
+            )
+            for y, feature in zip(y_pos, features, strict=True):
+                feature_values = feature_to_values[feature]
+                if feature_values.size == 0:
+                    continue
+                offsets = np.linspace(-0.16, 0.16, feature_values.size)
+                point_colors = ["#1f77b4" if value >= 0 else "#d62728" for value in feature_values]
+                ax.scatter(
+                    feature_values,
+                    y + offsets,
+                    s=22,
+                    color=point_colors,
+                    alpha=0.78,
+                    edgecolors="none",
+                    zorder=3,
+                )
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(features, fontsize=9, fontfamily="monospace")
+            ax.invert_yaxis()
+            limit = max_abs * 1.15
+            ax.set_xlim(-limit, limit)
+            ax.set_xlabel("fold-level coef_mean (signed)")
+            ax.grid(axis="x", color="#ececec", linewidth=0.8)
+            ax.set_axisbelow(True)
+            ax.axvline(0.0, color="#444444", linewidth=1.3)
+            fig.subplots_adjust(left=0.31, right=0.96, top=0.84, bottom=0.12)
+            _save_svg_figure(fig, out_path)
+            return
+
     max_abs = max(abs(v) for v in values) if values else 1.0
     if np.isclose(max_abs, 0.0):
         max_abs = 1.0
@@ -1846,6 +2064,8 @@ def write_run_figures(
     ensemble_model_probs: pl.DataFrame | None,
     model_selection_trials: pl.DataFrame | None,
     auto_threshold_metric: Literal["mcc", "balanced_accuracy"],
+    feature_importance_by_fold: pl.DataFrame | None = None,
+    coefficients_by_fold: pl.DataFrame | None = None,
     loss_by_split_cv: pl.DataFrame | None = None,
     loss_by_split_final_refit: pl.DataFrame | None = None,
     pred_external_test: pl.DataFrame | None = None,
@@ -1873,8 +2093,16 @@ def write_run_figures(
         selection_metric=auto_threshold_metric,
         out_path=figures_dir / "threshold_selection_curve.svg",
     )
-    _feature_importance_top(feature_importance, figures_dir / "feature_importance_top.svg")
-    _coefficients_signed_top(coefficients, figures_dir / "coefficients_signed_top.svg")
+    _feature_importance_top(
+        feature_importance,
+        figures_dir / "feature_importance_top.svg",
+        feature_importance_by_fold=feature_importance_by_fold,
+    )
+    _coefficients_signed_top(
+        coefficients,
+        figures_dir / "coefficients_signed_top.svg",
+        coefficients_by_fold=coefficients_by_fold,
+    )
     _species_probability_by_trait(
         predictions=oof_predictions,
         trait_col="label",

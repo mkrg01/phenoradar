@@ -55,9 +55,13 @@ Always written:
   - columns: `threshold_name`, `threshold_value`, `source`, `selection_metric`, `selection_scope`
   - threshold names: `fixed_probability_threshold`, `cv_derived_threshold`
 - `feature_importance.tsv`
-  - columns: `feature`, `importance_mean`, `importance_std`, `n_models`, `method`
+  - columns: `feature`, `importance_mean`, `importance_std`, `n_models`, `n_folds`, `method`
+- `feature_importance_by_fold.tsv`
+  - columns: `fold_id`, `feature`, `importance_mean`, `n_models`, `method`
 - `coefficients.tsv`
-  - columns: `feature`, `coef_mean`, `coef_std`, `n_models`, `method`, `reason`
+  - columns: `feature`, `coef_mean`, `coef_std`, `n_models`, `n_folds`, `method`, `reason`
+- `coefficients_by_fold.tsv`
+  - columns: `fold_id`, `feature`, `coef_mean`, `n_models`, `method`, `reason`
   - for non-linear models, coefficient values can be `NA` with `reason=unsupported_model_non_linear`
 - `prediction_cv.tsv`
   - columns: `fold_id`, `species`, `label`, `prob`
@@ -352,21 +356,38 @@ Conditionally written:
 #### `feature_importance.tsv`
 
 - `importance_mean`:
-  - Average normalized importance across models (relative importance, not effect direction).
+  - Mean of fold-level normalized importance values.
+  - Within each fold, normalized importance is averaged across fitted models first.
 - `importance_std`:
-  - Variation across models.
+  - Variation across fold-level mean importance values.
   - Large value suggests unstable feature reliance.
+- `n_models` / `n_folds`:
+  - Total fitted model count and outer-fold count used for the summary.
 - `method`:
   - `coef_abs_l1_norm`: linear model coefficients (absolute, L1-normalized per model).
   - `feature_importances_l1_norm`: random forest importances (L1-normalized per model).
 
+#### `feature_importance_by_fold.tsv`
+
+- One row per (`fold_id`, `feature`).
+- `importance_mean` is the mean normalized importance across fitted models in that fold.
+- These fold-level values are the points and boxplot distribution in
+  `feature_importance_top.svg`.
+
 #### `coefficients.tsv`
 
-- `coef_mean` / `coef_std` are for signed linear coefficients.
+- `coef_mean` / `coef_std` summarize fold-level mean signed linear coefficients.
 - Positive `coef_mean`: higher standardized feature value pushes probability toward class `1`.
 - Negative `coef_mean`: pushes toward class `0`.
 - For non-linear models, coefficient columns can be `NA` with
   `reason=unsupported_model_non_linear`.
+
+#### `coefficients_by_fold.tsv`
+
+- One row per (`fold_id`, `feature`).
+- `coef_mean` is the mean signed coefficient across fitted linear models in that fold.
+- These fold-level values are the points and boxplot distribution in
+  `coefficients_signed_top.svg`.
 
 #### `classification_summary.tsv`
 
@@ -449,10 +470,11 @@ Conditionally written:
   - Left: pooled OOF ROC, right: pooled OOF PR.
   - Curves summarize all folds together (not per-fold overlays).
 - `feature_importance_top.svg`
-  - Top 30 features by `importance_mean`; bar length is relative to top feature in this figure.
+  - Top 30 features by mean fold-level `importance_mean`.
+  - Horizontal boxplot plus fold-level points.
 - `coefficients_signed_top.svg`
-  - Top 30 by absolute coefficient magnitude.
-  - Right (blue): positive, left (red): negative.
+  - Top 30 by absolute mean fold-level coefficient magnitude.
+  - Horizontal boxplot plus fold-level points; right is positive and left is negative.
 - `cv_species_probability_by_trait.svg`
   - Out-of-fold species probabilities grouped by trait (`label`).
   - Boxplot with per-species points and trait-wise mean markers.

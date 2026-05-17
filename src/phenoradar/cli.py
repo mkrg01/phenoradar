@@ -736,8 +736,20 @@ def run(
     cv_artifacts.feature_importance.write_csv(
         run_dir / "feature_importance.tsv", separator="\t", float_precision=8, null_value="NA"
     )
+    cv_artifacts.feature_importance_by_fold.write_csv(
+        run_dir / "feature_importance_by_fold.tsv",
+        separator="\t",
+        float_precision=8,
+        null_value="NA",
+    )
     cv_artifacts.coefficients.write_csv(
         run_dir / "coefficients.tsv", separator="\t", float_precision=8, null_value="NA"
+    )
+    cv_artifacts.coefficients_by_fold.write_csv(
+        run_dir / "coefficients_by_fold.tsv",
+        separator="\t",
+        float_precision=8,
+        null_value="NA",
     )
     cv_artifacts.oof_predictions.write_csv(
         run_dir / "prediction_cv.tsv", separator="\t", float_precision=8, null_value="NA"
@@ -975,6 +987,8 @@ def run(
             thresholds=cv_artifacts.thresholds,
             feature_importance=cv_artifacts.feature_importance,
             coefficients=cv_artifacts.coefficients,
+            feature_importance_by_fold=cv_artifacts.feature_importance_by_fold,
+            coefficients_by_fold=cv_artifacts.coefficients_by_fold,
             ensemble_model_probs=cv_artifacts.ensemble_model_probs,
             model_selection_trials=cv_artifacts.model_selection_trials,
             model_selection_trials_summary=cv_artifacts.model_selection_trials_summary,

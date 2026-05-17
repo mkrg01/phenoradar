@@ -61,7 +61,9 @@ Always written:
 - `loss_by_split_cv.tsv`
 - `thresholds.tsv`
 - `feature_importance.tsv`
+- `feature_importance_by_fold.tsv`
 - `coefficients.tsv`
+- `coefficients_by_fold.tsv`
 - `prediction_cv.tsv`
 - `feature_filter_counts.tsv`
 - `feature_filter_counts_summary.tsv`

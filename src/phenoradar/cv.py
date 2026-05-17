@@ -75,6 +75,8 @@ class CVArtifacts:
     oof_predictions: pl.DataFrame
     feature_importance: pl.DataFrame
     coefficients: pl.DataFrame
+    feature_importance_by_fold: pl.DataFrame
+    coefficients_by_fold: pl.DataFrame
     ensemble_model_probs: pl.DataFrame | None
     model_selection_selected: pl.DataFrame | None
     model_selection_trials: pl.DataFrame | None
@@ -2238,6 +2240,7 @@ def _fit_outer_sample_set(
             ModelFeatureEntry(
                 feature_names=selected_features,
                 model=estimator,
+                fold_id=fold_id,
             )
         )
         model_prob = _predict_positive_probability(estimator, x_valid)
@@ -3413,6 +3416,8 @@ def run_outer_cv(
         oof_predictions=oof_df,
         feature_importance=interpretation_artifacts.feature_importance,
         coefficients=interpretation_artifacts.coefficients,
+        feature_importance_by_fold=interpretation_artifacts.feature_importance_by_fold,
+        coefficients_by_fold=interpretation_artifacts.coefficients_by_fold,
         ensemble_model_probs=ensemble_model_probs,
         model_selection_selected=model_selection_selected,
         model_selection_trials=model_selection_trials,

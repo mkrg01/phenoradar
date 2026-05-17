@@ -137,6 +137,16 @@ def _stub_cv_artifacts(
                 "importance_mean": [1.0],
                 "importance_std": [0.0],
                 "n_models": [1],
+                "n_folds": [1],
+                "method": ["coef_abs_l1_norm"],
+            }
+        ),
+        feature_importance_by_fold=pl.DataFrame(
+            {
+                "fold_id": ["0"],
+                "feature": ["OG1"],
+                "importance_mean": [1.0],
+                "n_models": [1],
                 "method": ["coef_abs_l1_norm"],
             }
         ),
@@ -145,6 +155,17 @@ def _stub_cv_artifacts(
                 "feature": ["OG1"],
                 "coef_mean": [0.2],
                 "coef_std": [0.0],
+                "n_models": [1],
+                "n_folds": [1],
+                "method": ["coef_signed"],
+                "reason": ["NA"],
+            }
+        ),
+        coefficients_by_fold=pl.DataFrame(
+            {
+                "fold_id": ["0"],
+                "feature": ["OG1"],
+                "coef_mean": [0.2],
                 "n_models": [1],
                 "method": ["coef_signed"],
                 "reason": ["NA"],
@@ -434,7 +455,9 @@ data:
     assert (run_dirs[0] / "loss_by_split_cv.tsv").exists()
     assert (run_dirs[0] / "thresholds.tsv").exists()
     assert (run_dirs[0] / "feature_importance.tsv").exists()
+    assert (run_dirs[0] / "feature_importance_by_fold.tsv").exists()
     assert (run_dirs[0] / "coefficients.tsv").exists()
+    assert (run_dirs[0] / "coefficients_by_fold.tsv").exists()
     assert (run_dirs[0] / "feature_filter_counts.tsv").exists()
     assert (run_dirs[0] / "feature_filter_counts_summary.tsv").exists()
     assert (run_dirs[0] / "retained_features.tsv").exists()
@@ -577,7 +600,9 @@ data:
     run_dirs = sorted((tmp_path / "runs").glob("*_run_*"))
     assert len(run_dirs) == 1
     assert (run_dirs[0] / "feature_importance.tsv").exists()
+    assert (run_dirs[0] / "feature_importance_by_fold.tsv").exists()
     assert (run_dirs[0] / "coefficients.tsv").exists()
+    assert (run_dirs[0] / "coefficients_by_fold.tsv").exists()
     assert (run_dirs[0] / "feature_filter_counts.tsv").exists()
     assert (run_dirs[0] / "feature_filter_counts_summary.tsv").exists()
     assert (run_dirs[0] / "retained_features.tsv").exists()

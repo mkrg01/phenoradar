@@ -122,7 +122,9 @@ Core outputs include:
 - `metrics_cv.tsv`
 - `thresholds.tsv`
 - `feature_importance.tsv`
+- `feature_importance_by_fold.tsv`
 - `coefficients.tsv`
+- `coefficients_by_fold.tsv`
 - `prediction_cv.tsv`
 - `classification_summary.tsv`
 - `run_metadata.json`
