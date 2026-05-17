@@ -5,6 +5,7 @@ from pathlib import Path
 import polars as pl
 
 from phenoradar.tree_prediction import (
+    build_contrast_pair_tree_annotation,
     build_cv_tree_prediction_annotation,
     build_external_tree_prediction_annotation,
     build_predict_tree_prediction_annotation,
@@ -29,6 +30,30 @@ def _thresholds() -> pl.DataFrame:
             "threshold_value": [0.5, 0.7],
         }
     )
+
+
+def test_build_contrast_pair_tree_annotation_filters_to_grouped_species() -> None:
+    metadata = _metadata().with_columns(pl.col("C4").alias("true_label"))
+
+    annotation = build_contrast_pair_tree_annotation(
+        metadata=metadata,
+        group_col="contrast_pair_id",
+    )
+
+    assert annotation.to_dicts() == [
+        {
+            "label": "sp1",
+            "species": "sp1",
+            "true_label": 0,
+            "contrast_pair_id": "g1",
+        },
+        {
+            "label": "sp2",
+            "species": "sp2",
+            "true_label": 1,
+            "contrast_pair_id": "g1",
+        },
+    ]
 
 
 def test_build_cv_tree_prediction_annotation_filters_to_contrast_pairs() -> None:
@@ -138,5 +163,6 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
     )
 
     assert (tmp_path / "run" / "tree_prediction_cv_annotation.tsv").exists()
+    assert (tmp_path / "run" / "tree_contrast_pairs_annotation.tsv").exists()
     if not (figures_dir / "tree_prediction_cv.svg").exists():
         assert any("phenoradar[tree]" in warning for warning in warnings)

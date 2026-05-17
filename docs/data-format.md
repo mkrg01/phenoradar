@@ -110,8 +110,9 @@ dependencies are installed with `pip install "phenoradar[tree]"`, Toytree SVG fi
 also written under `figures/`.
 
 Tree tip labels must match metadata and prediction `species` values. In CV runs, tree
-prediction artifacts focus on species with non-empty `contrast_pair_id`. In external-test
-and predict outputs, all predicted species are included in the annotation TSV.
+contrast-pair QC and prediction artifacts focus on species with non-empty
+`contrast_pair_id`. In external-test and predict outputs, all predicted species are included
+in the annotation TSV.
 
 Training preflight requirement:
 

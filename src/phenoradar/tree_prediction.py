@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Iterable
 from contextlib import suppress
 from pathlib import Path
@@ -56,6 +57,31 @@ def write_run_tree_prediction_artifacts(
         group_col=group_col,
     )
     warnings: list[str] = []
+    contrast_annotation = build_contrast_pair_tree_annotation(
+        metadata=metadata,
+        group_col=group_col,
+    )
+    if contrast_annotation.height > 0:
+        contrast_annotation.write_csv(
+            run_dir / "tree_contrast_pairs_annotation.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
+        warnings.extend(
+            _write_tree_prediction_svg(
+                tree_path=tree_path,
+                annotation=contrast_annotation,
+                out_path=run_dir / "figures" / "tree_contrast_pairs.svg",
+                title="Tree Contrast Pairs",
+                tracks=["true_label", "contrast_pair_id"],
+            )
+        )
+    else:
+        warnings.append(
+            "Skipped tree_contrast_pairs.svg: metadata contains no non-empty contrast_pair_id."
+        )
+
     cv_annotation = build_cv_tree_prediction_annotation(
         metadata=metadata,
         oof_predictions=oof_predictions,
@@ -164,6 +190,25 @@ def write_predict_tree_prediction_artifacts(
             "uncertainty_std",
             "contrast_pair_id",
         ],
+    )
+
+
+def build_contrast_pair_tree_annotation(
+    *,
+    metadata: pl.DataFrame,
+    group_col: str,
+) -> pl.DataFrame:
+    """Build ggtree-friendly metadata annotation for contrast-pair species."""
+    _require_columns(metadata, {"species", "true_label", group_col}, "metadata TSV")
+    return (
+        metadata.filter(pl.col(group_col).is_not_null() & (pl.col(group_col) != ""))
+        .with_columns(
+            pl.col("species").alias("label"),
+            pl.col("true_label").cast(pl.Int8, strict=False).alias("true_label"),
+            pl.col(group_col).cast(pl.String, strict=False).alias("contrast_pair_id"),
+        )
+        .select(["label", "species", "true_label", "contrast_pair_id"])
+        .sort(["contrast_pair_id", "species"])
     )
 
 
@@ -334,10 +379,15 @@ def _load_metadata(
     if require_trait:
         required.add(trait_col)
     _require_columns(metadata, required, "metadata TSV")
-    return metadata.with_columns(
+    normalized = metadata.with_columns(
         pl.col(species_col).cast(pl.String, strict=False).str.strip_chars().alias("species"),
         pl.col(group_col).cast(pl.String, strict=False).str.strip_chars().alias(group_col),
     )
+    if trait_col in normalized.columns:
+        normalized = normalized.with_columns(
+            pl.col(trait_col).cast(pl.Int8, strict=False).alias("true_label")
+        )
+    return normalized
 
 
 def _require_tree(tree_path: Path) -> None:
@@ -379,7 +429,7 @@ def _write_tree_prediction_svg(
     if annotation.height == 0:
         return [f"Skipped {out_path.name}: annotation table is empty."]
     try:
-        import toytree  # type: ignore[import-not-found]
+        toytree = importlib.import_module("toytree")
     except ImportError:
         return [
             f"Skipped {out_path.name}: install phenoradar[tree] to enable Toytree SVG output."

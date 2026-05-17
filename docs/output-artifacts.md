@@ -259,6 +259,15 @@ Conditionally written:
   `contrast_pair_id`, `fold_id`.
 - `pred_label` uses the CV-derived threshold when available.
 
+#### `tree_contrast_pairs_annotation.tsv` (optional)
+
+- Written when `data.tree_path` is set.
+- ggtree/Toytree-friendly metadata QC annotation for all species with non-empty
+  `contrast_pair_id`.
+- Columns: `label`, `species`, `true_label`, `contrast_pair_id`.
+- Use this file to inspect which tree tips participate in contrastive clades before
+  interpreting prediction probabilities.
+
 #### `prediction_external_test.tsv` / `prediction_inference.tsv`
 
 - `prob`: predicted probability of label `1`.
@@ -465,6 +474,9 @@ Conditionally written:
   - Written when `data.tree_path` is set and `phenoradar[tree]` is installed.
   - Rectangular Toytree view with aligned tracks for trait label, probability,
     predicted label, uncertainty, contrast pair, and fold where applicable.
+- `tree_contrast_pairs.svg` (optional)
+  - Written when `data.tree_path` is set and `phenoradar[tree]` is installed.
+  - Rectangular Toytree view with trait-label and contrast-pair tracks for metadata QC.
 
 ## `predict` artifacts (schemas and interpretation)
 
