@@ -1002,11 +1002,16 @@ def run(
                 run_dir=run_dir,
                 tree_path=Path(tree_path),
                 metadata_path=Path(resolved.data.metadata_path),
+                tpm_path=Path(resolved.data.tpm_path),
                 species_col=resolved.data.species_col,
+                feature_col=resolved.data.feature_col,
+                value_col=resolved.data.value_col,
                 trait_col=resolved.data.trait_col,
                 group_col=resolved.data.group_col,
                 oof_predictions=cv_artifacts.oof_predictions,
                 thresholds=cv_artifacts.thresholds,
+                feature_importance=cv_artifacts.feature_importance,
+                coefficients=cv_artifacts.coefficients,
                 pred_external_test=(
                     None
                     if final_refit_artifacts is None

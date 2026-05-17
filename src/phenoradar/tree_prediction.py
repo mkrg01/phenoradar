@@ -32,6 +32,7 @@ _PALETTE = [
     "#9c755f",
     "#bab0ac",
 ]
+_FEATURE_HEATMAP_LIMIT = 30
 
 
 def write_run_tree_prediction_artifacts(
@@ -39,11 +40,16 @@ def write_run_tree_prediction_artifacts(
     run_dir: Path,
     tree_path: Path | None,
     metadata_path: Path,
+    tpm_path: Path,
     species_col: str,
+    feature_col: str,
+    value_col: str,
     trait_col: str,
     group_col: str,
     oof_predictions: pl.DataFrame,
     thresholds: pl.DataFrame,
+    feature_importance: pl.DataFrame,
+    coefficients: pl.DataFrame,
     pred_external_test: pl.DataFrame | None,
 ) -> list[str]:
     """Write run-level tree annotation TSVs and optional Toytree SVG figures."""
@@ -81,6 +87,46 @@ def write_run_tree_prediction_artifacts(
         warnings.append(
             "Skipped tree_contrast_pairs.svg: metadata contains no non-empty contrast_pair_id."
         )
+
+    feature_annotation = build_tree_feature_heatmap_annotation(
+        metadata=metadata,
+        tpm_path=tpm_path,
+        species_col=species_col,
+        feature_col=feature_col,
+        value_col=value_col,
+        group_col=group_col,
+        feature_importance=feature_importance,
+        coefficients=coefficients,
+    )
+    if feature_annotation.height > 0:
+        feature_annotation.write_csv(
+            run_dir / "tree_feature_heatmap_annotation.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
+        warnings.extend(
+            _write_tree_feature_heatmap_svg(
+                tree_path=tree_path,
+                annotation=feature_annotation,
+                value_col="z_score_log2_tpm",
+                out_path=run_dir / "figures" / "tree_feature_heatmap_zscore.svg",
+                title="Tree Feature Heatmap (z-score)",
+                cmap_name="coolwarm",
+            )
+        )
+        warnings.extend(
+            _write_tree_feature_heatmap_svg(
+                tree_path=tree_path,
+                annotation=feature_annotation,
+                value_col="log2_tpm_plus1",
+                out_path=run_dir / "figures" / "tree_feature_heatmap_log2_tpm.svg",
+                title="Tree Feature Heatmap (log2 TPM + 1)",
+                cmap_name="viridis",
+            )
+        )
+    else:
+        warnings.append("Skipped tree_feature_heatmap.svg: no top features were available.")
 
     cv_annotation = build_cv_tree_prediction_annotation(
         metadata=metadata,
@@ -209,6 +255,105 @@ def build_contrast_pair_tree_annotation(
         )
         .select(["label", "species", "true_label", "contrast_pair_id"])
         .sort(["contrast_pair_id", "species"])
+    )
+
+
+def build_tree_feature_heatmap_annotation(
+    *,
+    metadata: pl.DataFrame,
+    tpm_path: Path,
+    species_col: str,
+    feature_col: str,
+    value_col: str,
+    group_col: str,
+    feature_importance: pl.DataFrame,
+    coefficients: pl.DataFrame,
+    feature_limit: int = _FEATURE_HEATMAP_LIMIT,
+) -> pl.DataFrame:
+    """Build long-form feature heatmap values for grouped species and top features."""
+    _require_columns(metadata, {"species", "true_label", group_col}, "metadata TSV")
+    _require_columns(feature_importance, {"feature", "importance_mean"}, "feature_importance.tsv")
+    if feature_limit < 1:
+        raise TreePredictionError("feature heatmap limit must be >= 1")
+
+    species_meta = (
+        metadata.filter(pl.col(group_col).is_not_null() & (pl.col(group_col) != ""))
+        .select(
+            [
+                "species",
+                "true_label",
+                pl.col(group_col).cast(pl.String, strict=False).alias("contrast_pair_id"),
+            ]
+        )
+        .unique("species")
+        .sort(["contrast_pair_id", "species"])
+    )
+    if species_meta.height == 0:
+        return _empty_feature_heatmap_annotation()
+
+    top_features = (
+        feature_importance.drop_nulls(["feature", "importance_mean"])
+        .with_columns(
+            pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("feature"),
+            pl.col("importance_mean").cast(pl.Float64, strict=False).alias("importance_mean"),
+        )
+        .filter(pl.col("feature").is_not_null() & (pl.col("feature") != ""))
+        .sort(["importance_mean", "feature"], descending=[True, False])
+        .head(feature_limit)
+        .with_row_index("feature_rank", offset=1)
+        .select(["feature_rank", "feature", "importance_mean"])
+    )
+    if top_features.height == 0:
+        return _empty_feature_heatmap_annotation()
+
+    coef_lookup = _coefficient_lookup(coefficients)
+    grid = species_meta.join(top_features, how="cross")
+    expression = _load_expression_for_heatmap(
+        tpm_path=tpm_path,
+        species=list(species_meta.select("species").to_series().to_list()),
+        features=list(top_features.select("feature").to_series().to_list()),
+        species_col=species_col,
+        feature_col=feature_col,
+        value_col=value_col,
+    )
+    annotated = (
+        grid.join(expression, on=["species", "feature"], how="left")
+        .with_columns(pl.col("tpm").fill_null(0.0))
+        .join(coef_lookup, on="feature", how="left")
+        .with_columns((pl.col("tpm") + 1.0).log(base=2.0).alias("log2_tpm_plus1"))
+    )
+    stats = annotated.group_by("feature").agg(
+        pl.col("log2_tpm_plus1").mean().alias("__feature_mean"),
+        pl.col("log2_tpm_plus1").std(ddof=0).alias("__feature_std"),
+    )
+    return (
+        annotated.join(stats, on="feature", how="left")
+        .with_columns(
+            pl.when(pl.col("__feature_std").is_null() | (pl.col("__feature_std") <= 0.0))
+            .then(0.0)
+            .otherwise(
+                (pl.col("log2_tpm_plus1") - pl.col("__feature_mean"))
+                / pl.col("__feature_std")
+            )
+            .alias("z_score_log2_tpm"),
+            pl.col("species").alias("label"),
+        )
+        .select(
+            [
+                "label",
+                "species",
+                "true_label",
+                "contrast_pair_id",
+                "feature_rank",
+                "feature",
+                "importance_mean",
+                "coef_mean",
+                "tpm",
+                "log2_tpm_plus1",
+                "z_score_log2_tpm",
+            ]
+        )
+        .sort(["feature_rank", "contrast_pair_id", "species"])
     )
 
 
@@ -390,6 +535,79 @@ def _load_metadata(
     return normalized
 
 
+def _load_expression_for_heatmap(
+    *,
+    tpm_path: Path,
+    species: list[str],
+    features: list[str],
+    species_col: str,
+    feature_col: str,
+    value_col: str,
+) -> pl.DataFrame:
+    try:
+        expression = pl.scan_csv(tpm_path, separator="\t")
+    except FileNotFoundError as exc:
+        raise TreePredictionError(f"Expression file not found: {tpm_path}") from exc
+    try:
+        schema_columns = set(expression.collect_schema().names())
+    except Exception as exc:
+        raise TreePredictionError(f"Failed to read expression TSV: {tpm_path}") from exc
+    required = {species_col, feature_col, value_col}
+    missing = sorted(required - schema_columns)
+    if missing:
+        raise TreePredictionError(
+            f"Missing required columns in expression TSV: {', '.join(missing)}"
+        )
+
+    data = (
+        expression.select(
+            pl.col(species_col).cast(pl.String, strict=False).str.strip_chars().alias("species"),
+            pl.col(feature_col).cast(pl.String, strict=False).str.strip_chars().alias("feature"),
+            pl.col(value_col).cast(pl.Float64, strict=False).fill_null(0.0).alias("tpm"),
+        )
+        .filter(pl.col("species").is_in(species) & pl.col("feature").is_in(features))
+        .group_by(["species", "feature"])
+        .agg(pl.col("tpm").sum())
+        .collect()
+    )
+    if data.filter(pl.col("tpm") < 0.0).height > 0:
+        raise TreePredictionError("Expression TSV contains negative TPM values")
+    return data
+
+
+def _coefficient_lookup(coefficients: pl.DataFrame) -> pl.DataFrame:
+    if not {"feature", "coef_mean"}.issubset(coefficients.columns):
+        return pl.DataFrame(
+            {"feature": [], "coef_mean": []},
+            schema={"feature": pl.String, "coef_mean": pl.Float64},
+        )
+    data = coefficients.with_columns(
+        pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("feature"),
+        pl.col("coef_mean").cast(pl.Float64, strict=False).alias("coef_mean"),
+    )
+    if "method" in data.columns:
+        data = data.filter(pl.col("method") == "coef_signed")
+    return data.select(["feature", "coef_mean"]).unique("feature")
+
+
+def _empty_feature_heatmap_annotation() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "label": pl.String,
+            "species": pl.String,
+            "true_label": pl.Int8,
+            "contrast_pair_id": pl.String,
+            "feature_rank": pl.UInt32,
+            "feature": pl.String,
+            "importance_mean": pl.Float64,
+            "coef_mean": pl.Float64,
+            "tpm": pl.Float64,
+            "log2_tpm_plus1": pl.Float64,
+            "z_score_log2_tpm": pl.Float64,
+        }
+    )
+
+
 def _require_tree(tree_path: Path) -> None:
     if not tree_path.exists():
         raise TreePredictionError(f"Input tree not found: {tree_path}")
@@ -478,6 +696,69 @@ def _write_tree_prediction_svg(
     return warnings
 
 
+def _write_tree_feature_heatmap_svg(
+    *,
+    tree_path: Path,
+    annotation: pl.DataFrame,
+    value_col: str,
+    out_path: Path,
+    title: str,
+    cmap_name: str,
+) -> list[str]:
+    if annotation.height == 0:
+        return [f"Skipped {out_path.name}: annotation table is empty."]
+    try:
+        toytree = importlib.import_module("toytree")
+    except ImportError:
+        return [
+            f"Skipped {out_path.name}: install phenoradar[tree] to enable Toytree SVG output."
+        ]
+
+    try:
+        tree = toytree.tree(str(tree_path))
+    except Exception as exc:
+        raise TreePredictionError(f"Failed to read tree with Toytree: {tree_path}") from exc
+
+    tip_labels = [str(v) for v in tree.get_tip_labels()]
+    tip_set = set(tip_labels)
+    requested_species = [
+        str(v)
+        for v in annotation.select("species").unique().to_series().to_list()
+        if v is not None and str(v) in tip_set
+    ]
+    requested_species = _unique_preserve_order(requested_species)
+    total_species = annotation.select("species").unique().height
+    missing_count = total_species - len(requested_species)
+    warnings: list[str] = []
+    if missing_count > 0:
+        warnings.append(
+            f"{out_path.name}: skipped {missing_count} species absent from the tree."
+        )
+    if len(requested_species) < 2:
+        warnings.append(
+            f"Skipped {out_path.name}: fewer than two annotated species are in the tree."
+        )
+        return warnings
+
+    if len(requested_species) < len(tip_labels):
+        try:
+            tree = tree.mod.prune(*requested_species)
+        except Exception as exc:
+            raise TreePredictionError(f"Failed to prune tree for {out_path.name}") from exc
+    with suppress(Exception):
+        tree = tree.ladderize()
+    _draw_toytree_feature_heatmap(
+        tree=tree,
+        annotation=annotation,
+        value_col=value_col,
+        out_path=out_path,
+        title=title,
+        cmap_name=cmap_name,
+        toytree_module=toytree,
+    )
+    return warnings
+
+
 def _draw_toytree_heatmap(
     *,
     tree: Any,
@@ -540,6 +821,80 @@ def _draw_toytree_heatmap(
     toytree_module.save(canvas, str(out_path))
 
 
+def _draw_toytree_feature_heatmap(
+    *,
+    tree: Any,
+    annotation: pl.DataFrame,
+    value_col: str,
+    out_path: Path,
+    title: str,
+    cmap_name: str,
+    toytree_module: Any,
+) -> None:
+    tip_labels = [str(v) for v in tree.get_tip_labels()]
+    features = (
+        annotation.select(["feature_rank", "feature"])
+        .unique("feature")
+        .sort("feature_rank")
+        .select("feature")
+        .to_series()
+        .to_list()
+    )
+    feature_labels = [str(v) for v in features]
+    height = max(420, 58 + 18 * len(tip_labels))
+    width = max(1040, 620 + 28 * len(feature_labels))
+    label_shift = 70 + 24 * len(feature_labels)
+    canvas, axes, _mark = tree.draw(
+        width=width,
+        height=height,
+        layout="r",
+        tip_labels=True,
+        tip_labels_align=True,
+        tip_labels_style={"font-size": "9px", "-toyplot-anchor-shift": f"{label_shift}px"},
+        node_sizes=0,
+        scale_bar=False,
+    )
+    axes.show = False
+    axes.x.domain.max = max(len(feature_labels) + 3.0, 4.0)
+
+    value_lookup: dict[tuple[str, str], object] = {}
+    for row in annotation.iter_rows(named=True):
+        value_lookup[(str(row["species"]), str(row["feature"]))] = row.get(value_col)
+    finite_values = _finite_values(annotation, value_col)
+    vmin, vmax = _heatmap_domain(value_col, finite_values)
+    for feature_index, feature in enumerate(feature_labels):
+        x = 0.45 + feature_index * 0.42
+        colors: list[str] = []
+        titles: list[str] = []
+        for species in tip_labels:
+            value = value_lookup.get((species, feature))
+            colors.append(_continuous_color(value, vmin=vmin, vmax=vmax, cmap_name=cmap_name))
+            titles.append(f"{species} {feature} {value_col}={_format_value(value)}")
+        axes.scatterplot(
+            [x] * len(tip_labels),
+            list(range(len(tip_labels))),
+            marker="s",
+            size=9,
+            color=colors,
+            title=titles,
+        )
+        axes.text(
+            x,
+            len(tip_labels) + 0.35,
+            feature,
+            angle=-65,
+            style={"font-size": "7px", "text-anchor": "end"},
+        )
+    axes.text(
+        -0.05,
+        len(tip_labels) + 1.1,
+        title,
+        style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    toytree_module.save(canvas, str(out_path))
+
+
 def _track_color(track: str, value: object, annotation: pl.DataFrame) -> str:
     if value is None:
         return _MISSING_COLOR
@@ -585,6 +940,15 @@ def _continuous_color(value: object, *, vmin: float, vmax: float, cmap_name: str
     ratio = 0.0 if vmax <= vmin else min(max((numeric - vmin) / (vmax - vmin), 0.0), 1.0)
     cmap = matplotlib.colormaps[cmap_name]
     return matplotlib.colors.to_hex(cmap(ratio))
+
+
+def _heatmap_domain(value_col: str, values: list[float]) -> tuple[float, float]:
+    if not values:
+        return 0.0, 1.0
+    if value_col == "z_score_log2_tpm":
+        max_abs = max(abs(value) for value in values)
+        return -max_abs, max_abs
+    return min(values), max(values)
 
 
 def _finite_values(annotation: pl.DataFrame, column: str) -> list[float]:

@@ -268,6 +268,17 @@ Conditionally written:
 - Use this file to inspect which tree tips participate in contrastive clades before
   interpreting prediction probabilities.
 
+#### `tree_feature_heatmap_annotation.tsv` (optional)
+
+- Written when `data.tree_path` is set.
+- Long-form ggtree/Toytree-friendly feature heatmap values for species with non-empty
+  `contrast_pair_id` and the top 30 features by `importance_mean`.
+- Columns: `label`, `species`, `true_label`, `contrast_pair_id`, `feature_rank`,
+  `feature`, `importance_mean`, `coef_mean`, `tpm`, `log2_tpm_plus1`,
+  `z_score_log2_tpm`.
+- `log2_tpm_plus1` is `log2(TPM + 1)` after duplicate `(species, feature)` rows are
+  summed; `z_score_log2_tpm` is computed within each feature across included species.
+
 #### `prediction_external_test.tsv` / `prediction_inference.tsv`
 
 - `prob`: predicted probability of label `1`.
@@ -477,6 +488,12 @@ Conditionally written:
 - `tree_contrast_pairs.svg` (optional)
   - Written when `data.tree_path` is set and `phenoradar[tree]` is installed.
   - Rectangular Toytree view with trait-label and contrast-pair tracks for metadata QC.
+- `tree_feature_heatmap_zscore.svg` / `tree_feature_heatmap_log2_tpm.svg` (optional)
+  - Written when `data.tree_path` is set and `phenoradar[tree]` is installed.
+  - Rectangular Toytree views with top-feature heatmap tiles ordered by
+    `importance_mean`.
+  - The z-score figure emphasizes relative per-feature expression patterns; the
+    log2-TPM figure preserves absolute expression scale after `log2(TPM + 1)`.
 
 ## `predict` artifacts (schemas and interpretation)
 
