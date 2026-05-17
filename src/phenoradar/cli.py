@@ -29,6 +29,7 @@ from phenoradar.config import (
 )
 from phenoradar.cv import CVError, run_final_refit, run_outer_cv
 from phenoradar.figures import FigureError, write_predict_figures, write_run_figures
+from phenoradar.metadata import MetadataError, build_species_metadata_from_skim, fetch_ncbi_tree
 from phenoradar.provenance import (
     ProvenanceError,
     bundle_payload_sha256,
@@ -1107,6 +1108,187 @@ def config_command(
     )
 
 
+@app.command("metadata")
+def metadata_command(
+    species_trait: Annotated[
+        Path,
+        typer.Option(
+            "--species-trait",
+            file_okay=True,
+            dir_okay=False,
+            help="Input TSV containing species and binary trait columns.",
+        ),
+    ] = Path("species_trait.tsv"),
+    species_taxid: Annotated[
+        Path | None,
+        typer.Option(
+            "--species-taxid",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Optional TSV containing species and NCBI taxid columns for tree retrieval.",
+        ),
+    ] = None,
+    out: Annotated[
+        Path,
+        typer.Option(
+            "--out",
+            file_okay=True,
+            dir_okay=False,
+            help="Output PhenoRadar metadata TSV with contrast_pair_id assignments.",
+        ),
+    ] = Path("species_metadata.tsv"),
+    tree_in: Annotated[
+        Path | None,
+        typer.Option(
+            "--tree-in",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Existing Newick tree to use for group assignment. Skips NCBI tree retrieval.",
+        ),
+    ] = None,
+    tree_out: Annotated[
+        Path,
+        typer.Option(
+            "--tree-out",
+            file_okay=True,
+            dir_okay=False,
+            help="Output Newick tree path generated from NCBI Taxonomy via nwkit.",
+        ),
+    ] = Path("ncbi_tree.nwk"),
+    species_col: Annotated[
+        str,
+        typer.Option(
+            "--species-col",
+            help="Species column name in species_trait.tsv and species_taxid.tsv.",
+        ),
+    ] = "species",
+    taxid_col: Annotated[
+        str,
+        typer.Option(
+            "--taxid-col",
+            help="Taxid column name in species_taxid.tsv.",
+        ),
+    ] = "taxid",
+    trait_col: Annotated[
+        str,
+        typer.Option(
+            "--trait-col",
+            help="Binary trait column name in species_trait.tsv and output metadata.",
+        ),
+    ] = "C4",
+    group_col: Annotated[
+        str,
+        typer.Option(
+            "--group-col",
+            help="Output group column name.",
+        ),
+    ] = "contrast_pair_id",
+    rank: Annotated[
+        str,
+        typer.Option(
+            "--rank",
+            help="NCBI taxonomy rank passed to `nwkit constrain --rank`.",
+        ),
+    ] = "family",
+    nwkit_bin: Annotated[
+        str,
+        typer.Option(
+            "--nwkit-bin",
+            help="nwkit executable path.",
+        ),
+    ] = "nwkit",
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Overwrite existing tree or metadata outputs.",
+        ),
+    ] = False,
+    write_metadata: Annotated[
+        bool,
+        typer.Option(
+            "--write-metadata/--tree-only",
+            help="Write species_metadata.tsv after tree retrieval.",
+        ),
+    ] = True,
+    verbose: VerboseArg = False,
+    quiet: QuietArg = False,
+) -> None:
+    """Fetch an NCBI tree and assign contrast_pair_id from species_trait.tsv."""
+    start_time = datetime.now(UTC)
+    log_verbosity = _resolve_log_verbosity(verbose=verbose, quiet=quiet)
+    if tree_in is not None and not write_metadata:
+        raise typer.BadParameter("`--tree-in` with `--tree-only` has no work to do.")
+    if tree_in is not None and species_taxid is not None:
+        raise typer.BadParameter("`--species-taxid` is only used when retrieving a new tree.")
+
+    _progress_log(
+        "metadata",
+        "Resolve tree for metadata preparation.",
+        start_time=start_time,
+        log_verbosity=log_verbosity,
+    )
+    try:
+        if tree_in is None:
+            tree_result = fetch_ncbi_tree(
+                species_trait,
+                tree_out,
+                species_taxid_path=species_taxid,
+                species_col=species_col,
+                taxid_col=taxid_col,
+                rank=rank,
+                nwkit_bin=nwkit_bin,
+                overwrite=force,
+            )
+            tree_path = tree_result.tree_path
+            typer.echo(
+                f"Wrote NCBI taxonomy tree: {tree_result.tree_path} "
+                f"(species={tree_result.species_count}, rank={tree_result.rank})."
+            )
+        else:
+            tree_path = tree_in
+            typer.echo(f"Using existing tree: {tree_path}")
+
+        if write_metadata:
+            _progress_log(
+                "metadata",
+                "Assign contrast_pair_id with nwkit skim.",
+                start_time=start_time,
+                log_verbosity=log_verbosity,
+            )
+            metadata_result = build_species_metadata_from_skim(
+                species_trait,
+                tree_path,
+                out,
+                species_col=species_col,
+                trait_col=trait_col,
+                group_col=group_col,
+                nwkit_bin=nwkit_bin,
+                overwrite=force,
+            )
+    except MetadataError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if write_metadata:
+        typer.echo(
+            f"Wrote species metadata: {metadata_result.metadata_path} "
+            f"(species={metadata_result.species_count}, "
+            f"grouped_species={metadata_result.grouped_species_count}, "
+            f"contrast_pairs={metadata_result.contrast_pair_count}, "
+            f"tree_missing_species={metadata_result.tree_missing_species_count})."
+        )
+    _progress_log(
+        "metadata",
+        "Completed.",
+        start_time=start_time,
+        log_verbosity=log_verbosity,
+    )
+
+
 @app.command("dataset")
 def dataset(
     out: Annotated[
@@ -1123,7 +1305,7 @@ def dataset(
         typer.Option(
             "--base-url",
             help=(
-                "Base URL containing species_metadata.tsv and tpm.tsv. "
+                "Base URL containing c4_tiny dataset files. "
                 "Defaults to GitHub raw content for this repository; "
                 "can also be set via PHENORADAR_TESTDATA_BASE_URL."
             ),

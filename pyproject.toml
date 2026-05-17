@@ -36,6 +36,11 @@ dev = [
   "types-PyYAML>=6.0.12.20250915,<7.0.0",
 ]
 
+[dependency-groups]
+taxonomy = [
+  "nwkit @ git+https://github.com/kfuku52/nwkit",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/phenoradar"]
 

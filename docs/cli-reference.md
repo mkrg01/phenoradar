@@ -10,6 +10,7 @@ Both commands are equivalent:
 ```text
 phenoradar run
 phenoradar config
+phenoradar metadata
 phenoradar dataset
 phenoradar predict
 phenoradar report
@@ -117,6 +118,51 @@ Options:
 - `--verbose`, `-v`: detailed stage-level logs
 - `--quiet`, `-q`: suppress progress logs
 
+## `metadata`
+
+Generate metadata-adjacent artifacts from a raw species trait table.
+
+```bash
+phenoradar metadata \
+  --species-trait species_trait.tsv \
+  --species-taxid species_taxid.tsv \
+  --tree-out ncbi_tree.nwk \
+  --out species_metadata.tsv
+```
+
+This command requires the external `nwkit` executable. For a local uv environment, install
+the recorded dependency group with:
+
+```bash
+uv sync --group taxonomy
+```
+
+For conda-based environments, install `nwkit` from Bioconda. For pip-only environments,
+install it directly from the upstream repository.
+
+Options:
+
+- `--species-trait`: input TSV containing species and binary trait columns (default: `species_trait.tsv`)
+- `--species-taxid`: optional TSV containing species and NCBI taxid columns for tree retrieval
+- `--out`: output PhenoRadar metadata TSV (default: `species_metadata.tsv`)
+- `--tree-in`: existing Newick tree to use for group assignment; skips NCBI tree retrieval
+- `--tree-out`: output Newick tree path when retrieving from NCBI Taxonomy (default: `ncbi_tree.nwk`)
+- `--species-col`: species column name in `species_trait.tsv` and `species_taxid.tsv` (default: `species`)
+- `--taxid-col`: taxid column name in `species_taxid.tsv` (default: `taxid`)
+- `--trait-col`: binary trait column name in `species_trait.tsv` and output metadata (default: `C4`)
+- `--group-col`: output group column name (default: `contrast_pair_id`)
+- `--rank`: NCBI taxonomy rank passed to `nwkit constrain --rank` (default: `family`)
+- `--nwkit-bin`: `nwkit` executable path (default: `nwkit`)
+- `--force`: overwrite existing tree or metadata outputs
+- `--tree-only`: fetch/write only the tree and skip metadata generation
+- `--verbose`, `-v`: detailed stage-level logs
+- `--quiet`, `-q`: suppress progress logs
+
+Group assignment uses `nwkit skim --only-contrastive-clades yes --output-groupfile yes`.
+Species that are not present in the tree are excluded from the generated metadata. The
+generated `contrast_pair_id` is based on `contrastive_clade`, so each assigned training
+group contains both non-missing trait labels (`0` and `1`).
+
 ## `predict`
 
 Predict from an exported bundle (no retraining).
@@ -158,7 +204,7 @@ phenoradar dataset [--out testdata/c4_tiny] [--base-url URL] [--force]
 Options:
 
 - `--out`: output directory (default: `testdata/c4_tiny`)
-- `--base-url`: alternate source URL containing `species_metadata.tsv` and `tpm.tsv`
+- `--base-url`: alternate source URL containing the c4_tiny dataset files
 - `--force`: overwrite existing files if checksum does not match expected values
 - `--verbose`, `-v`: detailed stage-level logs
 - `--quiet`, `-q`: suppress progress logs

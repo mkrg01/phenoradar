@@ -59,6 +59,8 @@ phenoradar dataset
 This downloads a compact dataset from GitHub into `testdata/c4_tiny/`:
 
 - `testdata/c4_tiny/species_metadata.tsv`
+- `testdata/c4_tiny/species_trait.tsv`
+- `testdata/c4_tiny/ncbi_tree.nwk`
 - `testdata/c4_tiny/tpm.tsv`
 
 You can also supply your own files; see [data-format.md](data-format.md) for required columns.

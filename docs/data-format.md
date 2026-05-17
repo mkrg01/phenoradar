@@ -2,6 +2,78 @@
 
 PhenoRadar expects tab-separated files (`.tsv`) for metadata and expression.
 
+## Species Trait TSV
+
+`phenoradar metadata` can fetch an NCBI taxonomy constrained Newick tree from a raw species
+trait table and generate `species_metadata.tsv` with `contrast_pair_id` assignments.
+
+Required columns (default names):
+
+- `species` (`--species-col`)
+- `C4` (`--trait-col`)
+
+Example:
+
+```tsv
+species	C4
+sp1	1
+sp2	0
+```
+
+Generate a tree and metadata:
+
+```bash
+phenoradar metadata \
+  --species-trait species_trait.tsv \
+  --species-taxid species_taxid.tsv \
+  --tree-out ncbi_tree.nwk \
+  --out species_metadata.tsv
+```
+
+The tree-generation step requires `nwkit`. For a local uv environment, install the recorded
+dependency group with:
+
+```bash
+uv sync --group taxonomy
+```
+
+For conda-based environments, install `nwkit` from Bioconda. For pip-only environments,
+install it directly from the upstream repository.
+
+Group assignment uses `nwkit skim` contrastive clades. Species that are not present in the
+tree are excluded from the generated `species_metadata.tsv`. Species with known traits inside
+minimal clades containing both `0` and `1` receive the same `contrast_pair_id`. Known-trait
+species present in the tree but outside contrastive clades keep an empty group and therefore
+become `external_test` under the normal pool assignment rules.
+
+## Species Taxid TSV
+
+When known NCBI Taxonomy IDs are available, `phenoradar metadata` can use them for tree
+retrieval instead of inferring taxids from species names.
+
+Required columns (default names):
+
+- `species` (`--species-col`)
+- `taxid` (`--taxid-col`)
+
+Example:
+
+```tsv
+species	taxid
+Zea_mays	4577
+Oryza_sativa	4530
+```
+
+Use it with:
+
+```bash
+phenoradar metadata \
+  --species-trait species_trait.tsv \
+  --species-taxid species_taxid.tsv \
+  --tree-out ncbi_tree.nwk \
+  --out species_metadata.tsv
+```
+
 ## Metadata TSV
 
 Default path/key:

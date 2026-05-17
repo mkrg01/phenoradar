@@ -1628,6 +1628,8 @@ def test_dataset_downloads_compact_dataset(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     assert (out_dir / "species_metadata.tsv").exists()
+    assert (out_dir / "species_trait.tsv").exists()
+    assert (out_dir / "ncbi_tree.nwk").exists()
     assert (out_dir / "tpm.tsv").exists()
 
 

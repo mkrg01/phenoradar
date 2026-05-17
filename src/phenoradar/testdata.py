@@ -23,7 +23,15 @@ class _DatasetFile:
 _C4_TINY_FILES = (
     _DatasetFile(
         name="species_metadata.tsv",
-        sha256="c0c4732607da374e70f7ec8c7906aceb902c90aff3111fd03559852df1ab9327",
+        sha256="ed0a3be112e83fea47e7dc48c3bedf0d6e7e955b3b94f354798a86b6a46cfc26",
+    ),
+    _DatasetFile(
+        name="species_trait.tsv",
+        sha256="411e3b8a52e3118719628139d2e0119e8ba315e23ee34610e07a63540f3ca5b4",
+    ),
+    _DatasetFile(
+        name="ncbi_tree.nwk",
+        sha256="2e8488b4738dd5652d7845241a4ce1876cf6d370f7787b76d1ca2ca5a34cead6",
     ),
     _DatasetFile(
         name="tpm.tsv",
