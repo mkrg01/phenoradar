@@ -93,6 +93,20 @@ unknown_section:
         load_and_resolve_config([cfg])
 
 
+def test_legacy_data_group_col_is_rejected(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+data:
+  group_col: contrast_pair_id
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError, match="group_col"):
+        load_and_resolve_config([cfg])
+
+
 def test_group_kfold_requires_n_splits(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path / "invalid.yml",
@@ -360,6 +374,67 @@ preprocess:
     )
 
     with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_generic_group_options_allow_null_contrast_pair_col(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "valid.yml",
+        """
+data:
+  contrast_pair_col: null
+split:
+  group_col: taxon_family_id
+sampling:
+  weighting: group_label_inverse
+""".strip()
+        + "\n",
+    )
+
+    resolved = load_and_resolve_config([cfg])
+
+    assert resolved.data.contrast_pair_col is None
+    assert resolved.split.group_col == "taxon_family_id"
+    assert resolved.sampling.weighting == "group_label_inverse"
+
+
+def test_pair_aware_filter_requires_contrast_pair_col(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+data:
+  contrast_pair_col: null
+preprocess:
+  pair_aware_filter:
+    enabled: true
+    max_features: 10
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError, match="contrast_pair_col"):
+        load_and_resolve_config([cfg])
+
+
+def test_pair_aware_group_balanced_requires_split_group_to_match_contrast_pair(
+    tmp_path: Path,
+) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+data:
+  contrast_pair_col: contrast_pair_id
+split:
+  group_col: taxon_family_id
+preprocess:
+  pair_aware_filter:
+    enabled: true
+    max_features: 10
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError, match="split.group_col"):
         load_and_resolve_config([cfg])
 
 

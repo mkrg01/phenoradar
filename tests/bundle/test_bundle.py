@@ -34,13 +34,13 @@ def _fixture_data(tmp_path: Path) -> tuple[Path, Path]:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp2\t0\tg1",
-                "sp3\t1\tg2",
-                "sp4\t0\tg2",
-                "sp5\t1\t",
-                "sp6\t\t",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
+                "sp3\t1\tg2\tno",
+                "sp4\t0\tg2\tno",
+                "sp5\t1\t\tyes",
+                "sp6\t\t\tno",
             ]
         )
         + "\n",
@@ -406,17 +406,17 @@ def test_bundle_manifest_calibration_policy(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "g1_pos\t1\tg1",
-                "g1_neg\t0\tg1",
-                "g2_pos\t1\tg2",
-                "g2_neg\t0\tg2",
-                "g3_pos\t1\tg3",
-                "g3_neg\t0\tg3",
-                "g4_pos\t1\tg4",
-                "g4_neg\t0\tg4",
-                "ext1\t1\t",
-                "inf1\t\t",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "g1_pos\t1\tg1\tno",
+                "g1_neg\t0\tg1\tno",
+                "g2_pos\t1\tg2\tno",
+                "g2_neg\t0\tg2\tno",
+                "g3_pos\t1\tg3\tno",
+                "g3_neg\t0\tg3\tno",
+                "g4_pos\t1\tg4\tno",
+                "g4_neg\t0\tg4\tno",
+                "ext1\t1\t\tyes",
+                "inf1\t\t\tno",
             ]
         )
         + "\n",

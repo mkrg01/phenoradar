@@ -42,6 +42,7 @@ tree = [
 
 [dependency-groups]
 taxonomy = [
+  "ete4>=4.4.0,<5.0.0",
   "nwkit @ git+https://github.com/kfuku52/nwkit",
 ]
 

@@ -1444,6 +1444,7 @@ def _build_inner_cv_preprocessed_folds(
     x_source_raw: np.ndarray,
     y_source: np.ndarray,
     groups_source: np.ndarray,
+    contrast_groups_source: np.ndarray | None,
     feature_names: list[str],
     warnings: list[str] | None = None,
 ) -> list[InnerCvPreprocessedFold]:
@@ -1457,6 +1458,9 @@ def _build_inner_cv_preprocessed_folds(
             y_train = y_source[train_idx]
             y_valid = y_source[valid_idx]
             groups_train = groups_source[train_idx]
+            contrast_groups_train = (
+                None if contrast_groups_source is None else contrast_groups_source[train_idx]
+            )
 
             x_train, x_valid, _selected = _preprocess_fold(
                 config,
@@ -1464,7 +1468,7 @@ def _build_inner_cv_preprocessed_folds(
                 x_valid_raw,
                 feature_names,
                 y_train=y_train,
-                groups_train=groups_train,
+                groups_train=contrast_groups_train,
                 warnings=warnings,
             )
             sample_weight = _fit_sample_weights(config, y_train, groups_train)
@@ -1568,6 +1572,7 @@ def _prepare_source_selection_tpe(
     feature_names: list[str],
     warnings: list[str],
     progress_callback: Callable[[str, str | None], None] | None = None,
+    contrast_groups_train: np.ndarray | None = None,
 ) -> SourceSelectionResult:
     if not _selection_is_active(config):
         raise CVError(
@@ -1582,6 +1587,9 @@ def _prepare_source_selection_tpe(
     x_source_raw = x_train_raw[sampled_idx, :]
     y_source = y_train[sampled_idx]
     groups_source = groups_train[sampled_idx]
+    contrast_groups_source = (
+        None if contrast_groups_train is None else contrast_groups_train[sampled_idx]
+    )
     if np.unique(y_source).size < 2:
         raise CVError(
             "Selection source sampled set became single-class; "
@@ -1593,6 +1601,7 @@ def _prepare_source_selection_tpe(
         x_source_raw=x_source_raw,
         y_source=y_source,
         groups_source=groups_source,
+        contrast_groups_source=contrast_groups_source,
         feature_names=feature_names,
         warnings=warnings,
     )
@@ -1718,6 +1727,7 @@ def _prepare_source_selection(
     feature_names: list[str],
     warnings: list[str],
     progress_callback: Callable[[str, str | None], None] | None = None,
+    contrast_groups_train: np.ndarray | None = None,
 ) -> SourceSelectionResult:
     selection_active = _selection_is_active(config)
     if selection_active and config.model_selection.search_strategy == "tpe":
@@ -1732,6 +1742,7 @@ def _prepare_source_selection(
             feature_names=feature_names,
             warnings=warnings,
             progress_callback=progress_callback,
+            contrast_groups_train=contrast_groups_train,
         )
 
     try:
@@ -1770,6 +1781,9 @@ def _prepare_source_selection(
     x_source_raw = x_train_raw[sampled_idx, :]
     y_source = y_train[sampled_idx]
     groups_source = groups_train[sampled_idx]
+    contrast_groups_source = (
+        None if contrast_groups_train is None else contrast_groups_train[sampled_idx]
+    )
     if np.unique(y_source).size < 2:
         raise CVError(
             "Selection source sampled set became single-class; "
@@ -1781,6 +1795,7 @@ def _prepare_source_selection(
         x_source_raw=x_source_raw,
         y_source=y_source,
         groups_source=groups_source,
+        contrast_groups_source=contrast_groups_source,
         feature_names=feature_names,
         warnings=warnings,
     )
@@ -1984,6 +1999,14 @@ def _fold_ids(split_manifest: pl.DataFrame) -> list[str]:
     return [str(v) for v in sorted(int(v) for v in fold_values)]
 
 
+def _with_contrast_group_column(config: AppConfig, split_manifest: pl.DataFrame) -> pl.DataFrame:
+    if "contrast_group_id" in split_manifest.columns:
+        return split_manifest
+    if config.preprocess.pair_aware_filter.enabled:
+        raise CVError("split_manifest is missing contrast_group_id required by pair_aware_filter")
+    return split_manifest.with_columns(pl.lit(None, dtype=pl.String).alias("contrast_group_id"))
+
+
 def _outer_cv_species(split_manifest: pl.DataFrame) -> list[str]:
     species_values = (
         split_manifest.filter(pl.col("pool").is_in(["train", "validation"]))
@@ -2177,6 +2200,7 @@ def _fit_outer_sample_set(
     x_train_raw: np.ndarray,
     y_train: np.ndarray,
     groups_train: np.ndarray,
+    contrast_groups_train: np.ndarray | None,
     x_valid_raw: np.ndarray,
     valid_species: list[str],
     feature_names: list[str],
@@ -2184,6 +2208,9 @@ def _fit_outer_sample_set(
     x_sampled_raw = x_train_raw[sampled_idx, :]
     y_sampled = y_train[sampled_idx]
     groups_sampled = groups_train[sampled_idx]
+    contrast_groups_sampled = (
+        None if contrast_groups_train is None else contrast_groups_train[sampled_idx]
+    )
     warnings: list[str] = []
     if np.unique(y_sampled).size < 2:
         raise CVError(f"Fold {fold_id} sampled training set became single-class")
@@ -2194,7 +2221,7 @@ def _fit_outer_sample_set(
             x_valid_raw,
             feature_names,
             y_train=y_sampled,
-            groups_train=groups_sampled,
+            groups_train=contrast_groups_sampled,
             warnings=warnings,
         )
     except CVError as exc:
@@ -2283,6 +2310,7 @@ def _fit_final_refit_sample_set(
     x_train_raw: np.ndarray | None = None,
     y_train: np.ndarray,
     groups_train: np.ndarray,
+    contrast_groups_train: np.ndarray | None = None,
     x_target_raw: np.ndarray | None = None,
     feature_names: list[str] | None = None,
     target_count: int,
@@ -2299,6 +2327,9 @@ def _fit_final_refit_sample_set(
     x_sampled_raw = resolved_x_train_raw[sampled_idx, :]
     y_sampled = y_train[sampled_idx]
     groups_sampled = groups_train[sampled_idx]
+    contrast_groups_sampled = (
+        None if contrast_groups_train is None else contrast_groups_train[sampled_idx]
+    )
     warnings: list[str] = []
     if np.unique(y_sampled).size < 2:
         raise CVError("Final refit sampled training set became single-class")
@@ -2314,7 +2345,7 @@ def _fit_final_refit_sample_set(
         resolved_x_target_raw,
         feature_names,
         y_train=y_sampled,
-        groups_train=groups_sampled,
+        groups_train=contrast_groups_sampled,
         warnings=warnings,
     )
     sample_weight = _fit_sample_weights(config, y_sampled, groups_sampled)
@@ -2417,6 +2448,7 @@ def run_final_refit(
     cv_threshold: float,
 ) -> FinalRefitArtifacts:
     """Refit final model(s) on full training pool and predict external/inference pools."""
+    split_manifest = _with_contrast_group_column(config, split_manifest)
     warnings: list[str] = []
     polars_warning = _polars_thread_pool_warning(config)
     if polars_warning is not None:
@@ -2429,6 +2461,7 @@ def run_final_refit(
         .agg(
             pl.col("label").drop_nulls().first().alias("label"),
             pl.col("group_id").drop_nulls().first().alias("group_id"),
+            pl.col("contrast_group_id").drop_nulls().first().alias("contrast_group_id"),
         )
         .sort("species")
     )
@@ -2436,6 +2469,11 @@ def run_final_refit(
         raise CVError("No species available for final refit training pool")
     if train_pool.filter(pl.col("label").is_null() | pl.col("group_id").is_null()).height > 0:
         raise CVError("Final refit training pool contains null label/group values")
+    if (
+        config.preprocess.pair_aware_filter.enabled
+        and train_pool.filter(pl.col("contrast_group_id").is_null()).height > 0
+    ):
+        raise CVError("Final refit training pool contains null contrast group values")
 
     external_pool = (
         split_manifest.filter(pl.col("pool") == "external_test")
@@ -2474,6 +2512,10 @@ def run_final_refit(
 
     y_train = np.array(train_pool.select("label").to_series().to_list(), dtype=int)
     groups_train = np.array(train_pool.select("group_id").to_series().to_list(), dtype=str)
+    contrast_groups_train: np.ndarray | None = None
+    if config.data.contrast_pair_col is not None or config.preprocess.pair_aware_filter.enabled:
+        contrast_values = train_pool.select("contrast_group_id").to_series().to_list()
+        contrast_groups_train = np.array(contrast_values, dtype=str)
     sampled_sets = _sample_training_sets(
         config=config,
         y_train=y_train,
@@ -2503,6 +2545,7 @@ def run_final_refit(
             x_train_raw=x_train_raw,
             y_train=y_train,
             groups_train=groups_train,
+            contrast_groups_train=contrast_groups_train,
             feature_names=feature_names,
             warnings=local_warnings,
         )
@@ -2585,6 +2628,7 @@ def run_final_refit(
             x_train_raw=x_train_raw,
             y_train=y_train,
             groups_train=groups_train,
+            contrast_groups_train=contrast_groups_train,
             x_target_raw=x_target_raw,
             feature_names=feature_names,
             target_count=target_count,
@@ -2803,6 +2847,14 @@ def _run_outer_fold(
     y_train = np.array(train_df.select("label").to_series().to_list(), dtype=int)
     y_valid = np.array(valid_df.select("label").to_series().to_list(), dtype=int)
     groups_train = np.array(train_df.select("group_id").to_series().to_list(), dtype=str)
+    contrast_groups_train: np.ndarray | None = None
+    if config.data.contrast_pair_col is not None or config.preprocess.pair_aware_filter.enabled:
+        contrast_values = train_df.select("contrast_group_id").to_series().to_list()
+        if config.preprocess.pair_aware_filter.enabled and any(v is None for v in contrast_values):
+            raise CVError(
+                "pair_aware_filter requires non-empty contrast_group_id values in each fold"
+            )
+        contrast_groups_train = np.array(contrast_values, dtype=str)
     _emit_fold_progress(
         "start",
         (
@@ -2854,6 +2906,7 @@ def _run_outer_fold(
             x_train_raw=x_train_raw,
             y_train=y_train,
             groups_train=groups_train,
+            contrast_groups_train=contrast_groups_train,
             feature_names=feature_names,
             warnings=local_warnings,
             progress_callback=_emit_fold_progress,
@@ -2996,6 +3049,7 @@ def _run_outer_fold(
             x_train_raw=x_train_raw,
             y_train=y_train,
             groups_train=groups_train,
+            contrast_groups_train=contrast_groups_train,
             x_valid_raw=x_valid_raw,
             valid_species=valid_species,
             feature_names=feature_names,
@@ -3208,6 +3262,7 @@ def run_outer_cv(
     progress_callback: Callable[[str], None] | None = None,
 ) -> CVArtifacts:
     """Execute outer CV using split manifest and return evaluation artifacts."""
+    split_manifest = _with_contrast_group_column(config, split_manifest)
     warnings: list[str] = []
     polars_warning = _polars_thread_pool_warning(config)
     if polars_warning is not None:

@@ -40,13 +40,13 @@ def _write_split_fixture(tmp_path: Path) -> tuple[Path, Path]:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp2\t0\tg1",
-                "sp3\t1\tg2",
-                "sp4\t0\tg2",
-                "sp5\t1\t",
-                "sp6\t\t",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
+                "sp3\t1\tg2\tno",
+                "sp4\t0\tg2\tno",
+                "sp5\t1\t\tyes",
+                "sp6\t\t\tno",
             ]
         )
         + "\n",
@@ -78,6 +78,7 @@ def _stub_resolved_config(*, execution_stage: str) -> SimpleNamespace:
             metadata_path="metadata.tsv",
             tpm_path="tpm.tsv",
             trait_col="C4",
+            contrast_pair_col="contrast_pair_id",
         ),
     )
 
@@ -307,6 +308,7 @@ def test_config_without_config_writes_default_yaml(
     assert payload["runtime"]["execution_stage"] == "cv_only"
     assert payload["data"]["metadata_path"] == "testdata/c4_tiny/species_metadata.tsv"
     assert payload["data"]["tpm_path"] == "testdata/c4_tiny/tpm.tsv"
+    assert payload["data"]["tree_path"] is None
 
 
 def test_run_rejects_multiple_config_options(tmp_path: Path) -> None:
@@ -680,17 +682,17 @@ def test_run_emits_model_selection_artifacts_when_selection_active(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "g1_pos\t1\tg1",
-                "g1_neg\t0\tg1",
-                "g2_pos\t1\tg2",
-                "g2_neg\t0\tg2",
-                "g3_pos\t1\tg3",
-                "g3_neg\t0\tg3",
-                "g4_pos\t1\tg4",
-                "g4_neg\t0\tg4",
-                "ext1\t1\t",
-                "inf1\t\t",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "g1_pos\t1\tg1\tno",
+                "g1_neg\t0\tg1\tno",
+                "g2_pos\t1\tg2\tno",
+                "g2_neg\t0\tg2\tno",
+                "g3_pos\t1\tg3\tno",
+                "g3_neg\t0\tg3\tno",
+                "g4_pos\t1\tg4\tno",
+                "g4_neg\t0\tg4\tno",
+                "ext1\t1\t\tyes",
+                "inf1\t\t\tno",
             ]
         )
         + "\n",

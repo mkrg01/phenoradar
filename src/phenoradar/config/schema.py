@@ -135,12 +135,15 @@ class DataConfig(StrictModel):
     feature_col: str = "orthogroup"
     value_col: str = "tpm"
     trait_col: str = "C4"
-    group_col: str = "contrast_pair_id"
+    contrast_pair_col: str | None = "contrast_pair_id"
 
 
 class SplitConfig(StrictModel):
     """Data split and CV controls."""
 
+    group_col: str = "contrast_pair_id"
+    test_holdout_col: str | None = "contrast_pair_test_holdout"
+    exclude_col: str | None = None
     outer_cv_strategy: OuterCvStrategy = "logo"
     outer_cv_n_splits: PositiveInt | None = None
 
@@ -394,3 +397,21 @@ class AppConfig(StrictModel):
     ensemble: EnsembleConfig = Field(default_factory=EnsembleConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
+
+    @model_validator(mode="after")
+    def validate_contrast_pair_dependencies(self) -> AppConfig:
+        if self.preprocess.pair_aware_filter.enabled and self.data.contrast_pair_col is None:
+            raise ValueError(
+                "preprocess.pair_aware_filter requires data.contrast_pair_col"
+            )
+        if (
+            self.preprocess.pair_aware_filter.enabled
+            and self.sampling.strategy == "group_balanced"
+            and self.data.contrast_pair_col != self.split.group_col
+        ):
+            raise ValueError(
+                "preprocess.pair_aware_filter with sampling.strategy=group_balanced "
+                "requires split.group_col to match data.contrast_pair_col; use "
+                "sampling.strategy=all_samples when splitting by broader phylogenetic groups"
+            )
+        return self

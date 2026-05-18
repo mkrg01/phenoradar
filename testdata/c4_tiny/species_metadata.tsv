@@ -1,21 +1,21 @@
-species	C4	contrast_pair_id
-Euphorbia_pulcherrima	0	3
-Euphorbia_maculata	1	3
-Flaveria_cronquistii	0	2
-Flaveria_bidentis	1	2
-Grayia_spinosa	0	1
-Atriplex_centralasiatica	1	1
-Atriplex_lentiformis	1	1
-Suaeda_linearis	0	1
-Suaeda_salsa	0	1
-Bassia_scoparia	1	1
-Halogeton_glomeratus	1	1
-Salsola_foliosa	1	1
-Carex_breviculmis	0	4
-Carex_nigra	0	4
-Cyperus_brevifolius	1	4
-Cyperus_esculentus-var-sativus	1	4
-Abelia_chinensis	0	
-Abelmoschus_esculentus	0	
-Abronia_glabrifolia		
-Abronia_nealleyi		
+species	C4	contrast_pair_id	contrast_pair_test_holdout
+Euphorbia_pulcherrima	0	3	no
+Euphorbia_maculata	1	3	no
+Flaveria_cronquistii	0	2	no
+Flaveria_bidentis	1	2	no
+Grayia_spinosa	0	1	no
+Atriplex_centralasiatica	1	1	no
+Atriplex_lentiformis	1	1	no
+Suaeda_linearis	0	1	no
+Suaeda_salsa	0	1	no
+Bassia_scoparia	1	1	no
+Halogeton_glomeratus	1	1	no
+Salsola_foliosa	1	1	no
+Carex_breviculmis	0	4	no
+Carex_nigra	0	4	no
+Cyperus_brevifolius	1	4	no
+Cyperus_esculentus-var-sativus	1	4	no
+Abelia_chinensis	0		yes
+Abelmoschus_esculentus	0		yes
+Abronia_glabrifolia			no
+Abronia_nealleyi			no

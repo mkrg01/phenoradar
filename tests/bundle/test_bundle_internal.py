@@ -31,13 +31,13 @@ def _fixture_data(tmp_path: Path) -> tuple[Path, Path]:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp2\t0\tg1",
-                "sp3\t1\tg2",
-                "sp4\t0\tg2",
-                "sp5\t1\t",
-                "sp6\t\t",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
+                "sp3\t1\tg2\tno",
+                "sp4\t0\tg2\tno",
+                "sp5\t1\t\tyes",
+                "sp6\t\t\tno",
             ]
         )
         + "\n",

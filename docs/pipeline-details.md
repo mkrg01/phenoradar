@@ -42,12 +42,18 @@ Metadata normalization:
 
 - species IDs are trimmed and must be non-empty and unique.
 - trait must be `0/1` or null/empty.
-- group can be null/empty.
+- `split.group_col` is required for labeled species unless
+  `split.test_holdout_col` marks the species as a test holdout.
+- `split.test_holdout_col` is optional; when it is `null`, no external-test
+  holdout column is read.
+- `split.exclude_col` is optional; rows marked true are removed before pool
+  assignment and expression coverage checks.
 
 Pool assignment:
 
-- trait present + group present -> `training_validation`
-- trait present + group missing -> `external_test`
+- exclude true -> removed from all pools
+- trait present + test holdout true -> `external_test`
+- trait present + test holdout false + split group present -> `training_validation`
 - trait missing -> `discovery_inference`
 
 `training_validation` is an internal pool label before fold expansion.
@@ -55,12 +61,18 @@ In `split_manifest.tsv`, these species appear as `train` and `validation`.
 
 Expression coverage checks:
 
-- all metadata species must exist in expression table.
+- all non-excluded metadata species must exist in expression table.
 - rows in expression with species not present in metadata are counted and reported in metadata.
 
 Preflight before CV:
 
-- each training group must contain both labels (applies to all sampling modes, including `all_samples`).
+- the full `training_validation` pool must contain both labels.
+- each outer fold's train and validation side must contain both labels.
+- `sampling.strategy: group_balanced` requires each `split.group_col` group to
+  contain both labels.
+- `preprocess.pair_aware_filter.enabled: true` requires complete
+  `data.contrast_pair_col` values and both labels in each contrast pair before
+  pair-aware filtering.
 
 Outer CV splits:
 

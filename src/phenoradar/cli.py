@@ -1010,7 +1010,8 @@ def run(
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    if tree_path is not None:
+    contrast_pair_col = resolved.data.contrast_pair_col
+    if tree_path is not None and contrast_pair_col is not None:
         try:
             tree_warnings = write_run_tree_prediction_artifacts(
                 run_dir=run_dir,
@@ -1021,7 +1022,7 @@ def run(
                 feature_col=resolved.data.feature_col,
                 value_col=resolved.data.value_col,
                 trait_col=resolved.data.trait_col,
-                group_col=resolved.data.group_col,
+                group_col=contrast_pair_col,
                 oof_predictions=cv_artifacts.oof_predictions,
                 thresholds=cv_artifacts.thresholds,
                 feature_importance=cv_artifacts.feature_importance,
@@ -1035,6 +1036,10 @@ def run(
         except TreePredictionError as exc:
             raise typer.BadParameter(str(exc)) from exc
         figure_warnings.extend(tree_warnings)
+    elif tree_path is not None:
+        figure_warnings.append(
+            "Skipped tree prediction artifacts because data.contrast_pair_col is null."
+        )
     warnings.extend(figure_warnings)
     _log(f"Run figures generated (figure_warnings={len(figure_warnings)}).")
 
@@ -1226,13 +1231,63 @@ def metadata_command(
             help="Binary trait column name in species_trait.tsv and output metadata.",
         ),
     ] = "C4",
-    group_col: Annotated[
+    contrast_pair_col: Annotated[
         str,
         typer.Option(
-            "--group-col",
-            help="Output group column name.",
+            "--contrast-pair-col",
+            help="Output contrast-pair column name.",
         ),
     ] = "contrast_pair_id",
+    contrast_pair_test_holdout_col: Annotated[
+        str,
+        typer.Option(
+            "--contrast-pair-test-holdout-col",
+            help="Output column marking labeled species held out from contrast-pair CV.",
+        ),
+    ] = "contrast_pair_test_holdout",
+    taxon_block_rank: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--taxon-block-rank",
+            help=(
+                "NCBI taxonomy rank to emit as a split block. Repeat for multiple "
+                "ranks, for example --taxon-block-rank family --taxon-block-rank order."
+            ),
+        ),
+    ] = None,
+    taxon_block_min_species_per_label: Annotated[
+        int,
+        typer.Option(
+            "--taxon-block-min-species-per-label",
+            min=1,
+            help="Minimum labeled species per trait value required for a taxon block to enter CV.",
+        ),
+    ] = 1,
+    taxon_block_mixed_test_fraction: Annotated[
+        float,
+        typer.Option(
+            "--taxon-block-mixed-test-fraction",
+            min=0.0,
+            max=0.999999,
+            help="Fraction of mixed-label taxon blocks to reserve as external test blocks.",
+        ),
+    ] = 0.0,
+    taxon_block_mixed_test_seed: Annotated[
+        int,
+        typer.Option(
+            "--taxon-block-mixed-test-seed",
+            help="Random seed for selecting mixed-label taxon blocks held out for test.",
+        ),
+    ] = 42,
+    ncbi_taxonomy_db: Annotated[
+        Path | None,
+        typer.Option(
+            "--ncbi-taxonomy-db",
+            file_okay=True,
+            dir_okay=False,
+            help="Optional ete4 NCBI taxonomy SQLite database path.",
+        ),
+    ] = None,
     rank: Annotated[
         str,
         typer.Option(
@@ -1264,13 +1319,11 @@ def metadata_command(
     verbose: VerboseArg = False,
     quiet: QuietArg = False,
 ) -> None:
-    """Fetch an NCBI tree and assign contrast_pair_id from species_trait.tsv."""
+    """Fetch an NCBI tree and assign contrast-pair metadata from species_trait.tsv."""
     start_time = datetime.now(UTC)
     log_verbosity = _resolve_log_verbosity(verbose=verbose, quiet=quiet)
     if tree_in is not None and not write_metadata:
         raise typer.BadParameter("`--tree-in` with `--tree-only` has no work to do.")
-    if tree_in is not None and species_taxid is not None:
-        raise typer.BadParameter("`--species-taxid` is only used when retrieving a new tree.")
 
     _progress_log(
         "metadata",
@@ -1302,7 +1355,7 @@ def metadata_command(
         if write_metadata:
             _progress_log(
                 "metadata",
-                "Assign contrast_pair_id with nwkit skim.",
+                "Assign contrast-pair metadata with nwkit skim.",
                 start_time=start_time,
                 log_verbosity=log_verbosity,
             )
@@ -1310,9 +1363,17 @@ def metadata_command(
                 species_trait,
                 tree_path,
                 out,
+                species_taxid_path=species_taxid,
                 species_col=species_col,
+                taxid_col=taxid_col,
                 trait_col=trait_col,
-                group_col=group_col,
+                contrast_pair_col=contrast_pair_col,
+                contrast_pair_test_holdout_col=contrast_pair_test_holdout_col,
+                taxon_block_ranks=taxon_block_rank,
+                taxon_block_min_species_per_label=taxon_block_min_species_per_label,
+                taxon_block_mixed_test_fraction=taxon_block_mixed_test_fraction,
+                taxon_block_mixed_test_seed=taxon_block_mixed_test_seed,
+                ncbi_taxonomy_db=ncbi_taxonomy_db,
                 nwkit_bin=nwkit_bin,
                 overwrite=force,
             )
@@ -1320,12 +1381,25 @@ def metadata_command(
         raise typer.BadParameter(str(exc)) from exc
 
     if write_metadata:
+        taxon_summary = ""
+        if metadata_result.taxon_block_counts:
+            taxon_summary = ", taxon_blocks=["
+            taxon_summary += "; ".join(
+                f"{rank}:blocks={metadata_result.taxon_block_counts[rank]},"
+                f"test_holdouts={metadata_result.taxon_block_test_holdout_counts[rank]},"
+                f"excluded={metadata_result.taxon_block_exclude_counts[rank]}"
+                for rank in sorted(metadata_result.taxon_block_counts)
+            )
+            taxon_summary += "]"
         typer.echo(
             f"Wrote species metadata: {metadata_result.metadata_path} "
             f"(species={metadata_result.species_count}, "
             f"grouped_species={metadata_result.grouped_species_count}, "
             f"contrast_pairs={metadata_result.contrast_pair_count}, "
-            f"tree_missing_species={metadata_result.tree_missing_species_count})."
+            f"contrast_pair_test_holdouts="
+            f"{metadata_result.contrast_pair_test_holdout_count}, "
+            f"tree_missing_species={metadata_result.tree_missing_species_count}"
+            f"{taxon_summary})."
         )
     _progress_log(
         "metadata",
@@ -1474,7 +1548,8 @@ def predict(
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    if tree_path is not None:
+    contrast_pair_col = resolved.data.contrast_pair_col
+    if tree_path is not None and contrast_pair_col is not None:
         try:
             tree_warnings = write_predict_tree_prediction_artifacts(
                 run_dir=run_dir,
@@ -1482,12 +1557,16 @@ def predict(
                 metadata_path=Path(resolved.data.metadata_path),
                 species_col=resolved.data.species_col,
                 trait_col=resolved.data.trait_col,
-                group_col=resolved.data.group_col,
+                group_col=contrast_pair_col,
                 pred_predict=pred_predict,
             )
         except TreePredictionError as exc:
             raise typer.BadParameter(str(exc)) from exc
         predict_warnings.extend(tree_warnings)
+    elif tree_path is not None:
+        predict_warnings.append(
+            "Skipped tree prediction artifacts because data.contrast_pair_col is null."
+        )
     end_time = datetime.now(UTC)
     _log("Collect provenance metadata.")
     try:

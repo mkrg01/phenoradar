@@ -1155,6 +1155,7 @@ tree = [
 
 [package.dev-dependencies]
 taxonomy = [
+    { name = "ete4" },
     { name = "nwkit" },
 ]
 
@@ -1180,7 +1181,10 @@ requires-dist = [
 provides-extras = ["dev", "tree"]
 
 [package.metadata.requires-dev]
-taxonomy = [{ name = "nwkit", git = "https://github.com/kfuku52/nwkit" }]
+taxonomy = [
+    { name = "ete4", specifier = ">=4.4.0,<5.0.0" },
+    { name = "nwkit", git = "https://github.com/kfuku52/nwkit" },
+]
 
 [[package]]
 name = "pillow"

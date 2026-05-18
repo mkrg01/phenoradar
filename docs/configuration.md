@@ -41,12 +41,16 @@ phenoradar config
 data:
   metadata_path: testdata/c4_tiny/species_metadata.tsv
   tpm_path: testdata/c4_tiny/tpm.tsv
+  tree_path: null
   species_col: species
   feature_col: orthogroup
   value_col: tpm
   trait_col: C4
-  group_col: contrast_pair_id
+  contrast_pair_col: contrast_pair_id
 split:
+  group_col: contrast_pair_id
+  test_holdout_col: contrast_pair_test_holdout
+  exclude_col: null
   outer_cv_strategy: logo
   outer_cv_n_splits: null
 sampling:
@@ -141,12 +145,33 @@ runtime:
 - `data.trait_col`
   - type: `str`
   - default: `C4`
-- `data.group_col`
-  - type: `str`
+- `data.contrast_pair_col`
+  - type: `str | null`
   - default: `contrast_pair_id`
+  - optional contrast-pair column used by contrast-specific features such as
+    `preprocess.pair_aware_filter` and tree contrast-pair QC. Set to `null`
+    when the workflow does not use contrast pairs.
 
 ## `split`
 
+- `split.group_col`
+  - type: `str`
+  - default: `contrast_pair_id`
+  - grouping column used for outer CV, group-balanced sampling, and
+    group-label inverse weighting.
+- `split.test_holdout_col`
+  - type: `str | null`
+  - default: `contrast_pair_test_holdout`
+  - metadata column marking labeled species to keep out of CV and evaluate only
+    as `external_test` during `full_run`. Accepted true values are `yes`,
+    `true`, and `1`; false values are `no`, `false`, `0`, empty, or null. When
+    set to `null`, no explicit external-test holdout column is read.
+- `split.exclude_col`
+  - type: `str | null`
+  - default: `null`
+  - optional metadata column marking species to remove from CV, external test,
+    and inference pools. It accepts the same boolean values as
+    `split.test_holdout_col`.
 - `split.outer_cv_strategy`
   - type: `logo | group_kfold`
   - default: `logo`
@@ -178,11 +203,11 @@ Compatibility rules:
 - when `sampling.strategy=all_samples`
   - `sampling.max_samples_per_label_per_group` must be `null`
   - `sampling.sampled_set_count` must be `1`
-- each training group must contain both labels (`0` and `1`) before CV split
-  execution.
-  - this refers to the internal `training_validation` pool (metadata rows with
-    both trait and group present), which is expanded to `train`/`validation`
-    rows in `split_manifest.tsv`.
+- `group_balanced` requires each `split.group_col` group in the
+  `training_validation` pool to contain both labels (`0` and `1`) before CV
+  split execution.
+- `group_label_inverse` weights labels within `split.group_col` groups and does
+  not require contrast-pair metadata.
 
 ## `preprocess`
 
@@ -227,6 +252,10 @@ Compatibility rules:
   - keeps the top `max_features`
   - when fewer than 2 training groups are available in a split, the filter is
     skipped with a warning
+  - requires `data.contrast_pair_col`; this is independent from
+    `split.group_col`, except that `group_balanced` sampling with
+    `pair_aware_filter` requires the two columns to match so sampled sets retain
+    complete contrast pairs.
 
 ### `preprocess.correlation_filter`
 

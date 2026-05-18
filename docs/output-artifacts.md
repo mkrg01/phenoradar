@@ -35,7 +35,7 @@ Always written:
 - `resolved_config.yml`
   - composed + validated config used in execution
 - `split_manifest.tsv`
-  - columns: `species`, `pool`, `fold_id`, `group_id`, `label`
+  - columns: `species`, `pool`, `fold_id`, `group_id`, `contrast_group_id`, `label`
   - pools: `train`, `validation`, `external_test`, `discovery_inference`
   - `train` / `validation` rows are the per-fold expansion of the internal
     `training_validation` pool.
@@ -194,14 +194,18 @@ Conditionally written:
 
 - `pool`:
   - `train` / `validation`: species used in outer CV (same species appears across folds).
-  - `external_test`: labeled but no group; evaluated only in `full_run`.
+  - `external_test`: labeled species marked by `split.test_holdout_col`;
+    evaluated only in `full_run`.
   - `discovery_inference`: unlabeled species; inference target in `full_run`.
   - `train` / `validation` are the per-fold representation of the internal
     `training_validation` pool.
+  - Species marked by `split.exclude_col` are omitted from `split_manifest.tsv`.
 - `fold_id`:
   - fold index for `train`/`validation`.
   - `NA` for `external_test` and `discovery_inference`.
-- `group_id`: only meaningful for CV pools (`train`/`validation`).
+- `group_id`: the `split.group_col` value used for CV groups.
+- `contrast_group_id`: the `data.contrast_pair_col` value when configured;
+  used by contrast-pair-specific features.
 - `label`: known only where metadata has trait label.
 
 #### `fold_validation_groups.tsv`

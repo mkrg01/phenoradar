@@ -47,13 +47,13 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp2\t0\tg1",
-                "sp3\t1\tg2",
-                "sp4\t0\tg2",
-                "sp5\t1\t",
-                "sp6\t\t",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
+                "sp3\t1\tg2\tno",
+                "sp4\t0\tg2\tno",
+                "sp5\t1\t\tyes",
+                "sp6\t\t\tno",
             ]
         )
         + "\n",
@@ -325,15 +325,15 @@ def test_outer_cv_emits_ensemble_artifacts_when_ensemble_size_gt_one(tmp_path: P
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "g1_pos1\t1\tg1",
-                "g1_pos2\t1\tg1",
-                "g1_neg1\t0\tg1",
-                "g1_neg2\t0\tg1",
-                "g2_pos1\t1\tg2",
-                "g2_pos2\t1\tg2",
-                "g2_neg1\t0\tg2",
-                "g2_neg2\t0\tg2",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "g1_pos1\t1\tg1\tno",
+                "g1_pos2\t1\tg1\tno",
+                "g1_neg1\t0\tg1\tno",
+                "g1_neg2\t0\tg1\tno",
+                "g2_pos1\t1\tg2\tno",
+                "g2_pos2\t1\tg2\tno",
+                "g2_neg1\t0\tg2\tno",
+                "g2_neg2\t0\tg2\tno",
             ]
         )
         + "\n",
@@ -398,13 +398,13 @@ def test_outer_cv_selection_active_emits_selected_and_trials_tables(tmp_path: Pa
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "g1_pos\t1\tg1",
-                "g1_neg\t0\tg1",
-                "g2_pos\t1\tg2",
-                "g2_neg\t0\tg2",
-                "g3_pos\t1\tg3",
-                "g3_neg\t0\tg3",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "g1_pos\t1\tg1\tno",
+                "g1_neg\t0\tg1\tno",
+                "g2_pos\t1\tg2\tno",
+                "g2_neg\t0\tg2\tno",
+                "g3_pos\t1\tg3\tno",
+                "g3_neg\t0\tg3\tno",
                 "g4_pos\t1\tg4",
                 "g4_neg\t0\tg4",
             ]
@@ -509,13 +509,13 @@ def test_outer_cv_tpe_selection_active_bypasses_generic_candidate_generation(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "g1_pos\t1\tg1",
-                "g1_neg\t0\tg1",
-                "g2_pos\t1\tg2",
-                "g2_neg\t0\tg2",
-                "g3_pos\t1\tg3",
-                "g3_neg\t0\tg3",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "g1_pos\t1\tg1\tno",
+                "g1_neg\t0\tg1\tno",
+                "g2_pos\t1\tg2\tno",
+                "g2_neg\t0\tg2\tno",
+                "g3_pos\t1\tg3\tno",
+                "g3_neg\t0\tg3\tno",
                 "g4_pos\t1\tg4",
                 "g4_neg\t0\tg4",
             ]
@@ -599,13 +599,13 @@ def test_outer_cv_selection_active_with_percent_emits_selected_and_trials_tables
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "g1_pos\t1\tg1",
-                "g1_neg\t0\tg1",
-                "g2_pos\t1\tg2",
-                "g2_neg\t0\tg2",
-                "g3_pos\t1\tg3",
-                "g3_neg\t0\tg3",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "g1_pos\t1\tg1\tno",
+                "g1_neg\t0\tg1\tno",
+                "g2_pos\t1\tg2\tno",
+                "g2_neg\t0\tg2\tno",
+                "g3_pos\t1\tg3\tno",
+                "g3_neg\t0\tg3\tno",
                 "g4_pos\t1\tg4",
                 "g4_neg\t0\tg4",
             ]
@@ -843,15 +843,15 @@ def test_outer_cv_selection_runs_per_sample_set(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "g1_pos1\t1\tg1",
-                "g1_pos2\t1\tg1",
-                "g1_neg1\t0\tg1",
-                "g1_neg2\t0\tg1",
-                "g2_pos1\t1\tg2",
-                "g2_pos2\t1\tg2",
-                "g2_neg1\t0\tg2",
-                "g2_neg2\t0\tg2",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "g1_pos1\t1\tg1\tno",
+                "g1_pos2\t1\tg1\tno",
+                "g1_neg1\t0\tg1\tno",
+                "g1_neg2\t0\tg1\tno",
+                "g2_pos1\t1\tg2\tno",
+                "g2_pos2\t1\tg2\tno",
+                "g2_neg1\t0\tg2\tno",
+                "g2_neg2\t0\tg2\tno",
                 "g3_pos1\t1\tg3",
                 "g3_pos2\t1\tg3",
                 "g3_neg1\t0\tg3",
@@ -933,15 +933,15 @@ def test_outer_cv_selection_can_reuse_first_sample_set(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "g1_pos1\t1\tg1",
-                "g1_pos2\t1\tg1",
-                "g1_neg1\t0\tg1",
-                "g1_neg2\t0\tg1",
-                "g2_pos1\t1\tg2",
-                "g2_pos2\t1\tg2",
-                "g2_neg1\t0\tg2",
-                "g2_neg2\t0\tg2",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "g1_pos1\t1\tg1\tno",
+                "g1_pos2\t1\tg1\tno",
+                "g1_neg1\t0\tg1\tno",
+                "g1_neg2\t0\tg1\tno",
+                "g2_pos1\t1\tg2\tno",
+                "g2_pos2\t1\tg2\tno",
+                "g2_neg1\t0\tg2\tno",
+                "g2_neg2\t0\tg2\tno",
                 "g3_pos1\t1\tg3",
                 "g3_pos2\t1\tg3",
                 "g3_neg1\t0\tg3",
@@ -1374,9 +1374,9 @@ def test_expression_matrix_builder_rejects_missing_required_columns(tmp_path: Pa
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp2\t0\tg1",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
             ]
         )
         + "\n",
@@ -2339,11 +2339,11 @@ def test_run_final_refit_supports_no_external_or_inference_species(tmp_path: Pat
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp2\t0\tg1",
-                "sp3\t1\tg2",
-                "sp4\t0\tg2",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
+                "sp3\t1\tg2\tno",
+                "sp4\t0\tg2\tno",
             ]
         )
         + "\n",
@@ -2870,7 +2870,10 @@ def test_expression_matrix_builder_rejects_empty_matrix_for_selected_species(
 ) -> None:
     metadata = _write(
         tmp_path / "species_metadata.tsv",
-        "\n".join(["species\tC4\tcontrast_pair_id", "sp1\t1\tg1"]) + "\n",
+        "\n".join(
+            ["species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout", "sp1\t1\tg1\tno"]
+        )
+        + "\n",
     )
     tpm = _write(
         tmp_path / "tpm.tsv",
@@ -2890,9 +2893,9 @@ def test_expression_matrix_builder_chunking_single_feature_returns_single_chunk(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp2\t0\tg1",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
             ]
         )
         + "\n",

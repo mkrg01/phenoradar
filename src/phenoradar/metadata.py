@@ -7,6 +7,7 @@ import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from random import Random
 
 import polars as pl
 
@@ -32,6 +33,10 @@ class SpeciesMetadataResult:
     species_count: int
     grouped_species_count: int
     contrast_pair_count: int
+    contrast_pair_test_holdout_count: int
+    taxon_block_counts: dict[str, int]
+    taxon_block_test_holdout_counts: dict[str, int]
+    taxon_block_exclude_counts: dict[str, int]
     tree_missing_species_count: int
 
 
@@ -289,6 +294,250 @@ def _skim_groupfile_path(skim_tree_path: Path, suffix: str) -> Path:
     return Path(f"{stem}.{suffix}.tsv")
 
 
+def _validate_output_column_names(column_names: Sequence[str]) -> None:
+    duplicates = sorted({name for name in column_names if column_names.count(name) > 1})
+    if duplicates:
+        duplicate_str = ", ".join(duplicates)
+        raise MetadataError(f"Output metadata column names must be unique: {duplicate_str}")
+
+
+def _normalize_taxon_block_ranks(ranks: Sequence[str] | None) -> list[str]:
+    normalized: list[str] = []
+    for rank in ranks or []:
+        value = rank.strip().lower()
+        if not value:
+            raise MetadataError("Taxon block ranks must be non-empty")
+        if not value.replace("_", "").isalnum():
+            raise MetadataError(
+                "Taxon block ranks must contain only letters, numbers, or underscores; "
+                f"offending value: {rank}"
+            )
+        if value not in normalized:
+            normalized.append(value)
+    return normalized
+
+
+def _taxon_block_columns(rank: str) -> tuple[str, str, str, str]:
+    prefix = f"taxon_{rank}"
+    return (
+        f"{prefix}_id",
+        f"{prefix}_name",
+        f"{prefix}_test_holdout",
+        f"{prefix}_exclude",
+    )
+
+
+def _load_ncbi_taxa(ncbi_taxonomy_db: Path | None = None) -> object:
+    try:
+        from ete4 import NCBITaxa
+    except ImportError as exc:
+        raise MetadataError(
+            "Taxonomic rank blocking requires ete4. Install the taxonomy dependency group."
+        ) from exc
+    try:
+        dbfile = None if ncbi_taxonomy_db is None else str(ncbi_taxonomy_db)
+        return NCBITaxa(dbfile=dbfile)
+    except Exception as exc:
+        raise MetadataError("Failed to initialize ete4 NCBITaxa") from exc
+
+
+def _dict_get_any_key(mapping: dict[object, object], key: int) -> object | None:
+    return mapping.get(key, mapping.get(str(key)))
+
+
+def _rank_taxon_lookup(
+    taxids: Sequence[int],
+    ranks: Sequence[str],
+    ncbi_taxa: object,
+) -> dict[int, dict[str, tuple[str, str]]]:
+    lookup: dict[int, dict[str, tuple[str, str]]] = {}
+    rank_taxids: set[int] = set()
+    lineages_by_taxid: dict[int, list[int]] = {}
+    for taxid in sorted(set(int(value) for value in taxids)):
+        try:
+            lineage = [int(value) for value in ncbi_taxa.get_lineage(taxid)]
+        except Exception:
+            lookup[taxid] = {}
+            continue
+        lineages_by_taxid[taxid] = lineage
+        try:
+            rank_map = dict(ncbi_taxa.get_rank(lineage))
+        except Exception:
+            lookup[taxid] = {}
+            continue
+        by_rank: dict[str, tuple[str, str]] = {}
+        for lineage_taxid in lineage:
+            lineage_rank = _dict_get_any_key(rank_map, lineage_taxid)
+            if lineage_rank is None:
+                continue
+            lineage_rank_str = str(lineage_rank).strip().lower()
+            if lineage_rank_str in ranks and lineage_rank_str not in by_rank:
+                rank_taxid = int(lineage_taxid)
+                by_rank[lineage_rank_str] = (str(rank_taxid), "")
+                rank_taxids.add(rank_taxid)
+        lookup[taxid] = by_rank
+
+    try:
+        names = dict(ncbi_taxa.get_taxid_translator(sorted(rank_taxids)))
+    except Exception:
+        names = {}
+    for by_rank in lookup.values():
+        for rank, (rank_taxid, _name) in list(by_rank.items()):
+            translated = _dict_get_any_key(names, int(rank_taxid))
+            by_rank[rank] = (rank_taxid, "" if translated is None else str(translated))
+    return lookup
+
+
+def _taxon_block_holdout_groups(
+    group_ids: list[str],
+    *,
+    fraction: float,
+    seed: int,
+) -> set[str]:
+    if fraction <= 0.0 or len(group_ids) <= 1:
+        return set()
+    holdout_count = max(1, int(round(len(group_ids) * fraction)))
+    holdout_count = min(holdout_count, len(group_ids) - 1)
+    shuffled = sorted(group_ids)
+    Random(seed).shuffle(shuffled)
+    return set(shuffled[:holdout_count])
+
+
+def _build_taxon_block_metadata(
+    species_for_metadata: pl.DataFrame,
+    species_taxid_path: Path,
+    *,
+    species_col: str,
+    taxid_col: str,
+    ranks: Sequence[str],
+    min_species_per_label: int,
+    mixed_test_fraction: float,
+    mixed_test_seed: int,
+    ncbi_taxonomy_db: Path | None,
+) -> tuple[pl.DataFrame, dict[str, int], dict[str, int], dict[str, int]]:
+    if min_species_per_label < 1:
+        raise MetadataError("taxon_block_min_species_per_label must be >= 1")
+    if mixed_test_fraction < 0.0 or mixed_test_fraction >= 1.0:
+        raise MetadataError("taxon_block_mixed_test_fraction must be >= 0 and < 1")
+
+    species_taxid = _normalize_species_taxid(
+        species_taxid_path,
+        species_col=species_col,
+        taxid_col=taxid_col,
+    ).rename({"leaf_name": "__species"})
+    metadata = species_for_metadata.select("__species", "__trait").join(
+        species_taxid, on="__species", how="left"
+    )
+    taxids = [
+        int(value)
+        for value in metadata.select("taxid").drop_nulls().unique().to_series().to_list()
+    ]
+    ncbi_taxa = _load_ncbi_taxa(ncbi_taxonomy_db)
+    rank_lookup = _rank_taxon_lookup(taxids, ranks, ncbi_taxa)
+
+    rows: list[dict[str, object]] = []
+    for row in metadata.to_dicts():
+        species = str(row["__species"])
+        trait = row["__trait"]
+        taxid = row["taxid"]
+        payload: dict[str, object] = {"__species": species, "__trait": trait}
+        rank_values = {} if taxid is None else rank_lookup.get(int(taxid), {})
+        for rank in ranks:
+            raw_id_col = f"__taxon_{rank}_raw_id"
+            raw_name_col = f"__taxon_{rank}_raw_name"
+            rank_taxon = rank_values.get(rank)
+            if rank_taxon is None:
+                payload[raw_id_col] = None
+                payload[raw_name_col] = None
+            else:
+                payload[raw_id_col] = rank_taxon[0]
+                payload[raw_name_col] = rank_taxon[1]
+        rows.append(payload)
+
+    rank_frame = pl.DataFrame(rows)
+    output = rank_frame.select("__species")
+    block_counts: dict[str, int] = {}
+    holdout_counts: dict[str, int] = {}
+    exclude_counts: dict[str, int] = {}
+
+    for rank in ranks:
+        raw_id_col = f"__taxon_{rank}_raw_id"
+        raw_name_col = f"__taxon_{rank}_raw_name"
+        out_id_col, out_name_col, holdout_col, exclude_col = _taxon_block_columns(rank)
+        label_counts = (
+            rank_frame.filter(
+                pl.col("__trait").is_not_null() & pl.col(raw_id_col).is_not_null()
+            )
+            .group_by(raw_id_col)
+            .agg(
+                (pl.col("__trait") == 0).sum().alias("n_label_0"),
+                (pl.col("__trait") == 1).sum().alias("n_label_1"),
+            )
+        )
+        valid_group_ids = [
+            str(row[raw_id_col])
+            for row in label_counts.filter(
+                (pl.col("n_label_0") >= min_species_per_label)
+                & (pl.col("n_label_1") >= min_species_per_label)
+            ).to_dicts()
+        ]
+        valid_groups = set(valid_group_ids)
+        mixed_holdout_groups = _taxon_block_holdout_groups(
+            valid_group_ids,
+            fraction=mixed_test_fraction,
+            seed=mixed_test_seed,
+        )
+        kept_groups = valid_groups - mixed_holdout_groups
+
+        rank_output = rank_frame.with_columns(
+            (
+                pl.col("__trait").is_not_null()
+                & pl.col(raw_id_col).is_not_null()
+                & pl.col(raw_id_col).is_in(sorted(kept_groups))
+            ).alias("__taxon_keep"),
+            (
+                pl.col("__trait").is_not_null()
+                & pl.col(raw_id_col).is_not_null()
+                & pl.col(raw_id_col).is_in(sorted(valid_groups))
+                & pl.col(raw_id_col).is_in(sorted(mixed_holdout_groups))
+            ).alias("__taxon_mixed_holdout"),
+            (pl.col("__trait").is_not_null() & pl.col(raw_id_col).is_null()).alias(
+                "__taxon_exclude"
+            ),
+        ).with_columns(
+            pl.when(pl.col("__taxon_keep"))
+            .then(pl.col(raw_id_col))
+            .otherwise(None)
+            .alias(out_id_col),
+            pl.when(pl.col("__taxon_keep"))
+            .then(pl.col(raw_name_col))
+            .otherwise(None)
+            .alias(out_name_col),
+            pl.when(
+                pl.col("__trait").is_not_null()
+                & ~pl.col("__taxon_keep")
+                & ~pl.col("__taxon_exclude")
+            )
+            .then(pl.lit("yes"))
+            .otherwise(pl.lit("no"))
+            .alias(holdout_col),
+            pl.when(pl.col("__taxon_exclude"))
+            .then(pl.lit("yes"))
+            .otherwise(pl.lit("no"))
+            .alias(exclude_col),
+        )
+        output = output.join(
+            rank_output.select(["__species", out_id_col, out_name_col, holdout_col, exclude_col]),
+            on="__species",
+            how="left",
+        )
+        block_counts[rank] = len(kept_groups)
+        holdout_counts[rank] = rank_output.filter(pl.col(holdout_col) == "yes").height
+        exclude_counts[rank] = rank_output.filter(pl.col(exclude_col) == "yes").height
+
+    return output, block_counts, holdout_counts, exclude_counts
+
+
 def _read_tree_names_with_nwkit(
     tree_path: Path, *, out_dir: Path, nwkit_bin: str
 ) -> set[str]:
@@ -329,9 +578,17 @@ def build_species_metadata_from_skim(
     tree_path: Path,
     out: Path,
     *,
+    species_taxid_path: Path | None = None,
     species_col: str = "species",
+    taxid_col: str = "taxid",
     trait_col: str = "C4",
-    group_col: str = "contrast_pair_id",
+    contrast_pair_col: str = "contrast_pair_id",
+    contrast_pair_test_holdout_col: str = "contrast_pair_test_holdout",
+    taxon_block_ranks: Sequence[str] | None = None,
+    taxon_block_min_species_per_label: int = 1,
+    taxon_block_mixed_test_fraction: float = 0.0,
+    taxon_block_mixed_test_seed: int = 42,
+    ncbi_taxonomy_db: Path | None = None,
     nwkit_bin: str = "nwkit",
     overwrite: bool = False,
 ) -> SpeciesMetadataResult:
@@ -342,6 +599,13 @@ def build_species_metadata_from_skim(
         raise MetadataError(f"Output metadata already exists; use --force to overwrite: {out}")
     if not tree_path.exists():
         raise MetadataError(f"Input tree not found: {tree_path}")
+    taxon_ranks = _normalize_taxon_block_ranks(taxon_block_ranks)
+    if taxon_ranks and species_taxid_path is None:
+        raise MetadataError("Taxonomic rank blocking requires species_taxid_path")
+    output_columns = [species_col, trait_col, contrast_pair_col, contrast_pair_test_holdout_col]
+    for rank in taxon_ranks:
+        output_columns.extend(_taxon_block_columns(rank))
+    _validate_output_column_names(output_columns)
 
     species_trait = _normalize_species_trait_for_metadata(
         species_trait_path,
@@ -441,17 +705,52 @@ def build_species_metadata_from_skim(
             )
             .then(None)
             .otherwise(pl.col("__contrast_pair"))
-            .alias(group_col)
+            .alias(contrast_pair_col),
+            pl.when(
+                pl.col(trait_col).is_not_null()
+                & (
+                    pl.col("__contrast_pair").is_null()
+                    | (pl.col("__contrast_pair") == "")
+                )
+            )
+            .then(pl.lit("yes"))
+            .otherwise(pl.lit("no"))
+            .alias(contrast_pair_test_holdout_col),
         )
-        .select([species_col, trait_col, group_col])
     )
+    taxon_block_counts: dict[str, int] = {}
+    taxon_block_test_holdout_counts: dict[str, int] = {}
+    taxon_block_exclude_counts: dict[str, int] = {}
+    if taxon_ranks:
+        if species_taxid_path is None:
+            raise MetadataError("Taxonomic rank blocking requires species_taxid_path")
+        (
+            taxon_blocks,
+            taxon_block_counts,
+            taxon_block_test_holdout_counts,
+            taxon_block_exclude_counts,
+        ) = _build_taxon_block_metadata(
+            species_for_skim,
+            species_taxid_path,
+            species_col=species_col,
+            taxid_col=taxid_col,
+            ranks=taxon_ranks,
+            min_species_per_label=taxon_block_min_species_per_label,
+            mixed_test_fraction=taxon_block_mixed_test_fraction,
+            mixed_test_seed=taxon_block_mixed_test_seed,
+            ncbi_taxonomy_db=ncbi_taxonomy_db,
+        )
+        metadata = metadata.join(taxon_blocks, on="__species", how="left")
+    metadata = metadata.select(output_columns)
 
-    grouped = metadata.filter(pl.col(group_col).is_not_null() & (pl.col(group_col) != ""))
+    grouped = metadata.filter(
+        pl.col(contrast_pair_col).is_not_null() & (pl.col(contrast_pair_col) != "")
+    )
     invalid_groups = (
-        grouped.group_by(group_col)
+        grouped.group_by(contrast_pair_col)
         .agg(pl.col(trait_col).n_unique().alias("n_labels"))
         .filter(pl.col("n_labels") < 2)
-        .select(group_col)
+        .select(contrast_pair_col)
         .to_series()
         .to_list()
     )
@@ -460,11 +759,20 @@ def build_species_metadata_from_skim(
         raise MetadataError(f"Generated contrast groups must contain both 0/1 labels: {groups}")
 
     metadata.write_csv(out, separator="\t")
-    contrast_pair_count = grouped.select(group_col).n_unique() if grouped.height > 0 else 0
+    contrast_pair_count = (
+        grouped.select(contrast_pair_col).n_unique() if grouped.height > 0 else 0
+    )
+    contrast_pair_test_holdout_count = metadata.filter(
+        pl.col(contrast_pair_test_holdout_col) == "yes"
+    ).height
     return SpeciesMetadataResult(
         metadata_path=out,
         species_count=metadata.height,
         grouped_species_count=grouped.height,
         contrast_pair_count=contrast_pair_count,
+        contrast_pair_test_holdout_count=contrast_pair_test_holdout_count,
+        taxon_block_counts=taxon_block_counts,
+        taxon_block_test_holdout_counts=taxon_block_test_holdout_counts,
+        taxon_block_exclude_counts=taxon_block_exclude_counts,
         tree_missing_species_count=tree_missing_species_count,
     )
