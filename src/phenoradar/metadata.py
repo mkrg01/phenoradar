@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 from collections.abc import Sequence
@@ -26,6 +27,16 @@ class NCBITreeResult:
 
 
 @dataclass(frozen=True)
+class SpeciesTaxidResult:
+    """Artifacts produced by species-to-NCBI-taxid resolution."""
+
+    taxid_path: Path
+    species_count: int
+    resolved_species_count: int
+    unresolved_species_count: int
+
+
+@dataclass(frozen=True)
 class SpeciesMetadataResult:
     """Artifacts produced by species metadata generation."""
 
@@ -38,6 +49,13 @@ class SpeciesMetadataResult:
     taxon_block_test_holdout_counts: dict[str, int]
     taxon_block_exclude_counts: dict[str, int]
     tree_missing_species_count: int
+    species_taxid_path: Path | None = None
+    species_taxid_generated: bool = False
+    species_taxid_resolved_count: int = 0
+    species_taxid_unresolved_count: int = 0
+
+
+_NWKIT_DEFAULT_SPECIES_PATTERN = re.compile(r"^([^_]+_[^_]+)(?:_|$)")
 
 
 def _load_species_trait(path: Path) -> pl.DataFrame:
@@ -95,6 +113,17 @@ def _load_species(species_trait_path: Path, *, species_col: str) -> list[str]:
     return [str(value) for value in species]
 
 
+def _taxonomy_query_from_label(label: str) -> str | None:
+    normalized = re.sub(r"\s+", "_", str(label).strip())
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    if not normalized:
+        return None
+    match = _NWKIT_DEFAULT_SPECIES_PATTERN.search(normalized)
+    query = match.group(1).replace("_", " ") if match is not None else normalized.replace("_", " ")
+    query = re.sub(r"\s+", " ", query).strip()
+    return query or None
+
+
 def _normalize_species_taxid(
     species_taxid_path: Path,
     *,
@@ -124,11 +153,7 @@ def _normalize_species_taxid(
     )
     if invalid_taxid.height > 0:
         offenders = (
-            invalid_taxid.select("__taxid_raw")
-            .unique()
-            .sort("__taxid_raw")
-            .to_series()
-            .to_list()
+            invalid_taxid.select("__taxid_raw").unique().sort("__taxid_raw").to_series().to_list()
         )
         preview = ", ".join("<empty>" if value is None else str(value) for value in offenders[:10])
         raise MetadataError(
@@ -276,8 +301,7 @@ def _normalize_species_trait_for_metadata(
     if invalid_trait_values:
         invalid = ", ".join(str(v) for v in invalid_trait_values)
         raise MetadataError(
-            "Trait column must contain only 0/1 or null/empty values; "
-            f"offending values: {invalid}"
+            f"Trait column must contain only 0/1 or null/empty values; offending values: {invalid}"
         )
     return normalized.with_columns(
         pl.when(pl.col("__trait_raw").is_null() | (pl.col("__trait_raw") == ""))
@@ -339,6 +363,131 @@ def _load_ncbi_taxa(ncbi_taxonomy_db: Path | None = None) -> object:
         return NCBITaxa(dbfile=dbfile)
     except Exception as exc:
         raise MetadataError("Failed to initialize ete4 NCBITaxa") from exc
+
+
+def _close_ncbi_taxa(ncbi_taxa: object) -> None:
+    db = getattr(ncbi_taxa, "db", None)
+    if db is None:
+        return
+    try:
+        db.close()
+    except Exception:
+        return
+
+
+def _lookup_ncbi_taxid(taxonomy_query: str, ncbi_taxa: object) -> int | None:
+    def _name_translator_value(query: str) -> list[object]:
+        try:
+            name_map = dict(ncbi_taxa.get_name_translator([query]))
+        except Exception:
+            return []
+        values = name_map.get(query)
+        if values is None:
+            return []
+        if isinstance(values, list):
+            return values
+        return [values]
+
+    candidates = _name_translator_value(taxonomy_query)
+    if not candidates:
+        genus = taxonomy_query.split(" ", 1)[0].strip()
+        if genus and genus != taxonomy_query:
+            candidates = _name_translator_value(genus)
+    if not candidates:
+        return None
+    try:
+        return int(candidates[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_species_taxid_frame(
+    species_for_taxid: pl.DataFrame,
+    *,
+    ncbi_taxonomy_db: Path | None,
+) -> tuple[pl.DataFrame, int]:
+    ncbi_taxa = _load_ncbi_taxa(ncbi_taxonomy_db)
+    rows: list[dict[str, object]] = []
+    unresolved_count = 0
+    try:
+        for species_value in species_for_taxid.select("__species").to_series().to_list():
+            species = str(species_value)
+            taxonomy_query = _taxonomy_query_from_label(species)
+            taxid = (
+                None if taxonomy_query is None else _lookup_ncbi_taxid(taxonomy_query, ncbi_taxa)
+            )
+            if taxid is None:
+                unresolved_count += 1
+                continue
+            rows.append({"leaf_name": species, "taxid": taxid})
+    finally:
+        _close_ncbi_taxa(ncbi_taxa)
+
+    schema = {"leaf_name": pl.String, "taxid": pl.Int64}
+    if not rows:
+        return pl.DataFrame(schema=schema), unresolved_count
+    return pl.DataFrame(rows, schema=schema).sort("leaf_name"), unresolved_count
+
+
+def _write_species_taxid_from_frame(
+    species_for_taxid: pl.DataFrame,
+    out: Path,
+    *,
+    species_col: str,
+    taxid_col: str,
+    ncbi_taxonomy_db: Path | None,
+    overwrite: bool,
+) -> SpeciesTaxidResult:
+    if out.exists() and not overwrite:
+        raise MetadataError(
+            f"Output species taxid TSV already exists; use --force to overwrite: {out}"
+        )
+    species_count = species_for_taxid.height
+    species_taxid, unresolved_count = _build_species_taxid_frame(
+        species_for_taxid,
+        ncbi_taxonomy_db=ncbi_taxonomy_db,
+    )
+    if species_taxid.height == 0:
+        raise MetadataError("No species could be resolved to NCBI taxids")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    rename_columns = {}
+    if species_col != "leaf_name":
+        rename_columns["leaf_name"] = species_col
+    if taxid_col != "taxid":
+        rename_columns["taxid"] = taxid_col
+    species_taxid_out = species_taxid.rename(rename_columns) if rename_columns else species_taxid
+    species_taxid_out.write_csv(out, separator="\t")
+    return SpeciesTaxidResult(
+        taxid_path=out,
+        species_count=species_count,
+        resolved_species_count=species_taxid.height,
+        unresolved_species_count=unresolved_count,
+    )
+
+
+def build_species_taxid_tsv(
+    species_trait_path: Path,
+    out: Path,
+    *,
+    species_col: str = "species",
+    taxid_col: str = "taxid",
+    ncbi_taxonomy_db: Path | None = None,
+    overwrite: bool = False,
+) -> SpeciesTaxidResult:
+    """Resolve species labels to NCBI taxids and write a species_taxid TSV."""
+    species_trait = _with_normalized_species(
+        _load_species_trait(species_trait_path), species_col=species_col
+    )
+    if species_trait.height == 0:
+        raise MetadataError("Species trait TSV contains no species")
+    return _write_species_taxid_from_frame(
+        species_trait,
+        out,
+        species_col=species_col,
+        taxid_col=taxid_col,
+        ncbi_taxonomy_db=ncbi_taxonomy_db,
+        overwrite=overwrite,
+    )
 
 
 def _dict_get_any_key(mapping: dict[object, object], key: int) -> object | None:
@@ -429,8 +578,7 @@ def _build_taxon_block_metadata(
         species_taxid, on="__species", how="left"
     )
     taxids = [
-        int(value)
-        for value in metadata.select("taxid").drop_nulls().unique().to_series().to_list()
+        int(value) for value in metadata.select("taxid").drop_nulls().unique().to_series().to_list()
     ]
     ncbi_taxa = _load_ncbi_taxa(ncbi_taxonomy_db)
     rank_lookup = _rank_taxon_lookup(taxids, ranks, ncbi_taxa)
@@ -465,9 +613,7 @@ def _build_taxon_block_metadata(
         raw_name_col = f"__taxon_{rank}_raw_name"
         out_id_col, out_name_col, holdout_col, exclude_col = _taxon_block_columns(rank)
         label_counts = (
-            rank_frame.filter(
-                pl.col("__trait").is_not_null() & pl.col(raw_id_col).is_not_null()
-            )
+            rank_frame.filter(pl.col("__trait").is_not_null() & pl.col(raw_id_col).is_not_null())
             .group_by(raw_id_col)
             .agg(
                 (pl.col("__trait") == 0).sum().alias("n_label_0"),
@@ -538,9 +684,7 @@ def _build_taxon_block_metadata(
     return output, block_counts, holdout_counts, exclude_counts
 
 
-def _read_tree_names_with_nwkit(
-    tree_path: Path, *, out_dir: Path, nwkit_bin: str
-) -> set[str]:
+def _read_tree_names_with_nwkit(tree_path: Path, *, out_dir: Path, nwkit_bin: str) -> set[str]:
     table_path = out_dir / "tree_table.tsv"
     command: Sequence[str] = (
         nwkit_bin,
@@ -564,9 +708,7 @@ def _read_tree_names_with_nwkit(
     _require_columns(table, ["name"], "nwkit tree table")
     return set(
         str(value)
-        for value in table.select(
-            pl.col("name").cast(pl.String, strict=False).str.strip_chars()
-        )
+        for value in table.select(pl.col("name").cast(pl.String, strict=False).str.strip_chars())
         .filter(pl.col("name").is_not_null() & (pl.col("name") != ""))
         .to_series()
         .to_list()
@@ -579,6 +721,7 @@ def build_species_metadata_from_skim(
     out: Path,
     *,
     species_taxid_path: Path | None = None,
+    species_taxid_out_path: Path | None = None,
     species_col: str = "species",
     taxid_col: str = "taxid",
     trait_col: str = "C4",
@@ -597,11 +740,11 @@ def build_species_metadata_from_skim(
         raise MetadataError("nwkit executable path must be non-empty")
     if out.exists() and not overwrite:
         raise MetadataError(f"Output metadata already exists; use --force to overwrite: {out}")
+    if species_taxid_path is not None and species_taxid_out_path is not None:
+        raise MetadataError("species_taxid_out_path cannot be used with species_taxid_path")
     if not tree_path.exists():
         raise MetadataError(f"Input tree not found: {tree_path}")
     taxon_ranks = _normalize_taxon_block_ranks(taxon_block_ranks)
-    if taxon_ranks and species_taxid_path is None:
-        raise MetadataError("Taxonomic rank blocking requires species_taxid_path")
     output_columns = [species_col, trait_col, contrast_pair_col, contrast_pair_test_holdout_col]
     for rank in taxon_ranks:
         output_columns.extend(_taxon_block_columns(rank))
@@ -614,6 +757,19 @@ def build_species_metadata_from_skim(
     )
     if species_trait.height == 0:
         raise MetadataError("Species trait TSV contains no species")
+
+    resolved_species_taxid_path = species_taxid_path
+    generated_species_taxid_result: SpeciesTaxidResult | None = None
+    if resolved_species_taxid_path is None and (taxon_ranks or species_taxid_out_path is not None):
+        generated_species_taxid_result = _write_species_taxid_from_frame(
+            species_trait,
+            species_taxid_out_path or out.with_name("species_taxid.tsv"),
+            species_col=species_col,
+            taxid_col=taxid_col,
+            ncbi_taxonomy_db=ncbi_taxonomy_db,
+            overwrite=overwrite,
+        )
+        resolved_species_taxid_path = generated_species_taxid_result.taxid_path
 
     out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
@@ -668,10 +824,7 @@ def build_species_metadata_from_skim(
             all_groupfile = _skim_groupfile_path(temp_skim_tree, "all")
             if not all_groupfile.exists():
                 details = _format_process_output(completed.stdout, completed.stderr)
-                message = (
-                    "nwkit skim completed but did not create group table: "
-                    f"{all_groupfile}"
-                )
+                message = f"nwkit skim completed but did not create group table: {all_groupfile}"
                 if details:
                     message += f":\n{details}"
                 raise MetadataError(message)
@@ -708,10 +861,7 @@ def build_species_metadata_from_skim(
             .alias(contrast_pair_col),
             pl.when(
                 pl.col(trait_col).is_not_null()
-                & (
-                    pl.col("__contrast_pair").is_null()
-                    | (pl.col("__contrast_pair") == "")
-                )
+                & (pl.col("__contrast_pair").is_null() | (pl.col("__contrast_pair") == ""))
             )
             .then(pl.lit("yes"))
             .otherwise(pl.lit("no"))
@@ -722,7 +872,7 @@ def build_species_metadata_from_skim(
     taxon_block_test_holdout_counts: dict[str, int] = {}
     taxon_block_exclude_counts: dict[str, int] = {}
     if taxon_ranks:
-        if species_taxid_path is None:
+        if resolved_species_taxid_path is None:
             raise MetadataError("Taxonomic rank blocking requires species_taxid_path")
         (
             taxon_blocks,
@@ -731,7 +881,7 @@ def build_species_metadata_from_skim(
             taxon_block_exclude_counts,
         ) = _build_taxon_block_metadata(
             species_for_skim,
-            species_taxid_path,
+            resolved_species_taxid_path,
             species_col=species_col,
             taxid_col=taxid_col,
             ranks=taxon_ranks,
@@ -759,9 +909,7 @@ def build_species_metadata_from_skim(
         raise MetadataError(f"Generated contrast groups must contain both 0/1 labels: {groups}")
 
     metadata.write_csv(out, separator="\t")
-    contrast_pair_count = (
-        grouped.select(contrast_pair_col).n_unique() if grouped.height > 0 else 0
-    )
+    contrast_pair_count = grouped.select(contrast_pair_col).n_unique() if grouped.height > 0 else 0
     contrast_pair_test_holdout_count = metadata.filter(
         pl.col(contrast_pair_test_holdout_col) == "yes"
     ).height
@@ -775,4 +923,12 @@ def build_species_metadata_from_skim(
         taxon_block_test_holdout_counts=taxon_block_test_holdout_counts,
         taxon_block_exclude_counts=taxon_block_exclude_counts,
         tree_missing_species_count=tree_missing_species_count,
+        species_taxid_path=resolved_species_taxid_path,
+        species_taxid_generated=generated_species_taxid_result is not None,
+        species_taxid_resolved_count=0
+        if generated_species_taxid_result is None
+        else generated_species_taxid_result.resolved_species_count,
+        species_taxid_unresolved_count=0
+        if generated_species_taxid_result is None
+        else generated_species_taxid_result.unresolved_species_count,
     )

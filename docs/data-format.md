@@ -26,7 +26,6 @@ Generate a tree and metadata:
 ```bash
 phenoradar metadata \
   --species-trait species_trait.tsv \
-  --species-taxid species_taxid.tsv \
   --tree-out ncbi_tree.nwk \
   --out species_metadata.tsv
 ```
@@ -48,8 +47,11 @@ species present in the tree but outside contrastive clades keep an empty contras
 and are marked `contrast_pair_test_holdout=yes` by default.
 
 Taxonomic rank blocking can be requested with repeated `--taxon-block-rank` options, for
-example `--taxon-block-rank family --taxon-block-rank order`. This requires
-`--species-taxid`. For each requested rank, metadata includes:
+example `--taxon-block-rank family --taxon-block-rank order`. If
+`--species-taxid` is omitted, `phenoradar metadata` resolves species names with
+`ete4.NCBITaxa`, writes `species_taxid.tsv` next to `--out` (or the path from
+`--species-taxid-out`), and then uses that TSV for rank-aware metadata. For each
+requested rank, metadata includes:
 
 - `taxon_<rank>_id`
 - `taxon_<rank>_name`
@@ -72,7 +74,9 @@ split:
 ## Species Taxid TSV
 
 When known NCBI Taxonomy IDs are available, `phenoradar metadata` can use them for tree
-retrieval instead of inferring taxids from species names.
+retrieval and rank blocking instead of resolving taxids from species names. When
+rank blocking needs taxids and this file is omitted, PhenoRadar generates the
+same schema automatically.
 
 Required columns (default names):
 

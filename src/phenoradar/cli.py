@@ -29,7 +29,12 @@ from phenoradar.config import (
 )
 from phenoradar.cv import CVError, run_final_refit, run_outer_cv
 from phenoradar.figures import FigureError, write_predict_figures, write_run_figures
-from phenoradar.metadata import MetadataError, build_species_metadata_from_skim, fetch_ncbi_tree
+from phenoradar.metadata import (
+    MetadataError,
+    build_species_metadata_from_skim,
+    build_species_taxid_tsv,
+    fetch_ncbi_tree,
+)
 from phenoradar.provenance import (
     ProvenanceError,
     bundle_payload_sha256,
@@ -319,9 +324,7 @@ def _emit_predict_summary(
     n_positive = None
     n_positive_cv = None
     if "pred_label_fixed_threshold" in pred_predict.columns:
-        n_positive = int(
-            pred_predict.filter(pl.col("pred_label_fixed_threshold") == 1).height
-        )
+        n_positive = int(pred_predict.filter(pl.col("pred_label_fixed_threshold") == 1).height)
     if "pred_label_cv_derived_threshold" in pred_predict.columns:
         n_positive_cv = int(
             pred_predict.filter(pl.col("pred_label_cv_derived_threshold") == 1).height
@@ -579,12 +582,9 @@ def _classification_summary(
         required_external_pred = {"prob", "true_label"}
         if not required_external_pred.issubset(pred_external_test.columns):
             raise typer.BadParameter(
-                "prediction_external_test.tsv schema is invalid for "
-                "classification_summary.tsv"
+                "prediction_external_test.tsv schema is invalid for classification_summary.tsv"
             )
-        missing_label_count = pred_external_test.filter(
-            pl.col("true_label").is_null()
-        ).height
+        missing_label_count = pred_external_test.filter(pl.col("true_label").is_null()).height
         if missing_label_count > 0:
             raise typer.BadParameter(
                 "prediction_external_test.tsv contains species with missing external_test labels"
@@ -1181,6 +1181,18 @@ def metadata_command(
             help="Optional TSV containing species and NCBI taxid columns for tree retrieval.",
         ),
     ] = None,
+    species_taxid_out: Annotated[
+        Path | None,
+        typer.Option(
+            "--species-taxid-out",
+            file_okay=True,
+            dir_okay=False,
+            help=(
+                "Output generated species/taxid TSV when --species-taxid is omitted. "
+                "Defaults to species_taxid.tsv next to --out when taxon rank blocks need it."
+            ),
+        ),
+    ] = None,
     out: Annotated[
         Path,
         typer.Option(
@@ -1324,6 +1336,40 @@ def metadata_command(
     log_verbosity = _resolve_log_verbosity(verbose=verbose, quiet=quiet)
     if tree_in is not None and not write_metadata:
         raise typer.BadParameter("`--tree-in` with `--tree-only` has no work to do.")
+    if species_taxid is not None and species_taxid_out is not None:
+        raise typer.BadParameter("`--species-taxid-out` cannot be used with `--species-taxid`.")
+
+    resolved_species_taxid = species_taxid
+    generated_taxid_result = None
+    should_generate_taxid = species_taxid is None and (
+        species_taxid_out is not None or (write_metadata and bool(taxon_block_rank))
+    )
+
+    try:
+        if should_generate_taxid:
+            taxid_out = species_taxid_out or out.with_name("species_taxid.tsv")
+            _progress_log(
+                "metadata",
+                "Resolve NCBI taxids for species metadata.",
+                start_time=start_time,
+                log_verbosity=log_verbosity,
+            )
+            generated_taxid_result = build_species_taxid_tsv(
+                species_trait,
+                taxid_out,
+                species_col=species_col,
+                taxid_col=taxid_col,
+                ncbi_taxonomy_db=ncbi_taxonomy_db,
+                overwrite=force,
+            )
+            resolved_species_taxid = generated_taxid_result.taxid_path
+            typer.echo(
+                f"Wrote species taxid TSV: {generated_taxid_result.taxid_path} "
+                f"(resolved_species={generated_taxid_result.resolved_species_count}, "
+                f"unresolved_species={generated_taxid_result.unresolved_species_count})."
+            )
+    except MetadataError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
     _progress_log(
         "metadata",
@@ -1336,7 +1382,7 @@ def metadata_command(
             tree_result = fetch_ncbi_tree(
                 species_trait,
                 tree_out,
-                species_taxid_path=species_taxid,
+                species_taxid_path=resolved_species_taxid,
                 species_col=species_col,
                 taxid_col=taxid_col,
                 rank=rank,
@@ -1363,7 +1409,7 @@ def metadata_command(
                 species_trait,
                 tree_path,
                 out,
-                species_taxid_path=species_taxid,
+                species_taxid_path=resolved_species_taxid,
                 species_col=species_col,
                 taxid_col=taxid_col,
                 trait_col=trait_col,
@@ -1510,9 +1556,7 @@ def predict(
     except BundleError as exc:
         raise typer.BadParameter(str(exc)) from exc
     if "true_label" not in pred_predict.columns:
-        pred_predict = pred_predict.with_columns(
-            pl.lit(None, dtype=pl.Int64).alias("true_label")
-        )
+        pred_predict = pred_predict.with_columns(pl.lit(None, dtype=pl.Int64).alias("true_label"))
     pred_predict = pred_predict.select(
         [
             name

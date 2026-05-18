@@ -127,7 +127,6 @@ Generate metadata-adjacent artifacts from a raw species trait table.
 ```bash
 phenoradar metadata \
   --species-trait species_trait.tsv \
-  --species-taxid species_taxid.tsv \
   --tree-out ncbi_tree.nwk \
   --out species_metadata.tsv
 ```
@@ -146,6 +145,7 @@ Options:
 
 - `--species-trait`: input TSV containing species and binary trait columns (default: `species_trait.tsv`)
 - `--species-taxid`: optional TSV containing species and NCBI taxid columns for tree retrieval and taxonomic-rank blocking
+- `--species-taxid-out`: output generated species/taxid TSV when `--species-taxid` is omitted; defaults to `species_taxid.tsv` next to `--out` when taxonomic-rank blocking needs it
 - `--out`: output PhenoRadar metadata TSV (default: `species_metadata.tsv`)
 - `--tree-in`: existing Newick tree to use for group assignment; skips NCBI tree retrieval
 - `--tree-out`: output Newick tree path when retrieving from NCBI Taxonomy (default: `ncbi_tree.nwk`)
@@ -174,9 +174,12 @@ without an assigned contrast pair are marked in `contrast_pair_test_holdout`.
 
 When `--taxon-block-rank` is supplied, the command also writes
 `taxon_<rank>_id`, `taxon_<rank>_name`, `taxon_<rank>_test_holdout`, and
-`taxon_<rank>_exclude`. Rank blocks with both labels are usable as CV groups.
-Single-label rank blocks are marked as test holdout, while labeled species with
-missing taxid/rank are marked as excluded.
+`taxon_<rank>_exclude`. If `--species-taxid` is omitted, `phenoradar metadata`
+first resolves species names with `ete4.NCBITaxa`, writes a generated
+`species_taxid.tsv` (or `--species-taxid-out`), and reuses that file for rank
+blocking. Rank blocks with both labels are usable as CV groups. Single-label
+rank blocks are marked as test holdout, while labeled species with missing
+taxid/rank are marked as excluded.
 
 ## `predict`
 

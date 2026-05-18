@@ -12,6 +12,7 @@ from phenoradar.cli import app
 from phenoradar.metadata import (
     MetadataError,
     build_species_metadata_from_skim,
+    build_species_taxid_tsv,
     fetch_ncbi_tree,
 )
 
@@ -27,10 +28,12 @@ class _FakeNCBITaxa:
         lineages: dict[int, list[int]],
         ranks: dict[int, str],
         names: dict[int, str],
+        name_taxids: dict[str, list[int]] | None = None,
     ) -> None:
         self._lineages = lineages
         self._ranks = ranks
         self._names = names
+        self._name_taxids = {} if name_taxids is None else name_taxids
 
     def get_lineage(self, taxid: int) -> list[int]:
         return self._lineages[int(taxid)]
@@ -40,6 +43,9 @@ class _FakeNCBITaxa:
 
     def get_taxid_translator(self, taxids: list[int]) -> dict[int, str]:
         return {taxid: self._names[taxid] for taxid in taxids if taxid in self._names}
+
+    def get_name_translator(self, names: list[str]) -> dict[str, list[int]]:
+        return {name: self._name_taxids[name] for name in names if name in self._name_taxids}
 
 
 def _fake_metadata_nwkit_run(
@@ -59,9 +65,7 @@ def _fake_metadata_nwkit_run(
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         all_groupfile = Path(f"{str(outfile).removesuffix('.nwk')}.all.tsv")
         all_groupfile.write_text(
-            "leaf_name\tC4\tgroup\tcontrastive_clade\n"
-            + "\n".join(skim_rows)
-            + "\n",
+            "leaf_name\tC4\tgroup\tcontrastive_clade\n" + "\n".join(skim_rows) + "\n",
             encoding="utf-8",
         )
         outfile.write_text("(" + ",".join(tree_names) + ");\n", encoding="utf-8")
@@ -222,6 +226,63 @@ def test_fetch_ncbi_tree_rejects_existing_output_without_force(tmp_path: Path) -
 
     with pytest.raises(MetadataError, match="already exists"):
         fetch_ncbi_tree(species_trait, tree_out)
+
+
+def test_build_species_taxid_tsv_resolves_species_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    species_trait = _write(
+        tmp_path / "species_trait.tsv",
+        "species\tC4\nHomo_sapiens_gene1\t1\nMus musculus\t0\nUnknown_species\t1\n",
+    )
+    out = tmp_path / "species_taxid.tsv"
+    monkeypatch.setattr(
+        "phenoradar.metadata._load_ncbi_taxa",
+        lambda _db=None: _FakeNCBITaxa(
+            lineages={},
+            ranks={},
+            names={},
+            name_taxids={"Homo sapiens": [9606], "Mus musculus": [10090]},
+        ),
+    )
+
+    result = build_species_taxid_tsv(species_trait, out)
+
+    assert result.taxid_path == out
+    assert result.species_count == 3
+    assert result.resolved_species_count == 2
+    assert result.unresolved_species_count == 1
+    assert out.read_text(encoding="utf-8") == (
+        "species\ttaxid\nHomo_sapiens_gene1\t9606\nMus musculus\t10090\n"
+    )
+
+
+def test_build_species_taxid_tsv_uses_custom_columns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    species_trait = _write(
+        tmp_path / "species_trait.tsv",
+        "leaf\tC4\nHomo_sapiens\t1\n",
+    )
+    out = tmp_path / "species_taxid.tsv"
+    monkeypatch.setattr(
+        "phenoradar.metadata._load_ncbi_taxa",
+        lambda _db=None: _FakeNCBITaxa(
+            lineages={},
+            ranks={},
+            names={},
+            name_taxids={"Homo sapiens": [9606]},
+        ),
+    )
+
+    build_species_taxid_tsv(
+        species_trait,
+        out,
+        species_col="leaf",
+        taxid_col="ncbi_taxid",
+    )
+
+    assert out.read_text(encoding="utf-8") == "leaf\tncbi_taxid\nHomo_sapiens\t9606\n"
 
 
 def test_metadata_cli_writes_ncbi_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -537,17 +598,51 @@ def test_build_species_metadata_from_skim_can_hold_out_mixed_taxon_blocks(
     assert table.filter(pl.col("taxon_family_id").is_not_null()).height == 2
 
 
-def test_taxon_rank_blocking_requires_species_taxid_path(tmp_path: Path) -> None:
+def test_build_species_metadata_from_skim_generates_taxid_for_taxon_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     species_trait = _write(tmp_path / "species_trait.tsv", "species\tC4\nsp1\t1\nsp2\t0\n")
     tree = _write(tmp_path / "tree.nwk", "(sp1,sp2);\n")
+    out = tmp_path / "species_metadata.tsv"
+    taxid_out = tmp_path / "generated_species_taxid.tsv"
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_metadata_nwkit_run(
+            ["sp1", "sp2"],
+            ["sp1\t1\t1\t1", "sp2\t0\t2\t1"],
+        ),
+    )
+    monkeypatch.setattr(
+        "phenoradar.metadata._load_ncbi_taxa",
+        lambda _db=None: _FakeNCBITaxa(
+            lineages={1: [1, 100], 2: [2, 100]},
+            ranks={100: "family"},
+            names={100: "FamilyA"},
+            name_taxids={"sp1": [1], "sp2": [2]},
+        ),
+    )
 
-    with pytest.raises(MetadataError, match="species_taxid_path"):
-        build_species_metadata_from_skim(
-            species_trait,
-            tree,
-            tmp_path / "species_metadata.tsv",
-            taxon_block_ranks=["family"],
-        )
+    result = build_species_metadata_from_skim(
+        species_trait,
+        tree,
+        out,
+        species_taxid_out_path=taxid_out,
+        taxon_block_ranks=["family"],
+    )
+
+    assert result.species_taxid_path == taxid_out
+    assert result.species_taxid_generated is True
+    assert result.species_taxid_resolved_count == 2
+    assert result.species_taxid_unresolved_count == 0
+    assert taxid_out.read_text(encoding="utf-8") == "species\ttaxid\nsp1\t1\nsp2\t2\n"
+    assert out.read_text(encoding="utf-8") == (
+        "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\t"
+        "taxon_family_id\ttaxon_family_name\ttaxon_family_test_holdout\t"
+        "taxon_family_exclude\n"
+        "sp1\t1\t1\tno\t100\tFamilyA\tno\tno\n"
+        "sp2\t0\t1\tno\t100\tFamilyA\tno\tno\n"
+    )
 
 
 def test_metadata_cli_writes_metadata_with_existing_tree(
@@ -602,9 +697,7 @@ def test_metadata_cli_writes_metadata_with_existing_tree(
     assert "contrast_pair_test_holdouts=0" in result.output
     assert "tree_missing_species=0" in result.output
     assert out.read_text(encoding="utf-8") == (
-        "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\n"
-        "sp1\t1\t1\tno\n"
-        "sp2\t0\t1\tno\n"
+        "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\nsp1\t1\t1\tno\nsp2\t0\t1\tno\n"
     )
 
 
@@ -660,6 +753,59 @@ def test_metadata_cli_writes_taxon_rank_blocks_with_existing_tree(
     )
 
 
+def test_metadata_cli_generates_taxid_for_taxon_rank_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    species_trait = _write(tmp_path / "species_trait.tsv", "species\tC4\nsp1\t1\nsp2\t0\n")
+    tree = _write(tmp_path / "tree.nwk", "(sp1,sp2);\n")
+    out = tmp_path / "species_metadata.tsv"
+    taxid_out = tmp_path / "species_taxid.tsv"
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_metadata_nwkit_run(
+            ["sp1", "sp2"],
+            ["sp1\t1\t1\t1", "sp2\t0\t2\t1"],
+        ),
+    )
+    monkeypatch.setattr(
+        "phenoradar.metadata._load_ncbi_taxa",
+        lambda _db=None: _FakeNCBITaxa(
+            lineages={1: [1, 100], 2: [2, 100]},
+            ranks={100: "family"},
+            names={100: "FamilyA"},
+            name_taxids={"sp1": [1], "sp2": [2]},
+        ),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "metadata",
+            "--species-trait",
+            str(species_trait),
+            "--tree-in",
+            str(tree),
+            "--out",
+            str(out),
+            "--taxon-block-rank",
+            "family",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Wrote species taxid TSV" in result.output
+    assert "taxon_blocks=[family:blocks=1,test_holdouts=0,excluded=0]" in result.output
+    assert taxid_out.read_text(encoding="utf-8") == "species\ttaxid\nsp1\t1\nsp2\t2\n"
+    assert out.read_text(encoding="utf-8") == (
+        "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\t"
+        "taxon_family_id\ttaxon_family_name\ttaxon_family_test_holdout\t"
+        "taxon_family_exclude\n"
+        "sp1\t1\t1\tno\t100\tFamilyA\tno\tno\n"
+        "sp2\t0\t1\tno\t100\tFamilyA\tno\tno\n"
+    )
+
+
 def test_build_species_metadata_from_skim_writes_empty_groups_when_no_contrasts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -696,9 +842,7 @@ def test_build_species_metadata_from_skim_writes_empty_groups_when_no_contrasts(
     assert result.contrast_pair_test_holdout_count == 2
     assert result.tree_missing_species_count == 0
     assert out.read_text(encoding="utf-8") == (
-        "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\n"
-        "sp1\t1\t\tyes\n"
-        "sp2\t1\t\tyes\n"
+        "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\nsp1\t1\t\tyes\nsp2\t1\t\tyes\n"
     )
 
 
@@ -743,7 +887,5 @@ def test_build_species_metadata_from_skim_excludes_species_missing_from_tree(
     assert result.grouped_species_count == 2
     assert result.tree_missing_species_count == 1
     assert out.read_text(encoding="utf-8") == (
-        "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\n"
-        "sp1\t1\t1\tno\n"
-        "sp2\t0\t1\tno\n"
+        "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\nsp1\t1\t1\tno\nsp2\t0\t1\tno\n"
     )
