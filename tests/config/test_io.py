@@ -62,8 +62,10 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.sampling.weighting == "none"
     assert resolved.model_selection.selection_metric == "log_loss"
     assert resolved.model_selection.candidate_source_policy == "per_sample_set"
+    assert resolved.preprocess.expression_transform.method == "log1p"
     assert resolved.preprocess.low_prevalence_filter.enabled is True
     assert resolved.preprocess.low_prevalence_filter.min_species_per_feature == 2
+    assert resolved.preprocess.feature_scaling.method == "standard"
 
 
 def test_allow_empty_config_paths_resolves_to_defaults() -> None:
@@ -77,6 +79,8 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
     assert resolved.sampling.weighting == "none"
     assert resolved.model_selection.selection_metric == "log_loss"
     assert resolved.model_selection.candidate_source_policy == "per_sample_set"
+    assert resolved.preprocess.expression_transform.method == "log1p"
+    assert resolved.preprocess.feature_scaling.method == "standard"
 
 
 def test_unknown_key_is_rejected(tmp_path: Path) -> None:

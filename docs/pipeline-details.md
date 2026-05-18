@@ -17,7 +17,7 @@ This page explains execution flow for `run`, `predict`, and `report`.
 
 1. Resolve config.
 2. Load and verify bundle integrity.
-3. Build expression matrix and align features to bundle schema.
+3. Build expression matrix, apply bundled expression transform, and align features to bundle schema.
 4. Run deterministic inference using bundled preprocessing/model state.
 5. Write artifacts, figures, metadata.
 
@@ -109,12 +109,12 @@ For each outer fold:
     - NumPy/SciPy/scikit-learn native thread pools are also limited to the active runtime budget in these execution paths
     - `search_strategy=tpe` remains sequential
 4. For each sampled training set, preprocess sampled-train/valid and fit selected models:
-  - `log1p`
+  - `preprocess.expression_transform` (`none`, `log1p`, `sample_rank`, or `sample_percentile_rank`)
   - optional low-prevalence filter
   - optional low-variance filter
   - optional pair-aware filter (train-only group-contrast ranking)
   - optional correlation filter (pearson/spearman)
-  - standard scaling (fit on sampled train, transform valid)
+  - `preprocess.feature_scaling` (`none` or train-fitted standard scaling)
   - fit selected model(s), predict fold-valid probabilities
 5. Aggregate model probabilities (`mean` or `median`).
 6. Compute fold metrics.
@@ -131,12 +131,12 @@ After all folds:
 - Candidate generation/selection is repeated in `final_refit` scope.
 - sampled sets can run in parallel up to `runtime.n_jobs` budget.
 - each sampled set is preprocessed independently before fit:
-  - `log1p`
+  - `preprocess.expression_transform` (`none`, `log1p`, `sample_rank`, or `sample_percentile_rank`)
   - optional low-prevalence filter
   - optional low-variance filter
   - optional pair-aware filter (train-only group-contrast ranking)
   - optional correlation filter (pearson/spearman)
-  - standard scaling (fit on sampled train, transform target pools)
+  - `preprocess.feature_scaling` (`none` or train-fitted standard scaling)
 - within each sampled set, selected model fits can also run in parallel.
 - `random_forest` thread count is auto-limited per task so combined concurrency stays within `runtime.n_jobs`.
 - NumPy/SciPy/scikit-learn native thread pools are also limited to the active runtime budget.
@@ -184,15 +184,16 @@ Bundle verification:
 
 Feature alignment:
 
-- align input features to bundle feature schema.
+- apply the bundled expression transform before feature-schema alignment.
+- align transformed input features to bundle feature schema.
 - missing bundle features are filled with `0`.
 - extra input features are ignored.
 - zero overlap is an error.
 
 Inference:
 
-- apply `log1p`, then per-model bundled preprocessing state
-  (feature subset alignment + model-local scaler transform).
+- apply per-model bundled preprocessing state
+  (feature subset alignment + optional model-local scaler transform).
 - run all bundled models.
 - aggregate probs by bundled aggregation mode.
 - derive `pred_label_fixed_threshold` by bundled fixed threshold.

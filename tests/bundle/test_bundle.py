@@ -69,22 +69,23 @@ def _fixture_data(tmp_path: Path) -> tuple[Path, Path]:
     return metadata, tpm
 
 
-def _config(tmp_path: Path, metadata: Path, tpm: Path) -> Path:
+def _config(tmp_path: Path, metadata: Path, tpm: Path, extra: str = "") -> Path:
     return _write(
         tmp_path / "config.yml",
         f"""
 data:
   metadata_path: {metadata}
   tpm_path: {tpm}
+{extra}
 """.strip()
         + "\n",
     )
 
 
 def _export_and_load_bundle(
-    tmp_path: Path, metadata: Path, tpm: Path
+    tmp_path: Path, metadata: Path, tpm: Path, extra: str = ""
 ) -> tuple[AppConfig, LoadedBundle]:
-    config = load_and_resolve_config([_config(tmp_path, metadata, tpm)])
+    config = load_and_resolve_config([_config(tmp_path, metadata, tpm, extra)])
     split_artifacts = build_split_artifacts(config)
     cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
     cv_threshold = (
@@ -211,6 +212,8 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
         threshold_fixed=float(threshold_fixed),
         threshold_cv_derived=float(cv_threshold),
         source_run_id=run_dir.name,
+        expression_transform=config.preprocess.expression_transform.method,
+        feature_scaling=config.preprocess.feature_scaling.method,
     )
     refit_pred_df, refit_warnings = predict_with_bundle(config, refit_bundle)
     pred_df, warnings = predict_with_bundle(config, bundle)
@@ -242,6 +245,33 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
     }.issubset(pred_df.columns)
     assert bundle.source_run_id == run_dir.name
     assert isinstance(warnings, list)
+
+
+def test_bundle_export_load_and_predict_with_rank_transform_no_scaling(tmp_path: Path) -> None:
+    metadata, tpm = _fixture_data(tmp_path)
+    config, bundle = _export_and_load_bundle(
+        tmp_path,
+        metadata,
+        tpm,
+        """
+sampling:
+  sampled_set_count: 1
+preprocess:
+  expression_transform:
+    method: sample_percentile_rank
+  feature_scaling:
+    method: none
+""",
+    )
+
+    pred_df, warnings = predict_with_bundle(config, bundle)
+
+    assert bundle.expression_transform == "sample_percentile_rank"
+    assert bundle.feature_scaling == "none"
+    assert bundle.scaler is None
+    assert all(entry.scaler is None for entry in bundle.model_preprocess)
+    assert pred_df.height == 6
+    assert warnings == []
 
 
 def test_bundle_integrity_failure_on_tampered_file(tmp_path: Path) -> None:

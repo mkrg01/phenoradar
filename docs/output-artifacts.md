@@ -586,8 +586,10 @@ Files:
 - `bundle_manifest.json`
 - `feature_schema.tsv`
 - `preprocess_state.joblib`
-  - contains bundle feature schema plus preprocess state
-  - may include model-local preprocessing entries (`model_preprocess`)
+  - contains bundle feature schema plus preprocessing method metadata
+    (`expression_transform`, `feature_scaling`)
+  - may include model-local preprocessing entries (`model_preprocess`),
+    including selected features and optional scaler state
 - `model_state.joblib`
 - `thresholds.tsv`
 - `resolved_config.yml`

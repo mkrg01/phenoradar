@@ -48,6 +48,8 @@ from phenoradar.model_selection import (
     generate_candidates,
 )
 
+type FeatureScaler = StandardScaler | None
+
 try:
     from threadpoolctl import (  # type: ignore[import-untyped]
         ThreadpoolController,
@@ -107,7 +109,7 @@ class FinalRefitArtifacts:
     warnings: list[str]
     ensemble_size: int
     feature_names: list[str]
-    scaler: StandardScaler
+    scaler: FeatureScaler
     models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
     model_entries: list[FinalModelEntry] = field(default_factory=list)
 
@@ -215,7 +217,7 @@ class FinalSampleSetFitResult:
     fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
     model_sparsity_rows: list[dict[str, Any]]
     selected_features: list[str]
-    scaler: StandardScaler
+    scaler: FeatureScaler
     filter_counts: FeatureFilterCounts
     model_count: int
     warnings: list[str]
@@ -226,7 +228,7 @@ class FinalModelEntry:
     """One final-refit model with its model-local preprocessing state."""
 
     feature_names: list[str]
-    scaler: StandardScaler
+    scaler: FeatureScaler
     model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier
 
 
@@ -654,6 +656,89 @@ def _config_with_runtime_n_jobs(config: AppConfig, n_jobs: int) -> AppConfig:
     )
 
 
+def _validate_expression_transform_method(method: str) -> str:
+    if method in {"none", "log1p", "sample_rank", "sample_percentile_rank"}:
+        return method
+    raise CVError(f"Unsupported preprocess.expression_transform.method: {method}")
+
+
+def _validate_feature_scaling_method(method: str) -> str:
+    if method in {"none", "standard"}:
+        return method
+    raise CVError(f"Unsupported preprocess.feature_scaling.method: {method}")
+
+
+def _sample_rank_transform(values: np.ndarray, *, percentile: bool) -> np.ndarray:
+    if np.any(values < 0):
+        raise CVError("Expression values must be non-negative before sample rank transform")
+
+    ranked = np.zeros_like(values, dtype=float)
+    for row_idx in range(values.shape[0]):
+        positive_mask = values[row_idx] > 0.0
+        positive_count = int(np.count_nonzero(positive_mask))
+        if positive_count == 0:
+            continue
+        row_ranks = rankdata(values[row_idx, positive_mask], method="average")
+        if percentile:
+            row_ranks = row_ranks / float(positive_count)
+        ranked[row_idx, positive_mask] = row_ranks
+    return ranked
+
+
+def apply_expression_transform(matrix: np.ndarray, method: str) -> np.ndarray:
+    """Apply a sample x feature expression transform before feature filters."""
+
+    resolved_method = _validate_expression_transform_method(str(method))
+    values = np.asarray(matrix, dtype=float)
+    if resolved_method == "none":
+        return values
+    if resolved_method == "log1p":
+        if np.any(values < 0):
+            raise CVError("TPM values must be non-negative before log1p transform")
+        return np.asarray(np.log1p(values), dtype=float)
+    if resolved_method == "sample_rank":
+        return _sample_rank_transform(values, percentile=False)
+    return _sample_rank_transform(values, percentile=True)
+
+
+def _apply_expression_transform_for_config(config: AppConfig, matrix: np.ndarray) -> np.ndarray:
+    return apply_expression_transform(matrix, config.preprocess.expression_transform.method)
+
+
+def apply_feature_scaling(matrix: np.ndarray, scaler: FeatureScaler, method: str) -> np.ndarray:
+    """Apply a previously fitted feature scaling state."""
+
+    resolved_method = _validate_feature_scaling_method(str(method))
+    values = np.asarray(matrix, dtype=float)
+    if resolved_method == "none":
+        if scaler is not None:
+            raise CVError("feature_scaling.method=none requires scaler state to be null")
+        return values
+    if not isinstance(scaler, StandardScaler):
+        raise CVError("feature_scaling.method=standard requires a fitted StandardScaler")
+    return np.asarray(scaler.transform(values), dtype=float)
+
+
+def fit_feature_scaling(
+    config: AppConfig,
+    x_train: np.ndarray,
+    x_target: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, FeatureScaler]:
+    method = _validate_feature_scaling_method(config.preprocess.feature_scaling.method)
+    x_train_values = np.asarray(x_train, dtype=float)
+    x_target_values = np.asarray(x_target, dtype=float)
+    if method == "none":
+        return x_train_values, x_target_values, None
+
+    scaler = StandardScaler()
+    x_train_scaled = np.asarray(scaler.fit_transform(x_train_values), dtype=float)
+    if x_target_values.shape[0] == 0:
+        x_target_scaled = np.empty((0, x_train_values.shape[1]), dtype=float)
+    else:
+        x_target_scaled = np.asarray(scaler.transform(x_target_values), dtype=float)
+    return x_train_scaled, x_target_scaled, scaler
+
+
 class ExpressionMatrixBuilder:
     """Build species x orthogroup matrix from long-format expression data."""
 
@@ -783,7 +868,7 @@ class ExpressionMatrixBuilder:
 
 
 def _pair_group_contrasts(
-    x_train_log: np.ndarray,
+    x_train_expr: np.ndarray,
     y_train: np.ndarray,
     groups_train: np.ndarray,
     selected: np.ndarray,
@@ -801,8 +886,8 @@ def _pair_group_contrasts(
                 "pair_aware_filter requires both labels within each training group; "
                 f"offending group={group}"
             )
-        label1_mean = np.mean(x_train_log[label1_idx][:, selected], axis=0)
-        label0_mean = np.mean(x_train_log[label0_idx][:, selected], axis=0)
+        label1_mean = np.mean(x_train_expr[label1_idx][:, selected], axis=0)
+        label0_mean = np.mean(x_train_expr[label0_idx][:, selected], axis=0)
         contrast_rows.append(np.asarray(label1_mean - label0_mean, dtype=float))
 
     if not contrast_rows:
@@ -812,7 +897,7 @@ def _pair_group_contrasts(
 
 def _apply_pair_aware_filter(
     config: AppConfig,
-    x_train_log: np.ndarray,
+    x_train_expr: np.ndarray,
     y_train: np.ndarray,
     groups_train: np.ndarray,
     selected: np.ndarray,
@@ -825,7 +910,7 @@ def _apply_pair_aware_filter(
     if selected.size == 0:
         return selected, np.empty(0, dtype=float)
 
-    contrasts = _pair_group_contrasts(x_train_log, y_train, groups_train, selected)
+    contrasts = _pair_group_contrasts(x_train_expr, y_train, groups_train, selected)
     n_groups = int(contrasts.shape[0])
     if n_groups < 2:
         if warnings is not None:
@@ -874,20 +959,20 @@ def _apply_pair_aware_filter(
 
 def _select_feature_indices_with_counts(
     config: AppConfig,
-    x_train_log: np.ndarray,
+    x_train_expr: np.ndarray,
     feature_names: list[str],
     y_train: np.ndarray | None = None,
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
 ) -> tuple[np.ndarray, FeatureFilterCounts]:
-    selected = np.arange(x_train_log.shape[1], dtype=int)
+    selected = np.arange(x_train_expr.shape[1], dtype=int)
     n_features_before = int(selected.size)
 
     if config.preprocess.low_prevalence_filter.enabled:
         min_species = config.preprocess.low_prevalence_filter.min_species_per_feature
         if min_species is None:
             raise CVError("low_prevalence_filter is enabled but min_species_per_feature is missing")
-        prevalence = np.count_nonzero(x_train_log[:, selected] > 0.0, axis=0)
+        prevalence = np.count_nonzero(x_train_expr[:, selected] > 0.0, axis=0)
         selected = selected[prevalence >= int(min_species)]
     n_features_after_low_prevalence = int(selected.size)
 
@@ -895,7 +980,7 @@ def _select_feature_indices_with_counts(
         min_variance = config.preprocess.low_variance_filter.min_variance
         if min_variance is None:
             raise CVError("low_variance_filter is enabled but min_variance is missing")
-        variances = np.var(x_train_log[:, selected], axis=0)
+        variances = np.var(x_train_expr[:, selected], axis=0)
         selected = selected[variances >= float(min_variance)]
     n_features_after_low_variance = int(selected.size)
 
@@ -905,7 +990,7 @@ def _select_feature_indices_with_counts(
             raise CVError("pair_aware_filter requires y_train and groups_train in preprocessing")
         selected, pair_aware_priority_scores = _apply_pair_aware_filter(
             config,
-            x_train_log,
+            x_train_expr,
             y_train,
             groups_train,
             selected,
@@ -917,7 +1002,7 @@ def _select_feature_indices_with_counts(
     if config.preprocess.correlation_filter.enabled and selected.size > 1:
         selected = _apply_correlation_filter(
             config,
-            x_train_log,
+            x_train_expr,
             selected,
             feature_names,
             priority_scores=pair_aware_priority_scores,
@@ -938,7 +1023,7 @@ def _select_feature_indices_with_counts(
 
 def _select_feature_indices(
     config: AppConfig,
-    x_train_log: np.ndarray,
+    x_train_expr: np.ndarray,
     feature_names: list[str],
     y_train: np.ndarray | None = None,
     groups_train: np.ndarray | None = None,
@@ -946,7 +1031,7 @@ def _select_feature_indices(
 ) -> np.ndarray:
     selected, _counts = _select_feature_indices_with_counts(
         config,
-        x_train_log,
+        x_train_expr,
         feature_names,
         y_train=y_train,
         groups_train=groups_train,
@@ -1013,15 +1098,12 @@ def _preprocess_fold_with_counts(
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts]:
-    if np.any(x_train_raw < 0) or np.any(x_valid_raw < 0):
-        raise CVError("TPM values must be non-negative before log1p transform")
-
-    x_train_log = np.log1p(x_train_raw)
-    x_valid_log = np.log1p(x_valid_raw)
+    x_train_expr = _apply_expression_transform_for_config(config, x_train_raw)
+    x_valid_expr = _apply_expression_transform_for_config(config, x_valid_raw)
 
     selected, counts = _select_feature_indices_with_counts(
         config,
-        x_train_log,
+        x_train_expr,
         feature_names,
         y_train=y_train,
         groups_train=groups_train,
@@ -1029,12 +1111,12 @@ def _preprocess_fold_with_counts(
     )
     selected_features = [feature_names[idx] for idx in selected]
 
-    x_train_selected = x_train_log[:, selected]
-    x_valid_selected = x_valid_log[:, selected]
+    x_train_selected = x_train_expr[:, selected]
+    x_valid_selected = x_valid_expr[:, selected]
 
-    scaler = StandardScaler()
-    x_train_scaled = np.asarray(scaler.fit_transform(x_train_selected), dtype=float)
-    x_valid_scaled = np.asarray(scaler.transform(x_valid_selected), dtype=float)
+    x_train_scaled, x_valid_scaled, _scaler = fit_feature_scaling(
+        config, x_train_selected, x_valid_selected
+    )
     return x_train_scaled, x_valid_scaled, selected_features, counts
 
 
@@ -2105,7 +2187,7 @@ def _preprocess_train_and_target(
     y_train: np.ndarray | None = None,
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
-) -> tuple[np.ndarray, np.ndarray, list[str], StandardScaler]:
+) -> tuple[np.ndarray, np.ndarray, list[str], FeatureScaler]:
     x_train_scaled, x_target_scaled, selected_features, scaler, _counts = (
         _preprocess_train_and_target_with_counts(
             config,
@@ -2128,16 +2210,13 @@ def _preprocess_train_and_target_with_counts(
     y_train: np.ndarray | None = None,
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
-) -> tuple[np.ndarray, np.ndarray, list[str], StandardScaler, FeatureFilterCounts]:
-    if np.any(x_train_raw < 0) or np.any(x_target_raw < 0):
-        raise CVError("TPM values must be non-negative before log1p transform")
-
-    x_train_log = np.log1p(x_train_raw)
-    x_target_log = np.log1p(x_target_raw)
+) -> tuple[np.ndarray, np.ndarray, list[str], FeatureScaler, FeatureFilterCounts]:
+    x_train_expr = _apply_expression_transform_for_config(config, x_train_raw)
+    x_target_expr = _apply_expression_transform_for_config(config, x_target_raw)
 
     selected, counts = _select_feature_indices_with_counts(
         config,
-        x_train_log,
+        x_train_expr,
         feature_names,
         y_train=y_train,
         groups_train=groups_train,
@@ -2145,15 +2224,12 @@ def _preprocess_train_and_target_with_counts(
     )
     selected_features = [feature_names[idx] for idx in selected]
 
-    x_train_selected = x_train_log[:, selected]
-    x_target_selected = x_target_log[:, selected]
+    x_train_selected = x_train_expr[:, selected]
+    x_target_selected = x_target_expr[:, selected]
 
-    scaler = StandardScaler()
-    x_train_scaled = np.asarray(scaler.fit_transform(x_train_selected), dtype=float)
-    if x_target_selected.shape[0] == 0:
-        x_target_scaled = np.empty((0, x_train_selected.shape[1]), dtype=float)
-    else:
-        x_target_scaled = np.asarray(scaler.transform(x_target_selected), dtype=float)
+    x_train_scaled, x_target_scaled, scaler = fit_feature_scaling(
+        config, x_train_selected, x_target_selected
+    )
     return x_train_scaled, x_target_scaled, selected_features, scaler, counts
 
 

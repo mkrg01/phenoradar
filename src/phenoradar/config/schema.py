@@ -25,6 +25,8 @@ CandidateSourcePolicy = Literal["per_sample_set", "reuse_first_sample_set"]
 SelectionMetricName = Literal["mcc", "balanced_accuracy", "log_loss"]
 ThresholdSelectionMetricName = Literal["mcc", "balanced_accuracy"]
 CorrelationMethod = Literal["pearson", "spearman"]
+ExpressionTransformMethod = Literal["none", "log1p", "sample_rank", "sample_percentile_rank"]
+FeatureScalingMethod = Literal["none", "standard"]
 
 
 class StrictModel(BaseModel):
@@ -230,16 +232,32 @@ class PairAwareFilterConfig(StrictModel):
         return self
 
 
+class ExpressionTransformConfig(StrictModel):
+    """Sample x feature expression value transform settings."""
+
+    method: ExpressionTransformMethod = "log1p"
+
+
+class FeatureScalingConfig(StrictModel):
+    """Train-fitted feature scaling settings."""
+
+    method: FeatureScalingMethod = "standard"
+
+
 class PreprocessConfig(StrictModel):
     """Preprocessing settings."""
 
     max_pivot_cells: PositiveInt = 50_000_000
+    expression_transform: ExpressionTransformConfig = Field(
+        default_factory=ExpressionTransformConfig
+    )
     low_prevalence_filter: LowPrevalenceFilterConfig = Field(
         default_factory=LowPrevalenceFilterConfig
     )
     low_variance_filter: LowVarianceFilterConfig = Field(default_factory=LowVarianceFilterConfig)
     pair_aware_filter: PairAwareFilterConfig = Field(default_factory=PairAwareFilterConfig)
     correlation_filter: CorrelationFilterConfig = Field(default_factory=CorrelationFilterConfig)
+    feature_scaling: FeatureScalingConfig = Field(default_factory=FeatureScalingConfig)
 
 
 class ModelConfig(StrictModel):

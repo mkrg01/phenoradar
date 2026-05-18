@@ -60,6 +60,8 @@ sampling:
   weighting: none
 preprocess:
   max_pivot_cells: 50000000
+  expression_transform:
+    method: log1p
   low_prevalence_filter:
     enabled: true
     min_species_per_feature: 2
@@ -73,6 +75,8 @@ preprocess:
     enabled: false
     method: pearson
     max_abs_correlation: null
+  feature_scaling:
+    method: standard
 model:
   name: logistic_elasticnet
 model_selection:
@@ -115,6 +119,8 @@ runtime:
 - `model.name`: `logistic_elasticnet` | `linear_svm` | `random_forest`
 - `sampling.strategy`: `all_samples` | `group_balanced`
 - `sampling.weighting`: `none` | `group_label_inverse`
+- `preprocess.expression_transform.method`: `none` | `log1p` | `sample_rank` | `sample_percentile_rank`
+- `preprocess.feature_scaling.method`: `none` | `standard`
 - `ensemble.probability_aggregation`: `mean` | `median`
 - `model_selection.search_strategy`: `grid` | `random` | `tpe`
 - `model_selection.selection_metric`: `mcc` | `balanced_accuracy` | `log_loss`
@@ -217,6 +223,20 @@ Compatibility rules:
   - meaning: upper bound for direct species x feature pivot size before chunked
     pivot mode
 
+### `preprocess.expression_transform`
+
+- `method`
+  - type: `none | log1p | sample_rank | sample_percentile_rank`
+  - default: `log1p`
+  - behavior:
+    - applied after the expression matrix is built and before feature filters
+    - `none`: use input values as-is
+    - `log1p`: use `log(1 + value)`; values must be non-negative
+    - `sample_rank`: within each sample, rank positive feature values and keep
+      zero values at `0`
+    - `sample_percentile_rank`: same zero-preserving sample-wise ranking, scaled
+      by the number of positive features so the largest positive feature is `1`
+
 ### `preprocess.low_prevalence_filter`
 
 - `enabled`
@@ -247,7 +267,7 @@ Compatibility rules:
   - default: `null`
   - rule: required when `enabled=true`
 - behavior:
-  - computes train-only per-group label contrasts after `log1p`
+  - computes train-only per-group label contrasts after `expression_transform`
   - ranks features by an internal paired t-like score
   - keeps the top `max_features`
   - when fewer than 2 training groups are available in a split, the filter is
@@ -271,6 +291,17 @@ Compatibility rules:
   - rules:
     - required when `enabled=true`
     - must be in `(0, 1]`
+
+### `preprocess.feature_scaling`
+
+- `method`
+  - type: `none | standard`
+  - default: `standard`
+  - behavior:
+    - applied after all feature filters and before model fitting/prediction
+    - `none`: do not scale selected features
+    - `standard`: fit a scikit-learn `StandardScaler` on the sampled training
+      matrix and transform validation/target matrices with that fitted state
 
 ## `model`
 

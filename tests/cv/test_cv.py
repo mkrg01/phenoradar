@@ -29,6 +29,7 @@ from phenoradar.cv import (
     _preprocess_fold,
     _preprocess_train_and_target,
     _select_feature_indices,
+    apply_expression_transform,
     run_final_refit,
     run_outer_cv,
 )
@@ -1470,6 +1471,79 @@ def test_preprocess_train_and_target_returns_training_fitted_scaler(tmp_path: Pa
     assert scaler.scale_ == pytest.approx(train_std)
     assert x_train_scaled == pytest.approx(expected_train)
     assert x_target_scaled == pytest.approx(expected_target)
+
+
+def test_sample_percentile_rank_transform_preserves_zero_values() -> None:
+    raw = np.array(
+        [
+            [0.0, 10.0, 5.0],
+            [2.0, 0.0, 2.0],
+            [0.0, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+
+    transformed = apply_expression_transform(raw, "sample_percentile_rank")
+
+    expected = np.array(
+        [
+            [0.0, 1.0, 0.5],
+            [0.75, 0.0, 0.75],
+            [0.0, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+    assert transformed == pytest.approx(expected)
+
+
+def test_preprocess_train_and_target_can_disable_feature_scaling(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                """
+preprocess:
+  expression_transform:
+    method: sample_percentile_rank
+  low_prevalence_filter:
+    enabled: false
+  feature_scaling:
+    method: none
+""",
+            )
+        ]
+    )
+    x_train_raw = np.array(
+        [
+            [0.0, 10.0, 5.0],
+            [2.0, 0.0, 2.0],
+        ],
+        dtype=float,
+    )
+    x_target_raw = np.array([[1.0, 3.0, 0.0]], dtype=float)
+
+    x_train, x_target, selected_features, scaler = _preprocess_train_and_target(
+        config,
+        x_train_raw,
+        x_target_raw,
+        ["OG1", "OG2", "OG3"],
+    )
+
+    assert selected_features == ["OG1", "OG2", "OG3"]
+    assert scaler is None
+    assert x_train == pytest.approx(
+        np.array(
+            [
+                [0.0, 1.0, 0.5],
+                [0.75, 0.0, 0.75],
+            ],
+            dtype=float,
+        )
+    )
+    assert x_target == pytest.approx(np.array([[0.5, 1.0, 0.0]], dtype=float))
 
 
 def test_build_prediction_table_rejects_probability_length_mismatch() -> None:
