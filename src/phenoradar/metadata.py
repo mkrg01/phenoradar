@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import importlib
 import re
 import subprocess
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from random import Random
+from typing import Protocol, cast
 
 import polars as pl
 
@@ -56,6 +58,28 @@ class SpeciesMetadataResult:
 
 
 _NWKIT_DEFAULT_SPECIES_PATTERN = re.compile(r"^([^_]+_[^_]+)(?:_|$)")
+
+
+class _Closable(Protocol):
+    def close(self) -> None: ...
+
+
+class _NCBITaxa(Protocol):
+    db: _Closable | None
+
+    def get_name_translator(
+        self, names: Sequence[str]
+    ) -> Mapping[str, Sequence[int | str]]: ...
+
+    def get_lineage(self, taxid: int) -> Sequence[int | str]: ...
+
+    def get_rank(self, taxids: Sequence[int]) -> Mapping[int | str, str]: ...
+
+    def get_taxid_translator(self, taxids: Sequence[int]) -> Mapping[int | str, str]: ...
+
+
+class _NCBITaxaFactory(Protocol):
+    def __call__(self, *, dbfile: str | None = None) -> _NCBITaxa: ...
 
 
 def _load_species_trait(path: Path) -> pl.DataFrame:
@@ -351,22 +375,23 @@ def _taxon_block_columns(rank: str) -> tuple[str, str, str, str]:
     )
 
 
-def _load_ncbi_taxa(ncbi_taxonomy_db: Path | None = None) -> object:
+def _load_ncbi_taxa(ncbi_taxonomy_db: Path | None = None) -> _NCBITaxa:
     try:
-        from ete4 import NCBITaxa
+        ete4_module = importlib.import_module("ete4")
     except ImportError as exc:
         raise MetadataError(
             "Taxonomic rank blocking requires ete4. Install the taxonomy dependency group."
         ) from exc
     try:
+        ncbi_taxa_factory = cast(_NCBITaxaFactory, ete4_module.NCBITaxa)
         dbfile = None if ncbi_taxonomy_db is None else str(ncbi_taxonomy_db)
-        return NCBITaxa(dbfile=dbfile)
+        return ncbi_taxa_factory(dbfile=dbfile)
     except Exception as exc:
         raise MetadataError("Failed to initialize ete4 NCBITaxa") from exc
 
 
-def _close_ncbi_taxa(ncbi_taxa: object) -> None:
-    db = getattr(ncbi_taxa, "db", None)
+def _close_ncbi_taxa(ncbi_taxa: _NCBITaxa) -> None:
+    db = cast(_Closable | None, getattr(ncbi_taxa, "db", None))
     if db is None:
         return
     try:
@@ -375,18 +400,16 @@ def _close_ncbi_taxa(ncbi_taxa: object) -> None:
         return
 
 
-def _lookup_ncbi_taxid(taxonomy_query: str, ncbi_taxa: object) -> int | None:
-    def _name_translator_value(query: str) -> list[object]:
+def _lookup_ncbi_taxid(taxonomy_query: str, ncbi_taxa: _NCBITaxa) -> int | None:
+    def _name_translator_value(query: str) -> list[int | str]:
         try:
-            name_map = dict(ncbi_taxa.get_name_translator([query]))
+            name_map = ncbi_taxa.get_name_translator([query])
         except Exception:
             return []
         values = name_map.get(query)
         if values is None:
             return []
-        if isinstance(values, list):
-            return values
-        return [values]
+        return list(values)
 
     candidates = _name_translator_value(taxonomy_query)
     if not candidates:
@@ -490,14 +513,14 @@ def build_species_taxid_tsv(
     )
 
 
-def _dict_get_any_key(mapping: dict[object, object], key: int) -> object | None:
+def _dict_get_any_key(mapping: Mapping[int | str, str], key: int) -> str | None:
     return mapping.get(key, mapping.get(str(key)))
 
 
 def _rank_taxon_lookup(
     taxids: Sequence[int],
     ranks: Sequence[str],
-    ncbi_taxa: object,
+    ncbi_taxa: _NCBITaxa,
 ) -> dict[int, dict[str, tuple[str, str]]]:
     lookup: dict[int, dict[str, tuple[str, str]]] = {}
     rank_taxids: set[int] = set()
@@ -521,9 +544,9 @@ def _rank_taxon_lookup(
                 continue
             lineage_rank_str = str(lineage_rank).strip().lower()
             if lineage_rank_str in ranks and lineage_rank_str not in by_rank:
-                rank_taxid = int(lineage_taxid)
-                by_rank[lineage_rank_str] = (str(rank_taxid), "")
-                rank_taxids.add(rank_taxid)
+                lineage_rank_taxid = int(lineage_taxid)
+                by_rank[lineage_rank_str] = (str(lineage_rank_taxid), "")
+                rank_taxids.add(lineage_rank_taxid)
         lookup[taxid] = by_rank
 
     try:
@@ -531,9 +554,12 @@ def _rank_taxon_lookup(
     except Exception:
         names = {}
     for by_rank in lookup.values():
-        for rank, (rank_taxid, _name) in list(by_rank.items()):
-            translated = _dict_get_any_key(names, int(rank_taxid))
-            by_rank[rank] = (rank_taxid, "" if translated is None else str(translated))
+        for rank, (rank_taxid_text, _name) in list(by_rank.items()):
+            translated = _dict_get_any_key(names, int(rank_taxid_text))
+            by_rank[rank] = (
+                rank_taxid_text,
+                "" if translated is None else translated,
+            )
     return lookup
 
 
