@@ -514,7 +514,7 @@ Conditionally written:
   - Written when `data.tree_path` is set and Toytree is available.
   - Rectangular Toytree view with aligned tracks for trait label, probability,
     predicted label, uncertainty, group, and fold where applicable.
-- `tree_contrast_pairs.svg` (optional)
+- `tree_group.svg` (optional)
   - Written when `data.tree_path` is set and Toytree is available.
   - Rectangular Toytree view with trait-label and split-group tracks for metadata QC.
 - `tree_feature_heatmap_zscore.svg` / `tree_feature_heatmap_log2_tpm.svg` (optional)

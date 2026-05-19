@@ -65,15 +65,13 @@ def write_run_tree_prediction_artifacts(
             _write_tree_prediction_svg(
                 tree_path=tree_path,
                 annotation=contrast_annotation,
-                out_path=run_dir / "figures" / "tree_contrast_pairs.svg",
-                title="Tree Contrast Pairs",
+                out_path=run_dir / "figures" / "tree_group.svg",
+                title="",
                 tracks=["true_label", "group_id"],
             )
         )
     else:
-        warnings.append(
-            "Skipped tree_contrast_pairs.svg: metadata contains no non-empty split group."
-        )
+        warnings.append("Skipped tree_group.svg: metadata contains no non-empty split group.")
 
     feature_annotation = build_tree_feature_heatmap_annotation(
         metadata=metadata,

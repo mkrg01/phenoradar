@@ -273,6 +273,14 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
     assert (tmp_path / "run" / "tree_prediction_cv_annotation.tsv").exists()
     assert (tmp_path / "run" / "tree_contrast_pairs_annotation.tsv").exists()
     assert (tmp_path / "run" / "tree_feature_heatmap_annotation.tsv").exists()
+    assert not (figures_dir / "tree_contrast_pairs.svg").exists()
+    group_svg = figures_dir / "tree_group.svg"
+    if group_svg.exists():
+        group_svg_text = group_svg.read_text(encoding="utf-8")
+        assert "Tree Contrast Pairs" not in group_svg_text
+        assert "The Contrast Pairs" not in group_svg_text
+    else:
+        assert any("Toytree is unavailable" in warning for warning in warnings)
     cv_svg = figures_dir / "tree_prediction_cv.svg"
     if cv_svg.exists():
         svg_text = cv_svg.read_text(encoding="utf-8")
