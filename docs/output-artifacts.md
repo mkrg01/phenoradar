@@ -180,7 +180,7 @@ Conditionally written:
 
 `aggregate_scope` meaning:
 
-- `NA`: per-fold row (`fold_id` is concrete fold index).
+- `NA`: per-fold row (`fold_id` is concrete 1-based fold index).
 - `macro`: mean of fold metrics (each fold weighted equally; NaN-aware).
 - `micro`: metric recomputed from all out-of-fold predictions pooled together.
 
@@ -201,7 +201,7 @@ Conditionally written:
     `training_validation` pool.
   - Species marked by `split.exclude_col` are omitted from `split_manifest.tsv`.
 - `fold_id`:
-  - fold index for `train`/`validation`.
+  - 1-based fold index for `train`/`validation`.
   - `NA` for `external_test` and `discovery_inference`.
 - `group_id`: the `split.group_col` value used for CV groups.
 - `contrast_group_id`: the `data.contrast_pair_col` value when configured;
@@ -404,7 +404,7 @@ Conditionally written:
   - `validation_oof`: out-of-fold validation predictions.
   - `external_test`: final-refit external test predictions (`full_run` only).
 - `fold_id`:
-  - per-fold rows for `validation_oof` (`0`, `1`, ...).
+  - per-fold rows for `validation_oof` (`1`, `2`, ...).
   - pooled row uses `NA`.
 - `tp`, `fp`, `tn`, `fn`:
   - confusion matrix counts at each threshold.

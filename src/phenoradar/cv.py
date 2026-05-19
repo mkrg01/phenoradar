@@ -1506,7 +1506,7 @@ def _inner_cv_splits(
 
     rows: list[tuple[np.ndarray, np.ndarray, str]] = []
     try:
-        for inner_fold_index, (train_idx, valid_idx) in enumerate(split_iter):
+        for inner_fold_index, (train_idx, valid_idx) in enumerate(split_iter, start=1):
             train_idx_array = np.asarray(train_idx, dtype=int)
             valid_idx_array = np.asarray(valid_idx, dtype=int)
             if train_idx_array.size == 0 or valid_idx_array.size == 0:

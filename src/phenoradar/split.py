@@ -356,7 +356,7 @@ def _validate_fold_labels(
     training_df: pl.DataFrame, folds: list[tuple[list[int], list[int]]]
 ) -> None:
     labels = training_df.select("__label").to_series().to_list()
-    for fold_id, (train_idx, valid_idx) in enumerate(folds):
+    for fold_id, (train_idx, valid_idx) in enumerate(folds, start=1):
         train_labels = {int(labels[idx]) for idx in train_idx}
         valid_labels = {int(labels[idx]) for idx in valid_idx}
         if len(train_labels) < 2:
@@ -374,7 +374,7 @@ def _validate_pair_aware_fold_contrasts(
         return
     labels = training_df.select("__label").to_series().to_list()
     contrast_groups = training_df.select("__contrast_group").to_series().to_list()
-    for fold_id, (train_idx, _valid_idx) in enumerate(folds):
+    for fold_id, (train_idx, _valid_idx) in enumerate(folds, start=1):
         labels_by_group: dict[str, set[int]] = {}
         for idx in train_idx:
             group = str(contrast_groups[idx])
@@ -472,7 +472,7 @@ def _build_split_manifest(
     folds: list[tuple[list[int], list[int]]],
 ) -> pl.DataFrame:
     rows: list[dict[str, Any]] = []
-    for fold_id, (train_idx, valid_idx) in enumerate(folds):
+    for fold_id, (train_idx, valid_idx) in enumerate(folds, start=1):
         _append_training_rows(
             rows, training_df, fold_id=fold_id, row_indices=train_idx, pool="train"
         )
@@ -512,7 +512,7 @@ def _build_fold_validation_groups(
     labels = training_df.select("__label").to_series().to_list()
 
     rows: list[dict[str, Any]] = []
-    for fold_id, (_train_idx, valid_idx) in enumerate(folds):
+    for fold_id, (_train_idx, valid_idx) in enumerate(folds, start=1):
         for idx in valid_idx:
             rows.append(
                 {

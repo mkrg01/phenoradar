@@ -390,14 +390,14 @@ def test_fold_validation_groups_map_logo_folds_to_held_out_groups(tmp_path: Path
     ]
     assert fold_validation_groups.to_dicts() == [
         {
-            "fold_id": "0",
+            "fold_id": "1",
             "group_id": "g1",
             "n_validation_species": 2,
             "n_validation_pos": 1,
             "n_validation_neg": 1,
         },
         {
-            "fold_id": "1",
+            "fold_id": "2",
             "group_id": "g2",
             "n_validation_species": 2,
             "n_validation_pos": 1,
