@@ -81,13 +81,15 @@ def test_build_contrast_pair_tree_annotation_filters_to_grouped_species() -> Non
             "label": "sp1",
             "species": "sp1",
             "true_label": 0,
-            "contrast_pair_id": "g1",
+            "group_id": "g1",
+            "group_name": None,
         },
         {
             "label": "sp2",
             "species": "sp2",
             "true_label": 1,
-            "contrast_pair_id": "g1",
+            "group_id": "g1",
+            "group_name": None,
         },
     ]
 
@@ -124,7 +126,7 @@ def test_build_tree_feature_heatmap_annotation_outputs_log2_and_zscore(tmp_path:
     assert zscore_sum == 0.0
 
 
-def test_build_cv_tree_prediction_annotation_filters_to_contrast_pairs() -> None:
+def test_build_cv_tree_prediction_annotation_filters_to_groups() -> None:
     annotation = build_cv_tree_prediction_annotation(
         metadata=_metadata(),
         oof_predictions=pl.DataFrame(
@@ -148,8 +150,38 @@ def test_build_cv_tree_prediction_annotation_filters_to_contrast_pairs() -> None
         "prob",
         "pred_label",
         "uncertainty_std",
-        "contrast_pair_id",
+        "group_id",
+        "group_name",
         "fold_id",
+    ]
+
+
+def test_build_cv_tree_prediction_annotation_uses_taxon_name_for_group_display() -> None:
+    metadata = pl.DataFrame(
+        {
+            "species": ["sp1", "sp2"],
+            "C4": [0, 1],
+            "taxon_family_id": ["100", "100"],
+            "taxon_family_name": ["Poaceae", "Poaceae"],
+        }
+    )
+
+    annotation = build_cv_tree_prediction_annotation(
+        metadata=metadata,
+        oof_predictions=pl.DataFrame(
+            {
+                "fold_id": ["0", "0"],
+                "species": ["sp1", "sp2"],
+                "label": [0, 1],
+                "prob": [0.2, 0.8],
+            }
+        ),
+        thresholds=_thresholds(),
+        group_col="taxon_family_id",
+    )
+
+    assert annotation.select(["group_id", "group_name"]).unique().to_dicts() == [
+        {"group_id": "100", "group_name": "Poaceae"}
     ]
 
 
@@ -176,7 +208,8 @@ def test_build_external_tree_prediction_annotation_keeps_external_species() -> N
             "prob": 0.9,
             "pred_label": 1,
             "uncertainty_std": None,
-            "contrast_pair_id": None,
+            "group_id": None,
+            "group_name": None,
         }
     ]
 
@@ -240,5 +273,15 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
     assert (tmp_path / "run" / "tree_prediction_cv_annotation.tsv").exists()
     assert (tmp_path / "run" / "tree_contrast_pairs_annotation.tsv").exists()
     assert (tmp_path / "run" / "tree_feature_heatmap_annotation.tsv").exists()
-    if not (figures_dir / "tree_prediction_cv.svg").exists():
+    cv_svg = figures_dir / "tree_prediction_cv.svg"
+    if cv_svg.exists():
+        svg_text = cv_svg.read_text(encoding="utf-8")
+        assert "CV Tree Prediction" not in svg_text
+        assert ">trait<" in svg_text
+        assert ">group<" in svg_text
+        assert ">contrast<" not in svg_text
+        assert "toyplot-mark-Point" not in svg_text
+        assert ">0.200<" in svg_text
+        assert ">sp1<" in svg_text
+    else:
         assert any("Toytree is unavailable" in warning for warning in warnings)

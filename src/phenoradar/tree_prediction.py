@@ -18,20 +18,7 @@ class TreePredictionError(ValueError):
 
 
 _MISSING_COLOR = "#eeeeee"
-_LABEL_COLORS = {0: "#d62728", 1: "#1f77b4"}
-_PRED_COLORS = {0: "#f4a3a3", 1: "#8ecae6"}
-_PALETTE = [
-    "#4e79a7",
-    "#f28e2b",
-    "#59a14f",
-    "#e15759",
-    "#76b7b2",
-    "#edc948",
-    "#b07aa1",
-    "#ff9da7",
-    "#9c755f",
-    "#bab0ac",
-]
+_TEXT_COLOR = "#000000"
 _FEATURE_HEATMAP_LIMIT = 30
 
 
@@ -80,12 +67,12 @@ def write_run_tree_prediction_artifacts(
                 annotation=contrast_annotation,
                 out_path=run_dir / "figures" / "tree_contrast_pairs.svg",
                 title="Tree Contrast Pairs",
-                tracks=["true_label", "contrast_pair_id"],
+                tracks=["true_label", "group_id"],
             )
         )
     else:
         warnings.append(
-            "Skipped tree_contrast_pairs.svg: metadata contains no non-empty contrast_pair_id."
+            "Skipped tree_contrast_pairs.svg: metadata contains no non-empty split group."
         )
 
     feature_annotation = build_tree_feature_heatmap_annotation(
@@ -146,20 +133,20 @@ def write_run_tree_prediction_artifacts(
                 tree_path=tree_path,
                 annotation=cv_annotation,
                 out_path=run_dir / "figures" / "tree_prediction_cv.svg",
-                title="CV Tree Prediction",
+                title="",
                 tracks=[
                     "true_label",
                     "prob",
                     "pred_label",
                     "uncertainty_std",
-                    "contrast_pair_id",
+                    "group_id",
                     "fold_id",
                 ],
             )
         )
     else:
         warnings.append(
-            "Skipped tree_prediction_cv.svg: no CV predictions with non-empty contrast_pair_id."
+            "Skipped tree_prediction_cv.svg: no CV predictions with non-empty split group."
         )
 
     if pred_external_test is not None and pred_external_test.height > 0:
@@ -185,7 +172,7 @@ def write_run_tree_prediction_artifacts(
                     "prob",
                     "pred_label",
                     "uncertainty_std",
-                    "contrast_pair_id",
+                    "group_id",
                 ],
             )
         )
@@ -234,7 +221,7 @@ def write_predict_tree_prediction_artifacts(
             "prob",
             "pred_label_cv_derived_threshold",
             "uncertainty_std",
-            "contrast_pair_id",
+            "group_id",
         ],
     )
 
@@ -244,17 +231,18 @@ def build_contrast_pair_tree_annotation(
     metadata: pl.DataFrame,
     group_col: str,
 ) -> pl.DataFrame:
-    """Build ggtree-friendly metadata annotation for contrast-pair species."""
+    """Build ggtree-friendly metadata annotation for grouped species."""
     _require_columns(metadata, {"species", "true_label", group_col}, "metadata TSV")
+    group_lookup = _metadata_group_lookup(metadata, group_col=group_col)
     return (
-        metadata.filter(pl.col(group_col).is_not_null() & (pl.col(group_col) != ""))
+        group_lookup.join(metadata.select(["species", "true_label"]), on="species", how="left")
+        .filter(pl.col("group_id").is_not_null() & (pl.col("group_id") != ""))
         .with_columns(
             pl.col("species").alias("label"),
             pl.col("true_label").cast(pl.Int8, strict=False).alias("true_label"),
-            pl.col(group_col).cast(pl.String, strict=False).alias("contrast_pair_id"),
         )
-        .select(["label", "species", "true_label", "contrast_pair_id"])
-        .sort(["contrast_pair_id", "species"])
+        .select(["label", "species", "true_label", "group_id", "group_name"])
+        .sort(["group_id", "species"])
     )
 
 
@@ -277,16 +265,19 @@ def build_tree_feature_heatmap_annotation(
         raise TreePredictionError("feature heatmap limit must be >= 1")
 
     species_meta = (
-        metadata.filter(pl.col(group_col).is_not_null() & (pl.col(group_col) != ""))
+        _metadata_group_lookup(metadata, group_col=group_col)
+        .join(metadata.select(["species", "true_label"]), on="species", how="left")
+        .filter(pl.col("group_id").is_not_null() & (pl.col("group_id") != ""))
         .select(
             [
                 "species",
                 "true_label",
-                pl.col(group_col).cast(pl.String, strict=False).alias("contrast_pair_id"),
+                "group_id",
+                "group_name",
             ]
         )
         .unique("species")
-        .sort(["contrast_pair_id", "species"])
+        .sort(["group_id", "species"])
     )
     if species_meta.height == 0:
         return _empty_feature_heatmap_annotation()
@@ -343,7 +334,8 @@ def build_tree_feature_heatmap_annotation(
                 "label",
                 "species",
                 "true_label",
-                "contrast_pair_id",
+                "group_id",
+                "group_name",
                 "feature_rank",
                 "feature",
                 "importance_mean",
@@ -353,7 +345,7 @@ def build_tree_feature_heatmap_annotation(
                 "z_score_log2_tpm",
             ]
         )
-        .sort(["feature_rank", "contrast_pair_id", "species"])
+        .sort(["feature_rank", "group_id", "species"])
     )
 
 
@@ -364,7 +356,7 @@ def build_cv_tree_prediction_annotation(
     thresholds: pl.DataFrame,
     group_col: str,
 ) -> pl.DataFrame:
-    """Build ggtree-friendly CV annotation for contrast-pair validation species."""
+    """Build ggtree-friendly CV annotation for grouped validation species."""
     _require_columns(oof_predictions, {"fold_id", "species", "label", "prob"}, "prediction_cv.tsv")
     threshold = _cv_derived_threshold(thresholds)
     predictions = oof_predictions.with_columns(
@@ -378,16 +370,13 @@ def build_cv_tree_prediction_annotation(
             pl.lit(None, dtype=pl.Float64).alias("uncertainty_std")
         )
     joined = predictions.join(
-        metadata.select(["species", group_col]),
-        on="species",
-        how="left",
+        _metadata_group_lookup(metadata, group_col=group_col), on="species", how="left"
     )
     return (
-        joined.filter(pl.col(group_col).is_not_null() & (pl.col(group_col) != ""))
+        joined.filter(pl.col("group_id").is_not_null() & (pl.col("group_id") != ""))
         .with_columns(
             pl.col("species").alias("label"),
             (pl.col("prob") >= threshold).cast(pl.Int8).alias("pred_label"),
-            pl.col(group_col).cast(pl.String, strict=False).alias("contrast_pair_id"),
         )
         .select(
             [
@@ -397,11 +386,12 @@ def build_cv_tree_prediction_annotation(
                 "prob",
                 "pred_label",
                 "uncertainty_std",
-                "contrast_pair_id",
+                "group_id",
+                "group_name",
                 "fold_id",
             ]
         )
-        .sort(["contrast_pair_id", "fold_id", "species"])
+        .sort(["group_id", "fold_id", "species"])
     )
 
 
@@ -430,10 +420,11 @@ def build_external_tree_prediction_annotation(
             pl.lit(None, dtype=pl.Float64).alias("uncertainty_std")
         )
     return (
-        predictions.join(metadata.select(["species", group_col]), on="species", how="left")
+        predictions.join(
+            _metadata_group_lookup(metadata, group_col=group_col), on="species", how="left"
+        )
         .with_columns(
             pl.col("species").alias("label"),
-            pl.col(group_col).cast(pl.String, strict=False).alias("contrast_pair_id"),
         )
         .select(
             [
@@ -443,7 +434,8 @@ def build_external_tree_prediction_annotation(
                 "prob",
                 "pred_label",
                 "uncertainty_std",
-                "contrast_pair_id",
+                "group_id",
+                "group_name",
             ]
         )
         .sort("species")
@@ -484,10 +476,11 @@ def build_predict_tree_prediction_annotation(
             pl.lit(None, dtype=pl.Float64).alias("uncertainty_std")
         )
     return (
-        predictions.join(metadata.select(["species", group_col]), on="species", how="left")
+        predictions.join(
+            _metadata_group_lookup(metadata, group_col=group_col), on="species", how="left"
+        )
         .with_columns(
             pl.col("species").alias("label"),
-            pl.col(group_col).cast(pl.String, strict=False).alias("contrast_pair_id"),
         )
         .select(
             [
@@ -498,7 +491,8 @@ def build_predict_tree_prediction_annotation(
                 "pred_label_fixed_threshold",
                 "pred_label_cv_derived_threshold",
                 "uncertainty_std",
-                "contrast_pair_id",
+                "group_id",
+                "group_name",
             ]
         )
         .sort("species")
@@ -533,6 +527,46 @@ def _load_metadata(
             pl.col(trait_col).cast(pl.Int8, strict=False).alias("true_label")
         )
     return normalized
+
+
+def _metadata_group_lookup(metadata: pl.DataFrame, *, group_col: str) -> pl.DataFrame:
+    group_name_col = _group_name_column(group_col, metadata.columns)
+    group_name_expr: pl.Expr
+    if group_name_col is None:
+        group_name_expr = pl.lit(None, dtype=pl.String).alias("group_name")
+    else:
+        group_name_expr = (
+            pl.col(group_name_col)
+            .cast(pl.String, strict=False)
+            .str.strip_chars()
+            .alias("group_name")
+        )
+    return (
+        metadata.select(
+            [
+                pl.col("species"),
+                pl.col(group_col)
+                .cast(pl.String, strict=False)
+                .str.strip_chars()
+                .alias("group_id"),
+                group_name_expr,
+            ]
+        )
+        .unique("species")
+        .sort("species")
+    )
+
+
+def _group_name_column(group_col: str, columns: Iterable[str]) -> str | None:
+    column_set = set(columns)
+    candidates: list[str] = []
+    if group_col.endswith("_id"):
+        candidates.append(f"{group_col[:-3]}_name")
+    candidates.append(f"{group_col}_name")
+    for candidate in candidates:
+        if candidate in column_set:
+            return candidate
+    return None
 
 
 def _load_expression_for_heatmap(
@@ -596,7 +630,8 @@ def _empty_feature_heatmap_annotation() -> pl.DataFrame:
             "label": pl.String,
             "species": pl.String,
             "true_label": pl.Int8,
-            "contrast_pair_id": pl.String,
+            "group_id": pl.String,
+            "group_name": pl.String,
             "feature_rank": pl.UInt32,
             "feature": pl.String,
             "importance_mean": pl.Float64,
@@ -772,53 +807,80 @@ def _draw_toytree_heatmap(
 ) -> None:
     tip_labels = [str(v) for v in tree.get_tip_labels()]
     track_count = len(tracks)
+    by_species = {str(row["species"]): row for row in annotation.iter_rows(named=True)}
+    cell_text_by_track: dict[str, list[str]] = {}
+    for track in tracks:
+        values: list[str] = []
+        for species in tip_labels:
+            row = by_species.get(species)
+            value = _track_display_value(track, row)
+            values.append(_format_cell_value(track, value))
+        cell_text_by_track[track] = values
+    track_widths = [
+        _text_column_width_px([_track_label(track), *cell_text_by_track[track]])
+        for track in tracks
+    ]
+    annotation_width = sum(track_widths)
+    species_label_width = _text_column_width_px(tip_labels, min_width=120, padding=28)
     height = max(360, 34 + 18 * len(tip_labels))
-    width = max(900, 560 + 58 * track_count)
-    label_shift = 56 + 44 * track_count
+    width = max(900, 560 + annotation_width + species_label_width)
     canvas, axes, _mark = tree.draw(
         width=width,
         height=height,
         layout="r",
-        tip_labels=True,
-        tip_labels_align=True,
-        tip_labels_style={"font-size": "9px", "-toyplot-anchor-shift": f"{label_shift}px"},
+        tip_labels=False,
         node_sizes=0,
         scale_bar=False,
     )
     axes.show = False
-    axes.x.domain.max = max(track_count + 2.0, float(track_count) + 1.2)
+    axes.x.domain.max = max(track_count + 2.8, (annotation_width + species_label_width) / 68.0)
 
-    by_species = {str(row["species"]): row for row in annotation.iter_rows(named=True)}
+    column_start_px = 18
+    column_scale_px = 88.0
+    column_cursor_px = column_start_px
     for track_index, track in enumerate(tracks):
-        x = 0.45 + track_index * 0.52
-        colors: list[str] = []
+        track_width = track_widths[track_index]
+        x = (column_cursor_px + track_width / 2.0) / column_scale_px
         titles: list[str] = []
+        values = cell_text_by_track[track]
         for species in tip_labels:
             row = by_species.get(species)
-            value = None if row is None else row.get(track)
-            colors.append(_track_color(track, value, annotation))
-            titles.append(f"{species} {track}={_format_value(value)}")
-        axes.scatterplot(
+            value = _track_title_value(track, row)
+            titles.append(f"{species} {_track_label(track)}={_format_value(value)}")
+        axes.text(
             [x] * len(tip_labels),
             list(range(len(tip_labels))),
-            marker="s",
-            size=10,
-            color=colors,
+            values,
+            color=_TEXT_COLOR,
             title=titles,
+            style={"font-size": "8px", "text-anchor": "middle"},
         )
         axes.text(
             x,
             len(tip_labels) + 0.35,
             _track_label(track),
             angle=-45,
+            color=_TEXT_COLOR,
             style={"font-size": "9px", "text-anchor": "end"},
         )
+        column_cursor_px += track_width
+    species_x = (column_cursor_px + 16) / column_scale_px
     axes.text(
-        -0.05,
-        len(tip_labels) + 1.1,
-        title,
-        style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
+        [species_x] * len(tip_labels),
+        list(range(len(tip_labels))),
+        tip_labels,
+        color=_TEXT_COLOR,
+        title=tip_labels,
+        style={"font-size": "9px", "text-anchor": "start"},
     )
+    if title:
+        axes.text(
+            -0.05,
+            len(tip_labels) + 1.1,
+            title,
+            color=_TEXT_COLOR,
+            style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
+        )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     toytree_module.save(canvas, str(out_path))
 
@@ -897,41 +959,6 @@ def _draw_toytree_feature_heatmap(
     toytree_module.save(canvas, str(out_path))
 
 
-def _track_color(track: str, value: object, annotation: pl.DataFrame) -> str:
-    if value is None:
-        return _MISSING_COLOR
-    if track == "true_label":
-        label_value = _int_or_none(value)
-        return (
-            _MISSING_COLOR
-            if label_value is None
-            else _LABEL_COLORS.get(label_value, _MISSING_COLOR)
-        )
-    if track.startswith("pred_label"):
-        pred_value = _int_or_none(value)
-        return (
-            _MISSING_COLOR
-            if pred_value is None
-            else _PRED_COLORS.get(pred_value, _MISSING_COLOR)
-        )
-    if track == "prob":
-        return _continuous_color(value, vmin=0.0, vmax=1.0, cmap_name="viridis")
-    if track == "uncertainty_std":
-        numeric_values = _finite_values(annotation, track)
-        vmax = max(numeric_values) if numeric_values else 1.0
-        return _continuous_color(value, vmin=0.0, vmax=max(vmax, 1e-12), cmap_name="Greys")
-    if track in {"contrast_pair_id", "fold_id"}:
-        category_values: list[str] = sorted(
-            str(v) for v in annotation.select(track).drop_nulls().to_series().to_list()
-        )
-        unique_values = list(dict.fromkeys(category_values))
-        mapping: dict[str, str] = {
-            v: _PALETTE[idx % len(_PALETTE)] for idx, v in enumerate(unique_values)
-        }
-        return mapping.get(str(value), _MISSING_COLOR)
-    return _MISSING_COLOR
-
-
 def _continuous_color(value: object, *, vmin: float, vmax: float, cmap_name: str) -> str:
     try:
         numeric = float(value)  # type: ignore[arg-type]
@@ -984,14 +1011,62 @@ def _format_value(value: object) -> str:
     return str(value)
 
 
+def _track_display_value(track: str, row: dict[str, Any] | None) -> object:
+    if row is None:
+        return None
+    if track == "group_id" and _has_text(row.get("group_name")):
+        return row.get("group_name")
+    return row.get(track)
+
+
+def _track_title_value(track: str, row: dict[str, Any] | None) -> object:
+    if row is None:
+        return None
+    value = _track_display_value(track, row)
+    if track != "group_id":
+        return value
+    group_id = row.get("group_id")
+    if _has_text(value) and _has_text(group_id) and str(value) != str(group_id):
+        return f"{value} (id={group_id})"
+    return value
+
+
+def _has_text(value: object) -> bool:
+    return value is not None and str(value).strip() != ""
+
+
+def _format_cell_value(track: str, value: object) -> str:
+    if value is None:
+        return "NA"
+    if track == "true_label" or track.startswith("pred_label"):
+        label_value = _int_or_none(value)
+        return "NA" if label_value is None else str(label_value)
+    if track in {"prob", "uncertainty_std"}:
+        try:
+            numeric = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return "NA"
+        if numeric != numeric:
+            return "NA"
+        return f"{numeric:.3f}"
+    return str(value)
+
+
+def _text_column_width_px(
+    values: Iterable[str], *, min_width: int = 42, padding: int = 18
+) -> int:
+    max_chars = max((len(value) for value in values), default=0)
+    return max(min_width, padding + 7 * max_chars)
+
+
 def _track_label(track: str) -> str:
     return {
-        "true_label": "true",
+        "true_label": "trait",
         "prob": "prob",
         "pred_label": "pred",
         "pred_label_cv_derived_threshold": "pred_cv",
         "uncertainty_std": "uncert",
-        "contrast_pair_id": "contrast",
+        "group_id": "group",
         "fold_id": "fold",
     }.get(track, track)
 

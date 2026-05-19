@@ -262,26 +262,29 @@ Conditionally written:
 #### `tree_prediction_cv_annotation.tsv` (optional)
 
 - Written when `data.tree_path` is set.
-- ggtree/Toytree-friendly tip annotation for CV species with non-empty `contrast_pair_id`.
+- ggtree/Toytree-friendly tip annotation for CV species with non-empty
+  `split.group_col`.
 - Columns: `label`, `species`, `true_label`, `prob`, `pred_label`, `uncertainty_std`,
-  `contrast_pair_id`, `fold_id`.
+  `group_id`, `group_name`, `fold_id`.
+- `group_id` is the `split.group_col` value. `group_name` is populated when a matching
+  name column is available, such as `taxon_family_name` for `taxon_family_id`.
 - `pred_label` uses the CV-derived threshold when available.
 
 #### `tree_contrast_pairs_annotation.tsv` (optional)
 
 - Written when `data.tree_path` is set.
 - ggtree/Toytree-friendly metadata QC annotation for all species with non-empty
-  `contrast_pair_id`.
-- Columns: `label`, `species`, `true_label`, `contrast_pair_id`.
-- Use this file to inspect which tree tips participate in contrastive clades before
+  `split.group_col`.
+- Columns: `label`, `species`, `true_label`, `group_id`, `group_name`.
+- Use this file to inspect which tree tips participate in split groups before
   interpreting prediction probabilities.
 
 #### `tree_feature_heatmap_annotation.tsv` (optional)
 
 - Written when `data.tree_path` is set.
 - Long-form ggtree/Toytree-friendly feature heatmap values for species with non-empty
-  `contrast_pair_id` and the top 30 features by `importance_mean`.
-- Columns: `label`, `species`, `true_label`, `contrast_pair_id`, `feature_rank`,
+  `split.group_col` and the top 30 features by `importance_mean`.
+- Columns: `label`, `species`, `true_label`, `group_id`, `group_name`, `feature_rank`,
   `feature`, `importance_mean`, `coef_mean`, `tpm`, `log2_tpm_plus1`,
   `z_score_log2_tpm`.
 - `log2_tpm_plus1` is `log2(TPM + 1)` after duplicate `(species, feature)` rows are
@@ -303,10 +306,10 @@ Conditionally written:
 
 - Written when `data.tree_path` is set and the corresponding prediction table exists.
 - External-test columns: `label`, `species`, `true_label`, `prob`, `pred_label`,
-  `uncertainty_std`, `contrast_pair_id`.
+  `uncertainty_std`, `group_id`, `group_name`.
 - Predict columns: `label`, `species`, `true_label`, `prob`,
   `pred_label_fixed_threshold`, `pred_label_cv_derived_threshold`, `uncertainty_std`,
-  `contrast_pair_id`.
+  `group_id`, `group_name`.
 - The annotation TSV retains predicted species even when a species is absent from the tree;
   Toytree SVG output is pruned to species present in the tree.
 
@@ -510,10 +513,10 @@ Conditionally written:
 - `tree_prediction_cv.svg` / `tree_prediction_external.svg` (optional)
   - Written when `data.tree_path` is set and Toytree is available.
   - Rectangular Toytree view with aligned tracks for trait label, probability,
-    predicted label, uncertainty, contrast pair, and fold where applicable.
+    predicted label, uncertainty, group, and fold where applicable.
 - `tree_contrast_pairs.svg` (optional)
   - Written when `data.tree_path` is set and Toytree is available.
-  - Rectangular Toytree view with trait-label and contrast-pair tracks for metadata QC.
+  - Rectangular Toytree view with trait-label and split-group tracks for metadata QC.
 - `tree_feature_heatmap_zscore.svg` / `tree_feature_heatmap_log2_tpm.svg` (optional)
   - Written when `data.tree_path` is set and Toytree is available.
   - Rectangular Toytree views with top-feature heatmap tiles ordered by
@@ -546,7 +549,7 @@ Conditionally written:
 - `tree_prediction_predict.svg` (optional)
   - Written when `data.tree_path` is set and Toytree is available.
   - Tree view with aligned tracks for true label when known, probability,
-    CV-threshold prediction, uncertainty, and contrast pair when available.
+    CV-threshold prediction, uncertainty, and group when available.
 
 ## `report` artifacts (schemas and interpretation)
 
