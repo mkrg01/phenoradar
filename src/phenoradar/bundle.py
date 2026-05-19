@@ -18,7 +18,14 @@ import polars as pl
 from sklearn.preprocessing import StandardScaler
 
 from phenoradar.config import AppConfig
-from phenoradar.cv import ExpressionMatrixBuilder, FinalRefitArtifacts
+from phenoradar.cv import (
+    CVError,
+    ExpressionMatrixBuilder,
+    FeatureScaler,
+    FinalRefitArtifacts,
+    apply_expression_transform,
+    apply_feature_scaling,
+)
 
 BUNDLE_FORMAT_VERSION = "1"
 _BUNDLE_DIRNAME = "model_bundle"
@@ -53,13 +60,15 @@ class LoadedBundle:
     manifest: dict[str, Any]
     manifest_sha256: str
     feature_names: list[str]
-    scaler: StandardScaler
+    scaler: FeatureScaler
     model_preprocess: list[ModelPreprocessEntry]
     models: list[Any]
     probability_aggregation: str
     threshold_fixed: float
     threshold_cv_derived: float
     source_run_id: str
+    expression_transform: str
+    feature_scaling: str
 
 
 @dataclass(frozen=True)
@@ -67,7 +76,7 @@ class ModelPreprocessEntry:
     """One model-local preprocessing state from bundle payload."""
 
     feature_names: list[str]
-    scaler: StandardScaler
+    scaler: FeatureScaler
 
 
 def _sha256_file(path: Path) -> str:
@@ -171,6 +180,56 @@ def _threshold_value(thresholds: pl.DataFrame, threshold_name: str) -> float:
     return float(values[0])
 
 
+def _preprocess_methods(preprocess_state: dict[str, Any]) -> tuple[str, str]:
+    expression_transform = preprocess_state.get("expression_transform")
+    feature_scaling = preprocess_state.get("feature_scaling")
+
+    if expression_transform is None and feature_scaling is None:
+        legacy_transform = preprocess_state.get("transform")
+        if legacy_transform == "log1p_then_standard_scaler":
+            return "log1p", "standard"
+        raise BundleError("preprocess_state.joblib is missing preprocessing method metadata")
+
+    if not isinstance(expression_transform, str):
+        raise BundleError("preprocess_state.joblib has invalid expression_transform")
+    if expression_transform not in {"none", "log1p", "sample_rank", "sample_percentile_rank"}:
+        raise BundleError(
+            f"preprocess_state.joblib has unsupported expression_transform: "
+            f"{expression_transform}"
+        )
+    if not isinstance(feature_scaling, str):
+        raise BundleError("preprocess_state.joblib has invalid feature_scaling")
+    if feature_scaling not in {"none", "standard"}:
+        raise BundleError(
+            f"preprocess_state.joblib has unsupported feature_scaling: {feature_scaling}"
+        )
+    return expression_transform, feature_scaling
+
+
+def _validate_scaler_state(
+    scaler: Any,
+    *,
+    feature_scaling: str,
+    context: str,
+    standard_message: str,
+) -> FeatureScaler:
+    if feature_scaling == "none":
+        if scaler is not None:
+            raise BundleError(f"{context} scaler must be null when feature_scaling=none")
+        return None
+    if not isinstance(scaler, StandardScaler):
+        raise BundleError(standard_message)
+    return scaler
+
+
+def _preprocess_transform_label(config: AppConfig) -> str:
+    expression_transform = config.preprocess.expression_transform.method
+    feature_scaling = config.preprocess.feature_scaling.method
+    if expression_transform == "log1p" and feature_scaling == "standard":
+        return "log1p_then_standard_scaler"
+    return f"{expression_transform}_then_{feature_scaling}"
+
+
 def export_model_bundle(
     *,
     run_dir: Path,
@@ -233,7 +292,9 @@ def export_model_bundle(
         {
             "feature_names": feature_schema,
             "scaler": final_refit_artifacts.scaler,
-            "transform": "log1p_then_standard_scaler",
+            "transform": _preprocess_transform_label(config),
+            "expression_transform": config.preprocess.expression_transform.method,
+            "feature_scaling": config.preprocess.feature_scaling.method,
             "model_preprocess": [
                 {
                     "feature_names": entry.feature_names,
@@ -399,11 +460,18 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
     feature_names = _load_feature_schema(bundle_dir / "feature_schema.tsv")
     preprocess_state = joblib.load(bundle_dir / "preprocess_state.joblib")
     model_state = joblib.load(bundle_dir / "model_state.joblib")
+    if not isinstance(preprocess_state, dict):
+        raise BundleError("preprocess_state.joblib must contain a mapping")
 
+    expression_transform, feature_scaling = _preprocess_methods(preprocess_state)
     scaler = preprocess_state.get("scaler")
     state_features = preprocess_state.get("feature_names")
-    if not isinstance(scaler, StandardScaler):
-        raise BundleError("preprocess_state.joblib is missing a valid StandardScaler")
+    scaler = _validate_scaler_state(
+        scaler,
+        feature_scaling=feature_scaling,
+        context="preprocess_state.joblib",
+        standard_message="preprocess_state.joblib is missing a valid StandardScaler",
+    )
     if state_features != feature_names:
         raise BundleError("preprocess_state feature_names do not match feature_schema.tsv")
 
@@ -435,10 +503,14 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
                 raise BundleError("preprocess_state.joblib model_preprocess contains invalid entry")
             entry_features = entry.get("feature_names")
             entry_scaler = entry.get("scaler")
-            if not isinstance(entry_scaler, StandardScaler):
-                raise BundleError(
+            entry_scaler = _validate_scaler_state(
+                entry_scaler,
+                feature_scaling=feature_scaling,
+                context="preprocess_state.joblib model_preprocess entry",
+                standard_message=(
                     "preprocess_state.joblib model_preprocess entry is missing a valid scaler"
-                )
+                ),
+            )
             if not isinstance(entry_features, list) or not entry_features:
                 raise BundleError(
                     "preprocess_state.joblib model_preprocess entry feature_names is invalid"
@@ -475,6 +547,8 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
         threshold_fixed=threshold_fixed,
         threshold_cv_derived=threshold_cv,
         source_run_id=source_run_id,
+        expression_transform=expression_transform,
+        feature_scaling=feature_scaling,
     )
 
 
@@ -522,8 +596,10 @@ def predict_with_bundle(
 
     matrix_builder = ExpressionMatrixBuilder(config)
     x_raw, input_features = matrix_builder.build_matrix(species_list)
-    if np.any(x_raw < 0):
-        raise BundleError("TPM values must be non-negative before log1p transform")
+    try:
+        x_transformed = apply_expression_transform(x_raw, bundle.expression_transform)
+    except CVError as exc:
+        raise BundleError(str(exc)) from exc
     input_index = {feature: idx for idx, feature in enumerate(input_features)}
     bundle_features = bundle.feature_names
 
@@ -533,7 +609,7 @@ def predict_with_bundle(
         input_idx = input_index.get(feature_name)
         if input_idx is None:
             continue
-        aligned[:, feature_idx] = x_raw[:, input_idx]
+        aligned[:, feature_idx] = x_transformed[:, input_idx]
         overlap_count += 1
 
     if overlap_count == 0:
@@ -553,7 +629,6 @@ def predict_with_bundle(
             f"ignored {extra_count} features"
         )
 
-    x_log = np.log1p(aligned)
     schema_index = {feature: idx for idx, feature in enumerate(bundle_features)}
 
     model_probs: list[np.ndarray] = []
@@ -568,8 +643,15 @@ def predict_with_bundle(
         selected_indices = np.array(
             [schema_index[feature] for feature in preprocess.feature_names], dtype=int
         )
-        x_model_log = x_log[:, selected_indices]
-        x_model_scaled = np.asarray(preprocess.scaler.transform(x_model_log), dtype=float)
+        x_model = aligned[:, selected_indices]
+        try:
+            x_model_scaled = apply_feature_scaling(
+                x_model,
+                preprocess.scaler,
+                bundle.feature_scaling,
+            )
+        except CVError as exc:
+            raise BundleError(str(exc)) from exc
         model_probs.append(_predict_probability(model, x_model_scaled))
 
     prob = _aggregate_probabilities(model_probs, bundle.probability_aggregation)

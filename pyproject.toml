@@ -14,7 +14,7 @@ authors = [
 dependencies = [
   "typer>=0.12.5,<1.0.0",
   "polars>=1.9.0,<2.0.0",
-  "scikit-learn>=1.5.2,<2.0.0",
+  "scikit-learn>=1.8.0,<2.0.0",
   "matplotlib>=3.9.2,<4.0.0",
   "optuna>=4.0.0,<5.0.0",
   "PyYAML>=6.0.2,<7.0.0",
@@ -34,6 +34,16 @@ dev = [
   "pytest-cov>=5.0.0,<6.0.0",
   "pre-commit>=3.8.0,<4.0.0",
   "types-PyYAML>=6.0.12.20250915,<7.0.0",
+]
+tree = [
+  "toytree>=3.0.0,<4.0.0",
+  "toyplot>=2.0.0,<3.0.0",
+]
+
+[dependency-groups]
+taxonomy = [
+  "ete4>=4.4.0,<5.0.0",
+  "nwkit @ git+https://github.com/kfuku52/nwkit",
 ]
 
 [tool.hatch.build.targets.wheel]

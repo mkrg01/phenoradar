@@ -41,6 +41,7 @@ class FigureError(ValueError):
 
 _FIG_DPI = 100
 _MODEL_SELECTION_SAMPLE_SET_LIMIT = 1
+_RETAINED_FEATURE_LIMIT = 40
 
 
 def _figure_size_inches(width_px: int, height_px: int) -> tuple[float, float]:
@@ -526,7 +527,11 @@ def _threshold_selection_curve(
     _save_svg_figure(fig, out_path)
 
 
-def _feature_importance_top(feature_importance: pl.DataFrame, out_path: Path) -> None:
+def _feature_importance_top(
+    feature_importance: pl.DataFrame,
+    out_path: Path,
+    feature_importance_by_fold: pl.DataFrame | None = None,
+) -> None:
     required = {"feature", "importance_mean"}
     if not required.issubset(feature_importance.columns):
         raise FigureError("feature_importance.tsv schema is invalid for feature_importance_top.svg")
@@ -540,6 +545,109 @@ def _feature_importance_top(feature_importance: pl.DataFrame, out_path: Path) ->
 
     features = [str(v) for v in top.select("feature").to_series().to_list()]
     values = [float(v) for v in top.select("importance_mean").to_series().to_list()]
+    if feature_importance_by_fold is not None:
+        fold_required = {"fold_id", "feature", "importance_mean"}
+        if not fold_required.issubset(feature_importance_by_fold.columns):
+            raise FigureError(
+                "feature_importance_by_fold.tsv schema is invalid for feature_importance_top.svg"
+            )
+        fold_data = (
+            feature_importance_by_fold.select(
+                pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
+                pl.col("feature").cast(pl.String, strict=False).alias("__feature"),
+                pl.col("importance_mean").cast(pl.Float64, strict=False).alias("__value"),
+            )
+            .filter(
+                pl.col("__feature").is_in(features)
+                & pl.col("__value").is_not_null()
+                & pl.col("__value").is_finite()
+            )
+        )
+        if fold_data.height > 0:
+            feature_to_values = {
+                feature: np.array(
+                    fold_data.filter(pl.col("__feature") == feature)
+                    .sort("__fold_id")
+                    .select("__value")
+                    .to_series()
+                    .to_list(),
+                    dtype=float,
+                )
+                for feature in features
+            }
+            max_value = max(
+                [max(values) if values else 0.0]
+                + [
+                    float(np.max(feature_values))
+                    for feature_values in feature_to_values.values()
+                    if feature_values.size > 0
+                ]
+            )
+            if np.isclose(max_value, 0.0):
+                max_value = 1.0
+
+            height_px = max(340, 155 + len(features) * 27)
+            fig, ax = plt.subplots(figsize=_figure_size_inches(1300, height_px), dpi=_FIG_DPI)
+            fig.patch.set_facecolor("white")
+            fig.suptitle("Feature Importance Top", x=0.01, ha="left", fontsize=16)
+            fig.text(
+                0.01,
+                0.90,
+                "Top 30 by mean fold-level importance (box=IQR/median, marker=mean, points=folds)",
+                fontsize=10,
+            )
+
+            y_pos = np.arange(len(features), dtype=float)
+            plot_values = [
+                feature_to_values[feature]
+                if feature_to_values[feature].size > 0
+                else np.array([0.0], dtype=float)
+                for feature in features
+            ]
+            ax.boxplot(
+                plot_values,
+                orientation="horizontal",
+                positions=y_pos,
+                widths=0.58,
+                patch_artist=True,
+                showmeans=True,
+                boxprops={"facecolor": "#d8ead2", "edgecolor": "#2ca02c", "linewidth": 1.1},
+                whiskerprops={"color": "#2ca02c", "linewidth": 1.0},
+                capprops={"color": "#2ca02c", "linewidth": 1.0},
+                medianprops={"color": "#222222", "linewidth": 1.4},
+                meanprops={
+                    "marker": "D",
+                    "markerfacecolor": "#222222",
+                    "markeredgecolor": "#222222",
+                    "markersize": 4.5,
+                },
+                flierprops={"marker": ""},
+            )
+            for y, feature in zip(y_pos, features, strict=True):
+                feature_values = feature_to_values[feature]
+                if feature_values.size == 0:
+                    continue
+                offsets = np.linspace(-0.16, 0.16, feature_values.size)
+                ax.scatter(
+                    feature_values,
+                    y + offsets,
+                    s=22,
+                    color="#222222",
+                    alpha=0.72,
+                    edgecolors="none",
+                    zorder=3,
+                )
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(features, fontsize=9, fontfamily="monospace")
+            ax.invert_yaxis()
+            ax.set_xlim(0.0, max_value * 1.15)
+            ax.set_xlabel("fold-level importance_mean")
+            ax.grid(axis="x", color="#ececec", linewidth=0.8)
+            ax.set_axisbelow(True)
+            fig.subplots_adjust(left=0.33, right=0.96, top=0.84, bottom=0.12)
+            _save_svg_figure(fig, out_path)
+            return
+
     max_value = max(values) if values else 1.0
     if np.isclose(max_value, 0.0):
         max_value = 1.0
@@ -579,7 +687,11 @@ def _feature_importance_top(feature_importance: pl.DataFrame, out_path: Path) ->
     _save_svg_figure(fig, out_path)
 
 
-def _coefficients_signed_top(coefficients: pl.DataFrame, out_path: Path) -> None:
+def _coefficients_signed_top(
+    coefficients: pl.DataFrame,
+    out_path: Path,
+    coefficients_by_fold: pl.DataFrame | None = None,
+) -> None:
     required = {"feature", "coef_mean", "method"}
     if not required.issubset(coefficients.columns):
         raise FigureError("coefficients.tsv schema is invalid for coefficients_signed_top.svg")
@@ -595,6 +707,113 @@ def _coefficients_signed_top(coefficients: pl.DataFrame, out_path: Path) -> None
 
     features = [str(v) for v in top.select("feature").to_series().to_list()]
     values = [float(v) for v in top.select("coef_mean").to_series().to_list()]
+    if coefficients_by_fold is not None:
+        fold_required = {"fold_id", "feature", "coef_mean", "method"}
+        if not fold_required.issubset(coefficients_by_fold.columns):
+            raise FigureError(
+                "coefficients_by_fold.tsv schema is invalid for coefficients_signed_top.svg"
+            )
+        fold_data = (
+            coefficients_by_fold.filter(pl.col("method") == "coef_signed")
+            .select(
+                pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
+                pl.col("feature").cast(pl.String, strict=False).alias("__feature"),
+                pl.col("coef_mean").cast(pl.Float64, strict=False).alias("__value"),
+            )
+            .filter(
+                pl.col("__feature").is_in(features)
+                & pl.col("__value").is_not_null()
+                & pl.col("__value").is_finite()
+            )
+        )
+        if fold_data.height > 0:
+            feature_to_values = {
+                feature: np.array(
+                    fold_data.filter(pl.col("__feature") == feature)
+                    .sort("__fold_id")
+                    .select("__value")
+                    .to_series()
+                    .to_list(),
+                    dtype=float,
+                )
+                for feature in features
+            }
+            max_abs = max(
+                [max(abs(value) for value in values) if values else 0.0]
+                + [
+                    float(np.max(np.abs(feature_values)))
+                    for feature_values in feature_to_values.values()
+                    if feature_values.size > 0
+                ]
+            )
+            if np.isclose(max_abs, 0.0):
+                max_abs = 1.0
+
+            height_px = max(340, 160 + len(features) * 27)
+            fig, ax = plt.subplots(figsize=_figure_size_inches(1340, height_px), dpi=_FIG_DPI)
+            fig.patch.set_facecolor("white")
+            fig.suptitle("Coefficients Signed Top", x=0.01, ha="left", fontsize=16)
+            fig.text(
+                0.01,
+                0.90,
+                "Top 30 by |mean fold-level coef| (box=IQR/median, marker=mean, points=folds)",
+                fontsize=10,
+            )
+
+            y_pos = np.arange(len(features), dtype=float)
+            plot_values = [
+                feature_to_values[feature]
+                if feature_to_values[feature].size > 0
+                else np.array([0.0], dtype=float)
+                for feature in features
+            ]
+            ax.boxplot(
+                plot_values,
+                orientation="horizontal",
+                positions=y_pos,
+                widths=0.58,
+                patch_artist=True,
+                showmeans=True,
+                boxprops={"facecolor": "#d9e8f5", "edgecolor": "#1f77b4", "linewidth": 1.1},
+                whiskerprops={"color": "#1f77b4", "linewidth": 1.0},
+                capprops={"color": "#1f77b4", "linewidth": 1.0},
+                medianprops={"color": "#222222", "linewidth": 1.4},
+                meanprops={
+                    "marker": "D",
+                    "markerfacecolor": "#222222",
+                    "markeredgecolor": "#222222",
+                    "markersize": 4.5,
+                },
+                flierprops={"marker": ""},
+            )
+            for y, feature in zip(y_pos, features, strict=True):
+                feature_values = feature_to_values[feature]
+                if feature_values.size == 0:
+                    continue
+                offsets = np.linspace(-0.16, 0.16, feature_values.size)
+                point_colors = ["#1f77b4" if value >= 0 else "#d62728" for value in feature_values]
+                ax.scatter(
+                    feature_values,
+                    y + offsets,
+                    s=22,
+                    color=point_colors,
+                    alpha=0.78,
+                    edgecolors="none",
+                    zorder=3,
+                )
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels(features, fontsize=9, fontfamily="monospace")
+            ax.invert_yaxis()
+            limit = max_abs * 1.15
+            ax.set_xlim(-limit, limit)
+            ax.set_xlabel("fold-level coef_mean (signed)")
+            ax.grid(axis="x", color="#ececec", linewidth=0.8)
+            ax.set_axisbelow(True)
+            ax.axvline(0.0, color="#444444", linewidth=1.3)
+            fig.subplots_adjust(left=0.31, right=0.96, top=0.84, bottom=0.12)
+            _save_svg_figure(fig, out_path)
+            return
+
     max_abs = max(abs(v) for v in values) if values else 1.0
     if np.isclose(max_abs, 0.0):
         max_abs = 1.0
@@ -1639,6 +1858,145 @@ def _feature_filter_funnel(feature_filter_counts_summary: pl.DataFrame, out_path
     _save_svg_figure(fig, out_path)
 
 
+def _retained_features_by_fold(retained_features_summary: pl.DataFrame, out_path: Path) -> None:
+    required = {"scope", "fold_id", "feature", "retained_count", "n_sample_sets", "retained_rate"}
+    if not required.issubset(retained_features_summary.columns):
+        raise FigureError(
+            "retained_features_summary.tsv schema is invalid for retained_features_by_fold.svg"
+        )
+    data = (
+        retained_features_summary.select(
+            pl.col("scope").cast(pl.String, strict=False).alias("__scope"),
+            pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
+            pl.col("feature").cast(pl.String, strict=False).alias("__feature"),
+            pl.col("retained_count").cast(pl.Int64, strict=False).alias("__retained_count"),
+            pl.col("n_sample_sets").cast(pl.Int64, strict=False).alias("__n_sample_sets"),
+            pl.col("retained_rate").cast(pl.Float64, strict=False).alias("__retained_rate"),
+        )
+        .filter(
+            (pl.col("__scope") == "outer_fold")
+            & pl.col("__fold_id").is_not_null()
+            & (pl.col("__fold_id") != "")
+            & pl.col("__feature").is_not_null()
+            & (pl.col("__feature") != "")
+            & pl.col("__retained_count").is_not_null()
+            & pl.col("__n_sample_sets").is_not_null()
+            & (pl.col("__n_sample_sets") > 0)
+            & pl.col("__retained_rate").is_not_null()
+            & pl.col("__retained_rate").is_finite()
+        )
+    )
+    if data.height == 0:
+        _write_message_figure(
+            title="Retained Features by Fold",
+            message="No outer-fold retained-feature summary rows are available.",
+            out_path=out_path,
+            width_px=980,
+            height_px=520,
+        )
+        return
+
+    fold_ids = [str(v) for v in data.select("__fold_id").unique().to_series().to_list()]
+    fold_ids = sorted(
+        fold_ids,
+        key=lambda value: (0, int(value)) if value.isdigit() else (1, value),
+    )
+    ranked_features = (
+        data.group_by("__feature")
+        .agg(
+            pl.col("__retained_rate").max().alias("__retained_rate_max"),
+            pl.col("__retained_rate").mean().alias("__retained_rate_mean"),
+            pl.len().alias("__n_folds_retained"),
+        )
+        .sort(
+            [
+                "__retained_rate_max",
+                "__retained_rate_mean",
+                "__n_folds_retained",
+                "__feature",
+            ],
+            descending=[True, True, True, False],
+        )
+    )
+    total_features = ranked_features.height
+    shown_feature_table = ranked_features.head(_RETAINED_FEATURE_LIMIT)
+    features = [str(v) for v in shown_feature_table.select("__feature").to_series().to_list()]
+    omitted_count = max(0, total_features - len(features))
+    if not fold_ids or not features:
+        _write_message_figure(
+            title="Retained Features by Fold",
+            message="No retained features are available after filtering.",
+            out_path=out_path,
+            width_px=980,
+            height_px=520,
+        )
+        return
+
+    feature_index = {feature: idx for idx, feature in enumerate(features)}
+    fold_index = {fold_id: idx for idx, fold_id in enumerate(fold_ids)}
+    rate_matrix = np.zeros((len(features), len(fold_ids)), dtype=float)
+    count_labels: dict[tuple[int, int], str] = {}
+    visible = data.filter(pl.col("__feature").is_in(features))
+    for row in visible.iter_rows(named=True):
+        feature_name = str(row["__feature"])
+        fold_id = str(row["__fold_id"])
+        row_index = feature_index[feature_name]
+        col_index = fold_index[fold_id]
+        rate_matrix[row_index, col_index] = float(row["__retained_rate"])
+        retained_count = int(row["__retained_count"])
+        n_sample_sets = int(row["__n_sample_sets"])
+        count_labels[(row_index, col_index)] = f"{retained_count}/{n_sample_sets}"
+
+    height_px = max(340, 170 + len(features) * 22)
+    width_px = max(980, 260 + len(fold_ids) * 92)
+    fig, ax = plt.subplots(figsize=_figure_size_inches(width_px, height_px), dpi=_FIG_DPI)
+    fig.patch.set_facecolor("white")
+    fig.suptitle("Retained Features by Fold", x=0.01, ha="left", fontsize=16)
+    summary_text = (
+        f"outer_fold retained_rate per feature (shown={len(features)}/{total_features}, "
+        f"folds={len(fold_ids)}, omitted={omitted_count})"
+    )
+    fig.text(0.01, 0.90, summary_text, fontsize=10)
+
+    image = ax.imshow(
+        rate_matrix,
+        aspect="auto",
+        cmap="Blues",
+        interpolation="nearest",
+        vmin=0.0,
+        vmax=1.0,
+    )
+    ax.set_xticks(np.arange(len(fold_ids), dtype=float))
+    ax.set_xticklabels([f"fold={fold_id}" for fold_id in fold_ids], fontsize=9)
+    ax.set_yticks(np.arange(len(features), dtype=float))
+    ax.set_yticklabels(features, fontsize=8, fontfamily="monospace")
+    ax.set_xlabel("CV fold")
+    ax.set_ylabel("Retained feature")
+    ax.set_xticks(np.arange(-0.5, len(fold_ids), 1.0), minor=True)
+    ax.set_yticks(np.arange(-0.5, len(features), 1.0), minor=True)
+    ax.grid(which="minor", color="#ffffff", linewidth=0.8)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    if len(features) <= 12 and len(fold_ids) <= 8:
+        for (row_index, col_index), label in count_labels.items():
+            color = "#222222" if rate_matrix[row_index, col_index] < 0.6 else "#ffffff"
+            ax.text(
+                col_index,
+                row_index,
+                label,
+                ha="center",
+                va="center",
+                fontsize=8,
+                color=color,
+                fontfamily="monospace",
+            )
+
+    colorbar = fig.colorbar(image, ax=ax, fraction=0.025, pad=0.02)
+    colorbar.set_label("retained_rate", rotation=90)
+    fig.subplots_adjust(left=0.28, right=0.92, top=0.84, bottom=0.12)
+    _save_svg_figure(fig, out_path)
+
+
 def _model_sparsity_scatter(model_sparsity: pl.DataFrame, out_path: Path) -> None:
     required = {"model_name", "n_features_after_all", "n_nonzero_features", "scope"}
     if not required.issubset(model_sparsity.columns):
@@ -1706,12 +2064,15 @@ def write_run_figures(
     ensemble_model_probs: pl.DataFrame | None,
     model_selection_trials: pl.DataFrame | None,
     auto_threshold_metric: Literal["mcc", "balanced_accuracy"],
+    feature_importance_by_fold: pl.DataFrame | None = None,
+    coefficients_by_fold: pl.DataFrame | None = None,
     loss_by_split_cv: pl.DataFrame | None = None,
     loss_by_split_final_refit: pl.DataFrame | None = None,
     pred_external_test: pl.DataFrame | None = None,
     trait_name: str = "trait",
     model_selection_trials_summary: pl.DataFrame | None = None,
     feature_filter_counts_summary: pl.DataFrame | None = None,
+    retained_features_summary: pl.DataFrame | None = None,
     model_sparsity: pl.DataFrame | None = None,
     model_sparsity_summary: pl.DataFrame | None = None,
 ) -> list[str]:
@@ -1732,8 +2093,16 @@ def write_run_figures(
         selection_metric=auto_threshold_metric,
         out_path=figures_dir / "threshold_selection_curve.svg",
     )
-    _feature_importance_top(feature_importance, figures_dir / "feature_importance_top.svg")
-    _coefficients_signed_top(coefficients, figures_dir / "coefficients_signed_top.svg")
+    _feature_importance_top(
+        feature_importance,
+        figures_dir / "feature_importance_top.svg",
+        feature_importance_by_fold=feature_importance_by_fold,
+    )
+    _coefficients_signed_top(
+        coefficients,
+        figures_dir / "coefficients_signed_top.svg",
+        coefficients_by_fold=coefficients_by_fold,
+    )
     _species_probability_by_trait(
         predictions=oof_predictions,
         trait_col="label",
@@ -1766,6 +2135,11 @@ def write_run_figures(
         _feature_filter_funnel(
             feature_filter_counts_summary,
             figures_dir / "feature_filter_funnel.svg",
+        )
+    if retained_features_summary is not None:
+        _retained_features_by_fold(
+            retained_features_summary,
+            figures_dir / "retained_features_by_fold.svg",
         )
     if model_sparsity is not None:
         _model_sparsity_scatter(

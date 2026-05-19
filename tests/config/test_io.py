@@ -61,8 +61,11 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.sampling.sampled_set_count == 10
     assert resolved.sampling.weighting == "none"
     assert resolved.model_selection.selection_metric == "log_loss"
+    assert resolved.model_selection.candidate_source_policy == "per_sample_set"
+    assert resolved.preprocess.expression_transform.method == "log1p"
     assert resolved.preprocess.low_prevalence_filter.enabled is True
     assert resolved.preprocess.low_prevalence_filter.min_species_per_feature == 2
+    assert resolved.preprocess.feature_scaling.method == "standard"
 
 
 def test_allow_empty_config_paths_resolves_to_defaults() -> None:
@@ -75,6 +78,9 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
     assert resolved.sampling.sampled_set_count == 10
     assert resolved.sampling.weighting == "none"
     assert resolved.model_selection.selection_metric == "log_loss"
+    assert resolved.model_selection.candidate_source_policy == "per_sample_set"
+    assert resolved.preprocess.expression_transform.method == "log1p"
+    assert resolved.preprocess.feature_scaling.method == "standard"
 
 
 def test_unknown_key_is_rejected(tmp_path: Path) -> None:
@@ -88,6 +94,20 @@ unknown_section:
     )
 
     with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_legacy_data_group_col_is_rejected(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+data:
+  group_col: contrast_pair_id
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError, match="group_col"):
         load_and_resolve_config([cfg])
 
 
@@ -186,6 +206,51 @@ def test_selected_candidate_count_requires_inner_cv_strategy(tmp_path: Path) -> 
         """
 model_selection:
   selected_candidate_count: 2
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_selected_candidate_percent_requires_inner_cv_strategy(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+model_selection:
+  selected_candidate_percent: 25
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_selected_candidate_count_and_percent_are_mutually_exclusive(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+model_selection:
+  selected_candidate_count: 2
+  selected_candidate_percent: 25
+  inner_cv_strategy: logo
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_selected_candidate_percent_must_be_lte_100(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+model_selection:
+  selected_candidate_percent: 120
+  inner_cv_strategy: logo
 """.strip()
         + "\n",
     )
@@ -298,6 +363,82 @@ preprocess:
     )
 
     with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_pair_aware_filter_requires_max_features_when_enabled(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+preprocess:
+  pair_aware_filter:
+    enabled: true
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_generic_group_options_allow_null_contrast_pair_col(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "valid.yml",
+        """
+data:
+  contrast_pair_col: null
+split:
+  group_col: taxon_family_id
+sampling:
+  weighting: group_label_inverse
+""".strip()
+        + "\n",
+    )
+
+    resolved = load_and_resolve_config([cfg])
+
+    assert resolved.data.contrast_pair_col is None
+    assert resolved.split.group_col == "taxon_family_id"
+    assert resolved.sampling.weighting == "group_label_inverse"
+
+
+def test_pair_aware_filter_requires_contrast_pair_col(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+data:
+  contrast_pair_col: null
+preprocess:
+  pair_aware_filter:
+    enabled: true
+    max_features: 10
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError, match="contrast_pair_col"):
+        load_and_resolve_config([cfg])
+
+
+def test_pair_aware_group_balanced_requires_split_group_to_match_contrast_pair(
+    tmp_path: Path,
+) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+data:
+  contrast_pair_col: contrast_pair_id
+split:
+  group_col: taxon_family_id
+preprocess:
+  pair_aware_filter:
+    enabled: true
+    max_features: 10
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError, match="split.group_col"):
         load_and_resolve_config([cfg])
 
 

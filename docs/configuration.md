@@ -41,12 +41,16 @@ phenoradar config
 data:
   metadata_path: testdata/c4_tiny/species_metadata.tsv
   tpm_path: testdata/c4_tiny/tpm.tsv
+  tree_path: null
   species_col: species
   feature_col: orthogroup
   value_col: tpm
   trait_col: C4
-  group_col: contrast_pair_id
+  contrast_pair_col: contrast_pair_id
 split:
+  group_col: contrast_pair_id
+  test_holdout_col: contrast_pair_test_holdout
+  exclude_col: null
   outer_cv_strategy: logo
   outer_cv_n_splits: null
 sampling:
@@ -56,21 +60,29 @@ sampling:
   weighting: none
 preprocess:
   max_pivot_cells: 50000000
+  expression_transform:
+    method: log1p
   low_prevalence_filter:
     enabled: true
     min_species_per_feature: 2
   low_variance_filter:
     enabled: false
     min_variance: null
+  pair_aware_filter:
+    enabled: false
+    max_features: null
   correlation_filter:
     enabled: false
     method: pearson
     max_abs_correlation: null
+  feature_scaling:
+    method: standard
 model:
   name: logistic_elasticnet
 model_selection:
   selected_candidate_count: null
-  candidate_source_policy: reuse_first_sample_set
+  selected_candidate_percent: null
+  candidate_source_policy: per_sample_set
   search_strategy: grid
   trial_count: null
   search_space: {}
@@ -107,6 +119,8 @@ runtime:
 - `model.name`: `logistic_elasticnet` | `linear_svm` | `random_forest`
 - `sampling.strategy`: `all_samples` | `group_balanced`
 - `sampling.weighting`: `none` | `group_label_inverse`
+- `preprocess.expression_transform.method`: `none` | `log1p` | `sample_rank` | `sample_percentile_rank`
+- `preprocess.feature_scaling.method`: `none` | `standard`
 - `ensemble.probability_aggregation`: `mean` | `median`
 - `model_selection.search_strategy`: `grid` | `random` | `tpe`
 - `model_selection.selection_metric`: `mcc` | `balanced_accuracy` | `log_loss`
@@ -120,6 +134,11 @@ runtime:
 - `data.tpm_path`
   - type: `str`
   - default: `testdata/c4_tiny/tpm.tsv`
+- `data.tree_path`
+  - type: `str | null`
+  - default: `null`
+  - optional Newick tree used to write tree prediction annotation TSVs and, when
+    `phenoradar[tree]` is installed, Toytree SVG figures.
 - `data.species_col`
   - type: `str`
   - default: `species`
@@ -132,12 +151,33 @@ runtime:
 - `data.trait_col`
   - type: `str`
   - default: `C4`
-- `data.group_col`
-  - type: `str`
+- `data.contrast_pair_col`
+  - type: `str | null`
   - default: `contrast_pair_id`
+  - optional contrast-pair column used by contrast-specific features such as
+    `preprocess.pair_aware_filter` and tree contrast-pair QC. Set to `null`
+    when the workflow does not use contrast pairs.
 
 ## `split`
 
+- `split.group_col`
+  - type: `str`
+  - default: `contrast_pair_id`
+  - grouping column used for outer CV, group-balanced sampling, and
+    group-label inverse weighting.
+- `split.test_holdout_col`
+  - type: `str | null`
+  - default: `contrast_pair_test_holdout`
+  - metadata column marking labeled species to keep out of CV and evaluate only
+    as `external_test` during `full_run`. Accepted true values are `yes`,
+    `true`, and `1`; false values are `no`, `false`, `0`, empty, or null. When
+    set to `null`, no explicit external-test holdout column is read.
+- `split.exclude_col`
+  - type: `str | null`
+  - default: `null`
+  - optional metadata column marking species to remove from CV, external test,
+    and inference pools. It accepts the same boolean values as
+    `split.test_holdout_col`.
 - `split.outer_cv_strategy`
   - type: `logo | group_kfold`
   - default: `logo`
@@ -169,11 +209,11 @@ Compatibility rules:
 - when `sampling.strategy=all_samples`
   - `sampling.max_samples_per_label_per_group` must be `null`
   - `sampling.sampled_set_count` must be `1`
-- each training group must contain both labels (`0` and `1`) before CV split
-  execution.
-  - this refers to the internal `training_validation` pool (metadata rows with
-    both trait and group present), which is expanded to `train`/`validation`
-    rows in `split_manifest.tsv`.
+- `group_balanced` requires each `split.group_col` group in the
+  `training_validation` pool to contain both labels (`0` and `1`) before CV
+  split execution.
+- `group_label_inverse` weights labels within `split.group_col` groups and does
+  not require contrast-pair metadata.
 
 ## `preprocess`
 
@@ -182,6 +222,20 @@ Compatibility rules:
   - default: `50000000`
   - meaning: upper bound for direct species x feature pivot size before chunked
     pivot mode
+
+### `preprocess.expression_transform`
+
+- `method`
+  - type: `none | log1p | sample_rank | sample_percentile_rank`
+  - default: `log1p`
+  - behavior:
+    - applied after the expression matrix is built and before feature filters
+    - `none`: use input values as-is
+    - `log1p`: use `log(1 + value)`; values must be non-negative
+    - `sample_rank`: within each sample, rank positive feature values and keep
+      zero values at `0`
+    - `sample_percentile_rank`: same zero-preserving sample-wise ranking, scaled
+      by the number of positive features so the largest positive feature is `1`
 
 ### `preprocess.low_prevalence_filter`
 
@@ -203,6 +257,26 @@ Compatibility rules:
   - default: `null`
   - rule: required when `enabled=true`
 
+### `preprocess.pair_aware_filter`
+
+- `enabled`
+  - type: `bool`
+  - default: `false`
+- `max_features`
+  - type: `int >= 1 | null`
+  - default: `null`
+  - rule: required when `enabled=true`
+- behavior:
+  - computes train-only per-group label contrasts after `expression_transform`
+  - ranks features by an internal paired t-like score
+  - keeps the top `max_features`
+  - when fewer than 2 training groups are available in a split, the filter is
+    skipped with a warning
+  - requires `data.contrast_pair_col`; this is independent from
+    `split.group_col`, except that `group_balanced` sampling with
+    `pair_aware_filter` requires the two columns to match so sampled sets retain
+    complete contrast pairs.
+
 ### `preprocess.correlation_filter`
 
 - `enabled`
@@ -218,20 +292,39 @@ Compatibility rules:
     - required when `enabled=true`
     - must be in `(0, 1]`
 
+### `preprocess.feature_scaling`
+
+- `method`
+  - type: `none | standard`
+  - default: `standard`
+  - behavior:
+    - applied after all feature filters and before model fitting/prediction
+    - `none`: do not scale selected features
+    - `standard`: fit a scikit-learn `StandardScaler` on the sampled training
+      matrix and transform validation/target matrices with that fitted state
+
 ## `model`
 
 - `model.name`
   - type: `logistic_elasticnet | linear_svm | random_forest`
   - default: `logistic_elasticnet`
+  - note:
+    - `logistic_elasticnet` assumes scikit-learn `>= 1.8`.
+    - with the built-in `saga` solver, `l1_ratio=0` gives L2, `l1_ratio=1`
+      gives L1, and `0 < l1_ratio < 1` gives elastic-net.
 
 ## `model_selection`
 
 - `model_selection.selected_candidate_count`
   - type: `int >= 1 | null`
   - default: `null`
+- `model_selection.selected_candidate_percent`
+  - type: `float > 0 and <= 100 | null`
+  - default: `null`
+  - rule: mutually exclusive with `selected_candidate_count`
 - `model_selection.candidate_source_policy`
   - type: `per_sample_set | reuse_first_sample_set`
-  - default: `reuse_first_sample_set`
+  - default: `per_sample_set`
 - `model_selection.search_strategy`
   - type: `grid | random | tpe`
   - default: `grid`
@@ -258,7 +351,11 @@ Compatibility rules:
 
 Compatibility rules:
 
-- `selected_candidate_count` requires `inner_cv_strategy`.
+- `selected_candidate_count` and `selected_candidate_percent` are mutually exclusive.
+- `selected_candidate_count` or `selected_candidate_percent` requires `inner_cv_strategy`.
+- when selection is active, top-N selection is applied per sampled set and selected models are always distinct by hyperparameter set.
+- `candidate_source_policy=per_sample_set`: select candidates independently for each sampled set.
+- `candidate_source_policy=reuse_first_sample_set`: select candidates once from sampled set `0` and reuse them for all sampled sets.
 - `search_strategy=grid` cannot use
   `continuous_range`/`continuous_log_range`.
 - search-space list values cannot be empty.
@@ -450,7 +547,7 @@ Unknown parameter names are rejected at training time.
     - global CPU upper bound for training-time parallel work.
     - outer-CV folds can run in parallel up to this limit.
     - within each running fold, model-selection candidate scoring
-      (`search_strategy=grid|random` with `selected_candidate_count` set) can
+      (`search_strategy=grid|random` with selection active) can
       also run in parallel.
     - per-model `random_forest` threads are auto-adjusted against the remaining
       fold budget so combined fold/candidate/model parallel work stays within
@@ -471,6 +568,6 @@ Unknown parameter names are rejected at training time.
 
 - Empty `search_space` is valid and means "no hyperparameter variation".
 - With default config, model selection is effectively disabled
-  (`selected_candidate_count: null`).
+  (`selected_candidate_count: null` and `selected_candidate_percent: null`).
 - Use `phenoradar config` to inspect resolved and validated config before a long
   run.

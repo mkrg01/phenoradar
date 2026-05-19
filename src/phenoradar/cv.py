@@ -48,6 +48,8 @@ from phenoradar.model_selection import (
     generate_candidates,
 )
 
+type FeatureScaler = StandardScaler | None
+
 try:
     from threadpoolctl import (  # type: ignore[import-untyped]
         ThreadpoolController,
@@ -75,12 +77,16 @@ class CVArtifacts:
     oof_predictions: pl.DataFrame
     feature_importance: pl.DataFrame
     coefficients: pl.DataFrame
+    feature_importance_by_fold: pl.DataFrame
+    coefficients_by_fold: pl.DataFrame
     ensemble_model_probs: pl.DataFrame | None
     model_selection_selected: pl.DataFrame | None
     model_selection_trials: pl.DataFrame | None
     model_selection_trials_summary: pl.DataFrame | None
     feature_filter_counts: pl.DataFrame
     feature_filter_counts_summary: pl.DataFrame
+    retained_features: pl.DataFrame
+    retained_features_summary: pl.DataFrame
     model_sparsity: pl.DataFrame
     model_sparsity_summary: pl.DataFrame
     warnings: list[str]
@@ -96,12 +102,14 @@ class FinalRefitArtifacts:
     model_selection_selected: pl.DataFrame | None
     feature_filter_counts: pl.DataFrame
     feature_filter_counts_summary: pl.DataFrame
+    retained_features: pl.DataFrame
+    retained_features_summary: pl.DataFrame
     model_sparsity: pl.DataFrame
     model_sparsity_summary: pl.DataFrame
     warnings: list[str]
     ensemble_size: int
     feature_names: list[str]
-    scaler: StandardScaler
+    scaler: FeatureScaler
     models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
     model_entries: list[FinalModelEntry] = field(default_factory=list)
 
@@ -127,6 +135,18 @@ class SourceSelectionResult:
 
 
 @dataclass(frozen=True)
+class InnerCvPreprocessedFold:
+    """One inner-CV split with train-only preprocessing already applied."""
+
+    inner_fold_id: str
+    x_train: np.ndarray
+    x_valid: np.ndarray
+    y_train: np.ndarray
+    y_valid: np.ndarray
+    sample_weight: np.ndarray | None
+
+
+@dataclass(frozen=True)
 class OuterFoldResult:
     """Fold-local outputs returned from one outer-CV fold execution."""
 
@@ -139,11 +159,13 @@ class OuterFoldResult:
     model_selection_selected_rows: list[dict[str, Any]]
     model_selection_trial_rows: list[dict[str, Any]]
     feature_filter_count_rows: list[dict[str, Any]]
+    retained_feature_rows: list[dict[str, Any]]
     model_sparsity_rows: list[dict[str, Any]]
     fold_model_count: int
     n_features_before_preprocess: int
     n_features_after_low_prevalence: int
     n_features_after_low_variance: int
+    n_features_after_pair_aware: int
     n_features_after_correlation: int
     n_features_after_preprocess: int
     warnings: list[str]
@@ -165,6 +187,7 @@ class FeatureFilterCounts:
     n_features_before: int
     n_features_after_low_prevalence: int
     n_features_after_low_variance: int
+    n_features_after_pair_aware: int
     n_features_after_correlation: int
     n_features_after_all: int
 
@@ -182,6 +205,7 @@ class OuterSampleSetFitResult:
     selected_features: list[str]
     filter_counts: FeatureFilterCounts
     model_count: int
+    warnings: list[str]
 
 
 @dataclass(frozen=True)
@@ -193,9 +217,10 @@ class FinalSampleSetFitResult:
     fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
     model_sparsity_rows: list[dict[str, Any]]
     selected_features: list[str]
-    scaler: StandardScaler
+    scaler: FeatureScaler
     filter_counts: FeatureFilterCounts
     model_count: int
+    warnings: list[str]
 
 
 @dataclass(frozen=True)
@@ -203,7 +228,7 @@ class FinalModelEntry:
     """One final-refit model with its model-local preprocessing state."""
 
     feature_names: list[str]
-    scaler: StandardScaler
+    scaler: FeatureScaler
     model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier
 
 
@@ -211,6 +236,7 @@ _FEATURE_FILTER_STAGE_COLUMNS = [
     "n_features_before",
     "n_features_after_low_prevalence",
     "n_features_after_low_variance",
+    "n_features_after_pair_aware",
     "n_features_after_correlation",
     "n_features_after_all",
 ]
@@ -218,10 +244,13 @@ _FEATURE_FILTER_STAGE_ORDER = {
     "n_features_before": 0,
     "n_features_after_low_prevalence": 1,
     "n_features_after_low_variance": 2,
-    "n_features_after_correlation": 3,
-    "n_features_after_all": 4,
+    "n_features_after_pair_aware": 3,
+    "n_features_after_correlation": 4,
+    "n_features_after_all": 5,
 }
 _NONZERO_TOLERANCE = 1e-12
+_PAIR_AWARE_SE_QUANTILE = 0.1
+_PAIR_AWARE_SCORE_FLOOR = 1e-12
 
 
 def _empty_feature_filter_counts() -> pl.DataFrame:
@@ -233,6 +262,7 @@ def _empty_feature_filter_counts() -> pl.DataFrame:
             "n_features_before": pl.Int64,
             "n_features_after_low_prevalence": pl.Int64,
             "n_features_after_low_variance": pl.Int64,
+            "n_features_after_pair_aware": pl.Int64,
             "n_features_after_correlation": pl.Int64,
             "n_features_after_all": pl.Int64,
         }
@@ -257,6 +287,30 @@ def _empty_feature_filter_counts_summary() -> pl.DataFrame:
     )
 
 
+def _empty_retained_features() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "scope": pl.String,
+            "fold_id": pl.String,
+            "sample_set_id": pl.Int64,
+            "feature": pl.String,
+        }
+    )
+
+
+def _empty_retained_features_summary() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "scope": pl.String,
+            "fold_id": pl.String,
+            "feature": pl.String,
+            "retained_count": pl.Int64,
+            "n_sample_sets": pl.Int64,
+            "retained_rate": pl.Float64,
+        }
+    )
+
+
 def _feature_filter_count_row(
     *,
     scope: str,
@@ -271,6 +325,7 @@ def _feature_filter_count_row(
         "n_features_before": int(counts.n_features_before),
         "n_features_after_low_prevalence": int(counts.n_features_after_low_prevalence),
         "n_features_after_low_variance": int(counts.n_features_after_low_variance),
+        "n_features_after_pair_aware": int(counts.n_features_after_pair_aware),
         "n_features_after_correlation": int(counts.n_features_after_correlation),
         "n_features_after_all": int(counts.n_features_after_all),
     }
@@ -309,6 +364,55 @@ def _summarize_feature_filter_counts(feature_filter_counts: pl.DataFrame) -> pl.
     return summary.with_columns(
         pl.col("stage").replace(_FEATURE_FILTER_STAGE_ORDER).alias("_stage_order"),
     ).sort(["scope", "_stage_order"]).drop("_stage_order")
+
+
+def _retained_feature_rows(
+    *,
+    scope: str,
+    fold_id: str,
+    sample_set_id: int,
+    features: list[str],
+) -> list[dict[str, Any]]:
+    unique_features = list(dict.fromkeys(str(feature) for feature in features))
+    return [
+        {
+            "scope": scope,
+            "fold_id": fold_id,
+            "sample_set_id": int(sample_set_id),
+            "feature": feature,
+        }
+        for feature in unique_features
+    ]
+
+
+def _build_retained_features(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    if not rows:
+        return _empty_retained_features()
+    return pl.DataFrame(rows).sort(["scope", "fold_id", "sample_set_id", "feature"])
+
+
+def _summarize_retained_features(retained_features: pl.DataFrame) -> pl.DataFrame:
+    if retained_features.height == 0:
+        return _empty_retained_features_summary()
+    unique_rows = retained_features.unique(["scope", "fold_id", "sample_set_id", "feature"])
+    sample_set_counts = (
+        unique_rows.select(["scope", "fold_id", "sample_set_id"])
+        .unique()
+        .group_by(["scope", "fold_id"])
+        .agg(pl.len().alias("n_sample_sets"))
+    )
+    return (
+        unique_rows.group_by(["scope", "fold_id", "feature"])
+        .agg(pl.len().alias("retained_count"))
+        .join(sample_set_counts, on=["scope", "fold_id"], how="left")
+        .with_columns(
+            (pl.col("retained_count") / pl.col("n_sample_sets")).alias("retained_rate"),
+        )
+        .sort(
+            ["scope", "fold_id", "retained_rate", "retained_count", "feature"],
+            descending=[False, False, True, True, False],
+        )
+    )
 
 
 def _empty_model_sparsity() -> pl.DataFrame:
@@ -552,6 +656,89 @@ def _config_with_runtime_n_jobs(config: AppConfig, n_jobs: int) -> AppConfig:
     )
 
 
+def _validate_expression_transform_method(method: str) -> str:
+    if method in {"none", "log1p", "sample_rank", "sample_percentile_rank"}:
+        return method
+    raise CVError(f"Unsupported preprocess.expression_transform.method: {method}")
+
+
+def _validate_feature_scaling_method(method: str) -> str:
+    if method in {"none", "standard"}:
+        return method
+    raise CVError(f"Unsupported preprocess.feature_scaling.method: {method}")
+
+
+def _sample_rank_transform(values: np.ndarray, *, percentile: bool) -> np.ndarray:
+    if np.any(values < 0):
+        raise CVError("Expression values must be non-negative before sample rank transform")
+
+    ranked = np.zeros_like(values, dtype=float)
+    for row_idx in range(values.shape[0]):
+        positive_mask = values[row_idx] > 0.0
+        positive_count = int(np.count_nonzero(positive_mask))
+        if positive_count == 0:
+            continue
+        row_ranks = rankdata(values[row_idx, positive_mask], method="average")
+        if percentile:
+            row_ranks = row_ranks / float(positive_count)
+        ranked[row_idx, positive_mask] = row_ranks
+    return ranked
+
+
+def apply_expression_transform(matrix: np.ndarray, method: str) -> np.ndarray:
+    """Apply a sample x feature expression transform before feature filters."""
+
+    resolved_method = _validate_expression_transform_method(str(method))
+    values = np.asarray(matrix, dtype=float)
+    if resolved_method == "none":
+        return values
+    if resolved_method == "log1p":
+        if np.any(values < 0):
+            raise CVError("TPM values must be non-negative before log1p transform")
+        return np.asarray(np.log1p(values), dtype=float)
+    if resolved_method == "sample_rank":
+        return _sample_rank_transform(values, percentile=False)
+    return _sample_rank_transform(values, percentile=True)
+
+
+def _apply_expression_transform_for_config(config: AppConfig, matrix: np.ndarray) -> np.ndarray:
+    return apply_expression_transform(matrix, config.preprocess.expression_transform.method)
+
+
+def apply_feature_scaling(matrix: np.ndarray, scaler: FeatureScaler, method: str) -> np.ndarray:
+    """Apply a previously fitted feature scaling state."""
+
+    resolved_method = _validate_feature_scaling_method(str(method))
+    values = np.asarray(matrix, dtype=float)
+    if resolved_method == "none":
+        if scaler is not None:
+            raise CVError("feature_scaling.method=none requires scaler state to be null")
+        return values
+    if not isinstance(scaler, StandardScaler):
+        raise CVError("feature_scaling.method=standard requires a fitted StandardScaler")
+    return np.asarray(scaler.transform(values), dtype=float)
+
+
+def fit_feature_scaling(
+    config: AppConfig,
+    x_train: np.ndarray,
+    x_target: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, FeatureScaler]:
+    method = _validate_feature_scaling_method(config.preprocess.feature_scaling.method)
+    x_train_values = np.asarray(x_train, dtype=float)
+    x_target_values = np.asarray(x_target, dtype=float)
+    if method == "none":
+        return x_train_values, x_target_values, None
+
+    scaler = StandardScaler()
+    x_train_scaled = np.asarray(scaler.fit_transform(x_train_values), dtype=float)
+    if x_target_values.shape[0] == 0:
+        x_target_scaled = np.empty((0, x_train_values.shape[1]), dtype=float)
+    else:
+        x_target_scaled = np.asarray(scaler.transform(x_target_values), dtype=float)
+    return x_train_scaled, x_target_scaled, scaler
+
+
 class ExpressionMatrixBuilder:
     """Build species x orthogroup matrix from long-format expression data."""
 
@@ -680,17 +867,112 @@ class ExpressionMatrixBuilder:
         return matrix, feature_names
 
 
+def _pair_group_contrasts(
+    x_train_expr: np.ndarray,
+    y_train: np.ndarray,
+    groups_train: np.ndarray,
+    selected: np.ndarray,
+) -> np.ndarray:
+    groups_str = groups_train.astype(str)
+    unique_groups = sorted(set(groups_str.tolist()))
+    contrast_rows: list[np.ndarray] = []
+
+    for group in unique_groups:
+        group_indices = np.where(groups_str == group)[0]
+        label0_idx = group_indices[y_train[group_indices] == 0]
+        label1_idx = group_indices[y_train[group_indices] == 1]
+        if label0_idx.size == 0 or label1_idx.size == 0:
+            raise CVError(
+                "pair_aware_filter requires both labels within each training group; "
+                f"offending group={group}"
+            )
+        label1_mean = np.mean(x_train_expr[label1_idx][:, selected], axis=0)
+        label0_mean = np.mean(x_train_expr[label0_idx][:, selected], axis=0)
+        contrast_rows.append(np.asarray(label1_mean - label0_mean, dtype=float))
+
+    if not contrast_rows:
+        return np.empty((0, selected.size), dtype=float)
+    return np.vstack(contrast_rows)
+
+
+def _apply_pair_aware_filter(
+    config: AppConfig,
+    x_train_expr: np.ndarray,
+    y_train: np.ndarray,
+    groups_train: np.ndarray,
+    selected: np.ndarray,
+    feature_names: list[str],
+    warnings: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    max_features = config.preprocess.pair_aware_filter.max_features
+    if max_features is None:
+        raise CVError("pair_aware_filter is enabled but max_features is missing")
+    if selected.size == 0:
+        return selected, np.empty(0, dtype=float)
+
+    contrasts = _pair_group_contrasts(x_train_expr, y_train, groups_train, selected)
+    n_groups = int(contrasts.shape[0])
+    if n_groups < 2:
+        if warnings is not None:
+            warnings.append(
+                "pair_aware_filter skipped because fewer than 2 training groups were available "
+                "in a split"
+            )
+        return selected, None
+
+    effect = np.asarray(np.mean(contrasts, axis=0), dtype=float)
+    se = np.asarray(np.std(contrasts, axis=0, ddof=1), dtype=float) / np.sqrt(float(n_groups))
+    positive_se = se[np.isfinite(se) & (se > 0.0)]
+    if positive_se.size == 0:
+        if warnings is not None:
+            warnings.append(
+                "pair_aware_filter used absolute mean group contrast because all per-feature "
+                "standard errors were zero"
+            )
+        score = np.abs(effect)
+    else:
+        s0 = max(float(np.quantile(positive_se, _PAIR_AWARE_SE_QUANTILE)), _PAIR_AWARE_SCORE_FLOOR)
+        score = np.abs(effect) / np.maximum(se, s0)
+    score = np.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0)
+    if np.all(np.isclose(score, 0.0)):
+        if warnings is not None:
+            warnings.append(
+                "pair_aware_filter skipped because all pair-aware scores were zero or non-finite "
+                "in a split"
+            )
+        return selected, None
+
+    keep_count = min(int(max_features), int(selected.size))
+    order = sorted(
+        range(selected.size),
+        key=lambda idx: (-score[idx], -abs(effect[idx]), feature_names[selected[idx]]),
+    )
+    kept_local = np.array(order[:keep_count], dtype=int)
+    kept_global = selected[kept_local]
+    kept_priority = score[kept_local]
+
+    order_by_feature = np.argsort(kept_global)
+    kept_global = np.asarray(kept_global[order_by_feature], dtype=int)
+    kept_priority = np.asarray(kept_priority[order_by_feature], dtype=float)
+    return kept_global, kept_priority
+
+
 def _select_feature_indices_with_counts(
-    config: AppConfig, x_train_log: np.ndarray, feature_names: list[str]
+    config: AppConfig,
+    x_train_expr: np.ndarray,
+    feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
 ) -> tuple[np.ndarray, FeatureFilterCounts]:
-    selected = np.arange(x_train_log.shape[1], dtype=int)
+    selected = np.arange(x_train_expr.shape[1], dtype=int)
     n_features_before = int(selected.size)
 
     if config.preprocess.low_prevalence_filter.enabled:
         min_species = config.preprocess.low_prevalence_filter.min_species_per_feature
         if min_species is None:
             raise CVError("low_prevalence_filter is enabled but min_species_per_feature is missing")
-        prevalence = np.count_nonzero(x_train_log[:, selected] > 0.0, axis=0)
+        prevalence = np.count_nonzero(x_train_expr[:, selected] > 0.0, axis=0)
         selected = selected[prevalence >= int(min_species)]
     n_features_after_low_prevalence = int(selected.size)
 
@@ -698,12 +980,33 @@ def _select_feature_indices_with_counts(
         min_variance = config.preprocess.low_variance_filter.min_variance
         if min_variance is None:
             raise CVError("low_variance_filter is enabled but min_variance is missing")
-        variances = np.var(x_train_log[:, selected], axis=0)
+        variances = np.var(x_train_expr[:, selected], axis=0)
         selected = selected[variances >= float(min_variance)]
     n_features_after_low_variance = int(selected.size)
 
+    pair_aware_priority_scores: np.ndarray | None = None
+    if config.preprocess.pair_aware_filter.enabled and selected.size > 0:
+        if y_train is None or groups_train is None:
+            raise CVError("pair_aware_filter requires y_train and groups_train in preprocessing")
+        selected, pair_aware_priority_scores = _apply_pair_aware_filter(
+            config,
+            x_train_expr,
+            y_train,
+            groups_train,
+            selected,
+            feature_names,
+            warnings=warnings,
+        )
+    n_features_after_pair_aware = int(selected.size)
+
     if config.preprocess.correlation_filter.enabled and selected.size > 1:
-        selected = _apply_correlation_filter(config, x_train_log, selected, feature_names)
+        selected = _apply_correlation_filter(
+            config,
+            x_train_expr,
+            selected,
+            feature_names,
+            priority_scores=pair_aware_priority_scores,
+        )
     n_features_after_correlation = int(selected.size)
 
     if selected.size == 0:
@@ -712,15 +1015,28 @@ def _select_feature_indices_with_counts(
         n_features_before=n_features_before,
         n_features_after_low_prevalence=n_features_after_low_prevalence,
         n_features_after_low_variance=n_features_after_low_variance,
+        n_features_after_pair_aware=n_features_after_pair_aware,
         n_features_after_correlation=n_features_after_correlation,
         n_features_after_all=int(selected.size),
     )
 
 
 def _select_feature_indices(
-    config: AppConfig, x_train_log: np.ndarray, feature_names: list[str]
+    config: AppConfig,
+    x_train_expr: np.ndarray,
+    feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
 ) -> np.ndarray:
-    selected, _counts = _select_feature_indices_with_counts(config, x_train_log, feature_names)
+    selected, _counts = _select_feature_indices_with_counts(
+        config,
+        x_train_expr,
+        feature_names,
+        y_train=y_train,
+        groups_train=groups_train,
+        warnings=warnings,
+    )
     return selected
 
 
@@ -729,10 +1045,13 @@ def _apply_correlation_filter(
     x_train_log: np.ndarray,
     selected: np.ndarray,
     feature_names: list[str],
+    priority_scores: np.ndarray | None = None,
 ) -> np.ndarray:
     max_abs_corr = config.preprocess.correlation_filter.max_abs_correlation
     if max_abs_corr is None:
         raise CVError("correlation_filter is enabled but max_abs_correlation is missing")
+    if priority_scores is not None and priority_scores.shape[0] != selected.size:
+        raise CVError("pair-aware priority scores must align with the selected feature set")
 
     train_selected = x_train_log[:, selected]
     if config.preprocess.correlation_filter.method == "spearman":
@@ -745,7 +1064,15 @@ def _apply_correlation_filter(
     local_variances = np.var(train_selected, axis=0)
     order = sorted(
         range(selected.size),
-        key=lambda idx: (-local_variances[idx], feature_names[selected[idx]]),
+        key=lambda idx: (
+            -(
+                0.0
+                if priority_scores is None
+                else float(priority_scores[idx])
+            ),
+            -local_variances[idx],
+            feature_names[selected[idx]],
+        ),
     )
 
     kept_local: list[int] = []
@@ -767,22 +1094,29 @@ def _preprocess_fold_with_counts(
     x_train_raw: np.ndarray,
     x_valid_raw: np.ndarray,
     feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts]:
-    if np.any(x_train_raw < 0) or np.any(x_valid_raw < 0):
-        raise CVError("TPM values must be non-negative before log1p transform")
+    x_train_expr = _apply_expression_transform_for_config(config, x_train_raw)
+    x_valid_expr = _apply_expression_transform_for_config(config, x_valid_raw)
 
-    x_train_log = np.log1p(x_train_raw)
-    x_valid_log = np.log1p(x_valid_raw)
-
-    selected, counts = _select_feature_indices_with_counts(config, x_train_log, feature_names)
+    selected, counts = _select_feature_indices_with_counts(
+        config,
+        x_train_expr,
+        feature_names,
+        y_train=y_train,
+        groups_train=groups_train,
+        warnings=warnings,
+    )
     selected_features = [feature_names[idx] for idx in selected]
 
-    x_train_selected = x_train_log[:, selected]
-    x_valid_selected = x_valid_log[:, selected]
+    x_train_selected = x_train_expr[:, selected]
+    x_valid_selected = x_valid_expr[:, selected]
 
-    scaler = StandardScaler()
-    x_train_scaled = np.asarray(scaler.fit_transform(x_train_selected), dtype=float)
-    x_valid_scaled = np.asarray(scaler.transform(x_valid_selected), dtype=float)
+    x_train_scaled, x_valid_scaled, _scaler = fit_feature_scaling(
+        config, x_train_selected, x_valid_selected
+    )
     return x_train_scaled, x_valid_scaled, selected_features, counts
 
 
@@ -791,12 +1125,18 @@ def _preprocess_fold(
     x_train_raw: np.ndarray,
     x_valid_raw: np.ndarray,
     feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     x_train_scaled, x_valid_scaled, selected_features, _counts = _preprocess_fold_with_counts(
         config,
         x_train_raw,
         x_valid_raw,
         feature_names,
+        y_train=y_train,
+        groups_train=groups_train,
+        warnings=warnings,
     )
     return x_train_scaled, x_valid_scaled, selected_features
 
@@ -1090,6 +1430,62 @@ def _rank_selected_candidates(
     )
 
 
+def _candidate_params_key(candidate: Candidate) -> str:
+    return json.dumps(candidate.params, ensure_ascii=True, sort_keys=True)
+
+
+def _dedupe_ranked_candidates_by_params(
+    ranked_candidates: list[SelectedCandidate],
+) -> list[SelectedCandidate]:
+    unique: list[SelectedCandidate] = []
+    seen_params: set[str] = set()
+    for selected in ranked_candidates:
+        params_key = _candidate_params_key(selected.candidate)
+        if params_key in seen_params:
+            continue
+        seen_params.add(params_key)
+        unique.append(selected)
+    return unique
+
+
+def _selection_is_active(config: AppConfig) -> bool:
+    return (
+        config.model_selection.selected_candidate_count is not None
+        or config.model_selection.selected_candidate_percent is not None
+    )
+
+
+def _selection_source_sample_set_id(config: AppConfig, sample_set_id: int) -> int:
+    if config.model_selection.candidate_source_policy == "per_sample_set":
+        return int(sample_set_id)
+    return 0
+
+
+def _selection_source_sample_set_ids(config: AppConfig, sampled_set_count: int) -> list[int]:
+    return sorted(
+        {
+            _selection_source_sample_set_id(config, sample_set_id)
+            for sample_set_id in range(sampled_set_count)
+        }
+    )
+
+
+def _requested_selected_candidate_count(
+    *,
+    config: AppConfig,
+    available_unique_candidates: int,
+) -> int | None:
+    if config.model_selection.selected_candidate_count is not None:
+        return int(config.model_selection.selected_candidate_count)
+    if config.model_selection.selected_candidate_percent is None:
+        return None
+    if available_unique_candidates < 1:
+        raise CVError("available_unique_candidates must be >= 1")
+    percent = float(config.model_selection.selected_candidate_percent)
+    requested = int(np.ceil((float(available_unique_candidates) * percent) / 100.0))
+    return max(1, requested)
+
+
 def _inner_cv_splits(
     config: AppConfig, y: np.ndarray, groups: np.ndarray
 ) -> list[tuple[np.ndarray, np.ndarray, str]]:
@@ -1124,16 +1520,62 @@ def _inner_cv_splits(
     return rows
 
 
+def _build_inner_cv_preprocessed_folds(
+    *,
+    config: AppConfig,
+    x_source_raw: np.ndarray,
+    y_source: np.ndarray,
+    groups_source: np.ndarray,
+    contrast_groups_source: np.ndarray | None,
+    feature_names: list[str],
+    warnings: list[str] | None = None,
+) -> list[InnerCvPreprocessedFold]:
+    def _build() -> list[InnerCvPreprocessedFold]:
+        preprocessed_folds: list[InnerCvPreprocessedFold] = []
+        for train_idx, valid_idx, inner_fold_id in _inner_cv_splits(
+            config, y_source, groups_source
+        ):
+            x_train_raw = x_source_raw[train_idx, :]
+            x_valid_raw = x_source_raw[valid_idx, :]
+            y_train = y_source[train_idx]
+            y_valid = y_source[valid_idx]
+            groups_train = groups_source[train_idx]
+            contrast_groups_train = (
+                None if contrast_groups_source is None else contrast_groups_source[train_idx]
+            )
+
+            x_train, x_valid, _selected = _preprocess_fold(
+                config,
+                x_train_raw,
+                x_valid_raw,
+                feature_names,
+                y_train=y_train,
+                groups_train=contrast_groups_train,
+                warnings=warnings,
+            )
+            sample_weight = _fit_sample_weights(config, y_train, groups_train)
+            preprocessed_folds.append(
+                InnerCvPreprocessedFold(
+                    inner_fold_id=inner_fold_id,
+                    x_train=x_train,
+                    x_valid=x_valid,
+                    y_train=y_train,
+                    y_valid=y_valid,
+                    sample_weight=sample_weight,
+                )
+            )
+        return preprocessed_folds
+
+    return _with_native_thread_limit_for_config(config, _build)
+
+
 def _score_candidate_inner_cv(
     *,
     config: AppConfig,
     training_scope_id: str,
     source_sample_set_id: int,
     candidate: Candidate,
-    x_source_raw: np.ndarray,
-    y_source: np.ndarray,
-    groups_source: np.ndarray,
-    feature_names: list[str],
+    preprocessed_folds: list[InnerCvPreprocessedFold],
     estimator_n_jobs: int | None = None,
 ) -> tuple[float, list[dict[str, Any]]]:
     resolved_estimator_n_jobs = (
@@ -1147,38 +1589,26 @@ def _score_candidate_inner_cv(
         trial_rows: list[dict[str, Any]] = []
         params_json = json.dumps(candidate.params, ensure_ascii=True, sort_keys=True)
 
-        for train_idx, valid_idx, inner_fold_id in _inner_cv_splits(
-            config, y_source, groups_source
-        ):
-            x_train_raw = x_source_raw[train_idx, :]
-            x_valid_raw = x_source_raw[valid_idx, :]
-            y_train = y_source[train_idx]
-            y_valid = y_source[valid_idx]
-            groups_train = groups_source[train_idx]
-
-            x_train, x_valid, _selected = _preprocess_fold(
-                config, x_train_raw, x_valid_raw, feature_names
-            )
-            sample_weight = _fit_sample_weights(config, y_train, groups_train)
+        for fold in preprocessed_folds:
             seed = _deterministic_int_seed(
                 f"{config.runtime.seed}|{training_scope_id}|source_{source_sample_set_id}|"
-                f"candidate_{candidate.candidate_index}|inner_{inner_fold_id}"
+                f"candidate_{candidate.candidate_index}|inner_{fold.inner_fold_id}"
             )
             estimator = _build_estimator(
                 config,
                 seed,
-                y_train,
+                fold.y_train,
                 model_params=candidate.params,
                 rf_n_jobs=resolved_estimator_n_jobs,
             )
-            _fit_estimator(estimator, x_train, y_train, sample_weight)
-            prob = _predict_positive_probability(estimator, x_valid)
-            score = _selection_metric_from_probability(config, y_valid, prob)
+            _fit_estimator(estimator, fold.x_train, fold.y_train, fold.sample_weight)
+            prob = _predict_positive_probability(estimator, fold.x_valid)
+            score = _selection_metric_from_probability(config, fold.y_valid, prob)
             fold_scores.append(score)
             trial_rows.append(
                 {
                     "candidate_index": candidate.candidate_index,
-                    "inner_fold_id": inner_fold_id,
+                    "inner_fold_id": fold.inner_fold_id,
                     "metric_name": config.model_selection.selection_metric,
                     "metric_value": score,
                     "params_json": params_json,
@@ -1224,10 +1654,13 @@ def _prepare_source_selection_tpe(
     feature_names: list[str],
     warnings: list[str],
     progress_callback: Callable[[str, str | None], None] | None = None,
+    contrast_groups_train: np.ndarray | None = None,
 ) -> SourceSelectionResult:
-    requested = config.model_selection.selected_candidate_count
-    if requested is None:
-        raise CVError("selected_candidate_count is required for TPE selection flow")
+    if not _selection_is_active(config):
+        raise CVError(
+            "selected_candidate_count/selected_candidate_percent is required "
+            "for TPE selection flow"
+        )
     if config.model_selection.trial_count is None:
         raise CVError("trial_count is required for TPE strategy")
     runtime_seed = int(config.runtime.seed)
@@ -1236,11 +1669,24 @@ def _prepare_source_selection_tpe(
     x_source_raw = x_train_raw[sampled_idx, :]
     y_source = y_train[sampled_idx]
     groups_source = groups_train[sampled_idx]
+    contrast_groups_source = (
+        None if contrast_groups_train is None else contrast_groups_train[sampled_idx]
+    )
     if np.unique(y_source).size < 2:
         raise CVError(
             "Selection source sampled set became single-class; "
             f"source_sample_set_id={source_sample_set_id}"
         )
+
+    preprocessed_folds = _build_inner_cv_preprocessed_folds(
+        config=config,
+        x_source_raw=x_source_raw,
+        y_source=y_source,
+        groups_source=groups_source,
+        contrast_groups_source=contrast_groups_source,
+        feature_names=feature_names,
+        warnings=warnings,
+    )
 
     trial_count = int(config.model_selection.trial_count)
     discrete_values, continuous_values = expanded_search_space(config.model_selection.search_space)
@@ -1278,10 +1724,7 @@ def _prepare_source_selection_tpe(
             training_scope_id=training_scope_id,
             source_sample_set_id=source_sample_set_id,
             candidate=candidate,
-            x_source_raw=x_source_raw,
-            y_source=y_source,
-            groups_source=groups_source,
-            feature_names=feature_names,
+            preprocessed_folds=preprocessed_folds,
             estimator_n_jobs=estimator_n_jobs,
         )
         trial_rows.extend(rows)
@@ -1320,10 +1763,22 @@ def _prepare_source_selection_tpe(
             )
         )
 
-    available = len(scored)
-    if requested is None:
-        raise CVError("selected_candidate_count resolved to null unexpectedly")
-    requested_count = int(requested)
+    scored_count = len(scored)
+    ranked = _rank_selected_candidates(scored, metric_name)
+    ranked_unique = _dedupe_ranked_candidates_by_params(ranked)
+    available = len(ranked_unique)
+    if available < scored_count:
+        warnings.append(
+            "model_selection deduplicated candidates with identical params; "
+            f"reduced from {scored_count} to {available} "
+            f"for source sample_set_id={source_sample_set_id}"
+        )
+    requested_count = _requested_selected_candidate_count(
+        config=config,
+        available_unique_candidates=available,
+    )
+    if requested_count is None:
+        raise CVError("selected candidate count resolved to null unexpectedly")
     effective_count = min(requested_count, available)
     if effective_count < requested_count:
         warnings.append(
@@ -1332,11 +1787,10 @@ def _prepare_source_selection_tpe(
             f"for source sample_set_id={source_sample_set_id}"
         )
 
-    ranked = _rank_selected_candidates(scored, metric_name)
     return SourceSelectionResult(
-        selected_candidates=ranked[:effective_count],
+        selected_candidates=ranked_unique[:effective_count],
         n_available_candidates=available,
-        n_scored_candidates=available,
+        n_scored_candidates=scored_count,
         selected_candidate_count_requested=requested_count,
         selected_candidate_count_effective=effective_count,
         trial_rows=trial_rows,
@@ -1355,9 +1809,9 @@ def _prepare_source_selection(
     feature_names: list[str],
     warnings: list[str],
     progress_callback: Callable[[str, str | None], None] | None = None,
+    contrast_groups_train: np.ndarray | None = None,
 ) -> SourceSelectionResult:
-    requested = config.model_selection.selected_candidate_count
-    selection_active = requested is not None
+    selection_active = _selection_is_active(config)
     if selection_active and config.model_selection.search_strategy == "tpe":
         return _prepare_source_selection_tpe(
             config=config,
@@ -1370,6 +1824,7 @@ def _prepare_source_selection(
             feature_names=feature_names,
             warnings=warnings,
             progress_callback=progress_callback,
+            contrast_groups_train=contrast_groups_train,
         )
 
     try:
@@ -1388,24 +1843,44 @@ def _prepare_source_selection(
     available = len(candidates)
 
     if not selection_active:
-        selected_candidates = [SelectedCandidate(candidate=item, score=None) for item in candidates]
+        ranked = [SelectedCandidate(candidate=item, score=None) for item in candidates]
+        selected_candidates = _dedupe_ranked_candidates_by_params(ranked)
+        if len(selected_candidates) < available:
+            warnings.append(
+                "model_selection deduplicated candidates with identical params; "
+                f"reduced from {available} to {len(selected_candidates)} "
+                f"for source sample_set_id={source_sample_set_id}"
+            )
         return SourceSelectionResult(
             selected_candidates=selected_candidates,
-            n_available_candidates=available,
+            n_available_candidates=len(selected_candidates),
             n_scored_candidates=0,
             selected_candidate_count_requested=None,
-            selected_candidate_count_effective=available,
+            selected_candidate_count_effective=len(selected_candidates),
             trial_rows=[],
         )
 
     x_source_raw = x_train_raw[sampled_idx, :]
     y_source = y_train[sampled_idx]
     groups_source = groups_train[sampled_idx]
+    contrast_groups_source = (
+        None if contrast_groups_train is None else contrast_groups_train[sampled_idx]
+    )
     if np.unique(y_source).size < 2:
         raise CVError(
             "Selection source sampled set became single-class; "
             f"source_sample_set_id={source_sample_set_id}"
         )
+
+    preprocessed_folds = _build_inner_cv_preprocessed_folds(
+        config=config,
+        x_source_raw=x_source_raw,
+        y_source=y_source,
+        groups_source=groups_source,
+        contrast_groups_source=contrast_groups_source,
+        feature_names=feature_names,
+        warnings=warnings,
+    )
 
     worker_count, estimator_n_jobs = _selection_parallel_plan(config, available)
     scored: list[SelectedCandidate] = []
@@ -1418,10 +1893,7 @@ def _prepare_source_selection(
                 training_scope_id=training_scope_id,
                 source_sample_set_id=source_sample_set_id,
                 candidate=candidate,
-                x_source_raw=x_source_raw,
-                y_source=y_source,
-                groups_source=groups_source,
-                feature_names=feature_names,
+                preprocessed_folds=preprocessed_folds,
                 estimator_n_jobs=estimator_n_jobs,
             )
             scored_rows.append((mean_score, rows))
@@ -1446,10 +1918,7 @@ def _prepare_source_selection(
                     training_scope_id=training_scope_id,
                     source_sample_set_id=source_sample_set_id,
                     candidate=candidate,
-                    x_source_raw=x_source_raw,
-                    y_source=y_source,
-                    groups_source=groups_source,
-                    feature_names=feature_names,
+                    preprocessed_folds=preprocessed_folds,
                     estimator_n_jobs=estimator_n_jobs,
                 ): candidate
                 for candidate in candidates
@@ -1476,10 +1945,24 @@ def _prepare_source_selection(
         scored.append(SelectedCandidate(candidate=candidate, score=score_value))
         trial_rows.extend(rows)
 
-    if requested is None:
-        raise CVError("selected_candidate_count resolved to null unexpectedly")
-    requested_count = int(requested)
-    effective_count = min(requested_count, available)
+    scored_count = len(scored)
+    ranked = _rank_selected_candidates(scored, config.model_selection.selection_metric)
+    ranked_unique = _dedupe_ranked_candidates_by_params(ranked)
+    available_unique = len(ranked_unique)
+    if available_unique < scored_count:
+        warnings.append(
+            "model_selection deduplicated candidates with identical params; "
+            f"reduced from {scored_count} to {available_unique} "
+            f"for source sample_set_id={source_sample_set_id}"
+        )
+
+    requested_count = _requested_selected_candidate_count(
+        config=config,
+        available_unique_candidates=available_unique,
+    )
+    if requested_count is None:
+        raise CVError("selected candidate count resolved to null unexpectedly")
+    effective_count = min(requested_count, available_unique)
     if effective_count < requested_count:
         warnings.append(
             "model_selection.selected_candidate_count exceeded available candidates; "
@@ -1487,11 +1970,10 @@ def _prepare_source_selection(
             f"for source sample_set_id={source_sample_set_id}"
         )
 
-    ranked = _rank_selected_candidates(scored, config.model_selection.selection_metric)
     return SourceSelectionResult(
-        selected_candidates=ranked[:effective_count],
-        n_available_candidates=available,
-        n_scored_candidates=available,
+        selected_candidates=ranked_unique[:effective_count],
+        n_available_candidates=available_unique,
+        n_scored_candidates=scored_count,
         selected_candidate_count_requested=requested_count,
         selected_candidate_count_effective=effective_count,
         trial_rows=trial_rows,
@@ -1599,6 +2081,14 @@ def _fold_ids(split_manifest: pl.DataFrame) -> list[str]:
     return [str(v) for v in sorted(int(v) for v in fold_values)]
 
 
+def _with_contrast_group_column(config: AppConfig, split_manifest: pl.DataFrame) -> pl.DataFrame:
+    if "contrast_group_id" in split_manifest.columns:
+        return split_manifest
+    if config.preprocess.pair_aware_filter.enabled:
+        raise CVError("split_manifest is missing contrast_group_id required by pair_aware_filter")
+    return split_manifest.with_columns(pl.lit(None, dtype=pl.String).alias("contrast_group_id"))
+
+
 def _outer_cv_species(split_manifest: pl.DataFrame) -> list[str]:
     species_values = (
         split_manifest.filter(pl.col("pool").is_in(["train", "validation"]))
@@ -1694,13 +2184,19 @@ def _preprocess_train_and_target(
     x_train_raw: np.ndarray,
     x_target_raw: np.ndarray,
     feature_names: list[str],
-) -> tuple[np.ndarray, np.ndarray, list[str], StandardScaler]:
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[str], FeatureScaler]:
     x_train_scaled, x_target_scaled, selected_features, scaler, _counts = (
         _preprocess_train_and_target_with_counts(
             config,
             x_train_raw,
             x_target_raw,
             feature_names,
+            y_train=y_train,
+            groups_train=groups_train,
+            warnings=warnings,
         )
     )
     return x_train_scaled, x_target_scaled, selected_features, scaler
@@ -1711,25 +2207,29 @@ def _preprocess_train_and_target_with_counts(
     x_train_raw: np.ndarray,
     x_target_raw: np.ndarray,
     feature_names: list[str],
-) -> tuple[np.ndarray, np.ndarray, list[str], StandardScaler, FeatureFilterCounts]:
-    if np.any(x_train_raw < 0) or np.any(x_target_raw < 0):
-        raise CVError("TPM values must be non-negative before log1p transform")
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[str], FeatureScaler, FeatureFilterCounts]:
+    x_train_expr = _apply_expression_transform_for_config(config, x_train_raw)
+    x_target_expr = _apply_expression_transform_for_config(config, x_target_raw)
 
-    x_train_log = np.log1p(x_train_raw)
-    x_target_log = np.log1p(x_target_raw)
-
-    selected, counts = _select_feature_indices_with_counts(config, x_train_log, feature_names)
+    selected, counts = _select_feature_indices_with_counts(
+        config,
+        x_train_expr,
+        feature_names,
+        y_train=y_train,
+        groups_train=groups_train,
+        warnings=warnings,
+    )
     selected_features = [feature_names[idx] for idx in selected]
 
-    x_train_selected = x_train_log[:, selected]
-    x_target_selected = x_target_log[:, selected]
+    x_train_selected = x_train_expr[:, selected]
+    x_target_selected = x_target_expr[:, selected]
 
-    scaler = StandardScaler()
-    x_train_scaled = np.asarray(scaler.fit_transform(x_train_selected), dtype=float)
-    if x_target_selected.shape[0] == 0:
-        x_target_scaled = np.empty((0, x_train_selected.shape[1]), dtype=float)
-    else:
-        x_target_scaled = np.asarray(scaler.transform(x_target_selected), dtype=float)
+    x_train_scaled, x_target_scaled, scaler = fit_feature_scaling(
+        config, x_train_selected, x_target_selected
+    )
     return x_train_scaled, x_target_scaled, selected_features, scaler, counts
 
 
@@ -1776,6 +2276,7 @@ def _fit_outer_sample_set(
     x_train_raw: np.ndarray,
     y_train: np.ndarray,
     groups_train: np.ndarray,
+    contrast_groups_train: np.ndarray | None,
     x_valid_raw: np.ndarray,
     valid_species: list[str],
     feature_names: list[str],
@@ -1783,6 +2284,10 @@ def _fit_outer_sample_set(
     x_sampled_raw = x_train_raw[sampled_idx, :]
     y_sampled = y_train[sampled_idx]
     groups_sampled = groups_train[sampled_idx]
+    contrast_groups_sampled = (
+        None if contrast_groups_train is None else contrast_groups_train[sampled_idx]
+    )
+    warnings: list[str] = []
     if np.unique(y_sampled).size < 2:
         raise CVError(f"Fold {fold_id} sampled training set became single-class")
     try:
@@ -1791,6 +2296,9 @@ def _fit_outer_sample_set(
             x_sampled_raw,
             x_valid_raw,
             feature_names,
+            y_train=y_sampled,
+            groups_train=contrast_groups_sampled,
+            warnings=warnings,
         )
     except CVError as exc:
         raise CVError(
@@ -1835,6 +2343,7 @@ def _fit_outer_sample_set(
             ModelFeatureEntry(
                 feature_names=selected_features,
                 model=estimator,
+                fold_id=fold_id,
             )
         )
         model_prob = _predict_positive_probability(estimator, x_valid)
@@ -1863,6 +2372,7 @@ def _fit_outer_sample_set(
         selected_features=selected_features,
         filter_counts=filter_counts,
         model_count=len(source_result.selected_candidates),
+        warnings=warnings,
     )
 
 
@@ -1876,6 +2386,7 @@ def _fit_final_refit_sample_set(
     x_train_raw: np.ndarray | None = None,
     y_train: np.ndarray,
     groups_train: np.ndarray,
+    contrast_groups_train: np.ndarray | None = None,
     x_target_raw: np.ndarray | None = None,
     feature_names: list[str] | None = None,
     target_count: int,
@@ -1892,6 +2403,10 @@ def _fit_final_refit_sample_set(
     x_sampled_raw = resolved_x_train_raw[sampled_idx, :]
     y_sampled = y_train[sampled_idx]
     groups_sampled = groups_train[sampled_idx]
+    contrast_groups_sampled = (
+        None if contrast_groups_train is None else contrast_groups_train[sampled_idx]
+    )
+    warnings: list[str] = []
     if np.unique(y_sampled).size < 2:
         raise CVError("Final refit sampled training set became single-class")
     (
@@ -1905,6 +2420,9 @@ def _fit_final_refit_sample_set(
         x_sampled_raw,
         resolved_x_target_raw,
         feature_names,
+        y_train=y_sampled,
+        groups_train=contrast_groups_sampled,
+        warnings=warnings,
     )
     sample_weight = _fit_sample_weights(config, y_sampled, groups_sampled)
 
@@ -1996,6 +2514,7 @@ def _fit_final_refit_sample_set(
         scaler=scaler,
         filter_counts=filter_counts,
         model_count=selected_count,
+        warnings=warnings,
     )
 
 
@@ -2005,6 +2524,7 @@ def run_final_refit(
     cv_threshold: float,
 ) -> FinalRefitArtifacts:
     """Refit final model(s) on full training pool and predict external/inference pools."""
+    split_manifest = _with_contrast_group_column(config, split_manifest)
     warnings: list[str] = []
     polars_warning = _polars_thread_pool_warning(config)
     if polars_warning is not None:
@@ -2017,6 +2537,7 @@ def run_final_refit(
         .agg(
             pl.col("label").drop_nulls().first().alias("label"),
             pl.col("group_id").drop_nulls().first().alias("group_id"),
+            pl.col("contrast_group_id").drop_nulls().first().alias("contrast_group_id"),
         )
         .sort("species")
     )
@@ -2024,6 +2545,11 @@ def run_final_refit(
         raise CVError("No species available for final refit training pool")
     if train_pool.filter(pl.col("label").is_null() | pl.col("group_id").is_null()).height > 0:
         raise CVError("Final refit training pool contains null label/group values")
+    if (
+        config.preprocess.pair_aware_filter.enabled
+        and train_pool.filter(pl.col("contrast_group_id").is_null()).height > 0
+    ):
+        raise CVError("Final refit training pool contains null contrast group values")
 
     external_pool = (
         split_manifest.filter(pl.col("pool") == "external_test")
@@ -2062,6 +2588,10 @@ def run_final_refit(
 
     y_train = np.array(train_pool.select("label").to_series().to_list(), dtype=int)
     groups_train = np.array(train_pool.select("group_id").to_series().to_list(), dtype=str)
+    contrast_groups_train: np.ndarray | None = None
+    if config.data.contrast_pair_col is not None or config.preprocess.pair_aware_filter.enabled:
+        contrast_values = train_pool.select("contrast_group_id").to_series().to_list()
+        contrast_groups_train = np.array(contrast_values, dtype=str)
     sampled_sets = _sample_training_sets(
         config=config,
         y_train=y_train,
@@ -2072,19 +2602,10 @@ def run_final_refit(
 
     model_probs: list[np.ndarray] = []
     fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
-    selection_active = config.model_selection.selected_candidate_count is not None
+    selection_active = _selection_is_active(config)
     model_selection_selected_rows: list[dict[str, Any]] = []
 
-    source_sample_set_ids = sorted(
-        {
-            (
-                sample_set_id
-                if config.model_selection.candidate_source_policy == "per_sample_set"
-                else 0
-            )
-            for sample_set_id in range(len(sampled_sets))
-        }
-    )
+    source_sample_set_ids = _selection_source_sample_set_ids(config, len(sampled_sets))
     source_workers, per_source_n_jobs = _sample_set_parallel_plan(
         config, len(source_sample_set_ids)
     )
@@ -2100,6 +2621,7 @@ def run_final_refit(
             x_train_raw=x_train_raw,
             y_train=y_train,
             groups_train=groups_train,
+            contrast_groups_train=contrast_groups_train,
             feature_names=feature_names,
             warnings=local_warnings,
         )
@@ -2123,11 +2645,7 @@ def run_final_refit(
                 warnings.extend(local_warnings)
 
     for sample_set_id, _sampled_idx in enumerate(sampled_sets):
-        source_sample_set_id = (
-            sample_set_id
-            if config.model_selection.candidate_source_policy == "per_sample_set"
-            else 0
-        )
+        source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
         source_result = source_results[source_sample_set_id]
         if not source_result.selected_candidates:
             raise CVError("No candidates were selected for final_refit")
@@ -2163,11 +2681,7 @@ def run_final_refit(
     model_index_offsets: dict[int, int] = {}
     model_index = 0
     for sample_set_id, _sampled_idx in enumerate(sampled_sets):
-        source_sample_set_id = (
-            sample_set_id
-            if config.model_selection.candidate_source_policy == "per_sample_set"
-            else 0
-        )
+        source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
         model_index_offsets[sample_set_id] = model_index
         model_index += len(source_results[source_sample_set_id].selected_candidates)
 
@@ -2178,11 +2692,7 @@ def run_final_refit(
         sample_set_id: int,
         sampled_idx: np.ndarray,
     ) -> tuple[int, FinalSampleSetFitResult]:
-        source_sample_set_id = (
-            sample_set_id
-            if config.model_selection.candidate_source_policy == "per_sample_set"
-            else 0
-        )
+        source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
         fit_result = _with_native_thread_limit_for_config(
             sample_config,
             _fit_final_refit_sample_set,
@@ -2194,6 +2704,7 @@ def run_final_refit(
             x_train_raw=x_train_raw,
             y_train=y_train,
             groups_train=groups_train,
+            contrast_groups_train=contrast_groups_train,
             x_target_raw=x_target_raw,
             feature_names=feature_names,
             target_count=target_count,
@@ -2223,6 +2734,7 @@ def run_final_refit(
 
     model_entries: list[FinalModelEntry] = []
     feature_filter_count_rows: list[dict[str, Any]] = []
+    retained_feature_rows: list[dict[str, Any]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
     sampled_train_loss_values: list[float] = []
     sampled_external_loss_values: list[float] = []
@@ -2236,6 +2748,15 @@ def run_final_refit(
                 counts=fit_result.filter_counts,
             )
         )
+        retained_feature_rows.extend(
+            _retained_feature_rows(
+                scope="final_refit",
+                fold_id="NA",
+                sample_set_id=sample_set_id,
+                features=fit_result.selected_features,
+            )
+        )
+        warnings.extend(fit_result.warnings)
         model_sparsity_rows.extend(fit_result.model_sparsity_rows)
         fitted_models.extend(fit_result.fitted_models)
         model_probs.extend(fit_result.model_probs)
@@ -2341,6 +2862,8 @@ def run_final_refit(
         )
     feature_filter_counts = _build_feature_filter_counts(feature_filter_count_rows)
     feature_filter_counts_summary = _summarize_feature_filter_counts(feature_filter_counts)
+    retained_features = _build_retained_features(retained_feature_rows)
+    retained_features_summary = _summarize_retained_features(retained_features)
     model_sparsity = _build_model_sparsity(model_sparsity_rows)
     model_sparsity_summary = _summarize_model_sparsity(model_sparsity)
 
@@ -2351,6 +2874,8 @@ def run_final_refit(
         model_selection_selected=model_selection_selected,
         feature_filter_counts=feature_filter_counts,
         feature_filter_counts_summary=feature_filter_counts_summary,
+        retained_features=retained_features,
+        retained_features_summary=retained_features_summary,
         model_sparsity=model_sparsity,
         model_sparsity_summary=model_sparsity_summary,
         warnings=warnings,
@@ -2398,6 +2923,14 @@ def _run_outer_fold(
     y_train = np.array(train_df.select("label").to_series().to_list(), dtype=int)
     y_valid = np.array(valid_df.select("label").to_series().to_list(), dtype=int)
     groups_train = np.array(train_df.select("group_id").to_series().to_list(), dtype=str)
+    contrast_groups_train: np.ndarray | None = None
+    if config.data.contrast_pair_col is not None or config.preprocess.pair_aware_filter.enabled:
+        contrast_values = train_df.select("contrast_group_id").to_series().to_list()
+        if config.preprocess.pair_aware_filter.enabled and any(v is None for v in contrast_values):
+            raise CVError(
+                "pair_aware_filter requires non-empty contrast_group_id values in each fold"
+            )
+        contrast_groups_train = np.array(contrast_values, dtype=str)
     _emit_fold_progress(
         "start",
         (
@@ -2423,16 +2956,7 @@ def _run_outer_fold(
         warnings=warnings,
     )
     _emit_fold_progress("sampling_done", f"sampled_set_count={len(sampled_sets)}")
-    source_sample_set_ids = sorted(
-        {
-            (
-                sample_set_id
-                if config.model_selection.candidate_source_policy == "per_sample_set"
-                else 0
-            )
-            for sample_set_id in range(len(sampled_sets))
-        }
-    )
+    source_sample_set_ids = _selection_source_sample_set_ids(config, len(sampled_sets))
     source_workers, per_source_n_jobs = _sample_set_parallel_plan(
         config, len(source_sample_set_ids)
     )
@@ -2458,6 +2982,7 @@ def _run_outer_fold(
             x_train_raw=x_train_raw,
             y_train=y_train,
             groups_train=groups_train,
+            contrast_groups_train=contrast_groups_train,
             feature_names=feature_names,
             warnings=local_warnings,
             progress_callback=_emit_fold_progress,
@@ -2539,11 +3064,7 @@ def _run_outer_fold(
 
     model_selection_selected_rows: list[dict[str, Any]] = []
     for sample_set_id, _sampled_idx in enumerate(sampled_sets):
-        source_sample_set_id = (
-            sample_set_id
-            if config.model_selection.candidate_source_policy == "per_sample_set"
-            else 0
-        )
+        source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
         source_result = source_results[source_sample_set_id]
         if not source_result.selected_candidates:
             raise CVError(
@@ -2581,11 +3102,7 @@ def _run_outer_fold(
     model_index_offsets: dict[int, int] = {}
     model_index = 0
     for sample_set_id, _sampled_idx in enumerate(sampled_sets):
-        source_sample_set_id = (
-            sample_set_id
-            if config.model_selection.candidate_source_policy == "per_sample_set"
-            else 0
-        )
+        source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
         model_index_offsets[sample_set_id] = model_index
         model_index += len(source_results[source_sample_set_id].selected_candidates)
 
@@ -2595,11 +3112,7 @@ def _run_outer_fold(
     def _fit_sample_set(
         sample_set_id: int, sampled_idx: np.ndarray
     ) -> tuple[int, OuterSampleSetFitResult]:
-        source_sample_set_id = (
-            sample_set_id
-            if config.model_selection.candidate_source_policy == "per_sample_set"
-            else 0
-        )
+        source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
         fit_result = _with_native_thread_limit_for_config(
             sample_config,
             _fit_outer_sample_set,
@@ -2612,6 +3125,7 @@ def _run_outer_fold(
             x_train_raw=x_train_raw,
             y_train=y_train,
             groups_train=groups_train,
+            contrast_groups_train=contrast_groups_train,
             x_valid_raw=x_valid_raw,
             valid_species=valid_species,
             feature_names=feature_names,
@@ -2620,6 +3134,7 @@ def _run_outer_fold(
 
     sample_results: dict[int, OuterSampleSetFitResult] = {}
     feature_filter_count_rows: list[dict[str, Any]] = []
+    retained_feature_rows: list[dict[str, Any]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
 
     def _record_sample_fit_result(sample_set_id: int, fit_result: OuterSampleSetFitResult) -> None:
@@ -2633,7 +3148,16 @@ def _run_outer_fold(
                 counts=counts,
             )
         )
+        retained_feature_rows.extend(
+            _retained_feature_rows(
+                scope="outer_fold",
+                fold_id=fold_id,
+                sample_set_id=sample_set_id,
+                features=fit_result.selected_features,
+            )
+        )
         model_sparsity_rows.extend(fit_result.model_sparsity_rows)
+        warnings.extend(fit_result.warnings)
         _emit_fold_progress(
             "preprocess_sample_set_done",
             (
@@ -2641,6 +3165,7 @@ def _run_outer_fold(
                 f"features_before={counts.n_features_before}, "
                 f"features_after_low_prevalence={counts.n_features_after_low_prevalence}, "
                 f"features_after_low_variance={counts.n_features_after_low_variance}, "
+                f"features_after_pair_aware={counts.n_features_after_pair_aware}, "
                 f"features_after_correlation={counts.n_features_after_correlation}, "
                 f"features_after={counts.n_features_after_all}"
             ),
@@ -2667,6 +3192,7 @@ def _run_outer_fold(
     n_features_before_preprocess = first_filter_counts.n_features_before
     n_features_after_low_prevalence = first_filter_counts.n_features_after_low_prevalence
     n_features_after_low_variance = first_filter_counts.n_features_after_low_variance
+    n_features_after_pair_aware = first_filter_counts.n_features_after_pair_aware
     n_features_after_correlation = first_filter_counts.n_features_after_correlation
     n_features_after_preprocess = first_filter_counts.n_features_after_all
     _emit_fold_progress("preprocess_done")
@@ -2793,11 +3319,13 @@ def _run_outer_fold(
         model_selection_selected_rows=model_selection_selected_rows,
         model_selection_trial_rows=model_selection_trial_rows,
         feature_filter_count_rows=feature_filter_count_rows,
+        retained_feature_rows=retained_feature_rows,
         model_sparsity_rows=model_sparsity_rows,
         fold_model_count=fold_model_count,
         n_features_before_preprocess=n_features_before_preprocess,
         n_features_after_low_prevalence=n_features_after_low_prevalence,
         n_features_after_low_variance=n_features_after_low_variance,
+        n_features_after_pair_aware=n_features_after_pair_aware,
         n_features_after_correlation=n_features_after_correlation,
         n_features_after_preprocess=n_features_after_preprocess,
         warnings=warnings,
@@ -2810,12 +3338,13 @@ def run_outer_cv(
     progress_callback: Callable[[str], None] | None = None,
 ) -> CVArtifacts:
     """Execute outer CV using split manifest and return evaluation artifacts."""
+    split_manifest = _with_contrast_group_column(config, split_manifest)
     warnings: list[str] = []
     polars_warning = _polars_thread_pool_warning(config)
     if polars_warning is not None:
         warnings.append(polars_warning)
     fixed_threshold = float(config.report.fixed_probability_threshold)
-    selection_active = config.model_selection.selected_candidate_count is not None
+    selection_active = _selection_is_active(config)
 
     fold_metric_list: list[dict[str, float]] = []
     metric_rows: list[dict[str, float | int | str | None]] = []
@@ -2826,6 +3355,7 @@ def run_outer_cv(
     model_selection_selected_rows: list[dict[str, Any]] = []
     model_selection_trial_rows: list[dict[str, Any]] = []
     feature_filter_count_rows: list[dict[str, Any]] = []
+    retained_feature_rows: list[dict[str, Any]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
     max_fold_ensemble_size = 0
 
@@ -2861,6 +3391,7 @@ def run_outer_cv(
         model_selection_selected_rows.extend(fold_result.model_selection_selected_rows)
         model_selection_trial_rows.extend(fold_result.model_selection_trial_rows)
         feature_filter_count_rows.extend(fold_result.feature_filter_count_rows)
+        retained_feature_rows.extend(fold_result.retained_feature_rows)
         model_sparsity_rows.extend(fold_result.model_sparsity_rows)
         max_fold_ensemble_size = max(max_fold_ensemble_size, fold_result.fold_model_count)
 
@@ -3004,6 +3535,8 @@ def run_outer_cv(
         model_selection_trials_summary = _summarize_model_selection_trials(model_selection_trials)
     feature_filter_counts = _build_feature_filter_counts(feature_filter_count_rows)
     feature_filter_counts_summary = _summarize_feature_filter_counts(feature_filter_counts)
+    retained_features = _build_retained_features(retained_feature_rows)
+    retained_features_summary = _summarize_retained_features(retained_features)
     model_sparsity = _build_model_sparsity(model_sparsity_rows)
     model_sparsity_summary = _summarize_model_sparsity(model_sparsity)
 
@@ -3014,12 +3547,16 @@ def run_outer_cv(
         oof_predictions=oof_df,
         feature_importance=interpretation_artifacts.feature_importance,
         coefficients=interpretation_artifacts.coefficients,
+        feature_importance_by_fold=interpretation_artifacts.feature_importance_by_fold,
+        coefficients_by_fold=interpretation_artifacts.coefficients_by_fold,
         ensemble_model_probs=ensemble_model_probs,
         model_selection_selected=model_selection_selected,
         model_selection_trials=model_selection_trials,
         model_selection_trials_summary=model_selection_trials_summary,
         feature_filter_counts=feature_filter_counts,
         feature_filter_counts_summary=feature_filter_counts_summary,
+        retained_features=retained_features,
+        retained_features_summary=retained_features_summary,
         model_sparsity=model_sparsity,
         model_sparsity_summary=model_sparsity_summary,
         warnings=warnings,

@@ -6,6 +6,7 @@ import numpy as np
 import polars as pl
 import pytest
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss
 
 import phenoradar.cv as cv_mod
@@ -28,6 +29,7 @@ from phenoradar.cv import (
     _preprocess_fold,
     _preprocess_train_and_target,
     _select_feature_indices,
+    apply_expression_transform,
     run_final_refit,
     run_outer_cv,
 )
@@ -46,13 +48,13 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp2\t0\tg1",
-                "sp3\t1\tg2",
-                "sp4\t0\tg2",
-                "sp5\t1\t",
-                "sp6\t\t",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
+                "sp3\t1\tg2\tno",
+                "sp4\t0\tg2\tno",
+                "sp5\t1\t\tyes",
+                "sp6\t\t\tno",
             ]
         )
         + "\n",
@@ -94,6 +96,14 @@ data:
     )
 
 
+def _selection_source_arrays() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return (
+        np.array([[1.0], [2.0], [3.0], [4.0]], dtype=float),
+        np.array([0, 1, 0, 1], dtype=int),
+        np.array(["g1", "g1", "g2", "g2"], dtype=str),
+    )
+
+
 def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
@@ -125,16 +135,33 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "importance_mean",
         "importance_std",
         "n_models",
+        "n_folds",
         "method",
     }.issubset(cv_artifacts.feature_importance.columns)
+    assert {
+        "fold_id",
+        "feature",
+        "importance_mean",
+        "n_models",
+        "method",
+    }.issubset(cv_artifacts.feature_importance_by_fold.columns)
     assert {
         "feature",
         "coef_mean",
         "coef_std",
         "n_models",
+        "n_folds",
         "method",
         "reason",
     }.issubset(cv_artifacts.coefficients.columns)
+    assert {
+        "fold_id",
+        "feature",
+        "coef_mean",
+        "n_models",
+        "method",
+        "reason",
+    }.issubset(cv_artifacts.coefficients_by_fold.columns)
     aggregate_rows = cv_artifacts.metrics_cv.filter(pl.col("fold_id") == "NA")
     assert aggregate_rows.height > 0
     assert aggregate_rows.filter(pl.col("n_valid_folds").is_null()).height == 0
@@ -151,6 +178,7 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "n_features_before",
         "n_features_after_low_prevalence",
         "n_features_after_low_variance",
+        "n_features_after_pair_aware",
         "n_features_after_correlation",
         "n_features_after_all",
     }.issubset(cv_artifacts.feature_filter_counts.columns)
@@ -162,6 +190,22 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "n_features_median",
         "retained_ratio_median",
     }.issubset(cv_artifacts.feature_filter_counts_summary.columns)
+    assert cv_artifacts.retained_features.height > 0
+    assert {
+        "scope",
+        "fold_id",
+        "sample_set_id",
+        "feature",
+    }.issubset(cv_artifacts.retained_features.columns)
+    assert cv_artifacts.retained_features_summary.height > 0
+    assert {
+        "scope",
+        "fold_id",
+        "feature",
+        "retained_count",
+        "n_sample_sets",
+        "retained_rate",
+    }.issubset(cv_artifacts.retained_features_summary.columns)
     assert cv_artifacts.model_sparsity.height > 0
     assert {
         "scope",
@@ -282,15 +326,15 @@ def test_outer_cv_emits_ensemble_artifacts_when_ensemble_size_gt_one(tmp_path: P
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "g1_pos1\t1\tg1",
-                "g1_pos2\t1\tg1",
-                "g1_neg1\t0\tg1",
-                "g1_neg2\t0\tg1",
-                "g2_pos1\t1\tg2",
-                "g2_pos2\t1\tg2",
-                "g2_neg1\t0\tg2",
-                "g2_neg2\t0\tg2",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "g1_pos1\t1\tg1\tno",
+                "g1_pos2\t1\tg1\tno",
+                "g1_neg1\t0\tg1\tno",
+                "g1_neg2\t0\tg1\tno",
+                "g2_pos1\t1\tg2\tno",
+                "g2_pos2\t1\tg2\tno",
+                "g2_neg1\t0\tg2\tno",
+                "g2_neg2\t0\tg2\tno",
             ]
         )
         + "\n",
@@ -355,13 +399,13 @@ def test_outer_cv_selection_active_emits_selected_and_trials_tables(tmp_path: Pa
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "g1_pos\t1\tg1",
-                "g1_neg\t0\tg1",
-                "g2_pos\t1\tg2",
-                "g2_neg\t0\tg2",
-                "g3_pos\t1\tg3",
-                "g3_neg\t0\tg3",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "g1_pos\t1\tg1\tno",
+                "g1_neg\t0\tg1\tno",
+                "g2_pos\t1\tg2\tno",
+                "g2_neg\t0\tg2\tno",
+                "g3_pos\t1\tg3\tno",
+                "g3_neg\t0\tg3\tno",
                 "g4_pos\t1\tg4",
                 "g4_neg\t0\tg4",
             ]
@@ -466,13 +510,13 @@ def test_outer_cv_tpe_selection_active_bypasses_generic_candidate_generation(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "g1_pos\t1\tg1",
-                "g1_neg\t0\tg1",
-                "g2_pos\t1\tg2",
-                "g2_neg\t0\tg2",
-                "g3_pos\t1\tg3",
-                "g3_neg\t0\tg3",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "g1_pos\t1\tg1\tno",
+                "g1_neg\t0\tg1\tno",
+                "g2_pos\t1\tg2\tno",
+                "g2_neg\t0\tg2\tno",
+                "g3_pos\t1\tg3\tno",
+                "g3_neg\t0\tg3\tno",
                 "g4_pos\t1\tg4",
                 "g4_neg\t0\tg4",
             ]
@@ -549,6 +593,87 @@ model_selection:
     assert cv_artifacts.model_selection_trials_summary.height > 0
 
 
+def test_outer_cv_selection_active_with_percent_emits_selected_and_trials_tables(
+    tmp_path: Path,
+) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "g1_pos\t1\tg1\tno",
+                "g1_neg\t0\tg1\tno",
+                "g2_pos\t1\tg2\tno",
+                "g2_neg\t0\tg2\tno",
+                "g3_pos\t1\tg3\tno",
+                "g3_neg\t0\tg3\tno",
+                "g4_pos\t1\tg4",
+                "g4_neg\t0\tg4",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "g1_pos\tOG1\t5.0",
+                "g1_pos\tOG2\t1.5",
+                "g1_neg\tOG1\t1.0",
+                "g1_neg\tOG2\t0.2",
+                "g2_pos\tOG1\t4.8",
+                "g2_pos\tOG2\t1.7",
+                "g2_neg\tOG1\t0.8",
+                "g2_neg\tOG2\t0.4",
+                "g3_pos\tOG1\t5.2",
+                "g3_pos\tOG2\t1.8",
+                "g3_neg\tOG1\t1.1",
+                "g3_neg\tOG2\t0.3",
+                "g4_pos\tOG1\t5.1",
+                "g4_pos\tOG2\t1.6",
+                "g4_neg\tOG1\t0.9",
+                "g4_neg\tOG2\t0.1",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+split:
+  outer_cv_strategy: group_kfold
+  outer_cv_n_splits: 2
+model_selection:
+  search_strategy: grid
+  search_space:
+    C: [0.5, 1.0]
+  selected_candidate_percent: 50
+  inner_cv_strategy: logo
+""".strip(),
+            )
+        ]
+    )
+    split_artifacts = build_split_artifacts(config)
+    cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
+
+    assert cv_artifacts.model_selection_selected is not None
+    assert cv_artifacts.model_selection_trials is not None
+    selected = cv_artifacts.model_selection_selected
+    assert selected.height > 0
+    requested_values = set(
+        selected.select("selected_candidate_count_requested").to_series().to_list()
+    )
+    assert requested_values == {1}
+    source_values = set(selected.select("selection_source_sample_set_id").to_series().to_list())
+    sample_set_values = set(selected.select("sample_set_id").to_series().to_list())
+    assert source_values == sample_set_values
+
+
 def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: Path) -> None:
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
@@ -605,9 +730,26 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
         "fold_id",
         "sample_set_id",
         "n_features_before",
+        "n_features_after_pair_aware",
         "n_features_after_all",
     }.issubset(refit_artifacts.feature_filter_counts.columns)
     assert refit_artifacts.feature_filter_counts_summary.height > 0
+    assert refit_artifacts.retained_features.height > 0
+    assert {
+        "scope",
+        "fold_id",
+        "sample_set_id",
+        "feature",
+    }.issubset(refit_artifacts.retained_features.columns)
+    assert refit_artifacts.retained_features_summary.height > 0
+    assert {
+        "scope",
+        "fold_id",
+        "feature",
+        "retained_count",
+        "n_sample_sets",
+        "retained_rate",
+    }.issubset(refit_artifacts.retained_features_summary.columns)
     assert refit_artifacts.model_sparsity.height > 0
     assert {
         "scope",
@@ -618,6 +760,66 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
         "n_nonzero_features",
     }.issubset(refit_artifacts.model_sparsity.columns)
     assert refit_artifacts.model_sparsity_summary.height > 0
+
+
+def test_summarize_retained_features_aggregates_count_and_rate() -> None:
+    retained_features = cv_mod._build_retained_features(
+        [
+            {
+                "scope": "outer_fold",
+                "fold_id": "0",
+                "sample_set_id": 0,
+                "feature": "OG1",
+            },
+            {
+                "scope": "outer_fold",
+                "fold_id": "0",
+                "sample_set_id": 1,
+                "feature": "OG1",
+            },
+            {
+                "scope": "outer_fold",
+                "fold_id": "0",
+                "sample_set_id": 1,
+                "feature": "OG2",
+            },
+            {
+                "scope": "outer_fold",
+                "fold_id": "1",
+                "sample_set_id": 0,
+                "feature": "OG2",
+            },
+        ]
+    )
+
+    summary = cv_mod._summarize_retained_features(retained_features)
+
+    assert summary.to_dicts() == [
+        {
+            "scope": "outer_fold",
+            "fold_id": "0",
+            "feature": "OG1",
+            "retained_count": 2,
+            "n_sample_sets": 2,
+            "retained_rate": 1.0,
+        },
+        {
+            "scope": "outer_fold",
+            "fold_id": "0",
+            "feature": "OG2",
+            "retained_count": 1,
+            "n_sample_sets": 2,
+            "retained_rate": 0.5,
+        },
+        {
+            "scope": "outer_fold",
+            "fold_id": "1",
+            "feature": "OG2",
+            "retained_count": 1,
+            "n_sample_sets": 1,
+            "retained_rate": 1.0,
+        },
+    ]
 
 
 def test_group_label_inverse_weights_are_normalized_and_group_label_balanced() -> None:
@@ -635,22 +837,112 @@ def test_group_label_inverse_weights_are_normalized_and_group_label_balanced() -
     assert float(weights[4]) > float(weights[3])
 
 
-def test_outer_cv_reuse_first_sample_set_uses_source_zero_for_all_sample_sets(
+def test_outer_cv_selection_runs_per_sample_set(
     tmp_path: Path,
 ) -> None:
     metadata = _write(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "g1_pos1\t1\tg1",
-                "g1_pos2\t1\tg1",
-                "g1_neg1\t0\tg1",
-                "g1_neg2\t0\tg1",
-                "g2_pos1\t1\tg2",
-                "g2_pos2\t1\tg2",
-                "g2_neg1\t0\tg2",
-                "g2_neg2\t0\tg2",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "g1_pos1\t1\tg1\tno",
+                "g1_pos2\t1\tg1\tno",
+                "g1_neg1\t0\tg1\tno",
+                "g1_neg2\t0\tg1\tno",
+                "g2_pos1\t1\tg2\tno",
+                "g2_pos2\t1\tg2\tno",
+                "g2_neg1\t0\tg2\tno",
+                "g2_neg2\t0\tg2\tno",
+                "g3_pos1\t1\tg3",
+                "g3_pos2\t1\tg3",
+                "g3_neg1\t0\tg3",
+                "g3_neg2\t0\tg3",
+                "g4_pos1\t1\tg4",
+                "g4_pos2\t1\tg4",
+                "g4_neg1\t0\tg4",
+                "g4_neg2\t0\tg4",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "g1_pos1\tOG1\t5.0",
+                "g1_pos2\tOG1\t5.1",
+                "g1_neg1\tOG1\t1.0",
+                "g1_neg2\tOG1\t1.1",
+                "g2_pos1\tOG1\t4.8",
+                "g2_pos2\tOG1\t4.9",
+                "g2_neg1\tOG1\t0.8",
+                "g2_neg2\tOG1\t0.9",
+                "g3_pos1\tOG1\t5.2",
+                "g3_pos2\tOG1\t5.3",
+                "g3_neg1\tOG1\t1.2",
+                "g3_neg2\tOG1\t1.3",
+                "g4_pos1\tOG1\t5.4",
+                "g4_pos2\tOG1\t5.5",
+                "g4_neg1\tOG1\t1.4",
+                "g4_neg2\tOG1\t1.5",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+sampling:
+  strategy: group_balanced
+  max_samples_per_label_per_group: 1
+  sampled_set_count: 2
+model_selection:
+  search_strategy: grid
+  search_space:
+    C: [0.5, 1.0]
+  selected_candidate_count: 1
+  inner_cv_strategy: logo
+""".strip(),
+            )
+        ]
+    )
+    split_artifacts = build_split_artifacts(config)
+
+    cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
+
+    assert cv_artifacts.model_selection_selected is not None
+    assert cv_artifacts.model_selection_trials is not None
+    assert cv_artifacts.model_selection_trials_summary is not None
+    selected = cv_artifacts.model_selection_selected
+    trials = cv_artifacts.model_selection_trials
+    trials_summary = cv_artifacts.model_selection_trials_summary
+    assert set(selected.select("sample_set_id").to_series().to_list()) == {0, 1}
+    assert set(selected.select("selection_source_sample_set_id").to_series().to_list()) == {0, 1}
+    assert set(trials.select("sample_set_id").to_series().to_list()) == {0, 1}
+    assert set(trials_summary.select("sample_set_id").to_series().to_list()) == {0, 1}
+
+
+def test_outer_cv_selection_can_reuse_first_sample_set(
+    tmp_path: Path,
+) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "g1_pos1\t1\tg1\tno",
+                "g1_pos2\t1\tg1\tno",
+                "g1_neg1\t0\tg1\tno",
+                "g1_neg2\t0\tg1\tno",
+                "g2_pos1\t1\tg2\tno",
+                "g2_pos2\t1\tg2\tno",
+                "g2_neg1\t0\tg2\tno",
+                "g2_neg2\t0\tg2\tno",
                 "g3_pos1\t1\tg3",
                 "g3_pos2\t1\tg3",
                 "g3_neg1\t0\tg3",
@@ -991,6 +1283,45 @@ def test_preprocess_fold_rejects_negative_tpm_values(tmp_path: Path) -> None:
         _preprocess_fold(config, x_train_raw, x_valid_raw, ["OG1", "OG2"])
 
 
+def test_preprocess_fold_scales_validation_with_training_statistics(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    x_train_raw = np.array(
+        [
+            [1.0, 3.0],
+            [2.0, 5.0],
+            [4.0, 9.0],
+        ],
+        dtype=float,
+    )
+    x_valid_raw = np.array(
+        [
+            [6.0, 2.0],
+            [8.0, 7.0],
+        ],
+        dtype=float,
+    )
+
+    x_train_scaled, x_valid_scaled, selected_features = _preprocess_fold(
+        config,
+        x_train_raw,
+        x_valid_raw,
+        ["OG1", "OG2"],
+    )
+
+    x_train_log = np.log1p(x_train_raw)
+    x_valid_log = np.log1p(x_valid_raw)
+    train_mean = np.mean(x_train_log, axis=0)
+    train_std = np.std(x_train_log, axis=0, ddof=0)
+
+    expected_train = (x_train_log - train_mean) / train_std
+    expected_valid = (x_valid_log - train_mean) / train_std
+
+    assert selected_features == ["OG1", "OG2"]
+    assert x_train_scaled == pytest.approx(expected_train)
+    assert x_valid_scaled == pytest.approx(expected_valid)
+
+
 def test_select_feature_indices_raises_when_filters_remove_all_features(
     tmp_path: Path,
 ) -> None:
@@ -1044,9 +1375,9 @@ def test_expression_matrix_builder_rejects_missing_required_columns(tmp_path: Pa
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp2\t0\tg1",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
             ]
         )
         + "\n",
@@ -1099,6 +1430,120 @@ def test_preprocess_train_and_target_rejects_negative_tpm_values(tmp_path: Path)
             np.array([[1.0, 0.2]], dtype=float),
             ["OG1", "OG2"],
         )
+
+
+def test_preprocess_train_and_target_returns_training_fitted_scaler(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    x_train_raw = np.array(
+        [
+            [1.0, 10.0],
+            [3.0, 14.0],
+            [7.0, 18.0],
+        ],
+        dtype=float,
+    )
+    x_target_raw = np.array(
+        [
+            [2.0, 11.0],
+            [9.0, 20.0],
+        ],
+        dtype=float,
+    )
+
+    x_train_scaled, x_target_scaled, selected_features, scaler = _preprocess_train_and_target(
+        config,
+        x_train_raw,
+        x_target_raw,
+        ["OG1", "OG2"],
+    )
+
+    x_train_log = np.log1p(x_train_raw)
+    x_target_log = np.log1p(x_target_raw)
+    train_mean = np.mean(x_train_log, axis=0)
+    train_std = np.std(x_train_log, axis=0, ddof=0)
+
+    expected_train = (x_train_log - train_mean) / train_std
+    expected_target = (x_target_log - train_mean) / train_std
+
+    assert selected_features == ["OG1", "OG2"]
+    assert scaler.mean_ == pytest.approx(train_mean)
+    assert scaler.scale_ == pytest.approx(train_std)
+    assert x_train_scaled == pytest.approx(expected_train)
+    assert x_target_scaled == pytest.approx(expected_target)
+
+
+def test_sample_percentile_rank_transform_preserves_zero_values() -> None:
+    raw = np.array(
+        [
+            [0.0, 10.0, 5.0],
+            [2.0, 0.0, 2.0],
+            [0.0, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+
+    transformed = apply_expression_transform(raw, "sample_percentile_rank")
+
+    expected = np.array(
+        [
+            [0.0, 1.0, 0.5],
+            [0.75, 0.0, 0.75],
+            [0.0, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+    assert transformed == pytest.approx(expected)
+
+
+def test_preprocess_train_and_target_can_disable_feature_scaling(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                """
+preprocess:
+  expression_transform:
+    method: sample_percentile_rank
+  low_prevalence_filter:
+    enabled: false
+  feature_scaling:
+    method: none
+""",
+            )
+        ]
+    )
+    x_train_raw = np.array(
+        [
+            [0.0, 10.0, 5.0],
+            [2.0, 0.0, 2.0],
+        ],
+        dtype=float,
+    )
+    x_target_raw = np.array([[1.0, 3.0, 0.0]], dtype=float)
+
+    x_train, x_target, selected_features, scaler = _preprocess_train_and_target(
+        config,
+        x_train_raw,
+        x_target_raw,
+        ["OG1", "OG2", "OG3"],
+    )
+
+    assert selected_features == ["OG1", "OG2", "OG3"]
+    assert scaler is None
+    assert x_train == pytest.approx(
+        np.array(
+            [
+                [0.0, 1.0, 0.5],
+                [0.75, 0.0, 0.75],
+            ],
+            dtype=float,
+        )
+    )
+    assert x_target == pytest.approx(np.array([[0.5, 1.0, 0.0]], dtype=float))
 
 
 def test_build_prediction_table_rejects_probability_length_mismatch() -> None:
@@ -1205,6 +1650,49 @@ model:
 
     with pytest.raises(CVError, match="calibration requires at least 2 samples per class"):
         _build_estimator(config, model_seed=123, y_train=np.array([1, 1, 1], dtype=int))
+
+
+def test_build_estimator_logistic_elasticnet_uses_l1_ratio_semantics() -> None:
+    config = load_and_resolve_config([], allow_empty=True)
+    x_train = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+        ],
+        dtype=float,
+    )
+    y_train = np.array([0, 0, 0, 1, 0, 1, 1, 1], dtype=int)
+
+    l2_estimator = _build_estimator(
+        config,
+        model_seed=123,
+        y_train=y_train,
+        model_params={"C": 0.7, "l1_ratio": 0.0, "max_iter": 5000},
+    )
+    elasticnet_estimator = _build_estimator(
+        config,
+        model_seed=123,
+        y_train=y_train,
+        model_params={"C": 0.7, "l1_ratio": 0.5, "max_iter": 5000},
+    )
+
+    assert isinstance(l2_estimator, LogisticRegression)
+    assert isinstance(elasticnet_estimator, LogisticRegression)
+    assert l2_estimator.solver == "saga"
+    assert elasticnet_estimator.solver == "saga"
+    assert l2_estimator.l1_ratio == pytest.approx(0.0)
+    assert elasticnet_estimator.l1_ratio == pytest.approx(0.5)
+
+    _fit_estimator(l2_estimator, x_train, y_train, sample_weight=None)
+    _fit_estimator(elasticnet_estimator, x_train, y_train, sample_weight=None)
+
+    assert not np.allclose(l2_estimator.coef_, elasticnet_estimator.coef_)
 
 
 def test_build_estimator_random_forest_respects_explicit_n_jobs(tmp_path: Path) -> None:
@@ -1348,10 +1836,92 @@ def test_prepare_source_selection_rejects_empty_candidate_list(
         )
 
 
+def test_prepare_source_selection_reuses_inner_fold_preprocessing_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+model_selection:
+  selected_candidate_count: 1
+  inner_cv_strategy: logo
+""".strip(),
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        cv_mod,
+        "generate_candidates",
+        lambda **_kwargs: [
+            Candidate(candidate_index=0, params={"C": 0.1}),
+            Candidate(candidate_index=1, params={"C": 1.0}),
+            Candidate(candidate_index=2, params={"C": 10.0}),
+        ],
+    )
+
+    original_preprocess_fold = cv_mod._preprocess_fold
+    preprocess_call_count = 0
+
+    def _counting_preprocess_fold(
+        *args: object, **kwargs: object
+    ) -> tuple[np.ndarray, np.ndarray, list[str]]:
+        nonlocal preprocess_call_count
+        preprocess_call_count += 1
+        return original_preprocess_fold(*args, **kwargs)
+
+    monkeypatch.setattr(cv_mod, "_preprocess_fold", _counting_preprocess_fold)
+
+    seen_cache_ids: list[int] = []
+
+    def _fake_score_candidate_inner_cv(**kwargs: object) -> tuple[float, list[dict[str, object]]]:
+        preprocessed_folds = kwargs["preprocessed_folds"]
+        if not isinstance(preprocessed_folds, list):
+            raise AssertionError("preprocessed_folds must be a list")
+        seen_cache_ids.append(id(preprocessed_folds))
+        candidate = kwargs["candidate"]
+        if not isinstance(candidate, Candidate):
+            raise AssertionError("candidate must be a Candidate instance")
+        return float(candidate.candidate_index), []
+
+    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+
+    result = _prepare_source_selection(
+        config=config,
+        training_scope_id="fold_0",
+        source_sample_set_id=0,
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=np.array(
+            [
+                [1.0, 4.0],
+                [2.0, 3.0],
+                [3.0, 2.0],
+                [4.0, 1.0],
+            ],
+            dtype=float,
+        ),
+        y_train=np.array([1, 0, 1, 0], dtype=int),
+        groups_train=np.array(["g1", "g1", "g2", "g2"], dtype=str),
+        feature_names=["OG1", "OG2"],
+        warnings=[],
+    )
+
+    assert preprocess_call_count == 2
+    assert seen_cache_ids
+    assert len(seen_cache_ids) == 3
+    assert len(set(seen_cache_ids)) == 1
+    assert result.n_scored_candidates == 3
+
+
 def test_prepare_source_selection_warns_when_selected_candidate_count_is_capped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config(
         [
             _config_path(
@@ -1382,10 +1952,10 @@ model_selection:
         config=config,
         training_scope_id="fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=warnings,
     )
@@ -1396,10 +1966,128 @@ model_selection:
     )
 
 
+def test_prepare_source_selection_deduplicates_selected_candidates_by_params(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+model_selection:
+  selected_candidate_count: 2
+  inner_cv_strategy: logo
+""".strip(),
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        cv_mod,
+        "generate_candidates",
+        lambda **_kwargs: [
+            Candidate(candidate_index=0, params={"C": 1.0}),
+            Candidate(candidate_index=1, params={"C": 1.0}),
+        ],
+    )
+
+    def _fake_score_candidate_inner_cv(**kwargs: object) -> tuple[float, list[dict[str, object]]]:
+        candidate = kwargs["candidate"]
+        if not isinstance(candidate, Candidate):
+            raise AssertionError("candidate must be a Candidate instance")
+        if candidate.candidate_index == 0:
+            return 0.20, []
+        return 0.40, []
+
+    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+    warnings: list[str] = []
+
+    result = _prepare_source_selection(
+        config=config,
+        training_scope_id="fold_0",
+        source_sample_set_id=0,
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
+        feature_names=["OG1"],
+        warnings=warnings,
+    )
+
+    assert result.n_scored_candidates == 2
+    assert result.n_available_candidates == 1
+    assert result.selected_candidate_count_effective == 1
+    assert len(result.selected_candidates) == 1
+    assert result.selected_candidates[0].candidate.candidate_index == 0
+    assert any("deduplicated candidates with identical params" in item for item in warnings)
+    assert any(
+        "selected_candidate_count exceeded available candidates" in item for item in warnings
+    )
+
+
+def test_prepare_source_selection_supports_selected_candidate_percent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+model_selection:
+  selected_candidate_percent: 50
+  inner_cv_strategy: logo
+""".strip(),
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        cv_mod,
+        "generate_candidates",
+        lambda **_kwargs: [
+            Candidate(candidate_index=0, params={"C": 0.1}),
+            Candidate(candidate_index=1, params={"C": 1.0}),
+            Candidate(candidate_index=2, params={"C": 10.0}),
+        ],
+    )
+
+    def _fake_score_candidate_inner_cv(**kwargs: object) -> tuple[float, list[dict[str, object]]]:
+        candidate = kwargs["candidate"]
+        if not isinstance(candidate, Candidate):
+            raise AssertionError("candidate must be a Candidate instance")
+        return float(candidate.candidate_index), []
+
+    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+
+    result = _prepare_source_selection(
+        config=config,
+        training_scope_id="fold_0",
+        source_sample_set_id=0,
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
+        feature_names=["OG1"],
+        warnings=[],
+    )
+
+    assert result.n_available_candidates == 3
+    assert result.selected_candidate_count_requested == 2
+    assert result.selected_candidate_count_effective == 2
+    assert [item.candidate.candidate_index for item in result.selected_candidates] == [0, 1]
+
+
 def test_prepare_source_selection_parallel_scoring_caps_rf_n_jobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config(
         [
             _config_path(
@@ -1443,10 +2131,10 @@ runtime:
         config=config,
         training_scope_id="fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=[],
     )
@@ -1460,6 +2148,7 @@ def test_prepare_source_selection_prefers_lower_log_loss(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config(
         [
             _config_path(
@@ -1498,10 +2187,10 @@ model_selection:
         config=config,
         training_scope_id="fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=[],
     )
@@ -1546,15 +2235,31 @@ runtime:
 
     monkeypatch.setattr(cv_mod, "_with_native_thread_limit", _fake_with_native_thread_limit)
 
+    preprocessed_folds = [
+        cv_mod.InnerCvPreprocessedFold(
+            inner_fold_id="0",
+            x_train=np.array([[0.0], [1.0]], dtype=float),
+            x_valid=np.array([[0.5], [1.5]], dtype=float),
+            y_train=np.array([0, 1], dtype=int),
+            y_valid=np.array([0, 1], dtype=int),
+            sample_weight=None,
+        ),
+        cv_mod.InnerCvPreprocessedFold(
+            inner_fold_id="1",
+            x_train=np.array([[1.0], [2.0]], dtype=float),
+            x_valid=np.array([[1.5], [2.5]], dtype=float),
+            y_train=np.array([0, 1], dtype=int),
+            y_valid=np.array([0, 1], dtype=int),
+            sample_weight=None,
+        ),
+    ]
+
     score, trial_rows = cv_mod._score_candidate_inner_cv(
         config=config,
         training_scope_id="fold_0",
         source_sample_set_id=0,
         candidate=Candidate(candidate_index=0, params={"n_estimators": 10}),
-        x_source_raw=np.array([[1.0], [2.0], [3.0], [4.0]], dtype=float),
-        y_source=np.array([0, 1, 0, 1], dtype=int),
-        groups_source=np.array(["g1", "g1", "g2", "g2"], dtype=str),
-        feature_names=["OG1"],
+        preprocessed_folds=preprocessed_folds,
         estimator_n_jobs=2,
     )
 
@@ -1708,11 +2413,11 @@ def test_run_final_refit_supports_no_external_or_inference_species(tmp_path: Pat
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp2\t0\tg1",
-                "sp3\t1\tg2",
-                "sp4\t0\tg2",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
+                "sp3\t1\tg2\tno",
+                "sp4\t0\tg2\tno",
             ]
         )
         + "\n",
@@ -1793,7 +2498,7 @@ def test_run_outer_cv_appends_threshold_warning(
     assert "warn" in artifacts.warnings
 
 
-def test_prepare_source_selection_tpe_requires_selected_candidate_count(
+def test_prepare_source_selection_tpe_requires_selection_setting(
     tmp_path: Path,
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
@@ -1810,7 +2515,10 @@ def test_prepare_source_selection_tpe_requires_selected_candidate_count(
         }
     )
 
-    with pytest.raises(CVError, match="selected_candidate_count is required"):
+    with pytest.raises(
+        CVError,
+        match="selected_candidate_count/selected_candidate_percent is required",
+    ):
         _prepare_source_selection_tpe(
             config=config_missing_selected,
             training_scope_id="outer_fold_0",
@@ -1910,6 +2618,7 @@ def test_prepare_source_selection_tpe_emits_capping_warnings_for_trials_and_sele
                 self.trials.append(trial)
 
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     config_tpe = config.model_copy(
         update={
@@ -1919,6 +2628,7 @@ def test_prepare_source_selection_tpe_emits_capping_warnings_for_trials_and_sele
                     "trial_count": 5,
                     "search_space": {"C": [0.1]},
                     "selected_candidate_count": 3,
+                    "inner_cv_strategy": "logo",
                 }
             )
         }
@@ -1931,10 +2641,10 @@ def test_prepare_source_selection_tpe_emits_capping_warnings_for_trials_and_sele
         config=config_tpe,
         training_scope_id="outer_fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=warnings,
     )
@@ -1945,6 +2655,159 @@ def test_prepare_source_selection_tpe_emits_capping_warnings_for_trials_and_sele
     assert any(
         "selected_candidate_count exceeded available candidates" in item for item in warnings
     )
+
+
+def test_prepare_source_selection_tpe_deduplicates_selected_candidates_by_params(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeTrial:
+        def __init__(self, number: int) -> None:
+            self.number = number
+            self.user_attrs: dict[str, object] = {}
+            self.value: float | None = None
+
+        def suggest_categorical(self, _name: str, values: list[object]) -> object:
+            return values[0]
+
+        def suggest_float(self, _name: str, low: float, _high: float) -> float:
+            return low
+
+        def set_user_attr(self, key: str, value: object) -> None:
+            self.user_attrs[key] = value
+
+    class _FakeStudy:
+        def __init__(self) -> None:
+            self.trials: list[_FakeTrial] = []
+
+        def optimize(self, objective: object, n_trials: int) -> None:
+            for number in range(n_trials):
+                trial = _FakeTrial(number)
+                trial.value = float(objective(trial))  # type: ignore[misc]
+                self.trials.append(trial)
+
+    metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    config_tpe = config.model_copy(
+        update={
+            "model_selection": config.model_selection.model_copy(
+                update={
+                    "search_strategy": "tpe",
+                    "trial_count": 2,
+                    "search_space": {"C": [0.1, 1.0]},
+                    "selected_candidate_count": 2,
+                    "inner_cv_strategy": "logo",
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(cv_mod.optuna, "create_study", lambda **_kwargs: _FakeStudy())
+
+    def _fake_score_candidate_inner_cv(**kwargs: object) -> tuple[float, list[dict[str, object]]]:
+        candidate = kwargs["candidate"]
+        if not isinstance(candidate, Candidate):
+            raise AssertionError("candidate must be a Candidate instance")
+        if candidate.candidate_index == 0:
+            return 0.50, []
+        return 0.30, []
+
+    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+    warnings: list[str] = []
+
+    result = _prepare_source_selection_tpe(
+        config=config_tpe,
+        training_scope_id="outer_fold_0",
+        source_sample_set_id=0,
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
+        feature_names=["OG1"],
+        warnings=warnings,
+    )
+
+    assert result.n_scored_candidates == 2
+    assert result.n_available_candidates == 1
+    assert result.selected_candidate_count_effective == 1
+    assert len(result.selected_candidates) == 1
+    assert result.selected_candidates[0].candidate.candidate_index == 1
+    assert any("deduplicated candidates with identical params" in item for item in warnings)
+    assert any(
+        "selected_candidate_count exceeded available candidates" in item for item in warnings
+    )
+
+
+def test_prepare_source_selection_tpe_supports_selected_candidate_percent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeTrial:
+        def __init__(self, number: int) -> None:
+            self.number = number
+            self.user_attrs: dict[str, object] = {}
+            self.value: float | None = None
+
+        def suggest_categorical(self, _name: str, values: list[object]) -> object:
+            return values[min(self.number, len(values) - 1)]
+
+        def suggest_float(self, _name: str, low: float, _high: float) -> float:
+            return low
+
+        def set_user_attr(self, key: str, value: object) -> None:
+            self.user_attrs[key] = value
+
+    class _FakeStudy:
+        def __init__(self) -> None:
+            self.trials: list[_FakeTrial] = []
+
+        def optimize(self, objective: object, n_trials: int) -> None:
+            for number in range(n_trials):
+                trial = _FakeTrial(number)
+                trial.value = float(objective(trial))  # type: ignore[misc]
+                self.trials.append(trial)
+
+    metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    config_tpe = config.model_copy(
+        update={
+            "model_selection": config.model_selection.model_copy(
+                update={
+                    "search_strategy": "tpe",
+                    "trial_count": 3,
+                    "search_space": {"C": [0.1, 1.0, 10.0]},
+                    "selected_candidate_count": None,
+                    "selected_candidate_percent": 50,
+                    "inner_cv_strategy": "logo",
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(cv_mod.optuna, "create_study", lambda **_kwargs: _FakeStudy())
+
+    def _fake_score_candidate_inner_cv(**kwargs: object) -> tuple[float, list[dict[str, object]]]:
+        candidate = kwargs["candidate"]
+        if not isinstance(candidate, Candidate):
+            raise AssertionError("candidate must be a Candidate instance")
+        return float(candidate.candidate_index), []
+
+    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+
+    result = _prepare_source_selection_tpe(
+        config=config_tpe,
+        training_scope_id="outer_fold_0",
+        source_sample_set_id=0,
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
+        feature_names=["OG1"],
+        warnings=[],
+    )
+
+    assert result.n_available_candidates == 3
+    assert result.selected_candidate_count_requested == 2
+    assert result.selected_candidate_count_effective == 2
+    assert [item.candidate.candidate_index for item in result.selected_candidates] == [0, 1]
 
 
 def test_prepare_source_selection_tpe_uses_minimize_direction_for_log_loss(
@@ -1976,6 +2839,7 @@ def test_prepare_source_selection_tpe_uses_minimize_direction_for_log_loss(
                 self.trials.append(trial)
 
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     config_tpe = config.model_copy(
         update={
@@ -1986,6 +2850,7 @@ def test_prepare_source_selection_tpe_uses_minimize_direction_for_log_loss(
                     "trial_count": 2,
                     "search_space": {"C": [0.1, 1.0]},
                     "selected_candidate_count": 1,
+                    "inner_cv_strategy": "logo",
                 }
             )
         }
@@ -2015,10 +2880,10 @@ def test_prepare_source_selection_tpe_uses_minimize_direction_for_log_loss(
         config=config_tpe,
         training_scope_id="outer_fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=[],
     )
@@ -2044,11 +2909,17 @@ def test_prepare_source_selection_tpe_rejects_trials_missing_candidate_params(
             _ = n_trials
 
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     config_tpe = config.model_copy(
         update={
             "model_selection": config.model_selection.model_copy(
-                update={"search_strategy": "tpe", "trial_count": 1, "selected_candidate_count": 1}
+                update={
+                    "search_strategy": "tpe",
+                    "trial_count": 1,
+                    "selected_candidate_count": 1,
+                    "inner_cv_strategy": "logo",
+                }
             )
         }
     )
@@ -2059,10 +2930,10 @@ def test_prepare_source_selection_tpe_rejects_trials_missing_candidate_params(
             config=config_tpe,
             training_scope_id="outer_fold_0",
             source_sample_set_id=0,
-            sampled_idx=np.array([0, 1], dtype=int),
-            x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-            y_train=np.array([0, 1], dtype=int),
-            groups_train=np.array(["g1", "g2"], dtype=str),
+            sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+            x_train_raw=x_train_raw,
+            y_train=y_train,
+            groups_train=groups_train,
             feature_names=["OG1"],
             warnings=[],
         )
@@ -2073,7 +2944,10 @@ def test_expression_matrix_builder_rejects_empty_matrix_for_selected_species(
 ) -> None:
     metadata = _write(
         tmp_path / "species_metadata.tsv",
-        "\n".join(["species\tC4\tcontrast_pair_id", "sp1\t1\tg1"]) + "\n",
+        "\n".join(
+            ["species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout", "sp1\t1\tg1\tno"]
+        )
+        + "\n",
     )
     tpm = _write(
         tmp_path / "tpm.tsv",
@@ -2093,9 +2967,9 @@ def test_expression_matrix_builder_chunking_single_feature_returns_single_chunk(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp2\t0\tg1",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
             ]
         )
         + "\n",
@@ -2215,6 +3089,96 @@ preprocess:
     assert selected.tolist() == [1]
 
 
+def test_select_feature_indices_pair_aware_filter_prefers_consistent_signal(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  low_prevalence_filter:
+    enabled: false
+  pair_aware_filter:
+    enabled: true
+    max_features: 1
+""".strip(),
+            )
+        ]
+    )
+    warnings: list[str] = []
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [0.0, 0.0],
+                [2.0, 10.0],
+                [0.0, 0.0],
+                [2.2, 0.0],
+                [0.0, 0.0],
+                [1.8, 0.0],
+                [0.0, 0.0],
+                [2.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        ["OG1", "OG2"],
+        y_train=np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=int),
+        groups_train=np.array(["g1", "g1", "g2", "g2", "g3", "g3", "g4", "g4"], dtype=str),
+        warnings=warnings,
+    )
+
+    assert selected.tolist() == [0]
+    assert warnings == []
+
+
+def test_select_feature_indices_pair_aware_filter_skips_when_too_few_groups(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  low_prevalence_filter:
+    enabled: false
+  pair_aware_filter:
+    enabled: true
+    max_features: 1
+""".strip(),
+            )
+        ]
+    )
+    warnings: list[str] = []
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [1.0, 0.0],
+                [2.0, 3.0],
+            ],
+            dtype=float,
+        ),
+        ["OG1", "OG2"],
+        y_train=np.array([0, 1], dtype=int),
+        groups_train=np.array(["g1", "g1"], dtype=str),
+        warnings=warnings,
+    )
+
+    assert selected.tolist() == [0, 1]
+    assert any("fewer than 2 training groups" in item for item in warnings)
+
+
 def test_select_feature_indices_calls_correlation_filter_when_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2251,6 +3215,45 @@ preprocess:
 
     assert called["value"] is True
     assert selected.tolist() == [1]
+
+
+def test_apply_correlation_filter_prefers_pair_aware_priority_when_provided(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  correlation_filter:
+    enabled: true
+    max_abs_correlation: 0.9
+""".strip(),
+            )
+        ]
+    )
+
+    kept = _apply_correlation_filter(
+        config,
+        x_train_log=np.array(
+            [
+                [0.0, 0.0],
+                [2.0, 1.0],
+                [4.0, 2.0],
+                [6.0, 3.0],
+            ],
+            dtype=float,
+        ),
+        selected=np.array([0, 1], dtype=int),
+        feature_names=["OG1", "OG2"],
+        priority_scores=np.array([0.1, 0.9], dtype=float),
+    )
+
+    assert kept.tolist() == [1]
 
 
 def test_apply_correlation_filter_rejects_missing_threshold_when_mutated(tmp_path: Path) -> None:
@@ -2547,17 +3550,13 @@ def test_score_candidate_inner_cv_returns_nan_when_no_inner_folds(
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
-    monkeypatch.setattr(cv_mod, "_inner_cv_splits", lambda *_args, **_kwargs: [])
 
     score, rows = cv_mod._score_candidate_inner_cv(
         config=config,
         training_scope_id="fold_0",
         source_sample_set_id=0,
         candidate=Candidate(candidate_index=0, params={}),
-        x_source_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_source=np.array([0, 1], dtype=int),
-        groups_source=np.array(["g1", "g2"], dtype=str),
-        feature_names=["OG1"],
+        preprocessed_folds=[],
     )
 
     assert np.isnan(score)
@@ -2593,6 +3592,7 @@ def test_prepare_source_selection_tpe_maps_nan_objective_score_to_none(
                 self.trials.append(trial)
 
     metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     config_tpe = config.model_copy(
         update={
@@ -2602,6 +3602,7 @@ def test_prepare_source_selection_tpe_maps_nan_objective_score_to_none(
                     "trial_count": 1,
                     "search_space": {"C": [0.1]},
                     "selected_candidate_count": 1,
+                    "inner_cv_strategy": "logo",
                 }
             )
         }
@@ -2613,10 +3614,10 @@ def test_prepare_source_selection_tpe_maps_nan_objective_score_to_none(
         config=config_tpe,
         training_scope_id="outer_fold_0",
         source_sample_set_id=0,
-        sampled_idx=np.array([0, 1], dtype=int),
-        x_train_raw=np.array([[1.0], [2.0]], dtype=float),
-        y_train=np.array([0, 1], dtype=int),
-        groups_train=np.array(["g1", "g2"], dtype=str),
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
         feature_names=["OG1"],
         warnings=[],
     )

@@ -35,10 +35,15 @@ Always written:
 - `resolved_config.yml`
   - composed + validated config used in execution
 - `split_manifest.tsv`
-  - columns: `species`, `pool`, `fold_id`, `group_id`, `label`
+  - columns: `species`, `pool`, `fold_id`, `group_id`, `contrast_group_id`, `label`
   - pools: `train`, `validation`, `external_test`, `discovery_inference`
   - `train` / `validation` rows are the per-fold expansion of the internal
     `training_validation` pool.
+- `fold_validation_groups.tsv`
+  - columns: `fold_id`, `group_id`, `n_validation_species`, `n_validation_pos`, `n_validation_neg`
+  - one row per validation-side group in each outer fold
+  - for `logo`, each `fold_id` has exactly one row
+  - for `group_kfold`, a `fold_id` can have multiple rows
 - `metrics_cv.tsv`
   - columns: `aggregate_scope`, `fold_id`, `metric`, `metric_value`, `n_pos`, `n_neg`, `n_valid_folds`
   - `aggregate_scope`: per-fold rows use `NA`, aggregate rows use `macro`/`micro`
@@ -50,9 +55,13 @@ Always written:
   - columns: `threshold_name`, `threshold_value`, `source`, `selection_metric`, `selection_scope`
   - threshold names: `fixed_probability_threshold`, `cv_derived_threshold`
 - `feature_importance.tsv`
-  - columns: `feature`, `importance_mean`, `importance_std`, `n_models`, `method`
+  - columns: `feature`, `importance_mean`, `importance_std`, `n_models`, `n_folds`, `method`
+- `feature_importance_by_fold.tsv`
+  - columns: `fold_id`, `feature`, `importance_mean`, `n_models`, `method`
 - `coefficients.tsv`
-  - columns: `feature`, `coef_mean`, `coef_std`, `n_models`, `method`, `reason`
+  - columns: `feature`, `coef_mean`, `coef_std`, `n_models`, `n_folds`, `method`, `reason`
+- `coefficients_by_fold.tsv`
+  - columns: `fold_id`, `feature`, `coef_mean`, `n_models`, `method`, `reason`
   - for non-linear models, coefficient values can be `NA` with `reason=unsupported_model_non_linear`
 - `prediction_cv.tsv`
   - columns: `fold_id`, `species`, `label`, `prob`
@@ -63,6 +72,7 @@ Always written:
     - `n_features_before`
     - `n_features_after_low_prevalence`
     - `n_features_after_low_variance`
+    - `n_features_after_pair_aware`
     - `n_features_after_correlation`
     - `n_features_after_all`
 - `feature_filter_counts_summary.tsv`
@@ -70,6 +80,13 @@ Always written:
     - `scope`, `stage`, `n_records`
     - `n_features_min`, `n_features_median`, `n_features_mean`, `n_features_max`
     - `retained_ratio_min`, `retained_ratio_median`, `retained_ratio_mean`, `retained_ratio_max`
+- `retained_features.tsv`
+  - columns:
+    - `scope`, `fold_id`, `sample_set_id`, `feature`
+- `retained_features_summary.tsv`
+  - columns:
+    - `scope`, `fold_id`, `feature`
+    - `retained_count`, `n_sample_sets`, `retained_rate`
 - `model_sparsity.tsv`
   - columns:
     - `scope`, `fold_id`, `sample_set_id`, `model_index`, `model_name`
@@ -106,6 +123,7 @@ Always written:
     - `cv_species_probability_by_trait.svg`
     - `cv_fold_trait_probability.svg`
     - `feature_filter_funnel.svg`
+    - `retained_features_by_fold.svg`
     - `model_sparsity_scatter.svg`
     - `model_selection_trials.svg` (candidate selection active)
     - `roc_pr_curves_cv.svg` (may be skipped with warning for degenerate folds)
@@ -176,15 +194,26 @@ Conditionally written:
 
 - `pool`:
   - `train` / `validation`: species used in outer CV (same species appears across folds).
-  - `external_test`: labeled but no group; evaluated only in `full_run`.
+  - `external_test`: labeled species marked by `split.test_holdout_col`;
+    evaluated only in `full_run`.
   - `discovery_inference`: unlabeled species; inference target in `full_run`.
   - `train` / `validation` are the per-fold representation of the internal
     `training_validation` pool.
+  - Species marked by `split.exclude_col` are omitted from `split_manifest.tsv`.
 - `fold_id`:
   - fold index for `train`/`validation`.
   - `NA` for `external_test` and `discovery_inference`.
-- `group_id`: only meaningful for CV pools (`train`/`validation`).
+- `group_id`: the `split.group_col` value used for CV groups.
+- `contrast_group_id`: the `data.contrast_pair_col` value when configured;
+  used by contrast-pair-specific features.
 - `label`: known only where metadata has trait label.
+
+#### `fold_validation_groups.tsv`
+
+- Lookup table from outer `fold_id` to validation-side `group_id`.
+- Use this when numeric `fold_id` values need to be interpreted later.
+- In `logo`, this is the held-out group for each fold.
+- In `group_kfold`, multiple validation groups can map to the same fold.
 
 #### `thresholds.tsv`
 
@@ -230,6 +259,34 @@ Conditionally written:
   - Larger value means lower ensemble agreement.
 - Use this file to inspect separation, calibration, and threshold effects without touching final-refit outputs.
 
+#### `tree_prediction_cv_annotation.tsv` (optional)
+
+- Written when `data.tree_path` is set.
+- ggtree/Toytree-friendly tip annotation for CV species with non-empty `contrast_pair_id`.
+- Columns: `label`, `species`, `true_label`, `prob`, `pred_label`, `uncertainty_std`,
+  `contrast_pair_id`, `fold_id`.
+- `pred_label` uses the CV-derived threshold when available.
+
+#### `tree_contrast_pairs_annotation.tsv` (optional)
+
+- Written when `data.tree_path` is set.
+- ggtree/Toytree-friendly metadata QC annotation for all species with non-empty
+  `contrast_pair_id`.
+- Columns: `label`, `species`, `true_label`, `contrast_pair_id`.
+- Use this file to inspect which tree tips participate in contrastive clades before
+  interpreting prediction probabilities.
+
+#### `tree_feature_heatmap_annotation.tsv` (optional)
+
+- Written when `data.tree_path` is set.
+- Long-form ggtree/Toytree-friendly feature heatmap values for species with non-empty
+  `contrast_pair_id` and the top 30 features by `importance_mean`.
+- Columns: `label`, `species`, `true_label`, `contrast_pair_id`, `feature_rank`,
+  `feature`, `importance_mean`, `coef_mean`, `tpm`, `log2_tpm_plus1`,
+  `z_score_log2_tpm`.
+- `log2_tpm_plus1` is `log2(TPM + 1)` after duplicate `(species, feature)` rows are
+  summed; `z_score_log2_tpm` is computed within each feature across included species.
+
 #### `prediction_external_test.tsv` / `prediction_inference.tsv`
 
 - `prob`: predicted probability of label `1`.
@@ -242,6 +299,17 @@ Conditionally written:
   - Standard deviation of per-model probabilities in ensemble.
   - Larger value means lower ensemble agreement.
 
+#### `tree_prediction_external_annotation.tsv` / `tree_prediction_predict_annotation.tsv` (optional)
+
+- Written when `data.tree_path` is set and the corresponding prediction table exists.
+- External-test columns: `label`, `species`, `true_label`, `prob`, `pred_label`,
+  `uncertainty_std`, `contrast_pair_id`.
+- Predict columns: `label`, `species`, `true_label`, `prob`,
+  `pred_label_fixed_threshold`, `pred_label_cv_derived_threshold`, `uncertainty_std`,
+  `contrast_pair_id`.
+- The annotation TSV retains predicted species even when a species is absent from the tree;
+  Toytree SVG output is pruned to species present in the tree.
+
 #### `feature_filter_counts.tsv`
 
 - One row per preprocessing result (`scope`, `fold_id`, `sample_set_id`).
@@ -249,6 +317,7 @@ Conditionally written:
   - raw (`n_features_before`)
   - low prevalence
   - low variance
+  - pair aware
   - correlation
   - final (`n_features_after_all`)
 - Use this table to inspect fold/sample-set-specific filtering behavior.
@@ -258,6 +327,20 @@ Conditionally written:
 - Summary of `feature_filter_counts.tsv` grouped by (`scope`, `stage`).
 - `retained_ratio_*` is the ratio relative to `n_features_before`.
 - Use this table for quick stage-wise trend checks without scanning all folds/sample sets.
+
+#### `retained_features.tsv`
+
+- One row per retained feature after preprocessing for a given
+  (`scope`, `fold_id`, `sample_set_id`).
+- `feature` is the feature name that survived all preprocessing filters.
+- Use this table when you need the exact retained-feature list for each fold/sample set.
+
+#### `retained_features_summary.tsv`
+
+- Summary of `retained_features.tsv` grouped by (`scope`, `fold_id`, `feature`).
+- `retained_count` is how many sampled sets retained that feature in the fold.
+- `retained_rate = retained_count / n_sample_sets`.
+- Use this table to compare feature retention across folds without scanning every sample set.
 
 #### `model_sparsity.tsv`
 
@@ -277,21 +360,38 @@ Conditionally written:
 #### `feature_importance.tsv`
 
 - `importance_mean`:
-  - Average normalized importance across models (relative importance, not effect direction).
+  - Mean of fold-level normalized importance values.
+  - Within each fold, normalized importance is averaged across fitted models first.
 - `importance_std`:
-  - Variation across models.
+  - Variation across fold-level mean importance values.
   - Large value suggests unstable feature reliance.
+- `n_models` / `n_folds`:
+  - Total fitted model count and outer-fold count used for the summary.
 - `method`:
   - `coef_abs_l1_norm`: linear model coefficients (absolute, L1-normalized per model).
   - `feature_importances_l1_norm`: random forest importances (L1-normalized per model).
 
+#### `feature_importance_by_fold.tsv`
+
+- One row per (`fold_id`, `feature`).
+- `importance_mean` is the mean normalized importance across fitted models in that fold.
+- These fold-level values are the points and boxplot distribution in
+  `feature_importance_top.svg`.
+
 #### `coefficients.tsv`
 
-- `coef_mean` / `coef_std` are for signed linear coefficients.
+- `coef_mean` / `coef_std` summarize fold-level mean signed linear coefficients.
 - Positive `coef_mean`: higher standardized feature value pushes probability toward class `1`.
 - Negative `coef_mean`: pushes toward class `0`.
 - For non-linear models, coefficient columns can be `NA` with
   `reason=unsupported_model_non_linear`.
+
+#### `coefficients_by_fold.tsv`
+
+- One row per (`fold_id`, `feature`).
+- `coef_mean` is the mean signed coefficient across fitted linear models in that fold.
+- These fold-level values are the points and boxplot distribution in
+  `coefficients_signed_top.svg`.
 
 #### `classification_summary.tsv`
 
@@ -353,10 +453,11 @@ Conditionally written:
     - `mcc` / `balanced_accuracy`: higher is better.
     - `log_loss`: lower is better.
 - `selection_source_sample_set_id`:
-  - indicates which sampled set produced the selected candidate list
-    (important when candidate source policy is shared vs per-sample-set).
+  - sampled set used for candidate selection (`reuse_first_sample_set` uses `0` for all rows).
 - `selected_candidate_count_requested` vs `selected_candidate_count_effective`:
-  - shows whether requested top-K was capped by candidate availability.
+  - shows requested vs effective top-K after candidate availability and deduplication.
+  - when `selected_candidate_percent` is used, `selected_candidate_count_requested`
+    is the per-sampled-set count derived from that percentage.
 
 ### Run figures
 
@@ -373,10 +474,11 @@ Conditionally written:
   - Left: pooled OOF ROC, right: pooled OOF PR.
   - Curves summarize all folds together (not per-fold overlays).
 - `feature_importance_top.svg`
-  - Top 30 features by `importance_mean`; bar length is relative to top feature in this figure.
+  - Top 30 features by mean fold-level `importance_mean`.
+  - Horizontal boxplot plus fold-level points.
 - `coefficients_signed_top.svg`
-  - Top 30 by absolute coefficient magnitude.
-  - Right (blue): positive, left (red): negative.
+  - Top 30 by absolute mean fold-level coefficient magnitude.
+  - Horizontal boxplot plus fold-level points; right is positive and left is negative.
 - `cv_species_probability_by_trait.svg`
   - Out-of-fold species probabilities grouped by trait (`label`).
   - Boxplot with per-species points and trait-wise mean markers.
@@ -386,6 +488,10 @@ Conditionally written:
 - `feature_filter_funnel.svg`
   - Stage-wise feature-count trend by scope.
   - Line is median count; shaded range is min-max.
+- `retained_features_by_fold.svg`
+  - Outer-fold retained-feature heatmap.
+  - Rows are features, columns are folds, color is `retained_rate`.
+  - Useful for spotting fold-specific feature retention differences.
 - `model_sparsity_scatter.svg`
   - Scatter of `n_features_after_all` vs `n_nonzero_features`.
   - Useful for comparing preprocessing output size vs model sparsity.
@@ -401,6 +507,19 @@ Conditionally written:
 - `final_refit_loss_by_split.svg` (`full_run`)
   - Final-refit `log_loss` comparison of `train` and `external_test`.
   - Useful for quick train-vs-external generalization diagnostics.
+- `tree_prediction_cv.svg` / `tree_prediction_external.svg` (optional)
+  - Written when `data.tree_path` is set and `phenoradar[tree]` is installed.
+  - Rectangular Toytree view with aligned tracks for trait label, probability,
+    predicted label, uncertainty, contrast pair, and fold where applicable.
+- `tree_contrast_pairs.svg` (optional)
+  - Written when `data.tree_path` is set and `phenoradar[tree]` is installed.
+  - Rectangular Toytree view with trait-label and contrast-pair tracks for metadata QC.
+- `tree_feature_heatmap_zscore.svg` / `tree_feature_heatmap_log2_tpm.svg` (optional)
+  - Written when `data.tree_path` is set and `phenoradar[tree]` is installed.
+  - Rectangular Toytree views with top-feature heatmap tiles ordered by
+    `importance_mean`.
+  - The z-score figure emphasizes relative per-feature expression patterns; the
+    log2-TPM figure preserves absolute expression scale after `log2(TPM + 1)`.
 
 ## `predict` artifacts (schemas and interpretation)
 
@@ -424,6 +543,10 @@ Conditionally written:
   - Histogram of predicted probabilities in bins `[0.0, 0.1), ... , [0.9, 1.0]`.
 - `predict_uncertainty.svg` (ensemble only)
   - Top species by `uncertainty_std`; high bars indicate less stable predictions.
+- `tree_prediction_predict.svg` (optional)
+  - Written when `data.tree_path` is set and `phenoradar[tree]` is installed.
+  - Tree view with aligned tracks for true label when known, probability,
+    CV-threshold prediction, uncertainty, and contrast pair when available.
 
 ## `report` artifacts (schemas and interpretation)
 
@@ -463,8 +586,10 @@ Files:
 - `bundle_manifest.json`
 - `feature_schema.tsv`
 - `preprocess_state.joblib`
-  - contains bundle feature schema plus preprocess state
-  - may include model-local preprocessing entries (`model_preprocess`)
+  - contains bundle feature schema plus preprocessing method metadata
+    (`expression_transform`, `feature_scaling`)
+  - may include model-local preprocessing entries (`model_preprocess`),
+    including selected features and optional scaler state
 - `model_state.joblib`
 - `thresholds.tsv`
 - `resolved_config.yml`

@@ -50,6 +50,33 @@ def test_build_interpretation_tables_for_linear_model_outputs_coefficients() -> 
     assert set(artifacts.coefficients.select("reason").to_series().to_list()) == {"NA"}
 
 
+def test_build_interpretation_tables_summarizes_fold_level_means() -> None:
+    fold0_model_a = LogisticRegression()
+    fold0_model_a.coef_ = np.array([[1.0, 0.0]], dtype=float)
+    fold0_model_b = LogisticRegression()
+    fold0_model_b.coef_ = np.array([[1.0, 0.0]], dtype=float)
+    fold1_model = LogisticRegression()
+    fold1_model.coef_ = np.array([[0.0, 1.0]], dtype=float)
+
+    artifacts = build_interpretation_tables(
+        [
+            ModelFeatureEntry(feature_names=["OG1", "OG2"], model=fold0_model_a, fold_id="0"),
+            ModelFeatureEntry(feature_names=["OG1", "OG2"], model=fold0_model_b, fold_id="0"),
+            ModelFeatureEntry(feature_names=["OG1", "OG2"], model=fold1_model, fold_id="1"),
+        ]
+    )
+
+    importance = {
+        row["feature"]: row
+        for row in artifacts.feature_importance.sort("feature").iter_rows(named=True)
+    }
+    assert importance["OG1"]["importance_mean"] == pytest.approx(0.5)
+    assert importance["OG2"]["importance_mean"] == pytest.approx(0.5)
+    assert importance["OG1"]["n_models"] == 3
+    assert importance["OG1"]["n_folds"] == 2
+    assert artifacts.feature_importance_by_fold.select("fold_id").unique().height == 2
+
+
 def test_build_interpretation_tables_for_random_forest_marks_coefficients_unsupported() -> None:
     x = np.array(
         [

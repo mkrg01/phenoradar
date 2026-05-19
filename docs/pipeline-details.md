@@ -17,7 +17,7 @@ This page explains execution flow for `run`, `predict`, and `report`.
 
 1. Resolve config.
 2. Load and verify bundle integrity.
-3. Build expression matrix and align features to bundle schema.
+3. Build expression matrix, apply bundled expression transform, and align features to bundle schema.
 4. Run deterministic inference using bundled preprocessing/model state.
 5. Write artifacts, figures, metadata.
 
@@ -42,12 +42,18 @@ Metadata normalization:
 
 - species IDs are trimmed and must be non-empty and unique.
 - trait must be `0/1` or null/empty.
-- group can be null/empty.
+- `split.group_col` is required for labeled species unless
+  `split.test_holdout_col` marks the species as a test holdout.
+- `split.test_holdout_col` is optional; when it is `null`, no external-test
+  holdout column is read.
+- `split.exclude_col` is optional; rows marked true are removed before pool
+  assignment and expression coverage checks.
 
 Pool assignment:
 
-- trait present + group present -> `training_validation`
-- trait present + group missing -> `external_test`
+- exclude true -> removed from all pools
+- trait present + test holdout true -> `external_test`
+- trait present + test holdout false + split group present -> `training_validation`
 - trait missing -> `discovery_inference`
 
 `training_validation` is an internal pool label before fold expansion.
@@ -55,12 +61,18 @@ In `split_manifest.tsv`, these species appear as `train` and `validation`.
 
 Expression coverage checks:
 
-- all metadata species must exist in expression table.
+- all non-excluded metadata species must exist in expression table.
 - rows in expression with species not present in metadata are counted and reported in metadata.
 
 Preflight before CV:
 
-- each training group must contain both labels (applies to all sampling modes, including `all_samples`).
+- the full `training_validation` pool must contain both labels.
+- each outer fold's train and validation side must contain both labels.
+- `sampling.strategy: group_balanced` requires each `split.group_col` group to
+  contain both labels.
+- `preprocess.pair_aware_filter.enabled: true` requires complete
+  `data.contrast_pair_col` values and both labels in each contrast pair before
+  pair-aware filtering.
 
 Outer CV splits:
 
@@ -83,21 +95,26 @@ For each outer fold:
   - `group_balanced`: deterministic per-group balanced subsets
   - sampled sets can execute in parallel within each fold budget
 3. Candidate handling:
-  - when `selected_candidate_count` is null:
+  - when both `selected_candidate_count` and `selected_candidate_percent` are null:
     - generate candidates and fit them directly (no inner CV ranking)
-  - when `selected_candidate_count` is set:
+  - when selection is active (`selected_candidate_count` or `selected_candidate_percent` is set):
     - score candidates on inner CV
     - keep top-K by `selection_metric`
+    - selection source depends on `model_selection.candidate_source_policy`:
+      - `per_sample_set`: select independently per sampled set
+      - `reuse_first_sample_set`: select once from sampled set `0` and reuse
+    - selected candidates are deduplicated by hyperparameter set (no duplicate params in one sampled-set selection)
     - for `search_strategy=grid|random`, candidate scoring can run in parallel within each fold budget
     - during that parallel scoring, per-model `random_forest` threads are auto-limited so combined fold/candidate/model concurrency stays within `runtime.n_jobs`
     - NumPy/SciPy/scikit-learn native thread pools are also limited to the active runtime budget in these execution paths
     - `search_strategy=tpe` remains sequential
 4. For each sampled training set, preprocess sampled-train/valid and fit selected models:
-  - `log1p`
+  - `preprocess.expression_transform` (`none`, `log1p`, `sample_rank`, or `sample_percentile_rank`)
   - optional low-prevalence filter
   - optional low-variance filter
+  - optional pair-aware filter (train-only group-contrast ranking)
   - optional correlation filter (pearson/spearman)
-  - standard scaling (fit on sampled train, transform valid)
+  - `preprocess.feature_scaling` (`none` or train-fitted standard scaling)
   - fit selected model(s), predict fold-valid probabilities
 5. Aggregate model probabilities (`mean` or `median`).
 6. Compute fold metrics.
@@ -114,11 +131,12 @@ After all folds:
 - Candidate generation/selection is repeated in `final_refit` scope.
 - sampled sets can run in parallel up to `runtime.n_jobs` budget.
 - each sampled set is preprocessed independently before fit:
-  - `log1p`
+  - `preprocess.expression_transform` (`none`, `log1p`, `sample_rank`, or `sample_percentile_rank`)
   - optional low-prevalence filter
   - optional low-variance filter
+  - optional pair-aware filter (train-only group-contrast ranking)
   - optional correlation filter (pearson/spearman)
-  - standard scaling (fit on sampled train, transform target pools)
+  - `preprocess.feature_scaling` (`none` or train-fitted standard scaling)
 - within each sampled set, selected model fits can also run in parallel.
 - `random_forest` thread count is auto-limited per task so combined concurrency stays within `runtime.n_jobs`.
 - NumPy/SciPy/scikit-learn native thread pools are also limited to the active runtime budget.
@@ -143,7 +161,7 @@ Search-space notes:
 
 Inner-CV selection:
 
-- enabled only when `selected_candidate_count` is set.
+- enabled only when selection is active (`selected_candidate_count` or `selected_candidate_percent` is set).
 - `inner_cv_strategy`: `logo` or `group_kfold`.
 - threshold-dependent candidate metrics (`mcc`/`balanced_accuracy`) use
   `report.fixed_probability_threshold`; `log_loss` is threshold-independent.
@@ -166,15 +184,16 @@ Bundle verification:
 
 Feature alignment:
 
-- align input features to bundle feature schema.
+- apply the bundled expression transform before feature-schema alignment.
+- align transformed input features to bundle feature schema.
 - missing bundle features are filled with `0`.
 - extra input features are ignored.
 - zero overlap is an error.
 
 Inference:
 
-- apply `log1p`, then per-model bundled preprocessing state
-  (feature subset alignment + model-local scaler transform).
+- apply per-model bundled preprocessing state
+  (feature subset alignment + optional model-local scaler transform).
 - run all bundled models.
 - aggregate probs by bundled aggregation mode.
 - derive `pred_label_fixed_threshold` by bundled fixed threshold.

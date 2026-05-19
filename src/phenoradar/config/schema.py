@@ -9,6 +9,7 @@ from pydantic import (
     ConfigDict,
     Field,
     NonNegativeFloat,
+    PositiveFloat,
     PositiveInt,
     model_validator,
 )
@@ -24,6 +25,8 @@ CandidateSourcePolicy = Literal["per_sample_set", "reuse_first_sample_set"]
 SelectionMetricName = Literal["mcc", "balanced_accuracy", "log_loss"]
 ThresholdSelectionMetricName = Literal["mcc", "balanced_accuracy"]
 CorrelationMethod = Literal["pearson", "spearman"]
+ExpressionTransformMethod = Literal["none", "log1p", "sample_rank", "sample_percentile_rank"]
+FeatureScalingMethod = Literal["none", "standard"]
 
 
 class StrictModel(BaseModel):
@@ -129,16 +132,20 @@ class DataConfig(StrictModel):
 
     metadata_path: str = "testdata/c4_tiny/species_metadata.tsv"
     tpm_path: str = "testdata/c4_tiny/tpm.tsv"
+    tree_path: str | None = None
     species_col: str = "species"
     feature_col: str = "orthogroup"
     value_col: str = "tpm"
     trait_col: str = "C4"
-    group_col: str = "contrast_pair_id"
+    contrast_pair_col: str | None = "contrast_pair_id"
 
 
 class SplitConfig(StrictModel):
     """Data split and CV controls."""
 
+    group_col: str = "contrast_pair_id"
+    test_holdout_col: str | None = "contrast_pair_test_holdout"
+    exclude_col: str | None = None
     outer_cv_strategy: OuterCvStrategy = "logo"
     outer_cv_n_splits: PositiveInt | None = None
 
@@ -210,15 +217,47 @@ class CorrelationFilterConfig(StrictModel):
         return self
 
 
+class PairAwareFilterConfig(StrictModel):
+    """Train-only group-contrast feature filter settings."""
+
+    enabled: bool = False
+    max_features: PositiveInt | None = None
+
+    @model_validator(mode="after")
+    def validate_enabled_args(self) -> PairAwareFilterConfig:
+        if self.enabled and self.max_features is None:
+            raise ValueError(
+                "preprocess.pair_aware_filter.max_features is required when enabled=true"
+            )
+        return self
+
+
+class ExpressionTransformConfig(StrictModel):
+    """Sample x feature expression value transform settings."""
+
+    method: ExpressionTransformMethod = "log1p"
+
+
+class FeatureScalingConfig(StrictModel):
+    """Train-fitted feature scaling settings."""
+
+    method: FeatureScalingMethod = "standard"
+
+
 class PreprocessConfig(StrictModel):
     """Preprocessing settings."""
 
     max_pivot_cells: PositiveInt = 50_000_000
+    expression_transform: ExpressionTransformConfig = Field(
+        default_factory=ExpressionTransformConfig
+    )
     low_prevalence_filter: LowPrevalenceFilterConfig = Field(
         default_factory=LowPrevalenceFilterConfig
     )
     low_variance_filter: LowVarianceFilterConfig = Field(default_factory=LowVarianceFilterConfig)
+    pair_aware_filter: PairAwareFilterConfig = Field(default_factory=PairAwareFilterConfig)
     correlation_filter: CorrelationFilterConfig = Field(default_factory=CorrelationFilterConfig)
+    feature_scaling: FeatureScalingConfig = Field(default_factory=FeatureScalingConfig)
 
 
 class ModelConfig(StrictModel):
@@ -261,7 +300,8 @@ class ModelSelectionConfig(StrictModel):
     """Hyperparameter candidate generation and selection settings."""
 
     selected_candidate_count: PositiveInt | None = None
-    candidate_source_policy: CandidateSourcePolicy = "reuse_first_sample_set"
+    selected_candidate_percent: PositiveFloat | None = None
+    candidate_source_policy: CandidateSourcePolicy = "per_sample_set"
     search_strategy: SearchStrategy = "grid"
     trial_count: PositiveInt | None = None
     search_space: dict[str, SearchSpaceValue] = Field(default_factory=dict)
@@ -284,6 +324,20 @@ class ModelSelectionConfig(StrictModel):
                 raise ValueError(
                     f"model_selection.search_space.{param_name} cannot be an empty list"
                 )
+
+        if (
+            self.selected_candidate_count is not None
+            and self.selected_candidate_percent is not None
+        ):
+            raise ValueError(
+                "model_selection.selected_candidate_count and "
+                "model_selection.selected_candidate_percent are mutually exclusive"
+            )
+        if (
+            self.selected_candidate_percent is not None
+            and float(self.selected_candidate_percent) > 100.0
+        ):
+            raise ValueError("model_selection.selected_candidate_percent must be <= 100")
 
         if self.search_strategy in {"random", "tpe"} and self.trial_count is None:
             raise ValueError(
@@ -310,9 +364,13 @@ class ModelSelectionConfig(StrictModel):
                 "model_selection.inner_cv_n_splits is only valid when inner_cv_strategy=group_kfold"
             )
 
-        if self.selected_candidate_count is not None and self.inner_cv_strategy is None:
+        if (
+            self.selected_candidate_count is not None
+            or self.selected_candidate_percent is not None
+        ) and self.inner_cv_strategy is None:
             raise ValueError(
-                "model_selection.inner_cv_strategy is required when selected_candidate_count is set"
+                "model_selection.inner_cv_strategy is required when "
+                "selected_candidate_count/selected_candidate_percent is set"
             )
 
         return self
@@ -357,3 +415,21 @@ class AppConfig(StrictModel):
     ensemble: EnsembleConfig = Field(default_factory=EnsembleConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
+
+    @model_validator(mode="after")
+    def validate_contrast_pair_dependencies(self) -> AppConfig:
+        if self.preprocess.pair_aware_filter.enabled and self.data.contrast_pair_col is None:
+            raise ValueError(
+                "preprocess.pair_aware_filter requires data.contrast_pair_col"
+            )
+        if (
+            self.preprocess.pair_aware_filter.enabled
+            and self.sampling.strategy == "group_balanced"
+            and self.data.contrast_pair_col != self.split.group_col
+        ):
+            raise ValueError(
+                "preprocess.pair_aware_filter with sampling.strategy=group_balanced "
+                "requires split.group_col to match data.contrast_pair_col; use "
+                "sampling.strategy=all_samples when splitting by broader phylogenetic groups"
+            )
+        return self

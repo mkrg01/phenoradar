@@ -59,6 +59,8 @@ phenoradar dataset
 This downloads a compact dataset from GitHub into `testdata/c4_tiny/`:
 
 - `testdata/c4_tiny/species_metadata.tsv`
+- `testdata/c4_tiny/species_trait.tsv`
+- `testdata/c4_tiny/ncbi_tree.nwk`
 - `testdata/c4_tiny/tpm.tsv`
 
 You can also supply your own files; see [data-format.md](data-format.md) for required columns.
@@ -116,10 +118,13 @@ Core outputs include:
 
 - `resolved_config.yml`
 - `split_manifest.tsv`
+- `fold_validation_groups.tsv`
 - `metrics_cv.tsv`
 - `thresholds.tsv`
 - `feature_importance.tsv`
+- `feature_importance_by_fold.tsv`
 - `coefficients.tsv`
+- `coefficients_by_fold.tsv`
 - `prediction_cv.tsv`
 - `classification_summary.tsv`
 - `run_metadata.json`

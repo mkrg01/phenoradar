@@ -29,6 +29,12 @@ from phenoradar.config import (
 )
 from phenoradar.cv import CVError, run_final_refit, run_outer_cv
 from phenoradar.figures import FigureError, write_predict_figures, write_run_figures
+from phenoradar.metadata import (
+    MetadataError,
+    build_species_metadata_from_skim,
+    build_species_taxid_tsv,
+    fetch_ncbi_tree,
+)
 from phenoradar.provenance import (
     ProvenanceError,
     bundle_payload_sha256,
@@ -50,6 +56,11 @@ from phenoradar.testdata import (
     DEFAULT_C4_TINY_BASE_URL,
     TestDataError,
     fetch_c4_tiny_test_data,
+)
+from phenoradar.tree_prediction import (
+    TreePredictionError,
+    write_predict_tree_prediction_artifacts,
+    write_run_tree_prediction_artifacts,
 )
 
 app = typer.Typer(
@@ -313,9 +324,7 @@ def _emit_predict_summary(
     n_positive = None
     n_positive_cv = None
     if "pred_label_fixed_threshold" in pred_predict.columns:
-        n_positive = int(
-            pred_predict.filter(pl.col("pred_label_fixed_threshold") == 1).height
-        )
+        n_positive = int(pred_predict.filter(pl.col("pred_label_fixed_threshold") == 1).height)
     if "pred_label_cv_derived_threshold" in pred_predict.columns:
         n_positive_cv = int(
             pred_predict.filter(pl.col("pred_label_cv_derived_threshold") == 1).height
@@ -573,12 +582,9 @@ def _classification_summary(
         required_external_pred = {"prob", "true_label"}
         if not required_external_pred.issubset(pred_external_test.columns):
             raise typer.BadParameter(
-                "prediction_external_test.tsv schema is invalid for "
-                "classification_summary.tsv"
+                "prediction_external_test.tsv schema is invalid for classification_summary.tsv"
             )
-        missing_label_count = pred_external_test.filter(
-            pl.col("true_label").is_null()
-        ).height
+        missing_label_count = pred_external_test.filter(pl.col("true_label").is_null()).height
         if missing_label_count > 0:
             raise typer.BadParameter(
                 "prediction_external_test.tsv contains species with missing external_test labels"
@@ -715,6 +721,9 @@ def run(
     run_dir = _build_run_dir("run")
     write_resolved_config(resolved, run_dir / "resolved_config.yml")
     split_artifacts.split_manifest.write_csv(run_dir / "split_manifest.tsv", separator="\t")
+    split_artifacts.fold_validation_groups.write_csv(
+        run_dir / "fold_validation_groups.tsv", separator="\t"
+    )
     cv_artifacts.metrics_cv.write_csv(
         run_dir / "metrics_cv.tsv", separator="\t", float_precision=8, null_value="NA"
     )
@@ -727,8 +736,20 @@ def run(
     cv_artifacts.feature_importance.write_csv(
         run_dir / "feature_importance.tsv", separator="\t", float_precision=8, null_value="NA"
     )
+    cv_artifacts.feature_importance_by_fold.write_csv(
+        run_dir / "feature_importance_by_fold.tsv",
+        separator="\t",
+        float_precision=8,
+        null_value="NA",
+    )
     cv_artifacts.coefficients.write_csv(
         run_dir / "coefficients.tsv", separator="\t", float_precision=8, null_value="NA"
+    )
+    cv_artifacts.coefficients_by_fold.write_csv(
+        run_dir / "coefficients_by_fold.tsv",
+        separator="\t",
+        float_precision=8,
+        null_value="NA",
     )
     cv_artifacts.oof_predictions.write_csv(
         run_dir / "prediction_cv.tsv", separator="\t", float_precision=8, null_value="NA"
@@ -847,6 +868,55 @@ def run(
             null_value="NA",
         )
 
+    retained_features_tables: list[pl.DataFrame] = []
+    cv_retained_features = getattr(cv_artifacts, "retained_features", None)
+    if isinstance(cv_retained_features, pl.DataFrame):
+        retained_features_tables.append(cv_retained_features)
+    final_retained_features = (
+        None
+        if final_refit_artifacts is None
+        else getattr(final_refit_artifacts, "retained_features", None)
+    )
+    if isinstance(final_retained_features, pl.DataFrame):
+        retained_features_tables.append(final_retained_features)
+    retained_features_table: pl.DataFrame | None = None
+    if retained_features_tables:
+        retained_features_table = pl.concat(retained_features_tables, how="vertical_relaxed").sort(
+            ["scope", "fold_id", "sample_set_id", "feature"]
+        )
+        retained_features_table.write_csv(
+            run_dir / "retained_features.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
+
+    retained_feature_summary_tables: list[pl.DataFrame] = []
+    cv_retained_features_summary = getattr(cv_artifacts, "retained_features_summary", None)
+    if isinstance(cv_retained_features_summary, pl.DataFrame):
+        retained_feature_summary_tables.append(cv_retained_features_summary)
+    final_retained_features_summary = (
+        None
+        if final_refit_artifacts is None
+        else getattr(final_refit_artifacts, "retained_features_summary", None)
+    )
+    if isinstance(final_retained_features_summary, pl.DataFrame):
+        retained_feature_summary_tables.append(final_retained_features_summary)
+    retained_features_summary_table: pl.DataFrame | None = None
+    if retained_feature_summary_tables:
+        retained_features_summary_table = pl.concat(
+            retained_feature_summary_tables, how="vertical_relaxed"
+        ).sort(
+            ["scope", "fold_id", "retained_rate", "retained_count", "feature"],
+            descending=[False, False, True, True, False],
+        )
+        retained_features_summary_table.write_csv(
+            run_dir / "retained_features_summary.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
+
     model_sparsity_tables: list[pl.DataFrame] = []
     cv_model_sparsity = getattr(cv_artifacts, "model_sparsity", None)
     if isinstance(cv_model_sparsity, pl.DataFrame):
@@ -908,6 +978,7 @@ def run(
     )
     figure_warnings: list[str] = []
     _log("Generate run figures.")
+    tree_path = getattr(resolved.data, "tree_path", None)
     try:
         figure_warnings = write_run_figures(
             run_dir=run_dir,
@@ -916,6 +987,8 @@ def run(
             thresholds=cv_artifacts.thresholds,
             feature_importance=cv_artifacts.feature_importance,
             coefficients=cv_artifacts.coefficients,
+            feature_importance_by_fold=cv_artifacts.feature_importance_by_fold,
+            coefficients_by_fold=cv_artifacts.coefficients_by_fold,
             ensemble_model_probs=cv_artifacts.ensemble_model_probs,
             model_selection_trials=cv_artifacts.model_selection_trials,
             model_selection_trials_summary=cv_artifacts.model_selection_trials_summary,
@@ -931,11 +1004,42 @@ def run(
             ),
             trait_name=resolved.data.trait_col,
             feature_filter_counts_summary=feature_filter_counts_summary_table,
+            retained_features_summary=retained_features_summary_table,
             model_sparsity=model_sparsity_table,
             model_sparsity_summary=model_sparsity_summary_table,
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    contrast_pair_col = resolved.data.contrast_pair_col
+    if tree_path is not None and contrast_pair_col is not None:
+        try:
+            tree_warnings = write_run_tree_prediction_artifacts(
+                run_dir=run_dir,
+                tree_path=Path(tree_path),
+                metadata_path=Path(resolved.data.metadata_path),
+                tpm_path=Path(resolved.data.tpm_path),
+                species_col=resolved.data.species_col,
+                feature_col=resolved.data.feature_col,
+                value_col=resolved.data.value_col,
+                trait_col=resolved.data.trait_col,
+                group_col=contrast_pair_col,
+                oof_predictions=cv_artifacts.oof_predictions,
+                thresholds=cv_artifacts.thresholds,
+                feature_importance=cv_artifacts.feature_importance,
+                coefficients=cv_artifacts.coefficients,
+                pred_external_test=(
+                    None
+                    if final_refit_artifacts is None
+                    else final_refit_artifacts.pred_external_test
+                ),
+            )
+        except TreePredictionError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        figure_warnings.extend(tree_warnings)
+    elif tree_path is not None:
+        figure_warnings.append(
+            "Skipped tree prediction artifacts because data.contrast_pair_col is null."
+        )
     warnings.extend(figure_warnings)
     _log(f"Run figures generated (figure_warnings={len(figure_warnings)}).")
 
@@ -947,6 +1051,7 @@ def run(
                 *config_paths,
                 Path(resolved.data.metadata_path),
                 Path(resolved.data.tpm_path),
+                *([] if tree_path is None else [Path(tree_path)]),
             ]
         )
     except ProvenanceError as exc:
@@ -1000,10 +1105,11 @@ def run(
         )
     typer.echo(
         f"Wrote run artifacts at {run_dir} "
-        "(resolved_config.yml, split_manifest.tsv, metrics_cv.tsv, loss_by_split_cv.tsv, "
-        "thresholds.tsv, "
+        "(resolved_config.yml, split_manifest.tsv, fold_validation_groups.tsv, "
+        "metrics_cv.tsv, loss_by_split_cv.tsv, thresholds.tsv, "
         "feature_importance.tsv, coefficients.tsv, prediction_cv.tsv, "
         "feature_filter_counts.tsv, feature_filter_counts_summary.tsv, "
+        "retained_features.tsv, retained_features_summary.tsv, "
         "model_sparsity.tsv, model_sparsity_summary.tsv, "
         "classification_summary.tsv, "
         "run_metadata.json"
@@ -1053,6 +1159,302 @@ def config_command(
     )
 
 
+@app.command("metadata")
+def metadata_command(
+    species_trait: Annotated[
+        Path,
+        typer.Option(
+            "--species-trait",
+            file_okay=True,
+            dir_okay=False,
+            help="Input TSV containing species and binary trait columns.",
+        ),
+    ] = Path("species_trait.tsv"),
+    species_taxid: Annotated[
+        Path | None,
+        typer.Option(
+            "--species-taxid",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Optional TSV containing species and NCBI taxid columns for tree retrieval.",
+        ),
+    ] = None,
+    species_taxid_out: Annotated[
+        Path | None,
+        typer.Option(
+            "--species-taxid-out",
+            file_okay=True,
+            dir_okay=False,
+            help=(
+                "Output generated species/taxid TSV when --species-taxid is omitted. "
+                "Defaults to species_taxid.tsv next to --out when taxon rank blocks need it."
+            ),
+        ),
+    ] = None,
+    out: Annotated[
+        Path,
+        typer.Option(
+            "--out",
+            file_okay=True,
+            dir_okay=False,
+            help="Output PhenoRadar metadata TSV with contrast_pair_id assignments.",
+        ),
+    ] = Path("species_metadata.tsv"),
+    tree_in: Annotated[
+        Path | None,
+        typer.Option(
+            "--tree-in",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Existing Newick tree to use for group assignment. Skips NCBI tree retrieval.",
+        ),
+    ] = None,
+    tree_out: Annotated[
+        Path,
+        typer.Option(
+            "--tree-out",
+            file_okay=True,
+            dir_okay=False,
+            help="Output Newick tree path generated from NCBI Taxonomy via nwkit.",
+        ),
+    ] = Path("ncbi_tree.nwk"),
+    species_col: Annotated[
+        str,
+        typer.Option(
+            "--species-col",
+            help="Species column name in species_trait.tsv and species_taxid.tsv.",
+        ),
+    ] = "species",
+    taxid_col: Annotated[
+        str,
+        typer.Option(
+            "--taxid-col",
+            help="Taxid column name in species_taxid.tsv.",
+        ),
+    ] = "taxid",
+    trait_col: Annotated[
+        str,
+        typer.Option(
+            "--trait-col",
+            help="Binary trait column name in species_trait.tsv and output metadata.",
+        ),
+    ] = "C4",
+    contrast_pair_col: Annotated[
+        str,
+        typer.Option(
+            "--contrast-pair-col",
+            help="Output contrast-pair column name.",
+        ),
+    ] = "contrast_pair_id",
+    contrast_pair_test_holdout_col: Annotated[
+        str,
+        typer.Option(
+            "--contrast-pair-test-holdout-col",
+            help="Output column marking labeled species held out from contrast-pair CV.",
+        ),
+    ] = "contrast_pair_test_holdout",
+    taxon_block_rank: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--taxon-block-rank",
+            help=(
+                "NCBI taxonomy rank to emit as a split block. Repeat for multiple "
+                "ranks, for example --taxon-block-rank family --taxon-block-rank order."
+            ),
+        ),
+    ] = None,
+    taxon_block_min_species_per_label: Annotated[
+        int,
+        typer.Option(
+            "--taxon-block-min-species-per-label",
+            min=1,
+            help="Minimum labeled species per trait value required for a taxon block to enter CV.",
+        ),
+    ] = 1,
+    taxon_block_mixed_test_fraction: Annotated[
+        float,
+        typer.Option(
+            "--taxon-block-mixed-test-fraction",
+            min=0.0,
+            max=0.999999,
+            help="Fraction of mixed-label taxon blocks to reserve as external test blocks.",
+        ),
+    ] = 0.0,
+    taxon_block_mixed_test_seed: Annotated[
+        int,
+        typer.Option(
+            "--taxon-block-mixed-test-seed",
+            help="Random seed for selecting mixed-label taxon blocks held out for test.",
+        ),
+    ] = 42,
+    ncbi_taxonomy_db: Annotated[
+        Path | None,
+        typer.Option(
+            "--ncbi-taxonomy-db",
+            file_okay=True,
+            dir_okay=False,
+            help="Optional ete4 NCBI taxonomy SQLite database path.",
+        ),
+    ] = None,
+    rank: Annotated[
+        str,
+        typer.Option(
+            "--rank",
+            help="NCBI taxonomy rank passed to `nwkit constrain --rank`.",
+        ),
+    ] = "family",
+    nwkit_bin: Annotated[
+        str,
+        typer.Option(
+            "--nwkit-bin",
+            help="nwkit executable path.",
+        ),
+    ] = "nwkit",
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Overwrite existing tree or metadata outputs.",
+        ),
+    ] = False,
+    write_metadata: Annotated[
+        bool,
+        typer.Option(
+            "--write-metadata/--tree-only",
+            help="Write species_metadata.tsv after tree retrieval.",
+        ),
+    ] = True,
+    verbose: VerboseArg = False,
+    quiet: QuietArg = False,
+) -> None:
+    """Fetch an NCBI tree and assign contrast-pair metadata from species_trait.tsv."""
+    start_time = datetime.now(UTC)
+    log_verbosity = _resolve_log_verbosity(verbose=verbose, quiet=quiet)
+    if tree_in is not None and not write_metadata:
+        raise typer.BadParameter("`--tree-in` with `--tree-only` has no work to do.")
+    if species_taxid is not None and species_taxid_out is not None:
+        raise typer.BadParameter("`--species-taxid-out` cannot be used with `--species-taxid`.")
+
+    resolved_species_taxid = species_taxid
+    generated_taxid_result = None
+    should_generate_taxid = species_taxid is None and (
+        species_taxid_out is not None or (write_metadata and bool(taxon_block_rank))
+    )
+
+    try:
+        if should_generate_taxid:
+            taxid_out = species_taxid_out or out.with_name("species_taxid.tsv")
+            _progress_log(
+                "metadata",
+                "Resolve NCBI taxids for species metadata.",
+                start_time=start_time,
+                log_verbosity=log_verbosity,
+            )
+            generated_taxid_result = build_species_taxid_tsv(
+                species_trait,
+                taxid_out,
+                species_col=species_col,
+                taxid_col=taxid_col,
+                ncbi_taxonomy_db=ncbi_taxonomy_db,
+                overwrite=force,
+            )
+            resolved_species_taxid = generated_taxid_result.taxid_path
+            typer.echo(
+                f"Wrote species taxid TSV: {generated_taxid_result.taxid_path} "
+                f"(resolved_species={generated_taxid_result.resolved_species_count}, "
+                f"unresolved_species={generated_taxid_result.unresolved_species_count})."
+            )
+    except MetadataError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    _progress_log(
+        "metadata",
+        "Resolve tree for metadata preparation.",
+        start_time=start_time,
+        log_verbosity=log_verbosity,
+    )
+    try:
+        if tree_in is None:
+            tree_result = fetch_ncbi_tree(
+                species_trait,
+                tree_out,
+                species_taxid_path=resolved_species_taxid,
+                species_col=species_col,
+                taxid_col=taxid_col,
+                rank=rank,
+                nwkit_bin=nwkit_bin,
+                overwrite=force,
+            )
+            tree_path = tree_result.tree_path
+            typer.echo(
+                f"Wrote NCBI taxonomy tree: {tree_result.tree_path} "
+                f"(species={tree_result.species_count}, rank={tree_result.rank})."
+            )
+        else:
+            tree_path = tree_in
+            typer.echo(f"Using existing tree: {tree_path}")
+
+        if write_metadata:
+            _progress_log(
+                "metadata",
+                "Assign contrast-pair metadata with nwkit skim.",
+                start_time=start_time,
+                log_verbosity=log_verbosity,
+            )
+            metadata_result = build_species_metadata_from_skim(
+                species_trait,
+                tree_path,
+                out,
+                species_taxid_path=resolved_species_taxid,
+                species_col=species_col,
+                taxid_col=taxid_col,
+                trait_col=trait_col,
+                contrast_pair_col=contrast_pair_col,
+                contrast_pair_test_holdout_col=contrast_pair_test_holdout_col,
+                taxon_block_ranks=taxon_block_rank,
+                taxon_block_min_species_per_label=taxon_block_min_species_per_label,
+                taxon_block_mixed_test_fraction=taxon_block_mixed_test_fraction,
+                taxon_block_mixed_test_seed=taxon_block_mixed_test_seed,
+                ncbi_taxonomy_db=ncbi_taxonomy_db,
+                nwkit_bin=nwkit_bin,
+                overwrite=force,
+            )
+    except MetadataError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if write_metadata:
+        taxon_summary = ""
+        if metadata_result.taxon_block_counts:
+            taxon_summary = ", taxon_blocks=["
+            taxon_summary += "; ".join(
+                f"{rank}:blocks={metadata_result.taxon_block_counts[rank]},"
+                f"test_holdouts={metadata_result.taxon_block_test_holdout_counts[rank]},"
+                f"excluded={metadata_result.taxon_block_exclude_counts[rank]}"
+                for rank in sorted(metadata_result.taxon_block_counts)
+            )
+            taxon_summary += "]"
+        typer.echo(
+            f"Wrote species metadata: {metadata_result.metadata_path} "
+            f"(species={metadata_result.species_count}, "
+            f"grouped_species={metadata_result.grouped_species_count}, "
+            f"contrast_pairs={metadata_result.contrast_pair_count}, "
+            f"contrast_pair_test_holdouts="
+            f"{metadata_result.contrast_pair_test_holdout_count}, "
+            f"tree_missing_species={metadata_result.tree_missing_species_count}"
+            f"{taxon_summary})."
+        )
+    _progress_log(
+        "metadata",
+        "Completed.",
+        start_time=start_time,
+        log_verbosity=log_verbosity,
+    )
+
+
 @app.command("dataset")
 def dataset(
     out: Annotated[
@@ -1069,7 +1471,7 @@ def dataset(
         typer.Option(
             "--base-url",
             help=(
-                "Base URL containing species_metadata.tsv and tpm.tsv. "
+                "Base URL containing c4_tiny dataset files. "
                 "Defaults to GitHub raw content for this repository; "
                 "can also be set via PHENORADAR_TESTDATA_BASE_URL."
             ),
@@ -1154,9 +1556,7 @@ def predict(
     except BundleError as exc:
         raise typer.BadParameter(str(exc)) from exc
     if "true_label" not in pred_predict.columns:
-        pred_predict = pred_predict.with_columns(
-            pl.lit(None, dtype=pl.Int64).alias("true_label")
-        )
+        pred_predict = pred_predict.with_columns(pl.lit(None, dtype=pl.Int64).alias("true_label"))
     pred_predict = pred_predict.select(
         [
             name
@@ -1183,6 +1583,7 @@ def predict(
         null_value="NA",
     )
     _log("Generate prediction figures.")
+    tree_path = getattr(resolved.data, "tree_path", None)
     try:
         write_predict_figures(
             run_dir=run_dir,
@@ -1191,6 +1592,25 @@ def predict(
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    contrast_pair_col = resolved.data.contrast_pair_col
+    if tree_path is not None and contrast_pair_col is not None:
+        try:
+            tree_warnings = write_predict_tree_prediction_artifacts(
+                run_dir=run_dir,
+                tree_path=Path(tree_path),
+                metadata_path=Path(resolved.data.metadata_path),
+                species_col=resolved.data.species_col,
+                trait_col=resolved.data.trait_col,
+                group_col=contrast_pair_col,
+                pred_predict=pred_predict,
+            )
+        except TreePredictionError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        predict_warnings.extend(tree_warnings)
+    elif tree_path is not None:
+        predict_warnings.append(
+            "Skipped tree prediction artifacts because data.contrast_pair_col is null."
+        )
     end_time = datetime.now(UTC)
     _log("Collect provenance metadata.")
     try:
@@ -1199,6 +1619,7 @@ def predict(
                 config_path,
                 Path(resolved.data.metadata_path),
                 Path(resolved.data.tpm_path),
+                *([] if tree_path is None else [Path(tree_path)]),
                 model_bundle / "bundle_manifest.json",
             ]
         )

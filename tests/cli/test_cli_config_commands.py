@@ -40,13 +40,13 @@ def _write_split_fixture(tmp_path: Path) -> tuple[Path, Path]:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp2\t0\tg1",
-                "sp3\t1\tg2",
-                "sp4\t0\tg2",
-                "sp5\t1\t",
-                "sp6\t\t",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
+                "sp3\t1\tg2\tno",
+                "sp4\t0\tg2\tno",
+                "sp5\t1\t\tyes",
+                "sp6\t\t\tno",
             ]
         )
         + "\n",
@@ -78,6 +78,7 @@ def _stub_resolved_config(*, execution_stage: str) -> SimpleNamespace:
             metadata_path="metadata.tsv",
             tpm_path="tpm.tsv",
             trait_col="C4",
+            contrast_pair_col="contrast_pair_id",
         ),
     )
 
@@ -85,6 +86,15 @@ def _stub_resolved_config(*, execution_stage: str) -> SimpleNamespace:
 def _stub_split_artifacts() -> SimpleNamespace:
     return SimpleNamespace(
         split_manifest=pl.DataFrame({"fold_id": ["0"], "species": ["sp1"], "pool": ["validation"]}),
+        fold_validation_groups=pl.DataFrame(
+            {
+                "fold_id": ["0"],
+                "group_id": ["g1"],
+                "n_validation_species": [1],
+                "n_validation_pos": [1],
+                "n_validation_neg": [0],
+            }
+        ),
         fold_count=1,
         pool_counts={"validation": 1},
         expression_rows_excluded=0,
@@ -128,6 +138,16 @@ def _stub_cv_artifacts(
                 "importance_mean": [1.0],
                 "importance_std": [0.0],
                 "n_models": [1],
+                "n_folds": [1],
+                "method": ["coef_abs_l1_norm"],
+            }
+        ),
+        feature_importance_by_fold=pl.DataFrame(
+            {
+                "fold_id": ["0"],
+                "feature": ["OG1"],
+                "importance_mean": [1.0],
+                "n_models": [1],
                 "method": ["coef_abs_l1_norm"],
             }
         ),
@@ -136,6 +156,17 @@ def _stub_cv_artifacts(
                 "feature": ["OG1"],
                 "coef_mean": [0.2],
                 "coef_std": [0.0],
+                "n_models": [1],
+                "n_folds": [1],
+                "method": ["coef_signed"],
+                "reason": ["NA"],
+            }
+        ),
+        coefficients_by_fold=pl.DataFrame(
+            {
+                "fold_id": ["0"],
+                "feature": ["OG1"],
+                "coef_mean": [0.2],
                 "n_models": [1],
                 "method": ["coef_signed"],
                 "reason": ["NA"],
@@ -153,6 +184,24 @@ def _stub_cv_artifacts(
         model_selection_trials=None,
         model_selection_trials_summary=None,
         model_selection_selected=None,
+        retained_features=pl.DataFrame(
+            {
+                "scope": ["outer_fold"],
+                "fold_id": ["0"],
+                "sample_set_id": [0],
+                "feature": ["OG1"],
+            }
+        ),
+        retained_features_summary=pl.DataFrame(
+            {
+                "scope": ["outer_fold"],
+                "fold_id": ["0"],
+                "feature": ["OG1"],
+                "retained_count": [1],
+                "n_sample_sets": [1],
+                "retained_rate": [1.0],
+            }
+        ),
     )
 
 
@@ -185,6 +234,24 @@ def _stub_final_refit_artifacts() -> SimpleNamespace:
         ),
         warnings=[],
         model_selection_selected=None,
+        retained_features=pl.DataFrame(
+            {
+                "scope": ["final_refit"],
+                "fold_id": ["NA"],
+                "sample_set_id": [0],
+                "feature": ["OG1"],
+            }
+        ),
+        retained_features_summary=pl.DataFrame(
+            {
+                "scope": ["final_refit"],
+                "fold_id": ["NA"],
+                "feature": ["OG1"],
+                "retained_count": [1],
+                "n_sample_sets": [1],
+                "retained_rate": [1.0],
+            }
+        ),
         ensemble_size=1,
     )
 
@@ -241,6 +308,7 @@ def test_config_without_config_writes_default_yaml(
     assert payload["runtime"]["execution_stage"] == "cv_only"
     assert payload["data"]["metadata_path"] == "testdata/c4_tiny/species_metadata.tsv"
     assert payload["data"]["tpm_path"] == "testdata/c4_tiny/tpm.tsv"
+    assert payload["data"]["tree_path"] is None
 
 
 def test_run_rejects_multiple_config_options(tmp_path: Path) -> None:
@@ -384,13 +452,18 @@ data:
     resolved = yaml.safe_load(resolved_path.read_text(encoding="utf-8"))
     assert resolved["runtime"]["execution_stage"] == "full_run"
     assert (run_dirs[0] / "split_manifest.tsv").exists()
+    assert (run_dirs[0] / "fold_validation_groups.tsv").exists()
     assert (run_dirs[0] / "metrics_cv.tsv").exists()
     assert (run_dirs[0] / "loss_by_split_cv.tsv").exists()
     assert (run_dirs[0] / "thresholds.tsv").exists()
     assert (run_dirs[0] / "feature_importance.tsv").exists()
+    assert (run_dirs[0] / "feature_importance_by_fold.tsv").exists()
     assert (run_dirs[0] / "coefficients.tsv").exists()
+    assert (run_dirs[0] / "coefficients_by_fold.tsv").exists()
     assert (run_dirs[0] / "feature_filter_counts.tsv").exists()
     assert (run_dirs[0] / "feature_filter_counts_summary.tsv").exists()
+    assert (run_dirs[0] / "retained_features.tsv").exists()
+    assert (run_dirs[0] / "retained_features_summary.tsv").exists()
     assert (run_dirs[0] / "model_sparsity.tsv").exists()
     assert (run_dirs[0] / "model_sparsity_summary.tsv").exists()
     assert (run_dirs[0] / "prediction_external_test.tsv").exists()
@@ -407,6 +480,7 @@ data:
     assert (run_dirs[0] / "figures" / "cv_fold_trait_probability.svg").exists()
     assert (run_dirs[0] / "figures" / "roc_pr_curves_cv.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_filter_funnel.svg").exists()
+    assert (run_dirs[0] / "figures" / "retained_features_by_fold.svg").exists()
     assert (run_dirs[0] / "figures" / "model_sparsity_scatter.svg").exists()
     assert (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
     assert (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()
@@ -418,6 +492,17 @@ data:
 
     metrics = pl.read_csv(run_dirs[0] / "metrics_cv.tsv", separator="\t")
     assert {"aggregate_scope", "fold_id", "metric", "metric_value"}.issubset(metrics.columns)
+    fold_validation_groups = pl.read_csv(
+        run_dirs[0] / "fold_validation_groups.tsv",
+        separator="\t",
+    )
+    assert {
+        "fold_id",
+        "group_id",
+        "n_validation_species",
+        "n_validation_pos",
+        "n_validation_neg",
+    }.issubset(fold_validation_groups.columns)
     thresholds = pl.read_csv(run_dirs[0] / "thresholds.tsv", separator="\t")
     assert set(thresholds.select("threshold_name").to_series().to_list()) == {
         "fixed_probability_threshold",
@@ -517,9 +602,13 @@ data:
     run_dirs = sorted((tmp_path / "runs").glob("*_run_*"))
     assert len(run_dirs) == 1
     assert (run_dirs[0] / "feature_importance.tsv").exists()
+    assert (run_dirs[0] / "feature_importance_by_fold.tsv").exists()
     assert (run_dirs[0] / "coefficients.tsv").exists()
+    assert (run_dirs[0] / "coefficients_by_fold.tsv").exists()
     assert (run_dirs[0] / "feature_filter_counts.tsv").exists()
     assert (run_dirs[0] / "feature_filter_counts_summary.tsv").exists()
+    assert (run_dirs[0] / "retained_features.tsv").exists()
+    assert (run_dirs[0] / "retained_features_summary.tsv").exists()
     assert (run_dirs[0] / "model_sparsity.tsv").exists()
     assert (run_dirs[0] / "model_sparsity_summary.tsv").exists()
     assert (run_dirs[0] / "figures" / "cv_metrics_overview.svg").exists()
@@ -531,6 +620,7 @@ data:
     assert (run_dirs[0] / "figures" / "cv_fold_trait_probability.svg").exists()
     assert (run_dirs[0] / "figures" / "roc_pr_curves_cv.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_filter_funnel.svg").exists()
+    assert (run_dirs[0] / "figures" / "retained_features_by_fold.svg").exists()
     assert (run_dirs[0] / "figures" / "model_sparsity_scatter.svg").exists()
     assert not (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
     assert not (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()
@@ -592,17 +682,17 @@ def test_run_emits_model_selection_artifacts_when_selection_active(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "g1_pos\t1\tg1",
-                "g1_neg\t0\tg1",
-                "g2_pos\t1\tg2",
-                "g2_neg\t0\tg2",
-                "g3_pos\t1\tg3",
-                "g3_neg\t0\tg3",
-                "g4_pos\t1\tg4",
-                "g4_neg\t0\tg4",
-                "ext1\t1\t",
-                "inf1\t\t",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "g1_pos\t1\tg1\tno",
+                "g1_neg\t0\tg1\tno",
+                "g2_pos\t1\tg2\tno",
+                "g2_neg\t0\tg2\tno",
+                "g3_pos\t1\tg3\tno",
+                "g3_neg\t0\tg3\tno",
+                "g4_pos\t1\tg4\tno",
+                "g4_neg\t0\tg4\tno",
+                "ext1\t1\t\tyes",
+                "inf1\t\t\tno",
             ]
         )
         + "\n",
@@ -1075,7 +1165,10 @@ def test_run_fails_when_cv_threshold_is_missing(
     )
     monkeypatch.setattr(
         "phenoradar.cli.build_split_artifacts",
-        lambda *_args, **_kwargs: SimpleNamespace(split_manifest=pl.DataFrame()),
+        lambda *_args, **_kwargs: SimpleNamespace(
+            split_manifest=pl.DataFrame(),
+            fold_validation_groups=pl.DataFrame(),
+        ),
     )
     monkeypatch.setattr(
         "phenoradar.cli.run_outer_cv",
@@ -1562,6 +1655,8 @@ def test_dataset_downloads_compact_dataset(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     assert (out_dir / "species_metadata.tsv").exists()
+    assert (out_dir / "species_trait.tsv").exists()
+    assert (out_dir / "ncbi_tree.nwk").exists()
     assert (out_dir / "tpm.tsv").exists()
 
 

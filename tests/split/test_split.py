@@ -32,13 +32,13 @@ def _fixture_data(tmp_path: Path) -> tuple[Path, Path]:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp2\t0\tg1",
-                "sp3\t1\tg2",
-                "sp4\t0\tg2",
-                "sp5\t1\t",
-                "sp6\t\t",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
+                "sp3\t1\tg2\tno",
+                "sp4\t0\tg2\tno",
+                "sp5\t1\t\tyes",
+                "sp6\t\t\tno",
             ]
         )
         + "\n",
@@ -73,6 +73,337 @@ def test_build_split_artifacts_success(tmp_path: Path) -> None:
     assert artifacts.pool_counts["discovery_inference"] == 1
     assert artifacts.expression_rows_excluded == 0
     assert artifacts.split_manifest.height > 0
+    assert artifacts.fold_validation_groups.height == 2
+
+
+def test_split_group_col_can_differ_from_contrast_pair_col(tmp_path: Path) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\tcontrast_pair_id\ttaxon_family_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tcp1\tfamily_a\tno",
+                "sp2\t0\tcp1\tfamily_a\tno",
+                "sp3\t1\tcp2\tfamily_b\tno",
+                "sp4\t0\tcp2\tfamily_b\tno",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp2\tOG1\t2.0",
+                "sp3\tOG1\t3.0",
+                "sp4\tOG1\t4.0",
+            ]
+        )
+        + "\n",
+    )
+    cfg = _write(
+        tmp_path / "config.yml",
+        f"""
+data:
+  metadata_path: {metadata}
+  tpm_path: {tpm}
+  contrast_pair_col: contrast_pair_id
+split:
+  group_col: taxon_family_id
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([cfg])
+
+    manifest = build_split_artifacts(config).split_manifest
+    rows = (
+        manifest.filter(pl.col("pool").is_in(["train", "validation"]))
+        .group_by("species")
+        .agg(
+            pl.col("group_id").drop_nulls().first().alias("group_id"),
+            pl.col("contrast_group_id").drop_nulls().first().alias("contrast_group_id"),
+        )
+        .sort("species")
+        .to_dicts()
+    )
+
+    assert rows == [
+        {"species": "sp1", "group_id": "family_a", "contrast_group_id": "cp1"},
+        {"species": "sp2", "group_id": "family_a", "contrast_group_id": "cp1"},
+        {"species": "sp3", "group_id": "family_b", "contrast_group_id": "cp2"},
+        {"species": "sp4", "group_id": "family_b", "contrast_group_id": "cp2"},
+    ]
+
+
+def test_null_contrast_pair_col_uses_split_group_without_contrast_column(
+    tmp_path: Path,
+) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\ttaxon_family_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tfamily_a\tno",
+                "sp2\t0\tfamily_a\tno",
+                "sp3\t1\tfamily_b\tno",
+                "sp4\t0\tfamily_b\tno",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp2\tOG1\t2.0",
+                "sp3\tOG1\t3.0",
+                "sp4\tOG1\t4.0",
+            ]
+        )
+        + "\n",
+    )
+    cfg = _write(
+        tmp_path / "config.yml",
+        f"""
+data:
+  metadata_path: {metadata}
+  tpm_path: {tpm}
+  contrast_pair_col: null
+split:
+  group_col: taxon_family_id
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([cfg])
+
+    manifest = build_split_artifacts(config).split_manifest
+
+    assert set(manifest.get_column("group_id").drop_nulls().to_list()) == {
+        "family_a",
+        "family_b",
+    }
+    assert manifest.get_column("contrast_group_id").null_count() == manifest.height
+
+
+def test_null_test_holdout_col_creates_no_legacy_external_test(tmp_path: Path) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\tcontrast_pair_id",
+                "sp1\t1\tg1",
+                "sp2\t0\tg1",
+                "sp3\t1\tg2",
+                "sp4\t0\tg2",
+                "sp5\t\t",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp2\tOG1\t2.0",
+                "sp3\tOG1\t3.0",
+                "sp4\tOG1\t4.0",
+                "sp5\tOG1\t5.0",
+            ]
+        )
+        + "\n",
+    )
+    cfg = _write(
+        tmp_path / "config.yml",
+        f"""
+data:
+  metadata_path: {metadata}
+  tpm_path: {tpm}
+split:
+  test_holdout_col: null
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([cfg])
+
+    artifacts = build_split_artifacts(config)
+
+    assert artifacts.pool_counts["external_test"] == 0
+    assert artifacts.pool_counts["discovery_inference"] == 1
+    assert "external_test" not in set(artifacts.split_manifest.get_column("pool").to_list())
+
+
+def test_null_test_holdout_col_rejects_labeled_species_without_split_group(
+    tmp_path: Path,
+) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\tcontrast_pair_id",
+                "sp1\t1\tg1",
+                "sp2\t0\tg1",
+                "sp3\t1\tg2",
+                "sp4\t0\tg2",
+                "sp5\t1\t",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp2\tOG1\t2.0",
+                "sp3\tOG1\t3.0",
+                "sp4\tOG1\t4.0",
+                "sp5\tOG1\t5.0",
+            ]
+        )
+        + "\n",
+    )
+    cfg = _write(
+        tmp_path / "config.yml",
+        f"""
+data:
+  metadata_path: {metadata}
+  tpm_path: {tpm}
+split:
+  test_holdout_col: null
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([cfg])
+
+    with pytest.raises(SplitError, match="Labeled non-holdout species"):
+        build_split_artifacts(config)
+
+
+def test_exclude_col_removes_species_from_all_pools_and_expression_requirements(
+    tmp_path: Path,
+) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\ttaxon_exclude",
+                "sp1\t1\tg1\tno\tno",
+                "sp2\t0\tg1\tno\tno",
+                "sp3\t1\tg2\tno\tno",
+                "sp4\t0\tg2\tno\tno",
+                "excluded_sp\t1\t\tno\tyes",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp2\tOG1\t2.0",
+                "sp3\tOG1\t3.0",
+                "sp4\tOG1\t4.0",
+            ]
+        )
+        + "\n",
+    )
+    cfg = _write(
+        tmp_path / "config.yml",
+        f"""
+data:
+  metadata_path: {metadata}
+  tpm_path: {tpm}
+split:
+  exclude_col: taxon_exclude
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([cfg])
+
+    artifacts = build_split_artifacts(config)
+
+    assert artifacts.pool_counts["excluded"] == 1
+    assert "excluded_sp" not in set(artifacts.split_manifest.get_column("species").to_list())
+
+
+def test_invalid_exclude_col_values_are_rejected(tmp_path: Path) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\ttaxon_exclude",
+                "sp1\t1\tg1\tno\tmaybe",
+                "sp2\t0\tg1\tno\tno",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp2\tOG1\t2.0",
+            ]
+        )
+        + "\n",
+    )
+    cfg = _write(
+        tmp_path / "config.yml",
+        f"""
+data:
+  metadata_path: {metadata}
+  tpm_path: {tpm}
+split:
+  exclude_col: taxon_exclude
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([cfg])
+
+    with pytest.raises(SplitError, match="Exclude column"):
+        build_split_artifacts(config)
+
+
+def test_fold_validation_groups_map_logo_folds_to_held_out_groups(tmp_path: Path) -> None:
+    metadata, tpm = _fixture_data(tmp_path)
+    config = load_and_resolve_config([_write_config(tmp_path, metadata, tpm)])
+
+    fold_validation_groups = build_split_artifacts(config).fold_validation_groups
+
+    assert fold_validation_groups.columns == [
+        "fold_id",
+        "group_id",
+        "n_validation_species",
+        "n_validation_pos",
+        "n_validation_neg",
+    ]
+    assert fold_validation_groups.to_dicts() == [
+        {
+            "fold_id": "0",
+            "group_id": "g1",
+            "n_validation_species": 2,
+            "n_validation_pos": 1,
+            "n_validation_neg": 1,
+        },
+        {
+            "fold_id": "1",
+            "group_id": "g2",
+            "n_validation_species": 2,
+            "n_validation_pos": 1,
+            "n_validation_neg": 1,
+        },
+    ]
 
 
 def test_split_manifest_fold_train_validation_are_disjoint_by_group_and_species(
@@ -111,8 +442,8 @@ def test_invalid_trait_values_are_rejected(tmp_path: Path) -> None:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\tmaybe\tg1",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\tmaybe\tg1\tno",
             ]
         )
         + "\n",
@@ -161,11 +492,11 @@ def test_single_class_group_is_rejected(tmp_path: Path) -> None:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp2\t1\tg1",
-                "sp3\t0\tg2",
-                "sp4\t1\tg2",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t1\tg1\tno",
+                "sp3\t0\tg2\tno",
+                "sp4\t1\tg2\tno",
             ]
         )
         + "\n",
@@ -194,9 +525,9 @@ def test_invalid_trait_values_error_lists_offending_values(tmp_path: Path) -> No
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\tmaybe\tg1",
-                "sp2\t2\tg1",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\tmaybe\tg1\tno",
+                "sp2\t2\tg1\tno",
             ]
         )
         + "\n",
@@ -223,9 +554,9 @@ def test_duplicate_species_in_metadata_is_rejected(tmp_path: Path) -> None:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp1\t0\tg1",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp1\t0\tg1\tno",
             ]
         )
         + "\n",
@@ -251,9 +582,9 @@ def test_empty_species_identifier_in_metadata_is_rejected(tmp_path: Path) -> Non
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "\t1\tg1",
-                "sp2\t0\tg1",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
             ]
         )
         + "\n",
@@ -299,13 +630,13 @@ def test_split_manifest_is_sorted_by_contract_keys(tmp_path: Path) -> None:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "z_sp\t1\tg1",
-                "a_sp\t0\tg1",
-                "y_sp\t1\tg2",
-                "b_sp\t0\tg2",
-                "ext\t1\t",
-                "inf\t\t",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "z_sp\t1\tg1\tno",
+                "a_sp\t0\tg1\tno",
+                "y_sp\t1\tg2\tno",
+                "b_sp\t0\tg2\tno",
+                "ext\t1\t\tyes",
+                "inf\t\t\tno",
             ]
         )
         + "\n",
@@ -415,9 +746,9 @@ def test_no_training_validation_pool_is_rejected(tmp_path: Path) -> None:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\t",
-                "sp2\t\t",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\t\tyes",
+                "sp2\t\t\tno",
             ]
         )
         + "\n",
@@ -493,14 +824,23 @@ def test_split_manifest_builder_rejects_empty_rows() -> None:
         schema={
             "__species": split_mod.pl.String,
             "__group": split_mod.pl.String,
+            "__contrast_group": split_mod.pl.String,
             "__label": split_mod.pl.Int8,
         }
     )
     empty_external = split_mod.pl.DataFrame(
-        schema={"__species": split_mod.pl.String, "__label": split_mod.pl.Int8}
+        schema={
+            "__species": split_mod.pl.String,
+            "__contrast_group": split_mod.pl.String,
+            "__label": split_mod.pl.Int8,
+        }
     )
     empty_inference = split_mod.pl.DataFrame(
-        schema={"__species": split_mod.pl.String, "__label": split_mod.pl.Int8}
+        schema={
+            "__species": split_mod.pl.String,
+            "__contrast_group": split_mod.pl.String,
+            "__label": split_mod.pl.Int8,
+        }
     )
 
     with pytest.raises(SplitError, match="Split manifest is empty"):
