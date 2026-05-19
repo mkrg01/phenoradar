@@ -373,7 +373,8 @@ def _load_ncbi_taxa(ncbi_taxonomy_db: Path | None = None) -> _NCBITaxa:
         ete4_module = importlib.import_module("ete4")
     except ImportError as exc:
         raise MetadataError(
-            "Taxonomic rank blocking requires ete4. Install the taxonomy dependency group."
+            "Taxonomic rank blocking requires ete4, which is installed with phenoradar. "
+            "Reinstall phenoradar or install ete4 manually."
         ) from exc
     try:
         ncbi_taxa_factory = cast(_NCBITaxaFactory, ete4_module.NCBITaxa)

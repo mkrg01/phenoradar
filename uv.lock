@@ -1026,7 +1026,7 @@ wheels = [
 [[package]]
 name = "nwkit"
 version = "0.24.0"
-source = { git = "https://github.com/kfuku52/nwkit#61db21b4a4241460b3d78779050482ea08d16722" }
+source = { git = "https://github.com/kfuku52/nwkit?rev=61db21b4a4241460b3d78779050482ea08d16722#61db21b4a4241460b3d78779050482ea08d16722" }
 dependencies = [
     { name = "biopython" },
     { name = "ete4" },
@@ -1126,9 +1126,10 @@ wheels = [
 
 [[package]]
 name = "phenoradar"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
+    { name = "ete4" },
     { name = "joblib" },
     { name = "matplotlib" },
     { name = "optuna" },
@@ -1136,6 +1137,8 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "scikit-learn" },
+    { name = "toyplot" },
+    { name = "toytree" },
     { name = "typer" },
 ]
 
@@ -1161,6 +1164,7 @@ taxonomy = [
 
 [package.metadata]
 requires-dist = [
+    { name = "ete4", specifier = ">=4.4.0,<5.0.0" },
     { name = "joblib", specifier = ">=1.4.2,<2.0.0" },
     { name = "matplotlib", specifier = ">=3.9.2,<4.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.2,<2.0.0" },
@@ -1173,7 +1177,9 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.2,<7.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.9,<1.0.0" },
     { name = "scikit-learn", specifier = ">=1.8.0,<2.0.0" },
+    { name = "toyplot", specifier = ">=2.0.0,<3.0.0" },
     { name = "toyplot", marker = "extra == 'tree'", specifier = ">=2.0.0,<3.0.0" },
+    { name = "toytree", specifier = ">=3.0.0,<4.0.0" },
     { name = "toytree", marker = "extra == 'tree'", specifier = ">=3.0.0,<4.0.0" },
     { name = "typer", specifier = ">=0.12.5,<1.0.0" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12.20250915,<7.0.0" },
@@ -1183,7 +1189,7 @@ provides-extras = ["dev", "tree"]
 [package.metadata.requires-dev]
 taxonomy = [
     { name = "ete4", specifier = ">=4.4.0,<5.0.0" },
-    { name = "nwkit", git = "https://github.com/kfuku52/nwkit" },
+    { name = "nwkit", git = "https://github.com/kfuku52/nwkit?rev=61db21b4a4241460b3d78779050482ea08d16722" },
 ]
 
 [[package]]

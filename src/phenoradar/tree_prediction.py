@@ -650,7 +650,8 @@ def _write_tree_prediction_svg(
         toytree = importlib.import_module("toytree")
     except ImportError:
         return [
-            f"Skipped {out_path.name}: install phenoradar[tree] to enable Toytree SVG output."
+            f"Skipped {out_path.name}: Toytree is unavailable. Reinstall phenoradar or "
+            "install toytree manually to enable SVG output."
         ]
 
     try:
@@ -711,7 +712,8 @@ def _write_tree_feature_heatmap_svg(
         toytree = importlib.import_module("toytree")
     except ImportError:
         return [
-            f"Skipped {out_path.name}: install phenoradar[tree] to enable Toytree SVG output."
+            f"Skipped {out_path.name}: Toytree is unavailable. Reinstall phenoradar or "
+            "install toytree manually to enable SVG output."
         ]
 
     try:

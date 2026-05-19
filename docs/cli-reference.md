@@ -131,15 +131,17 @@ phenoradar metadata \
   --out species_metadata.tsv
 ```
 
-This command requires the external `nwkit` executable. Taxonomic-rank blocking also uses
-`ete4.NCBITaxa`. For a local uv environment, install the recorded dependency group with:
+This command uses the external `nwkit` executable. Taxonomic-rank blocking also uses
+`ete4.NCBITaxa`, which is included in standard PhenoRadar installs. For a local uv
+environment, install the recorded `nwkit` dependency group with:
 
 ```bash
 uv sync --group taxonomy
 ```
 
-For conda-based environments, install `nwkit` from Bioconda and `ete4` from PyPI or conda.
-For pip-only environments, install `nwkit` directly from the upstream repository.
+For conda-based environments, install `nwkit` from Bioconda. For pip-only environments,
+install `nwkit` directly from the upstream repository. Make sure the executable is on
+`PATH` or pass `--nwkit-bin`.
 Tree retrieval uses the default `nwkit constrain` taxonomy depth; taxonomic-rank split
 blocks are controlled separately with `--taxon-block-rank`.
 

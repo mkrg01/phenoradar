@@ -138,7 +138,7 @@ runtime:
   - type: `str | null`
   - default: `null`
   - optional Newick tree used to write tree prediction annotation TSVs and, when
-    `phenoradar[tree]` is installed, Toytree SVG figures.
+    Toytree is available, Toytree SVG figures.
 - `data.species_col`
   - type: `str`
   - default: `species`

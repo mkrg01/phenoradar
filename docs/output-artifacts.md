@@ -508,14 +508,14 @@ Conditionally written:
   - Final-refit `log_loss` comparison of `train` and `external_test`.
   - Useful for quick train-vs-external generalization diagnostics.
 - `tree_prediction_cv.svg` / `tree_prediction_external.svg` (optional)
-  - Written when `data.tree_path` is set and `phenoradar[tree]` is installed.
+  - Written when `data.tree_path` is set and Toytree is available.
   - Rectangular Toytree view with aligned tracks for trait label, probability,
     predicted label, uncertainty, contrast pair, and fold where applicable.
 - `tree_contrast_pairs.svg` (optional)
-  - Written when `data.tree_path` is set and `phenoradar[tree]` is installed.
+  - Written when `data.tree_path` is set and Toytree is available.
   - Rectangular Toytree view with trait-label and contrast-pair tracks for metadata QC.
 - `tree_feature_heatmap_zscore.svg` / `tree_feature_heatmap_log2_tpm.svg` (optional)
-  - Written when `data.tree_path` is set and `phenoradar[tree]` is installed.
+  - Written when `data.tree_path` is set and Toytree is available.
   - Rectangular Toytree views with top-feature heatmap tiles ordered by
     `importance_mean`.
   - The z-score figure emphasizes relative per-feature expression patterns; the
@@ -544,7 +544,7 @@ Conditionally written:
 - `predict_uncertainty.svg` (ensemble only)
   - Top species by `uncertainty_std`; high bars indicate less stable predictions.
 - `tree_prediction_predict.svg` (optional)
-  - Written when `data.tree_path` is set and `phenoradar[tree]` is installed.
+  - Written when `data.tree_path` is set and Toytree is available.
   - Tree view with aligned tracks for true label when known, probability,
     CV-threshold prediction, uncertainty, and contrast pair when available.
 

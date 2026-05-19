@@ -20,6 +20,9 @@ dependencies = [
   "PyYAML>=6.0.2,<7.0.0",
   "pydantic>=2.9.2,<3.0.0",
   "joblib>=1.4.2,<2.0.0",
+  "ete4>=4.4.0,<5.0.0",
+  "toytree>=3.0.0,<4.0.0",
+  "toyplot>=2.0.0,<3.0.0",
 ]
 
 [project.scripts]
@@ -43,7 +46,7 @@ tree = [
 [dependency-groups]
 taxonomy = [
   "ete4>=4.4.0,<5.0.0",
-  "nwkit @ git+https://github.com/kfuku52/nwkit",
+  "nwkit @ git+https://github.com/kfuku52/nwkit@61db21b4a4241460b3d78779050482ea08d16722",
 ]
 
 [tool.hatch.build.targets.wheel]

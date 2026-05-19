@@ -241,4 +241,4 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
     assert (tmp_path / "run" / "tree_contrast_pairs_annotation.tsv").exists()
     assert (tmp_path / "run" / "tree_feature_heatmap_annotation.tsv").exists()
     if not (figures_dir / "tree_prediction_cv.svg").exists():
-        assert any("phenoradar[tree]" in warning for warning in warnings)
+        assert any("Toytree is unavailable" in warning for warning in warnings)

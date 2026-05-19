@@ -30,17 +30,18 @@ phenoradar metadata \
   --out species_metadata.tsv
 ```
 
-The tree-generation step requires `nwkit` and uses the default `nwkit constrain` taxonomy
-depth. Taxonomic-rank blocks are independent of tree retrieval and also use
-`ete4.NCBITaxa`.
-For a local uv environment, install the recorded dependency group with:
+The tree-generation step uses `nwkit constrain` and the default NCBI taxonomy depth.
+Taxonomic-rank blocks are independent of tree retrieval and also use `ete4.NCBITaxa`,
+which is included in standard PhenoRadar installs. For a local uv environment, install the
+recorded `nwkit` dependency group with:
 
 ```bash
 uv sync --group taxonomy
 ```
 
-For conda-based environments, install `nwkit` from Bioconda and `ete4` from PyPI or conda.
-For pip-only environments, install `nwkit` directly from the upstream repository.
+For conda-based environments, install `nwkit` from Bioconda. For pip-only environments,
+install `nwkit` directly from the upstream repository. Make sure the executable is on
+`PATH` or pass `--nwkit-bin`.
 
 Group assignment uses `nwkit skim` contrastive clades. Species that are not present in the
 tree are excluded from the generated `species_metadata.tsv`. Species with known traits inside
@@ -146,9 +147,8 @@ Optional path/key:
 - `data.tree_path` (default: `null`)
 
 When `data.tree_path` is set, `phenoradar run` and `phenoradar predict` write
-ggtree-friendly tree prediction annotation TSV files. If the optional tree visualization
-dependencies are installed with `pip install "phenoradar[tree]"`, Toytree SVG figures are
-also written under `figures/`.
+ggtree-friendly tree prediction annotation TSV files. Toytree SVG figures are also written
+under `figures/` when Toytree is available.
 
 Tree tip labels must match metadata and prediction `species` values. In CV runs, tree
 contrast-pair QC and prediction artifacts focus on species with non-empty
