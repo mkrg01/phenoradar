@@ -25,7 +25,6 @@ class NCBITreeResult:
 
     tree_path: Path
     species_count: int
-    rank: str
 
 
 @dataclass(frozen=True)
@@ -230,14 +229,10 @@ def fetch_ncbi_tree(
     species_taxid_path: Path | None = None,
     species_col: str = "species",
     taxid_col: str = "taxid",
-    rank: str = "family",
     nwkit_bin: str = "nwkit",
     overwrite: bool = False,
 ) -> NCBITreeResult:
     """Generate an NCBI-taxonomy constrained Newick tree with ``nwkit constrain``."""
-    resolved_rank = rank.strip()
-    if not resolved_rank:
-        raise MetadataError("NCBI taxonomy rank must be non-empty")
     if not nwkit_bin.strip():
         raise MetadataError("nwkit executable path must be non-empty")
     if tree_out.exists() and not overwrite:
@@ -278,8 +273,6 @@ def fetch_ncbi_tree(
             command_parts.extend(["--taxid_tsv", str(taxid_tsv_path)])
         command_parts.extend(
             [
-                "--rank",
-                resolved_rank,
                 "--outfile",
                 str(temp_tree_out),
             ]
@@ -294,7 +287,7 @@ def fetch_ncbi_tree(
             raise MetadataError(message)
         temp_tree_out.replace(tree_out)
 
-    return NCBITreeResult(tree_path=tree_out, species_count=species_count, rank=resolved_rank)
+    return NCBITreeResult(tree_path=tree_out, species_count=species_count)
 
 
 def _normalize_species_trait_for_metadata(

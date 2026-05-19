@@ -1300,13 +1300,6 @@ def metadata_command(
             help="Optional ete4 NCBI taxonomy SQLite database path.",
         ),
     ] = None,
-    rank: Annotated[
-        str,
-        typer.Option(
-            "--rank",
-            help="NCBI taxonomy rank passed to `nwkit constrain --rank`.",
-        ),
-    ] = "family",
     nwkit_bin: Annotated[
         str,
         typer.Option(
@@ -1385,14 +1378,13 @@ def metadata_command(
                 species_taxid_path=resolved_species_taxid,
                 species_col=species_col,
                 taxid_col=taxid_col,
-                rank=rank,
                 nwkit_bin=nwkit_bin,
                 overwrite=force,
             )
             tree_path = tree_result.tree_path
             typer.echo(
                 f"Wrote NCBI taxonomy tree: {tree_result.tree_path} "
-                f"(species={tree_result.species_count}, rank={tree_result.rank})."
+                f"(species={tree_result.species_count})."
             )
         else:
             tree_path = tree_in

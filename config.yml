@@ -1,0 +1,79 @@
+# Fully expanded working configuration.
+# Adapted to the current PhenoRadar config schema.
+data:
+  metadata_path: c4_dataset/species_metadata.tsv
+  tpm_path: c4_dataset/tpm.tsv
+  tree_path: c4_dataset/ncbi_tree.nwk
+  species_col: species
+  feature_col: orthogroup
+  value_col: tpm
+  trait_col: C4
+  contrast_pair_col: contrast_pair_id
+
+split:
+  group_col: contrast_pair_id
+  test_holdout_col: contrast_pair_test_holdout
+  exclude_col: null
+  outer_cv_strategy: logo
+  outer_cv_n_splits: null
+
+sampling:
+  strategy: group_balanced
+  max_samples_per_label_per_group: 1
+  sampled_set_count: 1
+  weighting: none
+
+preprocess:
+  max_pivot_cells: 50000000
+  expression_transform:
+    method: log1p
+  low_prevalence_filter:
+    enabled: true
+    min_species_per_feature: 8
+  low_variance_filter:
+    enabled: false
+    min_variance: null
+  pair_aware_filter:
+    enabled: true
+    max_features: 30
+  correlation_filter:
+    enabled: false
+    method: pearson
+    max_abs_correlation: null
+  feature_scaling:
+    method: standard
+
+model:
+  name: logistic_elasticnet
+
+model_selection:
+  selected_candidate_count: 1
+  selected_candidate_percent: null
+  candidate_source_policy: per_sample_set
+  search_strategy: grid
+  trial_count: null
+  search_space:
+    C:
+      type: log_range
+      base: 10
+      start_exp: -2
+      end_exp: 1
+      step_exp: 0.1
+      inclusive_end: true
+    l1_ratio: [1]
+    max_iter: [10000]
+  inner_cv_strategy: group_kfold
+  inner_cv_n_splits: 3
+  selection_metric: log_loss
+
+ensemble:
+  probability_aggregation: mean
+
+report:
+  fixed_probability_threshold: 0.5
+  auto_threshold_selection_metric: mcc
+
+runtime:
+  seed: 42
+  n_jobs: 32
+  execution_stage: cv_only

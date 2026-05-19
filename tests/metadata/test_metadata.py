@@ -107,13 +107,11 @@ def test_fetch_ncbi_tree_runs_nwkit_constrain(
     result = fetch_ncbi_tree(
         species_trait,
         tree_out,
-        rank="genus",
         nwkit_bin="nwkit-test",
     )
 
     assert result.tree_path == tree_out
     assert result.species_count == 2
-    assert result.rank == "genus"
     assert captured["command"] == [
         "nwkit-test",
         "constrain",
@@ -121,11 +119,10 @@ def test_fetch_ncbi_tree_runs_nwkit_constrain(
         "ncbi",
         "--species_list",
         captured["command"][5],
-        "--rank",
-        "genus",
         "--outfile",
-        captured["command"][9],
+        captured["command"][7],
     ]
+    assert "--rank" not in captured["command"]
     assert captured["kwargs"]["check"] is False
     assert captured["kwargs"]["capture_output"] is True
     assert captured["kwargs"]["text"] is True
@@ -178,11 +175,10 @@ def test_fetch_ncbi_tree_runs_nwkit_constrain_with_taxid_tsv(
         "ncbi",
         "--taxid_tsv",
         captured["command"][5],
-        "--rank",
-        "family",
         "--outfile",
-        captured["command"][9],
+        captured["command"][7],
     ]
+    assert "--rank" not in captured["command"]
     assert captured["kwargs"]["check"] is False
     assert captured["kwargs"]["capture_output"] is True
     assert captured["kwargs"]["text"] is True
@@ -306,8 +302,6 @@ def test_metadata_cli_writes_ncbi_tree(tmp_path: Path, monkeypatch: pytest.Monke
             str(species_trait),
             "--tree-out",
             str(tree_out),
-            "--rank",
-            "genus",
             "--tree-only",
         ],
     )

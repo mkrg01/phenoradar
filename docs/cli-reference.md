@@ -140,6 +140,8 @@ uv sync --group taxonomy
 
 For conda-based environments, install `nwkit` from Bioconda and `ete4` from PyPI or conda.
 For pip-only environments, install `nwkit` directly from the upstream repository.
+Tree retrieval uses the default `nwkit constrain` taxonomy depth; taxonomic-rank split
+blocks are controlled separately with `--taxon-block-rank`.
 
 Options:
 
@@ -159,7 +161,6 @@ Options:
 - `--taxon-block-mixed-test-fraction`: fraction of mixed-label taxon blocks to reserve as external test blocks (default: `0.0`)
 - `--taxon-block-mixed-test-seed`: random seed for selecting mixed-label test blocks (default: `42`)
 - `--ncbi-taxonomy-db`: optional ete4 NCBI taxonomy SQLite database path
-- `--rank`: NCBI taxonomy rank passed to `nwkit constrain --rank` (default: `family`)
 - `--nwkit-bin`: `nwkit` executable path (default: `nwkit`)
 - `--force`: overwrite existing tree or metadata outputs
 - `--tree-only`: fetch/write only the tree and skip metadata generation

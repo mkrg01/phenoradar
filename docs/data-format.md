@@ -30,7 +30,9 @@ phenoradar metadata \
   --out species_metadata.tsv
 ```
 
-The tree-generation step requires `nwkit`. Taxonomic-rank blocks also use `ete4.NCBITaxa`.
+The tree-generation step requires `nwkit` and uses the default `nwkit constrain` taxonomy
+depth. Taxonomic-rank blocks are independent of tree retrieval and also use
+`ete4.NCBITaxa`.
 For a local uv environment, install the recorded dependency group with:
 
 ```bash
