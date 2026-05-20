@@ -14,19 +14,19 @@ split:
   group_col: contrast_pair_id
   test_holdout_col: contrast_pair_test_holdout
   exclude_col: null
-  outer_cv_strategy: logo
+  outer_cv_strategy: logo  # choices: logo, group_kfold
   outer_cv_n_splits: null
 
 sampling:
-  strategy: group_balanced
+  strategy: group_balanced  # choices: all_samples, group_balanced
   max_samples_per_label_per_group: 1
   sampled_set_count: 1
-  weighting: none
+  weighting: none  # choices: none, group_label_inverse
 
 preprocess:
   max_pivot_cells: 50000000
   expression_transform:
-    method: log1p
+    method: log1p  # choices: none, log1p, sample_rank, sample_percentile_rank
   low_prevalence_filter:
     enabled: true
     min_species_per_feature: 8
@@ -38,23 +38,23 @@ preprocess:
     max_features: 30
   correlation_filter:
     enabled: false
-    method: pearson
+    method: pearson  # choices: pearson, spearman
     max_abs_correlation: null
   feature_scaling:
-    method: standard
+    method: standard  # choices: none, standard
 
 model:
-  name: logistic_elasticnet
+  name: logistic_elasticnet  # choices: logistic_elasticnet, linear_svm, random_forest
 
 model_selection:
   selected_candidate_count: 1
   selected_candidate_percent: null
-  candidate_source_policy: per_sample_set
-  search_strategy: grid
+  candidate_source_policy: per_sample_set  # choices: per_sample_set, reuse_first_sample_set
+  search_strategy: grid  # choices: grid, random, tpe
   trial_count: null
   search_space:
     C:
-      type: log_range
+      type: log_range  # choices: range, int_range, log_range, continuous_range, continuous_log_range
       base: 10
       start_exp: -2
       end_exp: 1
@@ -62,18 +62,18 @@ model_selection:
       inclusive_end: true
     l1_ratio: [1]
     max_iter: [10000]
-  inner_cv_strategy: group_kfold
+  inner_cv_strategy: group_kfold  # choices: logo, group_kfold
   inner_cv_n_splits: 3
-  selection_metric: log_loss
+  selection_metric: log_loss  # choices: mcc, balanced_accuracy, log_loss
 
 ensemble:
-  probability_aggregation: mean
+  probability_aggregation: mean  # choices: mean, median
 
 report:
   fixed_probability_threshold: 0.5
-  auto_threshold_selection_metric: mcc
+  auto_threshold_selection_metric: mcc  # choices: mcc, balanced_accuracy
 
 runtime:
   seed: 42
   n_jobs: 32
-  execution_stage: cv_only
+  execution_stage: cv_only  # choices: cv_only, full_run
