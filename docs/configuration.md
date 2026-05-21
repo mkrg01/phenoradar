@@ -535,8 +535,9 @@ Unknown parameter names are rejected at training time.
   - rule: must be in `[1, 100]`
   - behavior:
     - controls how many top-ranked features are shown in
-      `feature_importance_top.svg`, `coefficients_signed_top.svg`, and tree
-      feature heatmaps when `data.tree_path` is set.
+      `feature_importance_top.svg`, `feature_importance_by_fold_heatmap.svg`,
+      `coefficients_signed_top.svg`, and tree feature heatmaps when
+      `data.tree_path` is set.
 
 ## `report`
 

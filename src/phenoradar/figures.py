@@ -10,7 +10,7 @@ from typing import Any, Literal
 import matplotlib
 import numpy as np
 import polars as pl
-from matplotlib.colors import to_rgba
+from matplotlib.colors import LinearSegmentedColormap, to_rgba
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
@@ -79,6 +79,10 @@ _RETAINED_FEATURE_LIMIT = 40
 _DEFAULT_TOP_FEATURES = 30
 _FEATURE_IMPORTANCE_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
 _FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE = _LABEL_FONTSIZE
+_FEATURE_IMPORTANCE_HEATMAP_CMAP = LinearSegmentedColormap.from_list(
+    "phenoradar_feature_importance_blues",
+    ["#ffffff", "#deebf7", "#9ecae1", "#3182bd", "#08519c"],
+)
 _COEFFICIENTS_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
 _COEFFICIENTS_AXIS_LABEL_FONTSIZE = _LABEL_FONTSIZE
 _FEATURE_FILTER_FIGURE_DEFAULT_STAGE_ORDER = (
@@ -812,6 +816,154 @@ def _feature_importance_top(
         ),
         right=0.98,
         top=0.985,
+        bottom=_compact_bottom_margin(height_px),
+    )
+    _save_svg_figure(fig, out_path)
+
+
+def _feature_importance_by_fold_heatmap(
+    feature_importance: pl.DataFrame,
+    feature_importance_by_fold: pl.DataFrame,
+    out_path: Path,
+    top_features: int = _DEFAULT_TOP_FEATURES,
+) -> None:
+    required = {"feature", "importance_mean"}
+    if not required.issubset(feature_importance.columns):
+        raise FigureError(
+            "feature_importance.tsv schema is invalid for feature_importance_by_fold_heatmap.svg"
+        )
+    fold_required = {"fold_id", "feature", "importance_mean"}
+    if not fold_required.issubset(feature_importance_by_fold.columns):
+        raise FigureError(
+            "feature_importance_by_fold.tsv schema is invalid for "
+            "feature_importance_by_fold_heatmap.svg"
+        )
+    if top_features < 1:
+        raise FigureError("figures.top_features must be >= 1")
+
+    top = feature_importance.sort(
+        by=["importance_mean", "feature"],
+        descending=[True, False],
+    ).head(top_features)
+    if top.height == 0:
+        raise FigureError(
+            "feature_importance.tsv is empty; cannot draw feature_importance_by_fold_heatmap.svg"
+        )
+
+    features = [str(v) for v in top.select("feature").to_series().to_list()]
+    data = (
+        feature_importance_by_fold.select(
+            pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
+            pl.col("feature").cast(pl.String, strict=False).alias("__feature"),
+            pl.col("importance_mean").cast(pl.Float64, strict=False).alias("__value"),
+        )
+        .filter(
+            pl.col("__feature").is_in(features)
+            & pl.col("__fold_id").is_not_null()
+            & (pl.col("__fold_id") != "")
+            & pl.col("__feature").is_not_null()
+            & (pl.col("__feature") != "")
+            & pl.col("__value").is_not_null()
+            & pl.col("__value").is_finite()
+        )
+        .group_by(["__feature", "__fold_id"])
+        .agg(pl.col("__value").mean().alias("__value"))
+    )
+    if data.height == 0:
+        _write_message_figure(
+            title="Feature Importance by Fold Heatmap",
+            message="No fold-level feature importance rows match the selected top features.",
+            out_path=out_path,
+            width_px=_FEATURE_IMPORTANCE_TOP_WIDTH_PX,
+            height_px=360,
+        )
+        return
+
+    fold_ids = [str(v) for v in data.select("__fold_id").unique().to_series().to_list()]
+    fold_ids = sorted(
+        fold_ids,
+        key=lambda value: (0, int(value)) if value.isdigit() else (1, value),
+    )
+    if not fold_ids:
+        _write_message_figure(
+            title="Feature Importance by Fold Heatmap",
+            message="No CV folds are available in feature_importance_by_fold.tsv.",
+            out_path=out_path,
+            width_px=_FEATURE_IMPORTANCE_TOP_WIDTH_PX,
+            height_px=360,
+        )
+        return
+
+    feature_index = {feature: idx for idx, feature in enumerate(features)}
+    fold_index = {fold_id: idx for idx, fold_id in enumerate(fold_ids)}
+    importance_matrix = np.full((len(features), len(fold_ids)), np.nan, dtype=float)
+    for row in data.iter_rows(named=True):
+        feature_name = str(row["__feature"])
+        fold_id = str(row["__fold_id"])
+        importance_matrix[feature_index[feature_name], fold_index[fold_id]] = float(
+            row["__value"]
+        )
+
+    finite_values = importance_matrix[np.isfinite(importance_matrix)]
+    max_value = float(np.max(finite_values)) if finite_values.size > 0 else 1.0
+    if np.isclose(max_value, 0.0):
+        max_value = 1.0
+
+    height_px = max(260, 95 + len(features) * 18)
+    width_px = _fold_axis_width_px(len(fold_ids), base_px=260, per_fold_px=44)
+    fig, ax = plt.subplots(figsize=_figure_size_inches(width_px, height_px), dpi=_FIG_DPI)
+    fig.patch.set_facecolor("white")
+
+    cmap = _FEATURE_IMPORTANCE_HEATMAP_CMAP.copy()
+    cmap.set_bad("#ffffff")
+    image = ax.imshow(
+        np.ma.masked_invalid(importance_matrix),
+        aspect="auto",
+        cmap=cmap,
+        interpolation="nearest",
+        vmin=0.0,
+        vmax=max_value,
+    )
+    ax.set_xticks(np.arange(len(fold_ids), dtype=float))
+    ax.set_xticklabels([str(fold_id) for fold_id in fold_ids], fontsize=_TICK_FONTSIZE)
+    ax.set_yticks(np.arange(len(features), dtype=float))
+    ax.set_yticklabels(features, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
+    ax.set_xlabel("CV fold", fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE)
+    ax.set_ylabel("Orthogroup ID", fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE)
+    ax.set_xticks(np.arange(-0.5, len(fold_ids), 1.0), minor=True)
+    ax.set_yticks(np.arange(-0.5, len(features), 1.0), minor=True)
+    ax.grid(which="minor", color="#ffffff", linewidth=0.5)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    if len(features) <= 12 and len(fold_ids) <= 8:
+        for row_index in range(len(features)):
+            for col_index in range(len(fold_ids)):
+                value = importance_matrix[row_index, col_index]
+                if not np.isfinite(value):
+                    continue
+                color = "#ffffff" if value > max_value * 0.55 else _AXIS_COLOR
+                ax.text(
+                    col_index,
+                    row_index,
+                    f"{value:.3g}",
+                    ha="center",
+                    va="center",
+                    fontsize=_MONO_FONTSIZE,
+                    color=color,
+                    fontfamily="monospace",
+                )
+
+    colorbar = fig.colorbar(image, ax=ax, fraction=0.025, pad=0.02)
+    colorbar.set_label(
+        "Mean feature importance per fold",
+        rotation=90,
+        fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE,
+    )
+    colorbar.ax.tick_params(labelsize=_TICK_FONTSIZE)
+    fig.subplots_adjust(
+        left=_label_left_margin(features, width_px=width_px, fontsize_px=_MONO_FONTSIZE),
+        right=0.94,
+        top=0.98,
         bottom=_compact_bottom_margin(height_px),
     )
     _save_svg_figure(fig, out_path)
@@ -2480,6 +2632,13 @@ def write_run_figures(
         feature_importance_by_fold=feature_importance_by_fold,
         top_features=top_features,
     )
+    if feature_importance_by_fold is not None:
+        _feature_importance_by_fold_heatmap(
+            feature_importance,
+            feature_importance_by_fold,
+            figures_dir / "feature_importance_by_fold_heatmap.svg",
+            top_features=top_features,
+        )
     _coefficients_signed_top(
         coefficients,
         figures_dir / "coefficients_signed_top.svg",

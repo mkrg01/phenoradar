@@ -83,6 +83,7 @@ Notes:
   - `cv_loss_by_split.svg`
   - `threshold_selection_curve.svg`
   - `feature_importance_top.svg`
+  - `feature_importance_by_fold_heatmap.svg`
   - `coefficients_signed_top.svg`
   - `cv_species_probability_by_trait.svg`
   - `cv_fold_trait_probability.svg`

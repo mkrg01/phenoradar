@@ -121,6 +121,7 @@ Always written:
     - `cv_loss_by_split.svg`
     - `threshold_selection_curve.svg`
     - `feature_importance_top.svg`
+    - `feature_importance_by_fold_heatmap.svg`
     - `coefficients_signed_top.svg`
     - `cv_species_probability_by_trait.svg`
     - `cv_fold_trait_probability.svg`
@@ -383,7 +384,8 @@ Conditionally written:
 - One row per (`fold_id`, `feature`).
 - `importance_mean` is the mean normalized importance across fitted models in that fold.
 - These fold-level values are the points and boxplot distribution in
-  `feature_importance_top.svg`.
+  `feature_importance_top.svg` and the cells in
+  `feature_importance_by_fold_heatmap.svg`.
 
 #### `coefficients.tsv`
 
@@ -483,6 +485,12 @@ Conditionally written:
 - `feature_importance_top.svg`
   - Top `figures.top_features` features by mean fold-level `importance_mean`.
   - Horizontal boxplot plus fold-level points.
+- `feature_importance_by_fold_heatmap.svg`
+  - Top `figures.top_features` features by mean fold-level `importance_mean`.
+  - Rows are features, columns are CV folds, and color is fold-level
+    `importance_mean` from `feature_importance_by_fold.tsv`.
+  - The continuous white-to-blue scale starts at zero, so unimportant fold-feature
+    cells remain white and larger importances become darker blue.
 - `coefficients_signed_top.svg`
   - Top `figures.top_features` by absolute mean fold-level coefficient magnitude.
   - Horizontal boxplot plus fold-level points; right is positive and left is negative.

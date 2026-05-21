@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pytest
+from matplotlib.colors import to_hex
 
 import phenoradar.figures as figures_mod
 from phenoradar.figures import (
@@ -169,6 +170,18 @@ def _minimal_feature_importance() -> pl.DataFrame:
     )
 
 
+def _minimal_feature_importance_by_fold() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "fold_id": ["0", "1", "0", "1"],
+            "feature": ["OG1", "OG1", "OG2", "OG2"],
+            "importance_mean": [0.8, 0.6, 0.2, 0.4],
+            "n_models": [1, 1, 1, 1],
+            "method": ["coef_abs_l1_norm"] * 4,
+        }
+    )
+
+
 def _minimal_feature_filter_counts() -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -319,6 +332,7 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
         oof_predictions=_minimal_oof(),
         thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
+        feature_importance_by_fold=_minimal_feature_importance_by_fold(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
         model_selection_trials=None,
@@ -331,6 +345,7 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
     assert (figures_dir / "cv_loss_by_split.svg").exists()
     assert (figures_dir / "threshold_selection_curve.svg").exists()
     assert (figures_dir / "feature_importance_top.svg").exists()
+    assert (figures_dir / "feature_importance_by_fold_heatmap.svg").exists()
     assert (figures_dir / "coefficients_signed_top.svg").exists()
     assert (figures_dir / "cv_species_probability_by_trait.svg").exists()
     assert (figures_dir / "cv_fold_trait_probability.svg").exists()
@@ -1141,6 +1156,67 @@ def test_feature_importance_top_fold_points_use_neutral_styling(tmp_path: Path) 
     assert "#d9f0e6" not in svg_text
     assert "#eeeeee" in svg_text
     assert "#666666" in svg_text
+
+
+def test_feature_importance_by_fold_heatmap_rejects_invalid_schema(tmp_path: Path) -> None:
+    with pytest.raises(FigureError, match="feature_importance_by_fold.tsv schema is invalid"):
+        figures_mod._feature_importance_by_fold_heatmap(
+            feature_importance=_minimal_feature_importance(),
+            feature_importance_by_fold=pl.DataFrame({"feature": ["OG1"]}),
+            out_path=tmp_path / "feature_importance_by_fold_heatmap.svg",
+        )
+
+
+def test_feature_importance_by_fold_heatmap_writes_svg(tmp_path: Path) -> None:
+    out_path = tmp_path / "feature_importance_by_fold_heatmap.svg"
+    figures_mod._feature_importance_by_fold_heatmap(
+        feature_importance=_minimal_feature_importance(),
+        feature_importance_by_fold=_minimal_feature_importance_by_fold(),
+        out_path=out_path,
+    )
+
+    assert out_path.exists()
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "CV fold" in svg_text
+    assert "Orthogroup ID" in svg_text
+    assert "Mean feature importance per fold" in svg_text
+    assert "OG1" in svg_text
+    assert "OG2" in svg_text
+
+
+def test_feature_importance_by_fold_heatmap_colormap_starts_at_white() -> None:
+    cmap = figures_mod._FEATURE_IMPORTANCE_HEATMAP_CMAP
+
+    assert to_hex(cmap(0.0)) == "#ffffff"
+    assert to_hex(cmap(0.5)) != "#ffffff"
+
+
+def test_feature_importance_by_fold_heatmap_uses_requested_feature_limit(
+    tmp_path: Path,
+) -> None:
+    out_path = tmp_path / "feature_importance_by_fold_heatmap.svg"
+    figures_mod._feature_importance_by_fold_heatmap(
+        feature_importance=pl.DataFrame(
+            {
+                "feature": ["OG1", "OG2", "OG3"],
+                "importance_mean": [0.2, 0.9, 0.1],
+            }
+        ),
+        feature_importance_by_fold=pl.DataFrame(
+            {
+                "fold_id": ["0", "0", "0"],
+                "feature": ["OG1", "OG2", "OG3"],
+                "importance_mean": [0.2, 0.9, 0.1],
+            }
+        ),
+        out_path=out_path,
+        top_features=1,
+    )
+
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "OG2" in svg_text
+    assert "OG1" not in svg_text
+    assert "OG3" not in svg_text
 
 
 def test_coefficients_signed_top_rejects_invalid_schema(tmp_path: Path) -> None:
