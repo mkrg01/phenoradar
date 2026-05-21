@@ -42,10 +42,20 @@ class FigureError(ValueError):
 _FIG_DPI = 100
 _MODEL_SELECTION_SAMPLE_SET_LIMIT = 1
 _RETAINED_FEATURE_LIMIT = 40
+_COEFFICIENTS_TOP_WIDTH_PX = 1120
 
 
 def _figure_size_inches(width_px: int, height_px: int) -> tuple[float, float]:
     return width_px / _FIG_DPI, height_px / _FIG_DPI
+
+
+def _label_left_margin(labels: list[str], *, width_px: int, fontsize_px: int) -> float:
+    label_px = max((len(label) for label in labels), default=0) * fontsize_px * 0.62 + 32
+    return min(0.34, max(0.16, label_px / width_px))
+
+
+def _compact_bottom_margin(height_px: int) -> float:
+    return min(0.14, max(0.065, 42 / height_px))
 
 
 def _save_svg_figure(fig: Figure, out_path: Path) -> None:
@@ -636,7 +646,7 @@ def _feature_importance_top(
                     alpha=0.72,
                     edgecolors="none",
                     zorder=3,
-                )
+            )
             ax.set_yticks(y_pos)
             ax.set_yticklabels(features, fontsize=9, fontfamily="monospace")
             ax.invert_yaxis()
@@ -749,16 +759,12 @@ def _coefficients_signed_top(
             if np.isclose(max_abs, 0.0):
                 max_abs = 1.0
 
-            height_px = max(340, 160 + len(features) * 27)
-            fig, ax = plt.subplots(figsize=_figure_size_inches(1340, height_px), dpi=_FIG_DPI)
-            fig.patch.set_facecolor("white")
-            fig.suptitle("Coefficients Signed Top", x=0.01, ha="left", fontsize=16)
-            fig.text(
-                0.01,
-                0.90,
-                "Top 30 by |mean fold-level coef| (box=IQR/median, marker=mean, points=folds)",
-                fontsize=10,
+            height_px = max(250, 70 + len(features) * 26)
+            fig, ax = plt.subplots(
+                figsize=_figure_size_inches(_COEFFICIENTS_TOP_WIDTH_PX, height_px),
+                dpi=_FIG_DPI,
             )
+            fig.patch.set_facecolor("white")
 
             y_pos = np.arange(len(features), dtype=float)
             plot_values = [
@@ -774,15 +780,16 @@ def _coefficients_signed_top(
                 widths=0.58,
                 patch_artist=True,
                 showmeans=True,
-                boxprops={"facecolor": "#d9e8f5", "edgecolor": "#1f77b4", "linewidth": 1.1},
-                whiskerprops={"color": "#1f77b4", "linewidth": 1.0},
-                capprops={"color": "#1f77b4", "linewidth": 1.0},
-                medianprops={"color": "#222222", "linewidth": 1.4},
+                boxprops={"facecolor": "#eeeeee", "edgecolor": "#555555", "linewidth": 1.1},
+                whiskerprops={"color": "#666666", "linewidth": 1.0},
+                capprops={"color": "#666666", "linewidth": 1.0},
+                medianprops={"color": "#111111", "linewidth": 1.4},
                 meanprops={
                     "marker": "D",
-                    "markerfacecolor": "#222222",
-                    "markeredgecolor": "#222222",
+                    "markerfacecolor": "#111111",
+                    "markeredgecolor": "#111111",
                     "markersize": 4.5,
+                    "zorder": 5,
                 },
                 flierprops={"marker": ""},
             )
@@ -791,26 +798,36 @@ def _coefficients_signed_top(
                 if feature_values.size == 0:
                     continue
                 offsets = np.linspace(-0.16, 0.16, feature_values.size)
-                point_colors = ["#1f77b4" if value >= 0 else "#d62728" for value in feature_values]
                 ax.scatter(
                     feature_values,
                     y + offsets,
                     s=22,
-                    color=point_colors,
+                    facecolors="white",
+                    edgecolors="#555555",
+                    linewidths=0.8,
                     alpha=0.78,
-                    edgecolors="none",
-                    zorder=3,
-                )
+                    zorder=4,
+            )
             ax.set_yticks(y_pos)
             ax.set_yticklabels(features, fontsize=9, fontfamily="monospace")
+            ax.set_ylabel("Top 30 orthogroups by |mean signed coefficient|")
             ax.invert_yaxis()
             limit = max_abs * 1.15
             ax.set_xlim(-limit, limit)
-            ax.set_xlabel("fold-level coef_mean (signed)")
+            ax.set_xlabel("Mean signed coefficient per fold")
             ax.grid(axis="x", color="#ececec", linewidth=0.8)
             ax.set_axisbelow(True)
             ax.axvline(0.0, color="#444444", linewidth=1.3)
-            fig.subplots_adjust(left=0.31, right=0.96, top=0.84, bottom=0.12)
+            fig.subplots_adjust(
+                left=_label_left_margin(
+                    features,
+                    width_px=_COEFFICIENTS_TOP_WIDTH_PX,
+                    fontsize_px=9,
+                ),
+                right=0.985,
+                top=0.985,
+                bottom=_compact_bottom_margin(height_px),
+            )
             _save_svg_figure(fig, out_path)
             return
 
@@ -818,22 +835,23 @@ def _coefficients_signed_top(
     if np.isclose(max_abs, 0.0):
         max_abs = 1.0
 
-    height_px = max(320, 150 + len(features) * 24)
-    fig, ax = plt.subplots(figsize=_figure_size_inches(1340, height_px), dpi=_FIG_DPI)
+    height_px = max(240, 70 + len(features) * 24)
+    fig, ax = plt.subplots(
+        figsize=_figure_size_inches(_COEFFICIENTS_TOP_WIDTH_PX, height_px),
+        dpi=_FIG_DPI,
+    )
     fig.patch.set_facecolor("white")
-    fig.suptitle("Coefficients Signed Top", x=0.01, ha="left", fontsize=16)
-    fig.text(0.01, 0.90, "Top 30 by |coef_mean|", fontsize=10)
 
     y_pos = np.arange(len(features), dtype=float)
-    colors = ["#1f77b4" if value >= 0 else "#d62728" for value in values]
-    bars = ax.barh(y_pos, values, color=colors, height=0.65)
+    bars = ax.barh(y_pos, values, color="#666666", height=0.65)
     ax.set_yticks(y_pos)
     ax.set_yticklabels(features, fontsize=9, fontfamily="monospace")
+    ax.set_ylabel("Top 30 orthogroups by |mean signed coefficient|")
     ax.invert_yaxis()
 
     limit = max_abs * 1.15
     ax.set_xlim(-limit, limit)
-    ax.set_xlabel("coef_mean (signed)")
+    ax.set_xlabel("Mean signed coefficient per fold")
     ax.grid(axis="x", color="#ececec", linewidth=0.8)
     ax.set_axisbelow(True)
     ax.axvline(0.0, color="#444444", linewidth=1.3)
@@ -856,7 +874,12 @@ def _coefficients_signed_top(
             fontfamily="monospace",
         )
 
-    fig.subplots_adjust(left=0.31, right=0.94, top=0.84, bottom=0.12)
+    fig.subplots_adjust(
+        left=_label_left_margin(features, width_px=_COEFFICIENTS_TOP_WIDTH_PX, fontsize_px=9),
+        right=0.98,
+        top=0.985,
+        bottom=_compact_bottom_margin(height_px),
+    )
     _save_svg_figure(fig, out_path)
 
 

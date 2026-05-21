@@ -1052,6 +1052,43 @@ def test_coefficients_signed_top_handles_zero_coefficients(tmp_path: Path) -> No
         out_path=out_path,
     )
     assert out_path.exists()
+    svg_text = out_path.read_text()
+    assert "Coefficients Signed Top" not in svg_text
+    assert "Top 30 by |coef_mean|" not in svg_text
+    assert "Top 30 orthogroups by |mean signed coefficient|" in svg_text
+    assert "#1f77b4" not in svg_text
+    assert "#d62728" not in svg_text
+
+
+def test_coefficients_signed_top_fold_points_use_neutral_styling(tmp_path: Path) -> None:
+    out_path = tmp_path / "coefficients_signed_top.svg"
+    figures_mod._coefficients_signed_top(
+        coefficients=pl.DataFrame(
+            {
+                "feature": ["OG1", "OG2"],
+                "coef_mean": [0.4, -0.3],
+                "method": ["coef_signed", "coef_signed"],
+            }
+        ),
+        coefficients_by_fold=pl.DataFrame(
+            {
+                "fold_id": ["0", "1", "0", "1"],
+                "feature": ["OG1", "OG1", "OG2", "OG2"],
+                "coef_mean": [0.5, 0.3, -0.2, -0.4],
+                "method": ["coef_signed", "coef_signed", "coef_signed", "coef_signed"],
+            }
+        ),
+        out_path=out_path,
+    )
+
+    svg_text = out_path.read_text()
+    assert "Coefficients Signed Top" not in svg_text
+    assert "Top 30 by |mean fold-level coef|" not in svg_text
+    assert "Top 30 orthogroups by |mean signed coefficient|" in svg_text
+    assert "#1f77b4" not in svg_text
+    assert "#d62728" not in svg_text
+    assert "#eeeeee" in svg_text
+    assert "#555555" in svg_text
 
 
 def test_predict_probability_distribution_rejects_missing_prob_column(tmp_path: Path) -> None:
