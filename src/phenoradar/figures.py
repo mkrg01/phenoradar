@@ -12,6 +12,7 @@ import numpy as np
 import polars as pl
 from matplotlib.colors import to_rgba
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from sklearn.metrics import (
     average_precision_score,
@@ -217,6 +218,16 @@ def _format_feature_count_label(value: float) -> str:
     if np.isclose(value, rounded):
         return f"{int(rounded):,}"
     return f"{value:,.1f}"
+
+
+def _format_n_records_label(records: list[int]) -> str:
+    if not records:
+        return "n=NA"
+    minimum = min(records)
+    maximum = max(records)
+    if minimum == maximum:
+        return f"n={minimum}"
+    return f"n={minimum}-{maximum}"
 
 
 def _feature_filter_figure_stage_order(stage_order: Sequence[str] | None) -> list[str]:
@@ -1919,8 +1930,11 @@ def _feature_filter_funnel(
     required = {
         "scope",
         "stage",
+        "n_records",
         "n_features_min",
+        "n_features_q1",
         "n_features_median",
+        "n_features_q3",
         "n_features_max",
     }
     if not required.issubset(feature_filter_counts_summary.columns):
@@ -1948,67 +1962,91 @@ def _feature_filter_funnel(
     fig.patch.set_facecolor("white")
 
     colors = [_COLOR_BLUE, _COLOR_ORANGE, _COLOR_GREEN, _COLOR_PURPLE]
+    n_records_labels: list[str] = []
     for scope_index, scope in enumerate(scopes):
         scope_rows = data.filter(pl.col("scope") == scope)
-        stage_to_stats: dict[str, tuple[float, float, float]] = {}
+        stage_to_stats: dict[str, tuple[float, float, float, float, float, int]] = {}
         for row in scope_rows.iter_rows(named=True):
             stage = str(row["stage"])
+            n_records = int(row["n_records"])
             minimum = float(row["n_features_min"])
+            q1_raw = row["n_features_q1"]
             median_raw = row["n_features_median"]
+            q3_raw = row["n_features_q3"]
             maximum = float(row["n_features_max"])
+            q1 = np.nan if q1_raw is None else float(q1_raw)
             median = np.nan if median_raw is None else float(median_raw)
-            stage_to_stats[stage] = (minimum, median, maximum)
+            q3 = np.nan if q3_raw is None else float(q3_raw)
+            stage_to_stats[stage] = (minimum, q1, median, q3, maximum, n_records)
         y_min: list[float] = []
+        y_q1: list[float] = []
         y_median: list[float] = []
+        y_q3: list[float] = []
         y_max: list[float] = []
+        n_records_by_stage: list[int] = []
         for stage in stage_order:
             stats = stage_to_stats.get(stage)
             if stats is None:
                 y_min.append(np.nan)
+                y_q1.append(np.nan)
                 y_median.append(np.nan)
+                y_q3.append(np.nan)
                 y_max.append(np.nan)
                 continue
             y_min.append(stats[0])
-            y_median.append(stats[1])
-            y_max.append(stats[2])
+            y_q1.append(stats[1])
+            y_median.append(stats[2])
+            y_q3.append(stats[3])
+            y_max.append(stats[4])
+            n_records_by_stage.append(stats[5])
         color = colors[scope_index % len(colors)]
         y_min_array = np.array(y_min, dtype=float)
+        y_q1_array = np.array(y_q1, dtype=float)
         y_median_array = np.array(y_median, dtype=float)
+        y_q3_array = np.array(y_q3, dtype=float)
         y_max_array = np.array(y_max, dtype=float)
         finite_mask = np.isfinite(y_median_array)
         if not np.any(finite_mask):
             continue
+        iqr_mask = finite_mask & np.isfinite(y_q1_array) & np.isfinite(y_q3_array)
+        if np.any(iqr_mask):
+            ax.fill_between(
+                x_positions[iqr_mask],
+                y_q1_array[iqr_mask],
+                y_q3_array[iqr_mask],
+                color=color,
+                alpha=0.22,
+                edgecolor="none",
+                linewidth=0.0,
+            )
+        ax.plot(
+            x_positions[finite_mask],
+            y_min_array[finite_mask],
+            linestyle="--",
+            linewidth=0.7,
+            color=color,
+            alpha=0.9,
+        )
+        ax.plot(
+            x_positions[finite_mask],
+            y_max_array[finite_mask],
+            linestyle="--",
+            linewidth=0.7,
+            color=color,
+            alpha=0.9,
+        )
         ax.plot(
             x_positions[finite_mask],
             y_median_array[finite_mask],
             marker="o",
             linewidth=1.0,
             color=color,
-            label=f"{scope} (median)",
         )
-        ax.fill_between(
-            x_positions[finite_mask],
-            y_min_array[finite_mask],
-            y_max_array[finite_mask],
-            color=color,
-            alpha=0.18,
-        )
-        ax.plot(
-            x_positions[finite_mask],
-            y_min_array[finite_mask],
-            linestyle="--",
-            linewidth=0.7,
-            color=color,
-            alpha=0.9,
-        )
-        ax.plot(
-            x_positions[finite_mask],
-            y_max_array[finite_mask],
-            linestyle="--",
-            linewidth=0.7,
-            color=color,
-            alpha=0.9,
-        )
+        n_records_label = _format_n_records_label(n_records_by_stage)
+        if len(scopes) == 1:
+            n_records_labels.append(n_records_label)
+        else:
+            n_records_labels.append(f"{scope}: {n_records_label}")
         for x_value, y_value in zip(
             x_positions[finite_mask],
             y_median_array[finite_mask],
@@ -2032,12 +2070,50 @@ def _feature_filter_funnel(
         fontsize=_MONO_FONTSIZE,
         fontfamily="monospace",
     )
+    ax.set_xlabel("Feature selection step", fontsize=_LABEL_FONTSIZE)
     ax.set_ylabel("Number of features", fontsize=_LABEL_FONTSIZE)
     ax.margins(y=0.15)
     ax.set_ylim(bottom=0.0)
     ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.legend(loc="best", frameon=False)
+    if n_records_labels:
+        ax.text(
+            0.01,
+            0.98,
+            "\n".join(n_records_labels),
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=_MONO_FONTSIZE,
+            fontfamily="monospace",
+            color=_MUTED_TEXT_COLOR,
+        )
+    legend_color = colors[0]
+    legend_handles = [
+        Line2D(
+            [0],
+            [0],
+            color=legend_color,
+            marker="o",
+            linewidth=1.0,
+            markersize=3.0,
+            label="median",
+        ),
+        Patch(
+            facecolor=to_rgba(legend_color, 0.22),
+            edgecolor="none",
+            label="IQR (25-75%)",
+        ),
+        Line2D(
+            [0],
+            [0],
+            color=legend_color,
+            linestyle="--",
+            linewidth=0.7,
+            label="min-max",
+        ),
+    ]
+    ax.legend(handles=legend_handles, loc="best", frameon=False)
     fig.subplots_adjust(left=0.08, right=0.99, top=0.96, bottom=0.16)
     _save_svg_figure(fig, out_path)
 

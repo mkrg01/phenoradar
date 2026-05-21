@@ -198,12 +198,16 @@ def _minimal_feature_filter_counts_summary() -> pl.DataFrame:
             ],
             "n_records": [4, 4, 4, 4, 4, 4],
             "n_features_min": [100, 78, 59, 58, 50, 50],
+            "n_features_q1": [100.0, 78.75, 59.75, 58.5, 51.5, 51.5],
             "n_features_median": [100.0, 79.5, 60.0, 59.0, 52.0, 52.0],
             "n_features_mean": [100.0, 79.75, 60.0, 59.0, 51.75, 51.75],
+            "n_features_q3": [100.0, 80.5, 60.25, 59.5, 52.25, 52.25],
             "n_features_max": [100, 82, 61, 60, 53, 53],
             "retained_ratio_min": [1.0, 0.78, 0.59, 0.58, 0.50, 0.50],
+            "retained_ratio_q1": [1.0, 0.7875, 0.5975, 0.585, 0.515, 0.515],
             "retained_ratio_median": [1.0, 0.795, 0.60, 0.59, 0.52, 0.52],
             "retained_ratio_mean": [1.0, 0.7975, 0.60, 0.59, 0.5175, 0.5175],
+            "retained_ratio_q3": [1.0, 0.805, 0.6025, 0.595, 0.5225, 0.5225],
             "retained_ratio_max": [1.0, 0.82, 0.61, 0.60, 0.53, 0.53],
         }
     )
@@ -360,8 +364,14 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
     figures_dir = tmp_path / "run" / "figures"
     assert (figures_dir / "feature_filter_funnel.svg").exists()
     funnel_svg = (figures_dir / "feature_filter_funnel.svg").read_text(encoding="utf-8")
+    assert "Feature selection step" in funnel_svg
     assert "Number of features" in funnel_svg
     assert "Feature Count" not in funnel_svg
+    assert "n=4" in funnel_svg
+    assert "median" in funnel_svg
+    assert "IQR (25-75%)" in funnel_svg
+    assert "min-max" in funnel_svg
+    assert "outer_fold (median" not in funnel_svg
     assert "low_prevalence" in funnel_svg
     assert "pair_aware" in funnel_svg
     assert "low_variance" not in funnel_svg

@@ -187,8 +187,12 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "scope",
         "stage",
         "n_records",
+        "n_features_q1",
         "n_features_median",
+        "n_features_q3",
+        "retained_ratio_q1",
         "retained_ratio_median",
+        "retained_ratio_q3",
     }.issubset(cv_artifacts.feature_filter_counts_summary.columns)
     assert cv_artifacts.retained_features.height > 0
     assert {

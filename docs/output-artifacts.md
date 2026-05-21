@@ -78,8 +78,10 @@ Always written:
 - `feature_filter_counts_summary.tsv`
   - columns:
     - `scope`, `stage`, `n_records`
-    - `n_features_min`, `n_features_median`, `n_features_mean`, `n_features_max`
-    - `retained_ratio_min`, `retained_ratio_median`, `retained_ratio_mean`, `retained_ratio_max`
+    - `n_features_min`, `n_features_q1`, `n_features_median`, `n_features_mean`,
+      `n_features_q3`, `n_features_max`
+    - `retained_ratio_min`, `retained_ratio_q1`, `retained_ratio_median`,
+      `retained_ratio_mean`, `retained_ratio_q3`, `retained_ratio_max`
 - `retained_features.tsv`
   - columns:
     - `scope`, `fold_id`, `sample_set_id`, `feature`
@@ -329,6 +331,7 @@ Conditionally written:
 #### `feature_filter_counts_summary.tsv`
 
 - Summary of `feature_filter_counts.tsv` grouped by (`scope`, `stage`).
+- `*_q1`, `*_median`, and `*_q3` report the 25th, 50th, and 75th percentiles.
 - `retained_ratio_*` is the ratio relative to `n_features_before`.
 - Use this table for quick stage-wise trend checks without scanning all folds/sample sets.
 
@@ -491,7 +494,8 @@ Conditionally written:
   - Useful for checking fold-to-fold drift or fold-specific overlap.
 - `feature_filter_funnel.svg`
   - Feature-count trend by scope through the enabled `preprocess.*_filter` steps.
-  - Line is median count; shaded range is min-max.
+  - Line is median count; shaded band is IQR; dashed lines are min-max.
+  - Legend identifies median/IQR/min-max; the figure annotates the `n_records` count.
 - `retained_features_by_fold.svg`
   - Outer-fold retained-feature heatmap.
   - Rows are features, columns are folds, color is `retained_rate`.

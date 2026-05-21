@@ -276,12 +276,16 @@ def _empty_feature_filter_counts_summary() -> pl.DataFrame:
             "stage": pl.String,
             "n_records": pl.Int64,
             "n_features_min": pl.Int64,
+            "n_features_q1": pl.Float64,
             "n_features_median": pl.Float64,
             "n_features_mean": pl.Float64,
+            "n_features_q3": pl.Float64,
             "n_features_max": pl.Int64,
             "retained_ratio_min": pl.Float64,
+            "retained_ratio_q1": pl.Float64,
             "retained_ratio_median": pl.Float64,
             "retained_ratio_mean": pl.Float64,
+            "retained_ratio_q3": pl.Float64,
             "retained_ratio_max": pl.Float64,
         }
     )
@@ -352,12 +356,20 @@ def _summarize_feature_filter_counts(feature_filter_counts: pl.DataFrame) -> pl.
         [
             pl.len().alias("n_records"),
             pl.col("n_features").min().alias("n_features_min"),
+            pl.col("n_features").quantile(0.25, interpolation="linear").alias("n_features_q1"),
             pl.col("n_features").median().alias("n_features_median"),
             pl.col("n_features").mean().alias("n_features_mean"),
+            pl.col("n_features").quantile(0.75, interpolation="linear").alias("n_features_q3"),
             pl.col("n_features").max().alias("n_features_max"),
             pl.col("retained_ratio").min().alias("retained_ratio_min"),
+            pl.col("retained_ratio")
+            .quantile(0.25, interpolation="linear")
+            .alias("retained_ratio_q1"),
             pl.col("retained_ratio").median().alias("retained_ratio_median"),
             pl.col("retained_ratio").mean().alias("retained_ratio_mean"),
+            pl.col("retained_ratio")
+            .quantile(0.75, interpolation="linear")
+            .alias("retained_ratio_q3"),
             pl.col("retained_ratio").max().alias("retained_ratio_max"),
         ]
     )
