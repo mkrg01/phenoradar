@@ -280,12 +280,18 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
         group_svg_text = group_svg.read_text(encoding="utf-8")
         assert "Tree Contrast Pairs" not in group_svg_text
         assert "The Contrast Pairs" not in group_svg_text
+        assert "rotate(-90.0)" in group_svg_text
+        assert 'rotate(-90.0)"><text x="0"' in group_svg_text
+        assert "rotate(45.0)" not in group_svg_text
     else:
         assert any("Toytree is unavailable" in warning for warning in warnings)
     cv_svg = figures_dir / "tree_prediction_cv.svg"
     if cv_svg.exists():
         svg_text = cv_svg.read_text(encoding="utf-8")
         assert "CV Tree Prediction" not in svg_text
+        assert "rotate(-90.0)" in svg_text
+        assert 'rotate(-90.0)"><text x="0"' in svg_text
+        assert "rotate(45.0)" not in svg_text
         assert ">trait<" in svg_text
         assert ">group<" in svg_text
         assert ">contrast<" not in svg_text
@@ -298,7 +304,9 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
     if log2_heatmap_svg.exists():
         svg_text = log2_heatmap_svg.read_text(encoding="utf-8")
         assert "Tree Feature Heatmap (log2 TPM + 1)" not in svg_text
-        assert "rotate(90.0)" in svg_text
+        assert "rotate(-90.0)" in svg_text
+        assert 'rotate(-90.0)"><text x="0"' in svg_text
+        assert "rotate(90.0)" not in svg_text
         assert "rotate(65.0)" not in svg_text
         assert ">trait<" in svg_text
         assert "sp1 trait=0" in svg_text

@@ -877,9 +877,9 @@ def _draw_toytree_heatmap(
             x,
             len(tip_labels) + 0.35,
             _track_label(track),
-            angle=-45,
+            angle=90,
             color=_TEXT_COLOR,
-            style={"font-size": "9px", "text-anchor": "end"},
+            style={"font-size": "9px", "text-anchor": "start"},
         )
         column_cursor_px += track_width
     species_x = (column_cursor_px + 16) / column_scale_px
@@ -973,9 +973,9 @@ def _draw_toytree_feature_heatmap(
         trait_x,
         len(tip_labels) + 0.35,
         "trait",
-        angle=-90,
+        angle=90,
         color=_TEXT_COLOR,
-        style={"font-size": "7px", "text-anchor": "end"},
+        style={"font-size": "7px", "text-anchor": "start"},
     )
     prob_values = [_format_heatmap_prob_value(prob_lookup.get(species)) for species in tip_labels]
     axes.text(
@@ -992,9 +992,9 @@ def _draw_toytree_feature_heatmap(
         prob_x,
         len(tip_labels) + 0.35,
         "prob",
-        angle=-90,
+        angle=90,
         color=_TEXT_COLOR,
-        style={"font-size": "7px", "text-anchor": "end"},
+        style={"font-size": "7px", "text-anchor": "start"},
     )
     for x, feature in zip(feature_xs, feature_labels, strict=True):
         colors: list[str] = []
@@ -1015,9 +1015,9 @@ def _draw_toytree_feature_heatmap(
             x,
             len(tip_labels) + 0.35,
             feature,
-            angle=-90,
+            angle=90,
             color=_TEXT_COLOR,
-            style={"font-size": "7px", "text-anchor": "end"},
+            style={"font-size": "7px", "text-anchor": "start"},
         )
     axes.text(
         [species_x] * len(tip_labels),
