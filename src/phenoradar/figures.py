@@ -276,6 +276,14 @@ def _padded_domain(
     return lower - pad, upper + pad
 
 
+def _place_x_axis_at_zero(ax: Any) -> None:
+    ax.spines["bottom"].set_position(("data", 0.0))
+    ax.spines["bottom"].set_color(_AXIS_COLOR)
+    ax.spines["bottom"].set_linewidth(0.8)
+    ax.xaxis.set_ticks_position("bottom")
+    ax.xaxis.set_label_position("bottom")
+
+
 def _metric_score(
     y_true: np.ndarray, prob: np.ndarray, threshold: float, metric: str
 ) -> float:
@@ -378,7 +386,7 @@ def _cv_metrics_overview(metrics_cv: pl.DataFrame, out_path: Path) -> None:
     ax.set_xticklabels(metrics, fontsize=_TICK_FONTSIZE)
     ax.set_xlabel("Metric", fontsize=_LABEL_FONTSIZE)
     ax.set_ylabel("Score", fontsize=_LABEL_FONTSIZE)
-    ax.axhline(0.0, color=_AXIS_COLOR, linewidth=0.8)
+    _place_x_axis_at_zero(ax)
     ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
     ax.legend(loc="upper right", frameon=False)
@@ -597,7 +605,7 @@ def _threshold_selection_curve(
         ax.set_ylabel(f"{selection_metric} score", fontsize=_LABEL_FONTSIZE)
         ax.grid(color=_GRID_COLOR, linewidth=0.5)
         ax.set_axisbelow(True)
-        ax.axhline(0.0, color=_MUTED_TEXT_COLOR, linewidth=0.8)
+        _place_x_axis_at_zero(ax)
 
         if np.isfinite(selected_threshold):
             ax.axvline(

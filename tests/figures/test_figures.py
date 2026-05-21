@@ -261,6 +261,16 @@ def test_format_float_returns_nan_for_none_and_nan() -> None:
     assert figures_mod._format_float(float("nan")) == "NaN"
 
 
+def test_place_x_axis_at_zero_moves_bottom_spine() -> None:
+    fig, ax = figures_mod.plt.subplots()
+    try:
+        figures_mod._place_x_axis_at_zero(ax)
+
+        assert ax.spines["bottom"].get_position() == ("data", 0.0)
+    finally:
+        figures_mod.plt.close(fig)
+
+
 def test_metric_score_supports_balanced_accuracy() -> None:
     y_true = [0, 0, 1, 1]
     prob = [0.1, 0.7, 0.4, 0.9]
