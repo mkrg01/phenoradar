@@ -380,9 +380,12 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
     assert "Correlation" not in funnel_svg
     assert "Final" not in funnel_svg
     assert "79.5" in funnel_svg
-    assert (figures_dir / "selected_features_by_fold.svg").exists()
-    assert (figures_dir / "selected_feature_count_by_fold.svg").exists()
-    count_svg = (figures_dir / "selected_feature_count_by_fold.svg").read_text(encoding="utf-8")
+    assert (figures_dir / "selected_features_by_fold_after_preprocessing.svg").exists()
+    assert not (figures_dir / "selected_features_after_preprocessing.svg").exists()
+    assert not (figures_dir / "selected_features_by_fold.svg").exists()
+    assert (figures_dir / "non_zero_feature_count_by_fold.svg").exists()
+    assert not (figures_dir / "selected_feature_count_by_fold.svg").exists()
+    count_svg = (figures_dir / "non_zero_feature_count_by_fold.svg").read_text(encoding="utf-8")
     assert "Number of non-zero features per model" in count_svg
     assert not (figures_dir / "model_sparsity_scatter.svg").exists()
     assert warnings == []
@@ -1008,34 +1011,38 @@ def test_cv_fold_trait_probability_writes_svg(tmp_path: Path) -> None:
     assert "#d9d9d9" in svg_text
 
 
-def test_selected_features_by_fold_rejects_invalid_schema(tmp_path: Path) -> None:
+def test_selected_features_by_fold_after_preprocessing_rejects_invalid_schema(
+    tmp_path: Path,
+) -> None:
     with pytest.raises(FigureError, match="schema is invalid"):
-        figures_mod._selected_features_by_fold(
+        figures_mod._selected_features_by_fold_after_preprocessing(
             retained_features_summary=pl.DataFrame({"feature": ["OG1"]}),
-            out_path=tmp_path / "selected_features_by_fold.svg",
+            out_path=tmp_path / "selected_features_by_fold_after_preprocessing.svg",
         )
 
 
-def test_selected_features_by_fold_writes_svg(tmp_path: Path) -> None:
-    out_path = tmp_path / "selected_features_by_fold.svg"
-    figures_mod._selected_features_by_fold(
+def test_selected_features_by_fold_after_preprocessing_writes_svg(tmp_path: Path) -> None:
+    out_path = tmp_path / "selected_features_by_fold_after_preprocessing.svg"
+    figures_mod._selected_features_by_fold_after_preprocessing(
         retained_features_summary=_minimal_retained_features_summary(),
         out_path=out_path,
     )
     assert out_path.exists()
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "Selected features after preprocessing" in svg_text
 
 
-def test_selected_feature_count_by_fold_rejects_invalid_schema(tmp_path: Path) -> None:
+def test_non_zero_feature_count_by_fold_rejects_invalid_schema(tmp_path: Path) -> None:
     with pytest.raises(FigureError, match="schema is invalid"):
-        figures_mod._selected_feature_count_by_fold(
+        figures_mod._non_zero_feature_count_by_fold(
             model_sparsity=pl.DataFrame({"fold_id": ["0"]}),
-            out_path=tmp_path / "selected_feature_count_by_fold.svg",
+            out_path=tmp_path / "non_zero_feature_count_by_fold.svg",
         )
 
 
-def test_selected_feature_count_by_fold_writes_svg(tmp_path: Path) -> None:
-    out_path = tmp_path / "selected_feature_count_by_fold.svg"
-    figures_mod._selected_feature_count_by_fold(
+def test_non_zero_feature_count_by_fold_writes_svg(tmp_path: Path) -> None:
+    out_path = tmp_path / "non_zero_feature_count_by_fold.svg"
+    figures_mod._non_zero_feature_count_by_fold(
         model_sparsity=_minimal_model_sparsity(),
         out_path=out_path,
     )
@@ -1085,6 +1092,25 @@ def test_feature_importance_top_handles_zero_importances(tmp_path: Path) -> None
     assert "Mean feature importance per fold" in svg_text
     assert "#009e73" not in svg_text
     assert "#666666" in svg_text
+
+
+def test_feature_importance_top_uses_requested_feature_limit(tmp_path: Path) -> None:
+    out_path = tmp_path / "feature_importance_top.svg"
+    figures_mod._feature_importance_top(
+        feature_importance=pl.DataFrame(
+            {
+                "feature": ["OG1", "OG2", "OG3"],
+                "importance_mean": [0.2, 0.9, 0.1],
+            }
+        ),
+        out_path=out_path,
+        top_features=1,
+    )
+
+    svg_text = out_path.read_text()
+    assert "OG2" in svg_text
+    assert "OG1" not in svg_text
+    assert "OG3" not in svg_text
 
 
 def test_feature_importance_top_fold_points_use_neutral_styling(tmp_path: Path) -> None:
@@ -1159,6 +1185,26 @@ def test_coefficients_signed_top_handles_zero_coefficients(tmp_path: Path) -> No
     assert "Orthogroup ID" in svg_text
     assert "#1f77b4" not in svg_text
     assert "#d62728" not in svg_text
+
+
+def test_coefficients_signed_top_uses_requested_feature_limit(tmp_path: Path) -> None:
+    out_path = tmp_path / "coefficients_signed_top.svg"
+    figures_mod._coefficients_signed_top(
+        coefficients=pl.DataFrame(
+            {
+                "feature": ["OG1", "OG2", "OG3"],
+                "coef_mean": [0.2, -0.9, 0.1],
+                "method": ["coef_signed", "coef_signed", "coef_signed"],
+            }
+        ),
+        out_path=out_path,
+        top_features=1,
+    )
+
+    svg_text = out_path.read_text()
+    assert "OG2" in svg_text
+    assert "OG1" not in svg_text
+    assert "OG3" not in svg_text
 
 
 def test_coefficients_signed_top_fold_points_use_neutral_styling(tmp_path: Path) -> None:

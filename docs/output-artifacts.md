@@ -125,8 +125,8 @@ Always written:
     - `cv_species_probability_by_trait.svg`
     - `cv_fold_trait_probability.svg`
     - `feature_filter_funnel.svg`
-    - `selected_features_by_fold.svg`
-    - `selected_feature_count_by_fold.svg`
+    - `selected_features_by_fold_after_preprocessing.svg`
+    - `non_zero_feature_count_by_fold.svg`
     - `model_selection_trials.svg` (candidate selection active)
     - `roc_pr_curves_cv.svg` (may be skipped with warning for degenerate folds)
     - `final_refit_loss_by_split.svg` (attempted in `full_run`)
@@ -285,7 +285,7 @@ Conditionally written:
 
 - Written when `data.tree_path` is set.
 - Long-form ggtree/Toytree-friendly feature heatmap values for species with non-empty
-  `split.group_col` and the top 30 features by `importance_mean`.
+  `split.group_col` and the top `figures.top_features` features by `importance_mean`.
 - Columns: `label`, `species`, `true_label`, `prob`, `group_id`, `group_name`, `feature_rank`,
   `feature`, `importance_mean`, `coef_mean`, `tpm`, `log2_tpm_plus1`,
   `z_score_log2_tpm`.
@@ -481,10 +481,10 @@ Conditionally written:
   - Left: pooled OOF ROC, right: pooled OOF PR.
   - Curves summarize all folds together (not per-fold overlays).
 - `feature_importance_top.svg`
-  - Top 30 features by mean fold-level `importance_mean`.
+  - Top `figures.top_features` features by mean fold-level `importance_mean`.
   - Horizontal boxplot plus fold-level points.
 - `coefficients_signed_top.svg`
-  - Top 30 by absolute mean fold-level coefficient magnitude.
+  - Top `figures.top_features` by absolute mean fold-level coefficient magnitude.
   - Horizontal boxplot plus fold-level points; right is positive and left is negative.
 - `cv_species_probability_by_trait.svg`
   - Out-of-fold species probabilities grouped by trait (`label`).
@@ -496,11 +496,11 @@ Conditionally written:
   - Feature-count trend by scope through the enabled `preprocess.*_filter` steps.
   - Line is median count; shaded band is IQR; dashed lines are min-max.
   - Legend identifies median/IQR/min-max; the figure annotates the `n_records` count.
-- `selected_features_by_fold.svg`
-  - Outer-fold selected-feature heatmap.
-  - Rows are features, columns are folds, color is the feature selection rate across sampled sets.
-  - Useful for spotting fold-specific feature selection differences.
-- `selected_feature_count_by_fold.svg`
+- `selected_features_by_fold_after_preprocessing.svg`
+  - Outer-fold retained-feature heatmap after preprocessing.
+  - Rows are features, columns are folds, color is the feature retention rate across sampled sets.
+  - Useful for spotting fold-specific preprocessing retention differences.
+- `non_zero_feature_count_by_fold.svg`
   - Fold-wise distribution of `n_nonzero_features` from `model_sparsity.tsv`.
   - Boxplots are shown when a fold has multiple models; points show individual models.
 - `model_selection_trials.svg` (candidate selection active)
@@ -525,7 +525,7 @@ Conditionally written:
 - `tree_feature_heatmap_zscore.svg` / `tree_feature_heatmap_log2_tpm.svg` (optional)
   - Written when `data.tree_path` is set and Toytree is available.
   - Rectangular Toytree views with top-feature heatmap tiles ordered by
-    `importance_mean`.
+    `importance_mean`; the feature count is controlled by `figures.top_features`.
   - Show the numeric trait label and predicted probability immediately before the
     feature heatmap.
   - Include an inline continuous color-bar legend showing the plotted value scale

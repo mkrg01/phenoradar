@@ -1023,6 +1023,7 @@ def run(
             retained_features_summary=retained_features_summary_table,
             model_sparsity=model_sparsity_table,
             model_sparsity_summary=model_sparsity_summary_table,
+            top_features=resolved.figures.top_features,
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -1048,6 +1049,7 @@ def run(
                     if final_refit_artifacts is None
                     else final_refit_artifacts.pred_external_test
                 ),
+                feature_limit=resolved.figures.top_features,
             )
         except TreePredictionError as exc:
             raise typer.BadParameter(str(exc)) from exc

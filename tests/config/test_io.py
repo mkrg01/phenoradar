@@ -66,6 +66,7 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.preprocess.low_prevalence_filter.enabled is True
     assert resolved.preprocess.low_prevalence_filter.min_species_per_feature == 2
     assert resolved.preprocess.feature_scaling.method == "standard"
+    assert resolved.figures.top_features == 30
 
 
 def test_allow_empty_config_paths_resolves_to_defaults() -> None:
@@ -81,6 +82,7 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
     assert resolved.model_selection.candidate_source_policy == "per_sample_set"
     assert resolved.preprocess.expression_transform.method == "log1p"
     assert resolved.preprocess.feature_scaling.method == "standard"
+    assert resolved.figures.top_features == 30
 
 
 def test_unknown_key_is_rejected(tmp_path: Path) -> None:
@@ -454,6 +456,30 @@ report:
 
     with pytest.raises(ConfigError):
         load_and_resolve_config([cfg])
+
+
+def test_figures_top_features_must_be_between_one_and_one_hundred(tmp_path: Path) -> None:
+    cfg_zero = _write(
+        tmp_path / "zero.yml",
+        """
+figures:
+  top_features: 0
+""".strip()
+        + "\n",
+    )
+    cfg_too_many = _write(
+        tmp_path / "too-many.yml",
+        """
+figures:
+  top_features: 101
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg_zero])
+    with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg_too_many])
 
 
 def test_runtime_n_jobs_must_be_at_least_one(tmp_path: Path) -> None:

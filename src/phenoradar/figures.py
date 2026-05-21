@@ -76,6 +76,7 @@ _TRAIT_NEGATIVE_COLOR = "#d62728"
 _TRAIT_POSITIVE_COLOR = "#1f77b4"
 _MODEL_SELECTION_SAMPLE_SET_LIMIT = 1
 _RETAINED_FEATURE_LIMIT = 40
+_DEFAULT_TOP_FEATURES = 30
 _FEATURE_IMPORTANCE_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
 _FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE = _LABEL_FONTSIZE
 _COEFFICIENTS_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
@@ -629,15 +630,18 @@ def _feature_importance_top(
     feature_importance: pl.DataFrame,
     out_path: Path,
     feature_importance_by_fold: pl.DataFrame | None = None,
+    top_features: int = _DEFAULT_TOP_FEATURES,
 ) -> None:
     required = {"feature", "importance_mean"}
     if not required.issubset(feature_importance.columns):
         raise FigureError("feature_importance.tsv schema is invalid for feature_importance_top.svg")
+    if top_features < 1:
+        raise FigureError("figures.top_features must be >= 1")
 
     top = feature_importance.sort(
         by=["importance_mean", "feature"],
         descending=[True, False],
-    ).head(30)
+    ).head(top_features)
     if top.height == 0:
         raise FigureError("feature_importance.tsv is empty; cannot draw feature_importance_top.svg")
 
@@ -817,10 +821,13 @@ def _coefficients_signed_top(
     coefficients: pl.DataFrame,
     out_path: Path,
     coefficients_by_fold: pl.DataFrame | None = None,
+    top_features: int = _DEFAULT_TOP_FEATURES,
 ) -> None:
     required = {"feature", "coef_mean", "method"}
     if not required.issubset(coefficients.columns):
         raise FigureError("coefficients.tsv schema is invalid for coefficients_signed_top.svg")
+    if top_features < 1:
+        raise FigureError("figures.top_features must be >= 1")
 
     linear = coefficients.filter(pl.col("method") == "coef_signed").drop_nulls("coef_mean")
     if linear.height == 0:
@@ -829,7 +836,7 @@ def _coefficients_signed_top(
     top = linear.with_columns(pl.col("coef_mean").abs().alias("__abs_coef")).sort(
         by=["__abs_coef", "feature"],
         descending=[True, False],
-    ).head(30)
+    ).head(top_features)
 
     features = [str(v) for v in top.select("feature").to_series().to_list()]
     values = [float(v) for v in top.select("coef_mean").to_series().to_list()]
@@ -2140,11 +2147,14 @@ def _feature_filter_funnel(
     _save_svg_figure(fig, out_path)
 
 
-def _selected_features_by_fold(retained_features_summary: pl.DataFrame, out_path: Path) -> None:
+def _selected_features_by_fold_after_preprocessing(
+    retained_features_summary: pl.DataFrame, out_path: Path
+) -> None:
     required = {"scope", "fold_id", "feature", "retained_count", "n_sample_sets", "retained_rate"}
     if not required.issubset(retained_features_summary.columns):
         raise FigureError(
-            "retained_features_summary.tsv schema is invalid for selected_features_by_fold.svg"
+            "retained_features_summary.tsv schema is invalid for "
+            "selected_features_by_fold_after_preprocessing.svg"
         )
     data = (
         retained_features_summary.select(
@@ -2170,7 +2180,7 @@ def _selected_features_by_fold(retained_features_summary: pl.DataFrame, out_path
     )
     if data.height == 0:
         _write_message_figure(
-            title="Selected Features by Fold",
+            title="Selected Features by Fold after Preprocessing",
             message="No outer-fold selected-feature summary rows are available.",
             out_path=out_path,
             width_px=980,
@@ -2204,7 +2214,7 @@ def _selected_features_by_fold(retained_features_summary: pl.DataFrame, out_path
     features = [str(v) for v in shown_feature_table.select("__feature").to_series().to_list()]
     if not fold_ids or not features:
         _write_message_figure(
-            title="Selected Features by Fold",
+            title="Selected Features by Fold after Preprocessing",
             message="No selected features are available after filtering.",
             out_path=out_path,
             width_px=980,
@@ -2245,7 +2255,7 @@ def _selected_features_by_fold(retained_features_summary: pl.DataFrame, out_path
     ax.set_yticks(np.arange(len(features), dtype=float))
     ax.set_yticklabels(features, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
     ax.set_xlabel("CV fold", fontsize=_LABEL_FONTSIZE)
-    ax.set_ylabel("Selected feature", fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel("Selected features after preprocessing", fontsize=_LABEL_FONTSIZE)
     ax.set_xticks(np.arange(-0.5, len(fold_ids), 1.0), minor=True)
     ax.set_yticks(np.arange(-0.5, len(features), 1.0), minor=True)
     ax.grid(which="minor", color="#ffffff", linewidth=0.5)
@@ -2277,11 +2287,11 @@ def _selected_features_by_fold(retained_features_summary: pl.DataFrame, out_path
     _save_svg_figure(fig, out_path)
 
 
-def _selected_feature_count_by_fold(model_sparsity: pl.DataFrame, out_path: Path) -> None:
+def _non_zero_feature_count_by_fold(model_sparsity: pl.DataFrame, out_path: Path) -> None:
     required = {"scope", "fold_id", "n_nonzero_features"}
     if not required.issubset(model_sparsity.columns):
         raise FigureError(
-            "model_sparsity.tsv schema is invalid for selected_feature_count_by_fold.svg"
+            "model_sparsity.tsv schema is invalid for non_zero_feature_count_by_fold.svg"
         )
 
     data = (
@@ -2301,7 +2311,7 @@ def _selected_feature_count_by_fold(model_sparsity: pl.DataFrame, out_path: Path
     )
     if data.height == 0:
         _write_message_figure(
-            title="Selected Feature Count by Fold",
+            title="Non-zero Feature Count by Fold",
             message="No outer-fold non-zero feature counts are available in model_sparsity.tsv.",
             out_path=out_path,
             width_px=_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX,
@@ -2316,7 +2326,7 @@ def _selected_feature_count_by_fold(model_sparsity: pl.DataFrame, out_path: Path
     )
     if not fold_ids:
         _write_message_figure(
-            title="Selected Feature Count by Fold",
+            title="Non-zero Feature Count by Fold",
             message="No outer-fold non-zero feature counts are available in model_sparsity.tsv.",
             out_path=out_path,
             width_px=_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX,
@@ -2445,6 +2455,7 @@ def write_run_figures(
     model_sparsity: pl.DataFrame | None = None,
     model_sparsity_summary: pl.DataFrame | None = None,
     feature_filter_funnel_stage_order: Sequence[str] | None = None,
+    top_features: int = _DEFAULT_TOP_FEATURES,
 ) -> list[str]:
     """Write run-level SVG figures under <run_dir>/figures."""
     warnings: list[str] = []
@@ -2467,11 +2478,13 @@ def write_run_figures(
         feature_importance,
         figures_dir / "feature_importance_top.svg",
         feature_importance_by_fold=feature_importance_by_fold,
+        top_features=top_features,
     )
     _coefficients_signed_top(
         coefficients,
         figures_dir / "coefficients_signed_top.svg",
         coefficients_by_fold=coefficients_by_fold,
+        top_features=top_features,
     )
     _species_probability_by_trait(
         predictions=oof_predictions,
@@ -2508,14 +2521,14 @@ def write_run_figures(
             stage_order=feature_filter_funnel_stage_order,
         )
     if retained_features_summary is not None:
-        _selected_features_by_fold(
+        _selected_features_by_fold_after_preprocessing(
             retained_features_summary,
-            figures_dir / "selected_features_by_fold.svg",
+            figures_dir / "selected_features_by_fold_after_preprocessing.svg",
         )
     if model_sparsity is not None:
-        _selected_feature_count_by_fold(
+        _non_zero_feature_count_by_fold(
             model_sparsity,
-            figures_dir / "selected_feature_count_by_fold.svg",
+            figures_dir / "non_zero_feature_count_by_fold.svg",
         )
     if pred_external_test is not None:
         try:

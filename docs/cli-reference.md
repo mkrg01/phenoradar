@@ -87,8 +87,8 @@ Notes:
   - `cv_species_probability_by_trait.svg`
   - `cv_fold_trait_probability.svg`
   - `feature_filter_funnel.svg`
-  - `selected_features_by_fold.svg`
-  - `selected_feature_count_by_fold.svg`
+  - `selected_features_by_fold_after_preprocessing.svg`
+  - `non_zero_feature_count_by_fold.svg`
   - `model_selection_trials.svg` (model selection enabled)
   - `roc_pr_curves_cv.svg` (may be skipped when degenerate)
   - `final_refit_loss_by_split.svg` (`full_run`)

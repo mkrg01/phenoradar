@@ -69,10 +69,16 @@ def _write_split_fixture(tmp_path: Path) -> tuple[Path, Path]:
     return metadata, tpm
 
 
-def _stub_resolved_config(*, execution_stage: str) -> SimpleNamespace:
+def _stub_resolved_config(
+    *,
+    execution_stage: str,
+    top_features: int = 30,
+    tree_path: str | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         runtime=SimpleNamespace(execution_stage=execution_stage, seed=42),
         report=SimpleNamespace(auto_threshold_selection_metric="mcc"),
+        figures=SimpleNamespace(top_features=top_features),
         model_selection=SimpleNamespace(),
         preprocess=SimpleNamespace(
             low_prevalence_filter=SimpleNamespace(enabled=True),
@@ -83,6 +89,10 @@ def _stub_resolved_config(*, execution_stage: str) -> SimpleNamespace:
         data=SimpleNamespace(
             metadata_path="metadata.tsv",
             tpm_path="tpm.tsv",
+            tree_path=tree_path,
+            species_col="species",
+            feature_col="orthogroup",
+            value_col="tpm",
             trait_col="C4",
             contrast_pair_col="contrast_pair_id",
         ),
@@ -315,6 +325,61 @@ def test_config_without_config_writes_default_yaml(
     assert payload["data"]["metadata_path"] == "testdata/c4_tiny/species_metadata.tsv"
     assert payload["data"]["tpm_path"] == "testdata/c4_tiny/tpm.tsv"
     assert payload["data"]["tree_path"] is None
+    assert payload["figures"]["top_features"] == 30
+
+
+def test_run_passes_top_features_to_run_and_tree_figures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    config = _write(tmp_path / "config.yml", "{}\n")
+    captured_run_kwargs: dict[str, object] = {}
+    captured_tree_kwargs: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "phenoradar.cli.load_and_resolve_config",
+        lambda *_args, **_kwargs: _stub_resolved_config(
+            execution_stage="cv_only",
+            top_features=7,
+            tree_path="tree.nwk",
+        ),
+    )
+    monkeypatch.setattr(
+        "phenoradar.cli.build_split_artifacts",
+        lambda *_args, **_kwargs: _stub_split_artifacts(),
+    )
+    monkeypatch.setattr(
+        "phenoradar.cli.run_outer_cv",
+        lambda *_args, **_kwargs: _stub_cv_artifacts(),
+    )
+    monkeypatch.setattr("phenoradar.cli.write_resolved_config", lambda *_args, **_kwargs: None)
+
+    def _capture_run_figures(*_args: object, **kwargs: object) -> list[str]:
+        captured_run_kwargs.update(kwargs)
+        return []
+
+    def _capture_tree_figures(*_args: object, **kwargs: object) -> list[str]:
+        captured_tree_kwargs.update(kwargs)
+        return []
+
+    monkeypatch.setattr("phenoradar.cli.write_run_figures", _capture_run_figures)
+    monkeypatch.setattr(
+        "phenoradar.cli.write_run_tree_prediction_artifacts",
+        _capture_tree_figures,
+    )
+    monkeypatch.setattr("phenoradar.cli.collect_input_files", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("phenoradar.cli.git_snapshot", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        "phenoradar.cli.runtime_environment_snapshot",
+        lambda *_args, **_kwargs: {"python": "test"},
+    )
+
+    result = runner.invoke(app, ["run", "-c", str(config)])
+
+    assert result.exit_code == 0, result.output
+    assert captured_run_kwargs["top_features"] == 7
+    assert captured_tree_kwargs["feature_limit"] == 7
 
 
 def test_run_rejects_multiple_config_options(tmp_path: Path) -> None:
@@ -496,8 +561,13 @@ data:
     assert "Pair aware" not in funnel_svg
     assert "Correlation" not in funnel_svg
     assert ">Final<" not in funnel_svg
-    assert (run_dirs[0] / "figures" / "selected_features_by_fold.svg").exists()
-    assert (run_dirs[0] / "figures" / "selected_feature_count_by_fold.svg").exists()
+    assert (
+        run_dirs[0] / "figures" / "selected_features_by_fold_after_preprocessing.svg"
+    ).exists()
+    assert not (run_dirs[0] / "figures" / "selected_features_after_preprocessing.svg").exists()
+    assert not (run_dirs[0] / "figures" / "selected_features_by_fold.svg").exists()
+    assert (run_dirs[0] / "figures" / "non_zero_feature_count_by_fold.svg").exists()
+    assert not (run_dirs[0] / "figures" / "selected_feature_count_by_fold.svg").exists()
     assert not (run_dirs[0] / "figures" / "model_sparsity_scatter.svg").exists()
     assert (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
     assert (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()
@@ -638,8 +708,13 @@ data:
     assert (run_dirs[0] / "figures" / "cv_fold_trait_probability.svg").exists()
     assert (run_dirs[0] / "figures" / "roc_pr_curves_cv.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_filter_funnel.svg").exists()
-    assert (run_dirs[0] / "figures" / "selected_features_by_fold.svg").exists()
-    assert (run_dirs[0] / "figures" / "selected_feature_count_by_fold.svg").exists()
+    assert (
+        run_dirs[0] / "figures" / "selected_features_by_fold_after_preprocessing.svg"
+    ).exists()
+    assert not (run_dirs[0] / "figures" / "selected_features_after_preprocessing.svg").exists()
+    assert not (run_dirs[0] / "figures" / "selected_features_by_fold.svg").exists()
+    assert (run_dirs[0] / "figures" / "non_zero_feature_count_by_fold.svg").exists()
+    assert not (run_dirs[0] / "figures" / "selected_feature_count_by_fold.svg").exists()
     assert not (run_dirs[0] / "figures" / "model_sparsity_scatter.svg").exists()
     assert not (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
     assert not (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()

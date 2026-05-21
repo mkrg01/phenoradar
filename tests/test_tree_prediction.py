@@ -318,3 +318,48 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
         assert ">NA<" in svg_text
     else:
         assert any("Toytree is unavailable" in warning for warning in warnings)
+
+
+def test_write_run_tree_prediction_artifacts_uses_requested_feature_limit(
+    tmp_path: Path,
+) -> None:
+    metadata_path = tmp_path / "metadata.tsv"
+    tpm_path = tmp_path / "tpm.tsv"
+    tree_path = tmp_path / "tree.nwk"
+    _metadata().write_csv(metadata_path, separator="\t")
+    _write_tpm(tpm_path)
+    tree_path.write_text("(sp1,sp2,sp3);\n", encoding="utf-8")
+    figures_dir = tmp_path / "run" / "figures"
+    figures_dir.mkdir(parents=True)
+
+    write_run_tree_prediction_artifacts(
+        run_dir=tmp_path / "run",
+        tree_path=tree_path,
+        metadata_path=metadata_path,
+        tpm_path=tpm_path,
+        species_col="species",
+        feature_col="orthogroup",
+        value_col="tpm",
+        trait_col="C4",
+        group_col="contrast_pair_id",
+        oof_predictions=pl.DataFrame(
+            {
+                "fold_id": ["0", "0", "1"],
+                "species": ["sp1", "sp2", "sp3"],
+                "label": [0, 1, 0],
+                "prob": [0.2, 0.8, 0.9],
+            }
+        ),
+        thresholds=_thresholds(),
+        feature_importance=_feature_importance(),
+        coefficients=_coefficients(),
+        pred_external_test=None,
+        feature_limit=1,
+    )
+
+    annotation = pl.read_csv(
+        tmp_path / "run" / "tree_feature_heatmap_annotation.tsv",
+        separator="\t",
+        null_values=["NA"],
+    )
+    assert annotation.select("feature").unique().to_series().to_list() == ["OG2"]

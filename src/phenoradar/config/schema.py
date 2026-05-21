@@ -389,6 +389,12 @@ class ReportConfig(StrictModel):
         return self
 
 
+class FiguresConfig(StrictModel):
+    """Figure output controls."""
+
+    top_features: PositiveInt = Field(default=30, le=100)
+
+
 class RuntimeConfig(StrictModel):
     """Runtime execution controls."""
 
@@ -413,6 +419,7 @@ class AppConfig(StrictModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     model_selection: ModelSelectionConfig = Field(default_factory=ModelSelectionConfig)
     ensemble: EnsembleConfig = Field(default_factory=EnsembleConfig)
+    figures: FiguresConfig = Field(default_factory=FiguresConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
 

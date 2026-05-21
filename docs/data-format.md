@@ -153,9 +153,9 @@ under `figures/` when Toytree is available.
 Tree tip labels must match metadata and prediction `species` values. In CV runs, tree
 contrast-pair QC and prediction artifacts focus on species with non-empty
 `contrast_pair_id`. In external-test and predict outputs, all predicted species are included
-in the annotation TSV. Tree feature heatmaps use the top 30 features by fold-level
-`importance_mean`
-and write both `log2(TPM + 1)` and within-feature z-score values.
+in the annotation TSV. Tree feature heatmaps use the top `figures.top_features`
+features by fold-level `importance_mean` and write both `log2(TPM + 1)` and
+within-feature z-score values.
 
 Training preflight requirements:
 

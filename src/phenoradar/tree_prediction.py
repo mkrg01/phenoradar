@@ -38,6 +38,7 @@ def write_run_tree_prediction_artifacts(
     feature_importance: pl.DataFrame,
     coefficients: pl.DataFrame,
     pred_external_test: pl.DataFrame | None,
+    feature_limit: int = _FEATURE_HEATMAP_LIMIT,
 ) -> list[str]:
     """Write run-level tree annotation TSVs and optional Toytree SVG figures."""
     if tree_path is None:
@@ -83,6 +84,7 @@ def write_run_tree_prediction_artifacts(
         oof_predictions=oof_predictions,
         feature_importance=feature_importance,
         coefficients=coefficients,
+        feature_limit=feature_limit,
     )
     if feature_annotation.height > 0:
         feature_annotation.write_csv(

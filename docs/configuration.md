@@ -91,6 +91,8 @@ model_selection:
   selection_metric: log_loss
 ensemble:
   probability_aggregation: mean
+figures:
+  top_features: 30
 report:
   fixed_probability_threshold: 0.5
   auto_threshold_selection_metric: mcc
@@ -109,6 +111,7 @@ runtime:
 - `model`
 - `model_selection`
 - `ensemble`
+- `figures`
 - `report`
 - `runtime`
 
@@ -523,6 +526,17 @@ Unknown parameter names are rejected at training time.
 - `ensemble.probability_aggregation`
   - type: `mean | median`
   - default: `mean`
+
+## `figures`
+
+- `figures.top_features`
+  - type: `int`
+  - default: `30`
+  - rule: must be in `[1, 100]`
+  - behavior:
+    - controls how many top-ranked features are shown in
+      `feature_importance_top.svg`, `coefficients_signed_top.svg`, and tree
+      feature heatmaps when `data.tree_path` is set.
 
 ## `report`
 
