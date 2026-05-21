@@ -75,6 +75,8 @@ _TRAIT_NEGATIVE_COLOR = "#d62728"
 _TRAIT_POSITIVE_COLOR = "#1f77b4"
 _MODEL_SELECTION_SAMPLE_SET_LIMIT = 1
 _RETAINED_FEATURE_LIMIT = 40
+_FEATURE_IMPORTANCE_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
+_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE = _LABEL_FONTSIZE
 _COEFFICIENTS_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
 _COEFFICIENTS_AXIS_LABEL_FONTSIZE = _LABEL_FONTSIZE
 _FEATURE_FILTER_FIGURE_DEFAULT_STAGE_ORDER = (
@@ -681,9 +683,9 @@ def _feature_importance_top(
             if np.isclose(max_value, 0.0):
                 max_value = 1.0
 
-            height_px = max(300, 90 + len(features) * 18)
+            height_px = max(240, 70 + len(features) * 18)
             fig, ax = plt.subplots(
-                figsize=_figure_size_inches(_NATURE_DOUBLE_COLUMN_WIDTH_PX, height_px),
+                figsize=_figure_size_inches(_FEATURE_IMPORTANCE_TOP_WIDTH_PX, height_px),
                 dpi=_FIG_DPI,
             )
             fig.patch.set_facecolor("white")
@@ -702,15 +704,16 @@ def _feature_importance_top(
                 widths=0.58,
                 patch_artist=True,
                 showmeans=True,
-                boxprops={"facecolor": "#d9f0e6", "edgecolor": _COLOR_GREEN, "linewidth": 0.8},
-                whiskerprops={"color": _COLOR_GREEN, "linewidth": 0.8},
-                capprops={"color": _COLOR_GREEN, "linewidth": 0.8},
-                medianprops={"color": _AXIS_COLOR, "linewidth": 0.9},
+                boxprops={"facecolor": "#eeeeee", "edgecolor": _MUTED_TEXT_COLOR, "linewidth": 0.8},
+                whiskerprops={"color": _MUTED_TEXT_COLOR, "linewidth": 0.8},
+                capprops={"color": _MUTED_TEXT_COLOR, "linewidth": 0.8},
+                medianprops={"color": "#111111", "linewidth": 0.9},
                 meanprops={
                     "marker": "D",
-                    "markerfacecolor": _AXIS_COLOR,
-                    "markeredgecolor": _AXIS_COLOR,
+                    "markerfacecolor": "#111111",
+                    "markeredgecolor": "#111111",
                     "markersize": 3.0,
+                    "zorder": 5,
                 },
                 flierprops={"marker": ""},
             )
@@ -723,27 +726,35 @@ def _feature_importance_top(
                     feature_values,
                     y + offsets,
                     s=12,
-                    color=_AXIS_COLOR,
-                    alpha=0.72,
-                    edgecolors="none",
-                    zorder=3,
+                    facecolors="white",
+                    edgecolors=_MUTED_TEXT_COLOR,
+                    linewidths=0.5,
+                    alpha=0.78,
+                    zorder=4,
             )
             ax.set_yticks(y_pos)
             ax.set_yticklabels(features, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
+            ax.set_ylabel(
+                "Orthogroup ID",
+                fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE,
+            )
             ax.invert_yaxis()
             ax.set_xlim(0.0, max_value * 1.15)
-            ax.set_xlabel("fold-level importance_mean", fontsize=_LABEL_FONTSIZE)
+            ax.set_xlabel(
+                "Mean feature importance per fold",
+                fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE,
+            )
             ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
             ax.set_axisbelow(True)
             fig.subplots_adjust(
                 left=_label_left_margin(
                     features,
-                    width_px=_NATURE_DOUBLE_COLUMN_WIDTH_PX,
+                    width_px=_FEATURE_IMPORTANCE_TOP_WIDTH_PX,
                     fontsize_px=_MONO_FONTSIZE,
                 ),
                 right=0.985,
-                top=0.98,
-                bottom=0.12,
+                top=0.985,
+                bottom=_compact_bottom_margin(height_px),
             )
             _save_svg_figure(fig, out_path)
             return
@@ -752,22 +763,26 @@ def _feature_importance_top(
     if np.isclose(max_value, 0.0):
         max_value = 1.0
 
-    height_px = max(280, 80 + len(features) * 18)
+    height_px = max(220, 60 + len(features) * 18)
     fig, ax = plt.subplots(
-        figsize=_figure_size_inches(_NATURE_DOUBLE_COLUMN_WIDTH_PX, height_px),
+        figsize=_figure_size_inches(_FEATURE_IMPORTANCE_TOP_WIDTH_PX, height_px),
         dpi=_FIG_DPI,
     )
     fig.patch.set_facecolor("white")
 
     y_pos = np.arange(len(features), dtype=float)
-    bars = ax.barh(y_pos, values, color=_COLOR_GREEN, height=0.65)
+    bars = ax.barh(y_pos, values, color=_MUTED_TEXT_COLOR, height=0.65)
     ax.set_yticks(y_pos)
     ax.set_yticklabels(features, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
+    ax.set_ylabel("Orthogroup ID", fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE)
     ax.invert_yaxis()
 
     right_limit = max_value * 1.15
     ax.set_xlim(0.0, right_limit)
-    ax.set_xlabel("importance_mean", fontsize=_LABEL_FONTSIZE)
+    ax.set_xlabel(
+        "Mean feature importance per fold",
+        fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE,
+    )
     ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
 
@@ -787,12 +802,12 @@ def _feature_importance_top(
     fig.subplots_adjust(
         left=_label_left_margin(
             features,
-            width_px=_NATURE_DOUBLE_COLUMN_WIDTH_PX,
+            width_px=_FEATURE_IMPORTANCE_TOP_WIDTH_PX,
             fontsize_px=_MONO_FONTSIZE,
         ),
         right=0.98,
-        top=0.98,
-        bottom=0.12,
+        top=0.985,
+        bottom=_compact_bottom_margin(height_px),
     )
     _save_svg_figure(fig, out_path)
 
@@ -1318,6 +1333,13 @@ def _cv_fold_trait_probability(
     width_px = _fold_axis_width_px(len(fold_ids), base_px=140, per_fold_px=44)
     fig, ax = plt.subplots(figsize=_figure_size_inches(width_px, 390), dpi=_FIG_DPI)
     fig.patch.set_facecolor("white")
+
+    for fold_idx, center in enumerate(fold_centers):
+        if fold_idx % 2 == 0:
+            ax.axvspan(center - 0.48, center + 0.48, color="#f7f7f7", zorder=0)
+
+    for boundary in np.arange(1.5, len(fold_ids), 1.0):
+        ax.axvline(boundary, color="#d9d9d9", linewidth=0.5, zorder=1)
 
     for trait_idx, trait in enumerate(traits):
         values_for_box: list[list[float]] = []

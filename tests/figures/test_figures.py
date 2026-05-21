@@ -999,6 +999,8 @@ def test_cv_fold_trait_probability_writes_svg(tmp_path: Path) -> None:
     assert "C4" in svg_text
     assert "C4=0" not in svg_text
     assert "C4=1" not in svg_text
+    assert "#f7f7f7" in svg_text
+    assert "#d9d9d9" in svg_text
 
 
 def test_retained_features_by_fold_rejects_invalid_schema(tmp_path: Path) -> None:
@@ -1051,6 +1053,43 @@ def test_feature_importance_top_handles_zero_importances(tmp_path: Path) -> None
         out_path=out_path,
     )
     assert out_path.exists()
+    svg_text = out_path.read_text()
+    assert "Feature Importance Top" not in svg_text
+    assert "importance_mean" not in svg_text
+    assert "Orthogroup ID" in svg_text
+    assert "Mean feature importance per fold" in svg_text
+    assert "#009e73" not in svg_text
+    assert "#666666" in svg_text
+
+
+def test_feature_importance_top_fold_points_use_neutral_styling(tmp_path: Path) -> None:
+    out_path = tmp_path / "feature_importance_top.svg"
+    figures_mod._feature_importance_top(
+        feature_importance=pl.DataFrame(
+            {
+                "feature": ["OG1", "OG2"],
+                "importance_mean": [0.4, 0.3],
+            }
+        ),
+        feature_importance_by_fold=pl.DataFrame(
+            {
+                "fold_id": ["0", "1", "0", "1"],
+                "feature": ["OG1", "OG1", "OG2", "OG2"],
+                "importance_mean": [0.5, 0.3, 0.2, 0.4],
+            }
+        ),
+        out_path=out_path,
+    )
+
+    svg_text = out_path.read_text()
+    assert "Feature Importance Top" not in svg_text
+    assert "fold-level importance_mean" not in svg_text
+    assert "Orthogroup ID" in svg_text
+    assert "Mean feature importance per fold" in svg_text
+    assert "#009e73" not in svg_text
+    assert "#d9f0e6" not in svg_text
+    assert "#eeeeee" in svg_text
+    assert "#666666" in svg_text
 
 
 def test_coefficients_signed_top_rejects_invalid_schema(tmp_path: Path) -> None:
