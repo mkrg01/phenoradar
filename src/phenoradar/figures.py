@@ -88,12 +88,12 @@ _FEATURE_FILTER_FIGURE_DEFAULT_STAGE_ORDER = (
     "n_features_after_all",
 )
 _FEATURE_FILTER_FIGURE_STAGE_LABELS = {
-    "n_features_before": "input",
-    "n_features_after_low_prevalence": "low_prevalence",
-    "n_features_after_low_variance": "low_variance",
-    "n_features_after_pair_aware": "pair_aware",
-    "n_features_after_correlation": "correlation",
-    "n_features_after_all": "final",
+    "n_features_before": "Input",
+    "n_features_after_low_prevalence": "Low prevalence",
+    "n_features_after_low_variance": "Low variance",
+    "n_features_after_pair_aware": "Pair aware",
+    "n_features_after_correlation": "Correlation",
+    "n_features_after_all": "Final",
 }
 
 
@@ -2089,8 +2089,7 @@ def _feature_filter_funnel(
     ax.set_xticks(x_positions)
     ax.set_xticklabels(
         [_FEATURE_FILTER_FIGURE_STAGE_LABELS[stage] for stage in stage_order],
-        fontsize=_MONO_FONTSIZE,
-        fontfamily="monospace",
+        fontsize=_TICK_FONTSIZE,
     )
     ax.set_xlabel("Feature selection step", fontsize=_LABEL_FONTSIZE)
     ax.set_ylabel("Number of features", fontsize=_LABEL_FONTSIZE)

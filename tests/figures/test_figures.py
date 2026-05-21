@@ -372,11 +372,13 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
     assert "IQR (25-75%)" in funnel_svg
     assert "min-max" in funnel_svg
     assert "outer_fold (median" not in funnel_svg
-    assert "low_prevalence" in funnel_svg
-    assert "pair_aware" in funnel_svg
-    assert "low_variance" not in funnel_svg
-    assert "correlation" not in funnel_svg
-    assert "final" not in funnel_svg
+    assert "Input" in funnel_svg
+    assert "Low prevalence" in funnel_svg
+    assert "Pair aware" in funnel_svg
+    assert "low_prevalence" not in funnel_svg
+    assert "Low variance" not in funnel_svg
+    assert "Correlation" not in funnel_svg
+    assert "Final" not in funnel_svg
     assert "79.5" in funnel_svg
     assert (figures_dir / "retained_features_by_fold.svg").exists()
     assert (figures_dir / "model_sparsity_scatter.svg").exists()

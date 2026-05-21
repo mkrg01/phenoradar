@@ -483,11 +483,13 @@ data:
     funnel_svg = (run_dirs[0] / "figures" / "feature_filter_funnel.svg").read_text(
         encoding="utf-8"
     )
-    assert "low_prevalence" in funnel_svg
-    assert "low_variance" not in funnel_svg
-    assert "pair_aware" not in funnel_svg
-    assert "correlation" not in funnel_svg
-    assert ">final<" not in funnel_svg
+    assert "Input" in funnel_svg
+    assert "Low prevalence" in funnel_svg
+    assert "low_prevalence" not in funnel_svg
+    assert "Low variance" not in funnel_svg
+    assert "Pair aware" not in funnel_svg
+    assert "Correlation" not in funnel_svg
+    assert ">Final<" not in funnel_svg
     assert (run_dirs[0] / "figures" / "retained_features_by_fold.svg").exists()
     assert (run_dirs[0] / "figures" / "model_sparsity_scatter.svg").exists()
     assert (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
