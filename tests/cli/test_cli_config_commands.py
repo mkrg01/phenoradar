@@ -498,7 +498,7 @@ data:
     assert ">Final<" not in funnel_svg
     assert (run_dirs[0] / "figures" / "selected_features_by_fold.svg").exists()
     assert (run_dirs[0] / "figures" / "selected_feature_count_by_fold.svg").exists()
-    assert (run_dirs[0] / "figures" / "model_sparsity_scatter.svg").exists()
+    assert not (run_dirs[0] / "figures" / "model_sparsity_scatter.svg").exists()
     assert (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
     assert (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()
     cv_trait_svg = (run_dirs[0] / "figures" / "cv_species_probability_by_trait.svg").read_text(
@@ -640,7 +640,7 @@ data:
     assert (run_dirs[0] / "figures" / "feature_filter_funnel.svg").exists()
     assert (run_dirs[0] / "figures" / "selected_features_by_fold.svg").exists()
     assert (run_dirs[0] / "figures" / "selected_feature_count_by_fold.svg").exists()
-    assert (run_dirs[0] / "figures" / "model_sparsity_scatter.svg").exists()
+    assert not (run_dirs[0] / "figures" / "model_sparsity_scatter.svg").exists()
     assert not (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
     assert not (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()
     assert (run_dirs[0] / "classification_summary.tsv").exists()

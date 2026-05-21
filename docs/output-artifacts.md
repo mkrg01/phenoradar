@@ -127,7 +127,6 @@ Always written:
     - `feature_filter_funnel.svg`
     - `selected_features_by_fold.svg`
     - `selected_feature_count_by_fold.svg`
-    - `model_sparsity_scatter.svg`
     - `model_selection_trials.svg` (candidate selection active)
     - `roc_pr_curves_cv.svg` (may be skipped with warning for degenerate folds)
     - `final_refit_loss_by_split.svg` (attempted in `full_run`)
@@ -504,9 +503,6 @@ Conditionally written:
 - `selected_feature_count_by_fold.svg`
   - Fold-wise distribution of `n_nonzero_features` from `model_sparsity.tsv`.
   - Boxplots are shown when a fold has multiple models; points show individual models.
-- `model_sparsity_scatter.svg`
-  - Scatter of `n_features_after_all` vs `n_nonzero_features`.
-  - Useful for comparing preprocessing output size vs model sparsity.
 - `model_selection_trials.svg` (candidate selection active)
   - Panels are laid out automatically in a compact grid.
   - Candidate scores are shown as `metric_value_mean ± metric_value_std`.

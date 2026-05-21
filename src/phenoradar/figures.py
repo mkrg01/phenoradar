@@ -2422,45 +2422,6 @@ def _selected_feature_count_by_fold(model_sparsity: pl.DataFrame, out_path: Path
     _save_svg_figure(fig, out_path)
 
 
-def _model_sparsity_scatter(model_sparsity: pl.DataFrame, out_path: Path) -> None:
-    required = {"model_name", "n_features_after_all", "n_nonzero_features", "scope"}
-    if not required.issubset(model_sparsity.columns):
-        raise FigureError("model_sparsity.tsv schema is invalid for model_sparsity_scatter.svg")
-    data = model_sparsity.filter(pl.col("n_nonzero_features").is_not_null())
-    if data.height == 0:
-        _write_message_figure(
-            title="Model Sparsity Scatter",
-            message="No models expose non-zero feature counts in model_sparsity.tsv.",
-            out_path=out_path,
-            width_px=980,
-            height_px=520,
-        )
-        return
-
-    fig, ax = plt.subplots(
-        figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 330),
-        dpi=_FIG_DPI,
-    )
-    fig.patch.set_facecolor("white")
-
-    x_values = np.array(data.select("n_features_after_all").to_series().to_list(), dtype=float)
-    y_values = np.array(data.select("n_nonzero_features").to_series().to_list(), dtype=float)
-    ax.scatter(
-        x_values,
-        y_values,
-        s=18,
-        alpha=0.78,
-        color=_COLOR_BLUE,
-        edgecolors="none",
-    )
-    ax.set_xlabel("n_features_after_all", fontsize=_LABEL_FONTSIZE)
-    ax.set_ylabel("n_nonzero_features", fontsize=_LABEL_FONTSIZE)
-    ax.grid(color=_GRID_COLOR, linewidth=0.5)
-    ax.set_axisbelow(True)
-    fig.subplots_adjust(left=0.12, right=0.98, top=0.96, bottom=0.16)
-    _save_svg_figure(fig, out_path)
-
-
 def write_run_figures(
     *,
     run_dir: Path,
@@ -2555,10 +2516,6 @@ def write_run_figures(
         _selected_feature_count_by_fold(
             model_sparsity,
             figures_dir / "selected_feature_count_by_fold.svg",
-        )
-        _model_sparsity_scatter(
-            model_sparsity,
-            figures_dir / "model_sparsity_scatter.svg",
         )
     if pred_external_test is not None:
         try:

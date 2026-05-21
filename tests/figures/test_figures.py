@@ -384,7 +384,7 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
     assert (figures_dir / "selected_feature_count_by_fold.svg").exists()
     count_svg = (figures_dir / "selected_feature_count_by_fold.svg").read_text(encoding="utf-8")
     assert "Number of non-zero features per model" in count_svg
-    assert (figures_dir / "model_sparsity_scatter.svg").exists()
+    assert not (figures_dir / "model_sparsity_scatter.svg").exists()
     assert warnings == []
 
 
