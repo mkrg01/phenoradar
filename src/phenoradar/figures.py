@@ -14,6 +14,7 @@ from matplotlib.colors import to_rgba
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from matplotlib.ticker import MaxNLocator
 from sklearn.metrics import (
     average_precision_score,
     balanced_accuracy_score,
@@ -2139,11 +2140,11 @@ def _feature_filter_funnel(
     _save_svg_figure(fig, out_path)
 
 
-def _retained_features_by_fold(retained_features_summary: pl.DataFrame, out_path: Path) -> None:
+def _selected_features_by_fold(retained_features_summary: pl.DataFrame, out_path: Path) -> None:
     required = {"scope", "fold_id", "feature", "retained_count", "n_sample_sets", "retained_rate"}
     if not required.issubset(retained_features_summary.columns):
         raise FigureError(
-            "retained_features_summary.tsv schema is invalid for retained_features_by_fold.svg"
+            "retained_features_summary.tsv schema is invalid for selected_features_by_fold.svg"
         )
     data = (
         retained_features_summary.select(
@@ -2169,8 +2170,8 @@ def _retained_features_by_fold(retained_features_summary: pl.DataFrame, out_path
     )
     if data.height == 0:
         _write_message_figure(
-            title="Retained Features by Fold",
-            message="No outer-fold retained-feature summary rows are available.",
+            title="Selected Features by Fold",
+            message="No outer-fold selected-feature summary rows are available.",
             out_path=out_path,
             width_px=980,
             height_px=520,
@@ -2203,8 +2204,8 @@ def _retained_features_by_fold(retained_features_summary: pl.DataFrame, out_path
     features = [str(v) for v in shown_feature_table.select("__feature").to_series().to_list()]
     if not fold_ids or not features:
         _write_message_figure(
-            title="Retained Features by Fold",
-            message="No retained features are available after filtering.",
+            title="Selected Features by Fold",
+            message="No selected features are available after filtering.",
             out_path=out_path,
             width_px=980,
             height_px=520,
@@ -2244,7 +2245,7 @@ def _retained_features_by_fold(retained_features_summary: pl.DataFrame, out_path
     ax.set_yticks(np.arange(len(features), dtype=float))
     ax.set_yticklabels(features, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
     ax.set_xlabel("CV fold", fontsize=_LABEL_FONTSIZE)
-    ax.set_ylabel("Retained feature", fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel("Selected feature", fontsize=_LABEL_FONTSIZE)
     ax.set_xticks(np.arange(-0.5, len(fold_ids), 1.0), minor=True)
     ax.set_yticks(np.arange(-0.5, len(features), 1.0), minor=True)
     ax.grid(which="minor", color="#ffffff", linewidth=0.5)
@@ -2265,7 +2266,7 @@ def _retained_features_by_fold(retained_features_summary: pl.DataFrame, out_path
             )
 
     colorbar = fig.colorbar(image, ax=ax, fraction=0.025, pad=0.02)
-    colorbar.set_label("retained_rate", rotation=90, fontsize=_LABEL_FONTSIZE)
+    colorbar.set_label("selection_rate", rotation=90, fontsize=_LABEL_FONTSIZE)
     colorbar.ax.tick_params(labelsize=_TICK_FONTSIZE)
     fig.subplots_adjust(
         left=_label_left_margin(features, width_px=width_px, fontsize_px=_MONO_FONTSIZE),
@@ -2273,6 +2274,151 @@ def _retained_features_by_fold(retained_features_summary: pl.DataFrame, out_path
         top=0.98,
         bottom=0.12,
     )
+    _save_svg_figure(fig, out_path)
+
+
+def _selected_feature_count_by_fold(model_sparsity: pl.DataFrame, out_path: Path) -> None:
+    required = {"scope", "fold_id", "n_nonzero_features"}
+    if not required.issubset(model_sparsity.columns):
+        raise FigureError(
+            "model_sparsity.tsv schema is invalid for selected_feature_count_by_fold.svg"
+        )
+
+    data = (
+        model_sparsity.select(
+            pl.col("scope").cast(pl.String, strict=False).alias("__scope"),
+            pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
+            pl.col("n_nonzero_features").cast(pl.Float64, strict=False).alias("__count"),
+        )
+        .filter(
+            (pl.col("__scope") == "outer_fold")
+            & pl.col("__fold_id").is_not_null()
+            & (pl.col("__fold_id") != "")
+            & pl.col("__count").is_not_null()
+            & pl.col("__count").is_finite()
+        )
+        .sort(["__fold_id", "__count"])
+    )
+    if data.height == 0:
+        _write_message_figure(
+            title="Selected Feature Count by Fold",
+            message="No outer-fold non-zero feature counts are available in model_sparsity.tsv.",
+            out_path=out_path,
+            width_px=_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX,
+            height_px=320,
+        )
+        return
+
+    fold_ids = [str(v) for v in data.select("__fold_id").unique().to_series().to_list()]
+    fold_ids = sorted(
+        fold_ids,
+        key=lambda value: (0, int(value)) if value.isdigit() else (1, value),
+    )
+    if not fold_ids:
+        _write_message_figure(
+            title="Selected Feature Count by Fold",
+            message="No outer-fold non-zero feature counts are available in model_sparsity.tsv.",
+            out_path=out_path,
+            width_px=_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX,
+            height_px=320,
+        )
+        return
+
+    fold_centers = np.arange(1, len(fold_ids) + 1, dtype=float)
+    values_by_fold: list[np.ndarray] = []
+    all_values: list[float] = []
+    for fold_id in fold_ids:
+        subset = data.filter(pl.col("__fold_id") == fold_id)
+        values = np.array(subset.select("__count").to_series().to_list(), dtype=float)
+        values_by_fold.append(values)
+        all_values.extend(values.tolist())
+
+    y_max = max(all_values) if all_values else 1.0
+    if np.isclose(y_max, 0.0):
+        y_max = 1.0
+
+    width_px = _fold_axis_width_px(len(fold_ids), base_px=140, per_fold_px=44)
+    fig, ax = plt.subplots(figsize=_figure_size_inches(width_px, 340), dpi=_FIG_DPI)
+    fig.patch.set_facecolor("white")
+
+    for fold_idx, center in enumerate(fold_centers):
+        if fold_idx % 2 == 0:
+            ax.axvspan(center - 0.48, center + 0.48, color="#f7f7f7", zorder=0)
+    for boundary in np.arange(1.5, len(fold_ids), 1.0):
+        ax.axvline(boundary, color="#d9d9d9", linewidth=0.5, zorder=1)
+
+    box_values: list[list[float]] = []
+    box_positions: list[float] = []
+    for center, values in zip(fold_centers, values_by_fold, strict=True):
+        if values.size > 1:
+            box_values.append(values.tolist())
+            box_positions.append(float(center))
+    if box_values:
+        box = ax.boxplot(
+            box_values,
+            positions=box_positions,
+            widths=0.42,
+            patch_artist=True,
+            showmeans=True,
+            showfliers=False,
+            manage_ticks=False,
+            meanprops={
+                "marker": "D",
+                "markerfacecolor": _AXIS_COLOR,
+                "markeredgecolor": _AXIS_COLOR,
+                "markersize": 3.0,
+            },
+            medianprops={"linewidth": 0.9, "color": _AXIS_COLOR},
+            whiskerprops={"linewidth": 0.8, "color": _MUTED_TEXT_COLOR},
+            capprops={"linewidth": 0.8, "color": _MUTED_TEXT_COLOR},
+        )
+        for patch in box["boxes"]:
+            patch.set_facecolor(_COLOR_BLUE)
+            patch.set_alpha(0.22)
+            patch.set_edgecolor(_COLOR_BLUE)
+            patch.set_linewidth(0.8)
+
+    for center, values in zip(fold_centers, values_by_fold, strict=True):
+        if values.size == 0:
+            continue
+        offsets = _deterministic_offsets(values.size, 0.15)
+        ax.scatter(
+            np.full(values.shape[0], center, dtype=float) + offsets,
+            values,
+            s=18,
+            color=_COLOR_BLUE,
+            edgecolors="white",
+            linewidths=0.4,
+            alpha=0.78,
+            zorder=3,
+        )
+
+    for center, values in zip(fold_centers, values_by_fold, strict=True):
+        if values.size == 0:
+            continue
+        ax.text(
+            center,
+            1.02,
+            f"n={values.size}",
+            transform=ax.get_xaxis_transform(),
+            ha="center",
+            va="bottom",
+            fontsize=_ANNOTATION_FONTSIZE,
+            color=_MUTED_TEXT_COLOR,
+            clip_on=False,
+        )
+
+    ax.set_xlim(0.52, len(fold_ids) + 0.48)
+    ax.set_ylim(0.0, y_max * 1.15)
+    ax.set_xticks(fold_centers)
+    ax.set_xticklabels([str(fold_id) for fold_id in fold_ids], fontsize=_TICK_FONTSIZE)
+    ax.set_xlabel("CV fold", fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel("Number of non-zero features per model", fontsize=_LABEL_FONTSIZE)
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
+    ax.set_axisbelow(True)
+
+    fig.subplots_adjust(left=0.12, right=0.995, top=0.90, bottom=0.15)
     _save_svg_figure(fig, out_path)
 
 
@@ -2401,11 +2547,15 @@ def write_run_figures(
             stage_order=feature_filter_funnel_stage_order,
         )
     if retained_features_summary is not None:
-        _retained_features_by_fold(
+        _selected_features_by_fold(
             retained_features_summary,
-            figures_dir / "retained_features_by_fold.svg",
+            figures_dir / "selected_features_by_fold.svg",
         )
     if model_sparsity is not None:
+        _selected_feature_count_by_fold(
+            model_sparsity,
+            figures_dir / "selected_feature_count_by_fold.svg",
+        )
         _model_sparsity_scatter(
             model_sparsity,
             figures_dir / "model_sparsity_scatter.svg",

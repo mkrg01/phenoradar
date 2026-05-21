@@ -380,7 +380,10 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
     assert "Correlation" not in funnel_svg
     assert "Final" not in funnel_svg
     assert "79.5" in funnel_svg
-    assert (figures_dir / "retained_features_by_fold.svg").exists()
+    assert (figures_dir / "selected_features_by_fold.svg").exists()
+    assert (figures_dir / "selected_feature_count_by_fold.svg").exists()
+    count_svg = (figures_dir / "selected_feature_count_by_fold.svg").read_text(encoding="utf-8")
+    assert "Number of non-zero features per model" in count_svg
     assert (figures_dir / "model_sparsity_scatter.svg").exists()
     assert warnings == []
 
@@ -1005,21 +1008,41 @@ def test_cv_fold_trait_probability_writes_svg(tmp_path: Path) -> None:
     assert "#d9d9d9" in svg_text
 
 
-def test_retained_features_by_fold_rejects_invalid_schema(tmp_path: Path) -> None:
+def test_selected_features_by_fold_rejects_invalid_schema(tmp_path: Path) -> None:
     with pytest.raises(FigureError, match="schema is invalid"):
-        figures_mod._retained_features_by_fold(
+        figures_mod._selected_features_by_fold(
             retained_features_summary=pl.DataFrame({"feature": ["OG1"]}),
-            out_path=tmp_path / "retained_features_by_fold.svg",
+            out_path=tmp_path / "selected_features_by_fold.svg",
         )
 
 
-def test_retained_features_by_fold_writes_svg(tmp_path: Path) -> None:
-    out_path = tmp_path / "retained_features_by_fold.svg"
-    figures_mod._retained_features_by_fold(
+def test_selected_features_by_fold_writes_svg(tmp_path: Path) -> None:
+    out_path = tmp_path / "selected_features_by_fold.svg"
+    figures_mod._selected_features_by_fold(
         retained_features_summary=_minimal_retained_features_summary(),
         out_path=out_path,
     )
     assert out_path.exists()
+
+
+def test_selected_feature_count_by_fold_rejects_invalid_schema(tmp_path: Path) -> None:
+    with pytest.raises(FigureError, match="schema is invalid"):
+        figures_mod._selected_feature_count_by_fold(
+            model_sparsity=pl.DataFrame({"fold_id": ["0"]}),
+            out_path=tmp_path / "selected_feature_count_by_fold.svg",
+        )
+
+
+def test_selected_feature_count_by_fold_writes_svg(tmp_path: Path) -> None:
+    out_path = tmp_path / "selected_feature_count_by_fold.svg"
+    figures_mod._selected_feature_count_by_fold(
+        model_sparsity=_minimal_model_sparsity(),
+        out_path=out_path,
+    )
+    assert out_path.exists()
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "Number of non-zero features per model" in svg_text
+    assert "CV fold" in svg_text
 
 
 def test_feature_importance_top_rejects_invalid_schema(tmp_path: Path) -> None:

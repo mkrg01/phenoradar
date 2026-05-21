@@ -125,7 +125,8 @@ Always written:
     - `cv_species_probability_by_trait.svg`
     - `cv_fold_trait_probability.svg`
     - `feature_filter_funnel.svg`
-    - `retained_features_by_fold.svg`
+    - `selected_features_by_fold.svg`
+    - `selected_feature_count_by_fold.svg`
     - `model_sparsity_scatter.svg`
     - `model_selection_trials.svg` (candidate selection active)
     - `roc_pr_curves_cv.svg` (may be skipped with warning for degenerate folds)
@@ -496,10 +497,13 @@ Conditionally written:
   - Feature-count trend by scope through the enabled `preprocess.*_filter` steps.
   - Line is median count; shaded band is IQR; dashed lines are min-max.
   - Legend identifies median/IQR/min-max; the figure annotates the `n_records` count.
-- `retained_features_by_fold.svg`
-  - Outer-fold retained-feature heatmap.
-  - Rows are features, columns are folds, color is `retained_rate`.
-  - Useful for spotting fold-specific feature retention differences.
+- `selected_features_by_fold.svg`
+  - Outer-fold selected-feature heatmap.
+  - Rows are features, columns are folds, color is the feature selection rate across sampled sets.
+  - Useful for spotting fold-specific feature selection differences.
+- `selected_feature_count_by_fold.svg`
+  - Fold-wise distribution of `n_nonzero_features` from `model_sparsity.tsv`.
+  - Boxplots are shown when a fold has multiple models; points show individual models.
 - `model_sparsity_scatter.svg`
   - Scatter of `n_features_after_all` vs `n_nonzero_features`.
   - Useful for comparing preprocessing output size vs model sparsity.

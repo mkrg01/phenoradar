@@ -74,6 +74,12 @@ def _stub_resolved_config(*, execution_stage: str) -> SimpleNamespace:
         runtime=SimpleNamespace(execution_stage=execution_stage, seed=42),
         report=SimpleNamespace(auto_threshold_selection_metric="mcc"),
         model_selection=SimpleNamespace(),
+        preprocess=SimpleNamespace(
+            low_prevalence_filter=SimpleNamespace(enabled=True),
+            low_variance_filter=SimpleNamespace(enabled=True),
+            pair_aware_filter=SimpleNamespace(enabled=False),
+            correlation_filter=SimpleNamespace(enabled=False),
+        ),
         data=SimpleNamespace(
             metadata_path="metadata.tsv",
             tpm_path="tpm.tsv",
@@ -490,7 +496,8 @@ data:
     assert "Pair aware" not in funnel_svg
     assert "Correlation" not in funnel_svg
     assert ">Final<" not in funnel_svg
-    assert (run_dirs[0] / "figures" / "retained_features_by_fold.svg").exists()
+    assert (run_dirs[0] / "figures" / "selected_features_by_fold.svg").exists()
+    assert (run_dirs[0] / "figures" / "selected_feature_count_by_fold.svg").exists()
     assert (run_dirs[0] / "figures" / "model_sparsity_scatter.svg").exists()
     assert (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
     assert (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()
@@ -631,7 +638,8 @@ data:
     assert (run_dirs[0] / "figures" / "cv_fold_trait_probability.svg").exists()
     assert (run_dirs[0] / "figures" / "roc_pr_curves_cv.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_filter_funnel.svg").exists()
-    assert (run_dirs[0] / "figures" / "retained_features_by_fold.svg").exists()
+    assert (run_dirs[0] / "figures" / "selected_features_by_fold.svg").exists()
+    assert (run_dirs[0] / "figures" / "selected_feature_count_by_fold.svg").exists()
     assert (run_dirs[0] / "figures" / "model_sparsity_scatter.svg").exists()
     assert not (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
     assert not (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()
