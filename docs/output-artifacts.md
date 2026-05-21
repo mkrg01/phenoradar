@@ -284,9 +284,10 @@ Conditionally written:
 - Written when `data.tree_path` is set.
 - Long-form ggtree/Toytree-friendly feature heatmap values for species with non-empty
   `split.group_col` and the top 30 features by `importance_mean`.
-- Columns: `label`, `species`, `true_label`, `group_id`, `group_name`, `feature_rank`,
+- Columns: `label`, `species`, `true_label`, `prob`, `group_id`, `group_name`, `feature_rank`,
   `feature`, `importance_mean`, `coef_mean`, `tpm`, `log2_tpm_plus1`,
   `z_score_log2_tpm`.
+- `prob` is the out-of-fold predicted probability of label `1` when available.
 - `log2_tpm_plus1` is `log2(TPM + 1)` after duplicate `(species, feature)` rows are
   summed; `z_score_log2_tpm` is computed within each feature across included species.
 
@@ -521,6 +522,10 @@ Conditionally written:
   - Written when `data.tree_path` is set and Toytree is available.
   - Rectangular Toytree views with top-feature heatmap tiles ordered by
     `importance_mean`.
+  - Show the numeric trait label and predicted probability immediately before the
+    feature heatmap.
+  - Include an inline continuous color-bar legend showing the plotted value scale
+    and missing-value color.
   - The z-score figure emphasizes relative per-feature expression patterns; the
     log2-TPM figure preserves absolute expression scale after `log2(TPM + 1)`.
 

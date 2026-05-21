@@ -80,6 +80,7 @@ def write_run_tree_prediction_artifacts(
         feature_col=feature_col,
         value_col=value_col,
         group_col=group_col,
+        oof_predictions=oof_predictions,
         feature_importance=feature_importance,
         coefficients=coefficients,
     )
@@ -96,7 +97,7 @@ def write_run_tree_prediction_artifacts(
                 annotation=feature_annotation,
                 value_col="z_score_log2_tpm",
                 out_path=run_dir / "figures" / "tree_feature_heatmap_zscore.svg",
-                title="Tree Feature Heatmap (z-score)",
+                title="",
                 cmap_name="coolwarm",
             )
         )
@@ -106,7 +107,7 @@ def write_run_tree_prediction_artifacts(
                 annotation=feature_annotation,
                 value_col="log2_tpm_plus1",
                 out_path=run_dir / "figures" / "tree_feature_heatmap_log2_tpm.svg",
-                title="Tree Feature Heatmap (log2 TPM + 1)",
+                title="",
                 cmap_name="viridis",
             )
         )
@@ -254,6 +255,7 @@ def build_tree_feature_heatmap_annotation(
     group_col: str,
     feature_importance: pl.DataFrame,
     coefficients: pl.DataFrame,
+    oof_predictions: pl.DataFrame | None = None,
     feature_limit: int = _FEATURE_HEATMAP_LIMIT,
 ) -> pl.DataFrame:
     """Build long-form feature heatmap values for grouped species and top features."""
@@ -279,6 +281,20 @@ def build_tree_feature_heatmap_annotation(
     )
     if species_meta.height == 0:
         return _empty_feature_heatmap_annotation()
+    if oof_predictions is None:
+        species_meta = species_meta.with_columns(pl.lit(None, dtype=pl.Float64).alias("prob"))
+    else:
+        _require_columns(oof_predictions, {"species", "prob"}, "prediction_cv.tsv")
+        prediction_probs = (
+            oof_predictions.with_columns(
+                pl.col("species").cast(pl.String, strict=False).str.strip_chars().alias("species"),
+                pl.col("prob").cast(pl.Float64, strict=False).alias("prob"),
+            )
+            .drop_nulls(["species"])
+            .group_by("species")
+            .agg(pl.col("prob").mean().alias("prob"))
+        )
+        species_meta = species_meta.join(prediction_probs, on="species", how="left")
 
     top_features = (
         feature_importance.drop_nulls(["feature", "importance_mean"])
@@ -332,6 +348,7 @@ def build_tree_feature_heatmap_annotation(
                 "label",
                 "species",
                 "true_label",
+                "prob",
                 "group_id",
                 "group_name",
                 "feature_rank",
@@ -628,6 +645,7 @@ def _empty_feature_heatmap_annotation() -> pl.DataFrame:
             "label": pl.String,
             "species": pl.String,
             "true_label": pl.Int8,
+            "prob": pl.Float64,
             "group_id": pl.String,
             "group_name": pl.String,
             "feature_rank": pl.UInt32,
@@ -903,16 +921,23 @@ def _draw_toytree_feature_heatmap(
         .to_list()
     )
     feature_labels = [str(v) for v in features]
-    height = max(420, 58 + 18 * len(tip_labels))
+    feature_step = 0.48
+    trait_x = 0.45
+    prob_x = trait_x + feature_step
+    feature_start_x = prob_x + feature_step
+    feature_xs = [
+        feature_start_x + feature_index * feature_step
+        for feature_index in range(len(feature_labels))
+    ]
+    heatmap_end_x = feature_xs[-1] + feature_step / 2.0
+    species_x = heatmap_end_x + 0.28
+    height = max(420, 88 + 18 * len(tip_labels))
     width = max(1040, 620 + 28 * len(feature_labels))
-    label_shift = 70 + 24 * len(feature_labels)
     canvas, axes, _mark = tree.draw(
         width=width,
         height=height,
         layout="r",
-        tip_labels=True,
-        tip_labels_align=True,
-        tip_labels_style={"font-size": "9px", "-toyplot-anchor-shift": f"{label_shift}px"},
+        tip_labels=False,
         node_sizes=0,
         scale_bar=False,
     )
@@ -920,12 +945,56 @@ def _draw_toytree_feature_heatmap(
     axes.x.domain.max = max(len(feature_labels) + 3.0, 4.0)
 
     value_lookup: dict[tuple[str, str], object] = {}
+    trait_lookup: dict[str, object] = {}
+    prob_lookup: dict[str, object] = {}
     for row in annotation.iter_rows(named=True):
-        value_lookup[(str(row["species"]), str(row["feature"]))] = row.get(value_col)
+        species = str(row["species"])
+        value_lookup[(species, str(row["feature"]))] = row.get(value_col)
+        trait_lookup.setdefault(species, row.get("true_label"))
+        prob_lookup.setdefault(species, row.get("prob"))
     finite_values = _finite_values(annotation, value_col)
     vmin, vmax = _heatmap_domain(value_col, finite_values)
-    for feature_index, feature in enumerate(feature_labels):
-        x = 0.45 + feature_index * 0.42
+    trait_values = [
+        _format_cell_value("true_label", trait_lookup.get(species)) for species in tip_labels
+    ]
+    axes.text(
+        [trait_x] * len(tip_labels),
+        list(range(len(tip_labels))),
+        trait_values,
+        color=_TEXT_COLOR,
+        title=[
+            f"{species} trait={_format_value(trait_lookup.get(species))}" for species in tip_labels
+        ],
+        style={"font-size": "8px", "text-anchor": "middle"},
+    )
+    axes.text(
+        trait_x,
+        len(tip_labels) + 0.35,
+        "trait",
+        angle=-90,
+        color=_TEXT_COLOR,
+        style={"font-size": "7px", "text-anchor": "end"},
+    )
+    prob_values = [_format_heatmap_prob_value(prob_lookup.get(species)) for species in tip_labels]
+    axes.text(
+        [prob_x] * len(tip_labels),
+        list(range(len(tip_labels))),
+        prob_values,
+        color=_TEXT_COLOR,
+        title=[
+            f"{species} prob={_format_value(prob_lookup.get(species))}" for species in tip_labels
+        ],
+        style={"font-size": "8px", "text-anchor": "middle"},
+    )
+    axes.text(
+        prob_x,
+        len(tip_labels) + 0.35,
+        "prob",
+        angle=-90,
+        color=_TEXT_COLOR,
+        style={"font-size": "7px", "text-anchor": "end"},
+    )
+    for x, feature in zip(feature_xs, feature_labels, strict=True):
         colors: list[str] = []
         titles: list[str] = []
         for species in tip_labels:
@@ -944,17 +1013,106 @@ def _draw_toytree_feature_heatmap(
             x,
             len(tip_labels) + 0.35,
             feature,
-            angle=-65,
+            angle=-90,
+            color=_TEXT_COLOR,
             style={"font-size": "7px", "text-anchor": "end"},
         )
     axes.text(
-        -0.05,
-        len(tip_labels) + 1.1,
-        title,
-        style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
+        [species_x] * len(tip_labels),
+        list(range(len(tip_labels))),
+        tip_labels,
+        color=_TEXT_COLOR,
+        title=tip_labels,
+        style={"font-size": "9px", "text-anchor": "start"},
     )
+    _draw_heatmap_legend(
+        canvas=canvas,
+        width=width,
+        value_col=value_col,
+        vmin=vmin,
+        vmax=vmax,
+        cmap_name=cmap_name,
+    )
+    if title:
+        axes.text(
+            -0.05,
+            len(tip_labels) + 1.45,
+            title,
+            color=_TEXT_COLOR,
+            style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
+        )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     toytree_module.save(canvas, str(out_path))
+
+
+def _draw_heatmap_legend(
+    *,
+    canvas: Any,
+    width: int,
+    value_col: str,
+    vmin: float,
+    vmax: float,
+    cmap_name: str,
+) -> None:
+    toyplot_locator = importlib.import_module("toyplot.locator")
+    tick_locations = [vmin] if vmin == vmax else [vmin, vmax]
+    tick_labels = [_format_legend_value(value) for value in tick_locations]
+    canvas.color_scale(
+        _toyplot_linear_colormap(cmap_name=cmap_name, vmin=vmin, vmax=vmax),
+        x1=width - 270,
+        y1=82,
+        x2=width - 105,
+        y2=82,
+        width=12,
+        label=_heatmap_legend_label(value_col),
+        min=vmin,
+        max=vmax,
+        ticklocator=toyplot_locator.Explicit(tick_locations, tick_labels),
+    )
+    missing_axes = canvas.cartesian(
+        bounds=(width - 92, width - 35, 50, 112),
+        show=False,
+        xmin=0,
+        xmax=1,
+        ymin=0,
+        ymax=1,
+    )
+    missing_axes.show = False
+    missing_axes.rectangle(
+        [0.06],
+        [0.28],
+        [0.42],
+        [0.58],
+        color=[_MISSING_COLOR],
+        title=["Missing value"],
+        style={"stroke": "none"},
+    )
+    missing_axes.text(
+        0.36,
+        0.5,
+        "NA",
+        color=_TEXT_COLOR,
+        style={"font-size": "7px", "text-anchor": "start"},
+    )
+
+
+def _heatmap_legend_label(value_col: str) -> str:
+    return {
+        "log2_tpm_plus1": "log2(TPM + 1)",
+        "z_score_log2_tpm": "within-feature z-score",
+    }.get(value_col, value_col)
+
+
+def _toyplot_linear_colormap(*, cmap_name: str, vmin: float, vmax: float) -> Any:
+    toyplot_color = importlib.import_module("toyplot.color")
+    cmap = matplotlib.colormaps[cmap_name]
+    colors = [matplotlib.colors.to_hex(cmap(index / 255.0)) for index in range(256)]
+    palette = toyplot_color.Palette(colors)
+    return toyplot_color.LinearMap(
+        palette=palette,
+        domain_min=vmin,
+        domain_max=vmax,
+    )
 
 
 def _continuous_color(value: object, *, vmin: float, vmax: float, cmap_name: str) -> str:
@@ -990,6 +1148,24 @@ def _finite_values(annotation: pl.DataFrame, column: str) -> list[float]:
         if numeric == numeric:
             values.append(numeric)
     return values
+
+
+def _format_legend_value(value: float) -> str:
+    if abs(value) < 100:
+        return f"{value:.2f}"
+    return f"{value:.3g}"
+
+
+def _format_heatmap_prob_value(value: object) -> str:
+    if value is None:
+        return "NA"
+    try:
+        numeric = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "NA"
+    if numeric != numeric:
+        return "NA"
+    return f"{numeric:.2f}"
 
 
 def _int_or_none(value: object) -> int | None:

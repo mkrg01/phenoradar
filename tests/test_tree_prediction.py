@@ -118,6 +118,7 @@ def test_build_tree_feature_heatmap_annotation_outputs_log2_and_zscore(tmp_path:
     assert annotation.height == 4
     first = annotation.filter((pl.col("species") == "sp1") & (pl.col("feature") == "OG2"))
     assert first.select("feature_rank").item() == 1
+    assert first.select("prob").item() is None
     assert first.select("log2_tpm_plus1").item() == 2.0
     assert first.select("coef_mean").item() == -0.4
     zscore_sum = (
@@ -291,5 +292,29 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
         assert "toyplot-mark-Point" not in svg_text
         assert ">0.200<" in svg_text
         assert ">sp1<" in svg_text
+    else:
+        assert any("Toytree is unavailable" in warning for warning in warnings)
+    log2_heatmap_svg = figures_dir / "tree_feature_heatmap_log2_tpm.svg"
+    if log2_heatmap_svg.exists():
+        svg_text = log2_heatmap_svg.read_text(encoding="utf-8")
+        assert "Tree Feature Heatmap (log2 TPM + 1)" not in svg_text
+        assert "rotate(90.0)" in svg_text
+        assert "rotate(65.0)" not in svg_text
+        assert ">trait<" in svg_text
+        assert "sp1 trait=0" in svg_text
+        assert "sp2 trait=1" in svg_text
+        assert ">prob<" in svg_text
+        assert ">0.20<" in svg_text
+        assert ">0.80<" in svg_text
+        assert "sp1 prob=0.2000" in svg_text
+        assert "sp2 prob=0.8000" in svg_text
+        assert ">OG1<" in svg_text
+        assert ">OG2<" in svg_text
+        assert "linearGradient" in svg_text
+        assert ">log2(TPM + 1)<" in svg_text
+        assert ">0.00<" in svg_text
+        assert ">4.00<" in svg_text
+        assert "Missing value" in svg_text
+        assert ">NA<" in svg_text
     else:
         assert any("Toytree is unavailable" in warning for warning in warnings)
