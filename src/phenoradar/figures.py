@@ -276,6 +276,16 @@ def _padded_domain(
     return lower - pad, upper + pad
 
 
+def _score_domain_with_zero_floor(values: np.ndarray) -> tuple[float, float]:
+    lower, upper = _padded_domain(values.tolist(), include_zero=True)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return lower, upper
+    if float(np.min(finite)) >= 0.0:
+        lower = 0.0
+    return lower, upper
+
+
 def _place_x_axis_at_zero(ax: Any) -> None:
     ax.spines["bottom"].set_position(("data", 0.0))
     ax.spines["bottom"].set_color(_AXIS_COLOR)
@@ -291,6 +301,14 @@ def _metric_score(
     if metric == "mcc":
         return float(matthews_corrcoef(y_true, pred))
     return float(balanced_accuracy_score(y_true, pred))
+
+
+def _threshold_metric_axis_label(metric: str) -> str:
+    if metric == "mcc":
+        return "MCC score"
+    if metric == "balanced_accuracy":
+        return "Balanced accuracy score"
+    return f"{metric} score"
 
 
 def _cv_metrics_overview(metrics_cv: pl.DataFrame, out_path: Path) -> None:
@@ -596,23 +614,50 @@ def _threshold_selection_curve(
         score_points = sorted(score_points, key=lambda item: item[0])
         thresholds_plot = np.array([point[0] for point in score_points], dtype=float)
         scores_plot = np.array([point[1] for point in score_points], dtype=float)
-        score_min, score_max = _padded_domain(scores_plot.tolist(), include_zero=True)
+        score_min, score_max = _score_domain_with_zero_floor(scores_plot)
+        metric_axis_label = _threshold_metric_axis_label(selection_metric)
 
-        ax.plot(thresholds_plot, scores_plot, color=_COLOR_BLUE, linewidth=1.0)
+        ax.plot(
+            thresholds_plot,
+            scores_plot,
+            color=_COLOR_BLUE,
+            linewidth=1.0,
+            label="Threshold score curve",
+        )
         ax.set_xlim(0.0, 1.0)
         ax.set_ylim(score_min, score_max)
         ax.set_xlabel("Threshold", fontsize=_LABEL_FONTSIZE)
-        ax.set_ylabel(f"{selection_metric} score", fontsize=_LABEL_FONTSIZE)
+        ax.set_ylabel(metric_axis_label, fontsize=_LABEL_FONTSIZE)
         ax.grid(color=_GRID_COLOR, linewidth=0.5)
         ax.set_axisbelow(True)
         _place_x_axis_at_zero(ax)
 
+        legend_handles: list[Line2D] = [
+            Line2D(
+                [0],
+                [0],
+                color=_COLOR_BLUE,
+                linewidth=1.0,
+                label="Threshold score curve",
+            )
+        ]
         if np.isfinite(selected_threshold):
             ax.axvline(
                 selected_threshold,
                 color=_TRAIT_NEGATIVE_COLOR,
                 linewidth=0.8,
                 linestyle=(0, (5, 4)),
+                label="CV-derived threshold",
+            )
+            legend_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    color=_TRAIT_NEGATIVE_COLOR,
+                    linewidth=0.8,
+                    linestyle=(0, (5, 4)),
+                    label="CV-derived threshold",
+                )
             )
 
         selected_score = _metric_score(y_true, prob, selected_threshold, selection_metric)
@@ -623,7 +668,21 @@ def _threshold_selection_curve(
                 color=_TRAIT_NEGATIVE_COLOR,
                 s=18,
                 zorder=3,
+                label="Selected threshold score",
             )
+            legend_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    color="none",
+                    markerfacecolor=_TRAIT_NEGATIVE_COLOR,
+                    markeredgecolor=_TRAIT_NEGATIVE_COLOR,
+                    markersize=3.2,
+                    label="Selected threshold score",
+                )
+            )
+        ax.legend(handles=legend_handles, loc="best", frameon=False)
     else:
         ax.axis("off")
         ax.text(

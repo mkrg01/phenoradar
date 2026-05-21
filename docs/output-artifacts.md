@@ -475,8 +475,10 @@ Conditionally written:
   - Axis is drawn from observed metric range; the x-axis is placed at the zero score baseline.
 - `threshold_selection_curve.svg`
   - x-axis: threshold, y-axis: selected score metric.
-  - The x-axis is placed at the zero score baseline.
-  - Red marker is the chosen `cv_derived_threshold`.
+  - The x-axis is placed at the zero score baseline; nonnegative score ranges are not
+    padded below zero.
+  - Legend entries identify the threshold score curve, chosen `cv_derived_threshold`,
+    and selected-threshold score marker.
 - `cv_loss_by_split.svg`
   - Fold-wise final `log_loss` comparison of `train` vs `validation`.
   - Useful for quick overfitting diagnostics without per-iteration learning curves.

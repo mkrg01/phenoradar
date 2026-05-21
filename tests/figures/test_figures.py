@@ -935,6 +935,24 @@ def test_threshold_selection_curve_handles_all_nan_scores(
     assert "No valid threshold scores" in out_path.read_text(encoding="utf-8")
 
 
+def test_threshold_selection_curve_labels_legend_and_nonnegative_axis(tmp_path: Path) -> None:
+    out_path = tmp_path / "threshold_selection_curve.svg"
+
+    figures_mod._threshold_selection_curve(
+        oof_predictions=pl.DataFrame({"label": [0, 1], "prob": [0.1, 0.9]}),
+        thresholds=_minimal_thresholds(),
+        selection_metric="mcc",
+        out_path=out_path,
+    )
+
+    svg = out_path.read_text(encoding="utf-8")
+    assert "MCC score" in svg
+    assert "Threshold score curve" in svg
+    assert "CV-derived threshold" in svg
+    assert "Selected threshold score" in svg
+    assert ">−" not in svg
+
+
 def test_species_probability_by_trait_rejects_invalid_schema(tmp_path: Path) -> None:
     with pytest.raises(FigureError, match="schema is invalid"):
         figures_mod._species_probability_by_trait(
