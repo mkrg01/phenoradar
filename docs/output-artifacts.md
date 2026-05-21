@@ -490,7 +490,7 @@ Conditionally written:
   - Fold-level probability distribution grouped by trait.
   - Useful for checking fold-to-fold drift or fold-specific overlap.
 - `feature_filter_funnel.svg`
-  - Stage-wise feature-count trend by scope.
+  - Feature-count trend by scope through the enabled `preprocess.*_filter` steps.
   - Line is median count; shaded range is min-max.
 - `retained_features_by_fold.svg`
   - Outer-fold retained-feature heatmap.

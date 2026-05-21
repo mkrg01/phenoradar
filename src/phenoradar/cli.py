@@ -22,6 +22,7 @@ from phenoradar.bundle import (
     predict_with_bundle,
 )
 from phenoradar.config import (
+    AppConfig,
     ConfigError,
     ExecutionStage,
     load_and_resolve_config,
@@ -70,6 +71,20 @@ app = typer.Typer(
 
 
 LogVerbosity = Literal["quiet", "normal", "verbose"]
+
+
+def _feature_filter_funnel_stage_order(config: AppConfig) -> list[str]:
+    stages = ["n_features_before"]
+    if config.preprocess.low_prevalence_filter.enabled:
+        stages.append("n_features_after_low_prevalence")
+    if config.preprocess.low_variance_filter.enabled:
+        stages.append("n_features_after_low_variance")
+    if config.preprocess.pair_aware_filter.enabled:
+        stages.append("n_features_after_pair_aware")
+    if config.preprocess.correlation_filter.enabled:
+        stages.append("n_features_after_correlation")
+    return stages
+
 
 ConfigPathsArg = Annotated[
     list[Path],
@@ -1004,6 +1019,7 @@ def run(
             ),
             trait_name=resolved.data.trait_col,
             feature_filter_counts_summary=feature_filter_counts_summary_table,
+            feature_filter_funnel_stage_order=_feature_filter_funnel_stage_order(resolved),
             retained_features_summary=retained_features_summary_table,
             model_sparsity=model_sparsity_table,
             model_sparsity_summary=model_sparsity_summary_table,

@@ -187,23 +187,24 @@ def _minimal_feature_filter_counts() -> pl.DataFrame:
 def _minimal_feature_filter_counts_summary() -> pl.DataFrame:
     return pl.DataFrame(
         {
-            "scope": ["outer_fold"] * 5,
+            "scope": ["outer_fold"] * 6,
             "stage": [
                 "n_features_before",
                 "n_features_after_low_prevalence",
                 "n_features_after_low_variance",
+                "n_features_after_pair_aware",
                 "n_features_after_correlation",
                 "n_features_after_all",
             ],
-            "n_records": [4, 4, 4, 4, 4],
-            "n_features_min": [100, 78, 59, 50, 50],
-            "n_features_median": [100.0, 79.5, 60.0, 52.0, 52.0],
-            "n_features_mean": [100.0, 79.75, 60.0, 51.75, 51.75],
-            "n_features_max": [100, 82, 61, 53, 53],
-            "retained_ratio_min": [1.0, 0.78, 0.59, 0.50, 0.50],
-            "retained_ratio_median": [1.0, 0.795, 0.60, 0.52, 0.52],
-            "retained_ratio_mean": [1.0, 0.7975, 0.60, 0.5175, 0.5175],
-            "retained_ratio_max": [1.0, 0.82, 0.61, 0.53, 0.53],
+            "n_records": [4, 4, 4, 4, 4, 4],
+            "n_features_min": [100, 78, 59, 58, 50, 50],
+            "n_features_median": [100.0, 79.5, 60.0, 59.0, 52.0, 52.0],
+            "n_features_mean": [100.0, 79.75, 60.0, 59.0, 51.75, 51.75],
+            "n_features_max": [100, 82, 61, 60, 53, 53],
+            "retained_ratio_min": [1.0, 0.78, 0.59, 0.58, 0.50, 0.50],
+            "retained_ratio_median": [1.0, 0.795, 0.60, 0.59, 0.52, 0.52],
+            "retained_ratio_mean": [1.0, 0.7975, 0.60, 0.59, 0.5175, 0.5175],
+            "retained_ratio_max": [1.0, 0.82, 0.61, 0.60, 0.53, 0.53],
         }
     )
 
@@ -347,12 +348,26 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
         model_selection_trials=None,
         auto_threshold_metric="mcc",
         feature_filter_counts_summary=_minimal_feature_filter_counts_summary(),
+        feature_filter_funnel_stage_order=[
+            "n_features_before",
+            "n_features_after_low_prevalence",
+            "n_features_after_pair_aware",
+        ],
         retained_features_summary=_minimal_retained_features_summary(),
         model_sparsity=_minimal_model_sparsity(),
     )
 
     figures_dir = tmp_path / "run" / "figures"
     assert (figures_dir / "feature_filter_funnel.svg").exists()
+    funnel_svg = (figures_dir / "feature_filter_funnel.svg").read_text(encoding="utf-8")
+    assert "Number of features" in funnel_svg
+    assert "Feature Count" not in funnel_svg
+    assert "low_prevalence" in funnel_svg
+    assert "pair_aware" in funnel_svg
+    assert "low_variance" not in funnel_svg
+    assert "correlation" not in funnel_svg
+    assert "final" not in funnel_svg
+    assert "79.5" in funnel_svg
     assert (figures_dir / "retained_features_by_fold.svg").exists()
     assert (figures_dir / "model_sparsity_scatter.svg").exists()
     assert warnings == []
@@ -627,7 +642,7 @@ def test_write_run_figures_limits_model_selection_sample_sets_per_fold(
 
     figures_dir = tmp_path / "run" / "figures"
     svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
-    assert "fold=0" in svg_text
+    assert "fold=0" not in svg_text
     assert '0: {"panel_param":0}' in svg_text
     assert '"panel_param":10' not in svg_text
     assert warnings == []
@@ -925,6 +940,9 @@ def test_species_probability_by_trait_writes_svg(tmp_path: Path) -> None:
         figure_name="cv_species_probability_by_trait.svg",
     )
     assert out_path.exists()
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "n=2" in svg_text
+    assert "mean=" not in svg_text
 
 
 def test_cv_fold_trait_probability_rejects_invalid_schema(tmp_path: Path) -> None:
@@ -960,8 +978,17 @@ def test_cv_fold_trait_probability_writes_svg(tmp_path: Path) -> None:
             }
         ),
         out_path=out_path,
+        trait_name="C4",
     )
     assert out_path.exists()
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "CV Fold Trait Probability" not in svg_text
+    assert "Fold-wise probability distribution" not in svg_text
+    assert "fold=0" not in svg_text
+    assert "fold=1" not in svg_text
+    assert "C4" in svg_text
+    assert "C4=0" not in svg_text
+    assert "C4=1" not in svg_text
 
 
 def test_retained_features_by_fold_rejects_invalid_schema(tmp_path: Path) -> None:
@@ -1088,7 +1115,7 @@ def test_coefficients_signed_top_fold_points_use_neutral_styling(tmp_path: Path)
     assert "#1f77b4" not in svg_text
     assert "#d62728" not in svg_text
     assert "#eeeeee" in svg_text
-    assert "#555555" in svg_text
+    assert "#666666" in svg_text
 
 
 def test_predict_probability_distribution_rejects_missing_prob_column(tmp_path: Path) -> None:

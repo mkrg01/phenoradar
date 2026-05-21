@@ -480,6 +480,14 @@ data:
     assert (run_dirs[0] / "figures" / "cv_fold_trait_probability.svg").exists()
     assert (run_dirs[0] / "figures" / "roc_pr_curves_cv.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_filter_funnel.svg").exists()
+    funnel_svg = (run_dirs[0] / "figures" / "feature_filter_funnel.svg").read_text(
+        encoding="utf-8"
+    )
+    assert "low_prevalence" in funnel_svg
+    assert "low_variance" not in funnel_svg
+    assert "pair_aware" not in funnel_svg
+    assert "correlation" not in funnel_svg
+    assert ">final<" not in funnel_svg
     assert (run_dirs[0] / "figures" / "retained_features_by_fold.svg").exists()
     assert (run_dirs[0] / "figures" / "model_sparsity_scatter.svg").exists()
     assert (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
@@ -487,8 +495,9 @@ data:
     cv_trait_svg = (run_dirs[0] / "figures" / "cv_species_probability_by_trait.svg").read_text(
         encoding="utf-8"
     )
-    assert "C4=0" in cv_trait_svg
-    assert "C4=1" in cv_trait_svg
+    assert "C4" in cv_trait_svg
+    assert "C4=0" not in cv_trait_svg
+    assert "C4=1" not in cv_trait_svg
 
     metrics = pl.read_csv(run_dirs[0] / "metrics_cv.tsv", separator="\t")
     assert {"aggregate_scope", "fold_id", "metric", "metric_value"}.issubset(metrics.columns)
