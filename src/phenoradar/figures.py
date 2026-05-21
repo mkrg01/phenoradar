@@ -43,6 +43,7 @@ _FIG_DPI = 100
 _MODEL_SELECTION_SAMPLE_SET_LIMIT = 1
 _RETAINED_FEATURE_LIMIT = 40
 _COEFFICIENTS_TOP_WIDTH_PX = 1120
+_COEFFICIENTS_AXIS_LABEL_FONTSIZE = 10
 
 
 def _figure_size_inches(width_px: int, height_px: int) -> tuple[float, float]:
@@ -810,11 +811,14 @@ def _coefficients_signed_top(
             )
             ax.set_yticks(y_pos)
             ax.set_yticklabels(features, fontsize=9, fontfamily="monospace")
-            ax.set_ylabel("Top 30 orthogroups by |mean signed coefficient|")
+            ax.set_ylabel("Orthogroup ID", fontsize=_COEFFICIENTS_AXIS_LABEL_FONTSIZE)
             ax.invert_yaxis()
             limit = max_abs * 1.15
             ax.set_xlim(-limit, limit)
-            ax.set_xlabel("Mean signed coefficient per fold")
+            ax.set_xlabel(
+                "Mean signed coefficient per fold",
+                fontsize=_COEFFICIENTS_AXIS_LABEL_FONTSIZE,
+            )
             ax.grid(axis="x", color="#ececec", linewidth=0.8)
             ax.set_axisbelow(True)
             ax.axvline(0.0, color="#444444", linewidth=1.3)
@@ -846,12 +850,15 @@ def _coefficients_signed_top(
     bars = ax.barh(y_pos, values, color="#666666", height=0.65)
     ax.set_yticks(y_pos)
     ax.set_yticklabels(features, fontsize=9, fontfamily="monospace")
-    ax.set_ylabel("Top 30 orthogroups by |mean signed coefficient|")
+    ax.set_ylabel("Orthogroup ID", fontsize=_COEFFICIENTS_AXIS_LABEL_FONTSIZE)
     ax.invert_yaxis()
 
     limit = max_abs * 1.15
     ax.set_xlim(-limit, limit)
-    ax.set_xlabel("Mean signed coefficient per fold")
+    ax.set_xlabel(
+        "Mean signed coefficient per fold",
+        fontsize=_COEFFICIENTS_AXIS_LABEL_FONTSIZE,
+    )
     ax.grid(axis="x", color="#ececec", linewidth=0.8)
     ax.set_axisbelow(True)
     ax.axvline(0.0, color="#444444", linewidth=1.3)
