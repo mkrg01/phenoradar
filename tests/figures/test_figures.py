@@ -645,6 +645,75 @@ def test_write_run_figures_hides_fixed_params_in_model_selection_labels(
     assert warnings == []
 
 
+def test_write_run_figures_writes_one_se_model_selection_figure(
+    tmp_path: Path,
+) -> None:
+    summary = pl.DataFrame(
+        {
+            "fold_id": ["0", "0", "0", "1", "1", "1"],
+            "sample_set_id": [0, 0, 0, 0, 0, 0],
+            "candidate_index": [0, 1, 2, 0, 1, 2],
+            "metric_name": ["log_loss"] * 6,
+            "params_json": [
+                "{\"C\":0.01}",
+                "{\"C\":0.1}",
+                "{\"C\":1.0}",
+                "{\"C\":0.01}",
+                "{\"C\":0.1}",
+                "{\"C\":1.0}",
+            ],
+            "n_inner_folds": [2] * 6,
+            "n_valid_inner_folds": [2] * 6,
+            "metric_value_mean": [0.40, 0.23, 0.20, 0.35, 0.24, 0.21],
+            "metric_value_std": [0.01, 0.01, 0.07, 0.01, 0.01, 0.08],
+            "metric_value_se": [0.007, 0.007, 0.049, 0.007, 0.007, 0.057],
+        }
+    )
+    selected = pl.DataFrame(
+        {
+            "selection_scope": ["outer_fold", "outer_fold", "final_refit"],
+            "fold_id": ["0", "1", "NA"],
+            "sample_set_id": [0, 0, 0],
+            "selection_source_sample_set_id": [0, 0, 0],
+            "rank": [1, 1, 1],
+            "candidate_index": [1, 1, 1],
+            "metric_name": ["log_loss", "log_loss", "log_loss"],
+            "metric_value": [0.23, 0.24, 0.22],
+            "metric_value_se": [0.007, 0.007, 0.006],
+            "selection_rule": ["one_se", "one_se", "one_se"],
+            "n_available_candidates": [3, 3, 3],
+            "n_scored_candidates": [3, 3, 3],
+            "selected_candidate_count_requested": [1, 1, 1],
+            "selected_candidate_count_effective": [1, 1, 1],
+            "params_json": ["{\"C\":0.1}", "{\"C\":0.1}", "{\"C\":0.1}"],
+        }
+    )
+
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_minimal_oof(),
+        thresholds=_minimal_thresholds(),
+        feature_importance=_minimal_feature_importance(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        model_selection_trials_summary=summary,
+        model_selection_selected=selected,
+        auto_threshold_metric="mcc",
+    )
+
+    figures_dir = tmp_path / "run" / "figures"
+    one_se_svg = (figures_dir / "model_selection_one_se_curve.svg").read_text(
+        encoding="utf-8"
+    )
+    assert "one-SE threshold" in one_se_svg
+    assert "Selected candidate" in one_se_svg
+    assert "log10(C)" in one_se_svg
+    assert not (figures_dir / "selected_hyperparameter_stability.svg").exists()
+    assert warnings == []
+
+
 def test_write_run_figures_limits_model_selection_sample_sets_per_fold(
     tmp_path: Path,
 ) -> None:

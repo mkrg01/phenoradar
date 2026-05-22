@@ -860,6 +860,8 @@ model_selection:
     assert trials_path.exists()
     assert trials_summary_path.exists()
     assert (run_dirs[0] / "figures" / "model_selection_trials.svg").exists()
+    assert (run_dirs[0] / "figures" / "model_selection_one_se_curve.svg").exists()
+    assert not (run_dirs[0] / "figures" / "selected_hyperparameter_stability.svg").exists()
 
     selected_df = pl.read_csv(selected_path, separator="\t")
     scopes = set(selected_df.select("selection_scope").to_series().to_list())
@@ -880,6 +882,7 @@ model_selection:
         "n_valid_inner_folds",
         "metric_value_mean",
         "metric_value_std",
+        "metric_value_se",
     }.issubset(trials_summary_df.columns)
 
 

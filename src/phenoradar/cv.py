@@ -120,6 +120,8 @@ class SelectedCandidate:
 
     candidate: Candidate
     score: float | None
+    score_std_error: float | None = None
+    selection_rule: str = "best"
 
 
 @dataclass(frozen=True)
@@ -1423,13 +1425,23 @@ def _selection_metric_nan_sentinel(metric_name: str) -> float:
     return -1e12 if _selection_metric_higher_is_better(metric_name) else 1e12
 
 
-def _rank_selected_candidates(
+def _finite_score(value: float | None) -> float | None:
+    if value is None:
+        return None
+    score = float(value)
+    if not np.isfinite(score):
+        return None
+    return score
+
+
+def _rank_candidates_by_metric(
     scored: list[SelectedCandidate], metric_name: str
 ) -> list[SelectedCandidate]:
     def _score_for_sort(value: float | None) -> float:
-        if value is None:
+        score = _finite_score(value)
+        if score is None:
             return -np.inf if _selection_metric_higher_is_better(metric_name) else np.inf
-        return float(value)
+        return score
 
     if _selection_metric_higher_is_better(metric_name):
         return sorted(
@@ -1440,6 +1452,105 @@ def _rank_selected_candidates(
         scored,
         key=lambda item: (_score_for_sort(item.score), item.candidate.candidate_index),
     )
+
+
+def _numeric_candidate_param(
+    candidate: Candidate, name: str, default: float
+) -> float:
+    value = candidate.params.get(name)
+    if value is None:
+        return default
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not np.isfinite(numeric):
+        return default
+    return numeric
+
+
+def _candidate_simplicity_sort_key(
+    candidate: Candidate, model_name: str
+) -> tuple[float, ...]:
+    if model_name in {"logistic_elasticnet", "linear_svm"}:
+        c_value = _numeric_candidate_param(candidate, "C", np.inf)
+        if model_name == "logistic_elasticnet":
+            l1_ratio = _numeric_candidate_param(candidate, "l1_ratio", 0.0)
+            return (c_value, -l1_ratio, float(candidate.candidate_index))
+        return (c_value, float(candidate.candidate_index))
+
+    if model_name == "random_forest":
+        max_depth_raw = candidate.params.get("max_depth")
+        max_depth = np.inf if max_depth_raw is None else _numeric_candidate_param(
+            candidate, "max_depth", np.inf
+        )
+        min_samples_leaf = _numeric_candidate_param(candidate, "min_samples_leaf", 1.0)
+        min_samples_split = _numeric_candidate_param(candidate, "min_samples_split", 2.0)
+        n_estimators = _numeric_candidate_param(candidate, "n_estimators", 100.0)
+        return (
+            max_depth,
+            -min_samples_leaf,
+            -min_samples_split,
+            n_estimators,
+            float(candidate.candidate_index),
+        )
+
+    return (float(candidate.candidate_index),)
+
+
+def _rank_candidates_one_se(
+    scored: list[SelectedCandidate], config: AppConfig
+) -> list[SelectedCandidate]:
+    metric_name = config.model_selection.selection_metric
+    ranked_by_metric = _rank_candidates_by_metric(scored, metric_name)
+    if not ranked_by_metric:
+        return []
+
+    best = next((item for item in ranked_by_metric if _finite_score(item.score) is not None), None)
+    if best is None:
+        return ranked_by_metric
+
+    best_score = _finite_score(best.score)
+    if best_score is None:
+        return ranked_by_metric
+    best_se = _finite_score(best.score_std_error)
+    if best_se is None:
+        best_se = 0.0
+
+    higher_is_better = _selection_metric_higher_is_better(metric_name)
+    if higher_is_better:
+        cutoff = best_score - best_se
+
+        def _within_one_se(item: SelectedCandidate) -> bool:
+            score = _finite_score(item.score)
+            return score is not None and score >= cutoff
+
+    else:
+        cutoff = best_score + best_se
+
+        def _within_one_se(item: SelectedCandidate) -> bool:
+            score = _finite_score(item.score)
+            return score is not None and score <= cutoff
+
+    metric_rank = {id(item): rank for rank, item in enumerate(ranked_by_metric)}
+    eligible = [item for item in ranked_by_metric if _within_one_se(item)]
+    ineligible = [item for item in ranked_by_metric if not _within_one_se(item)]
+    eligible_sorted = sorted(
+        eligible,
+        key=lambda item: (
+            _candidate_simplicity_sort_key(item.candidate, config.model.name),
+            metric_rank[id(item)],
+        ),
+    )
+    return eligible_sorted + ineligible
+
+
+def _rank_selected_candidates(
+    scored: list[SelectedCandidate], config: AppConfig
+) -> list[SelectedCandidate]:
+    if config.model_selection.selection_rule == "one_se":
+        return _rank_candidates_one_se(scored, config)
+    return _rank_candidates_by_metric(scored, config.model_selection.selection_metric)
 
 
 def _candidate_params_key(candidate: Candidate) -> str:
@@ -1634,6 +1745,34 @@ def _score_candidate_inner_cv(
     return _with_native_thread_limit(resolved_estimator_n_jobs, _score)
 
 
+def _score_std_error_from_trial_rows(trial_rows: list[dict[str, Any]]) -> float | None:
+    values = [
+        score
+        for row in trial_rows
+        if (score := _finite_score(row.get("metric_value"))) is not None
+    ]
+    if not values:
+        return None
+    value_array = np.asarray(values, dtype=float)
+    return float(np.std(value_array, ddof=0) / np.sqrt(value_array.size))
+
+
+def _candidate_score_std_errors_from_trial_rows(
+    trial_rows: list[dict[str, Any]],
+) -> dict[int, float | None]:
+    rows_by_candidate: dict[int, list[dict[str, Any]]] = {}
+    for row in trial_rows:
+        candidate_index_raw = row.get("candidate_index")
+        if candidate_index_raw is None:
+            continue
+        candidate_index = int(candidate_index_raw)
+        rows_by_candidate.setdefault(candidate_index, []).append(row)
+    return {
+        candidate_index: _score_std_error_from_trial_rows(rows)
+        for candidate_index, rows in rows_by_candidate.items()
+    }
+
+
 def _tpe_trial_params(
     trial: optuna.Trial,
     *,
@@ -1761,6 +1900,7 @@ def _prepare_source_selection_tpe(
     study.optimize(_objective, n_trials=effective_trials)
     ordered_trials = sorted(study.trials, key=lambda item: item.number)
     scored: list[SelectedCandidate] = []
+    score_std_errors = _candidate_score_std_errors_from_trial_rows(trial_rows)
     for trial in ordered_trials:
         params_raw = trial.user_attrs.get("candidate_params")
         if not isinstance(params_raw, dict):
@@ -1772,11 +1912,13 @@ def _prepare_source_selection_tpe(
             SelectedCandidate(
                 candidate=Candidate(candidate_index=trial.number, params=dict(params_raw)),
                 score=score_value,
+                score_std_error=score_std_errors.get(trial.number),
+                selection_rule=config.model_selection.selection_rule,
             )
         )
 
     scored_count = len(scored)
-    ranked = _rank_selected_candidates(scored, metric_name)
+    ranked = _rank_selected_candidates(scored, config)
     ranked_unique = _dedupe_ranked_candidates_by_params(ranked)
     available = len(ranked_unique)
     if available < scored_count:
@@ -1954,11 +2096,18 @@ def _prepare_source_selection(
 
     for candidate, (mean_score, rows) in zip(candidates, scored_rows, strict=True):
         score_value = None if np.isnan(mean_score) else float(mean_score)
-        scored.append(SelectedCandidate(candidate=candidate, score=score_value))
+        scored.append(
+            SelectedCandidate(
+                candidate=candidate,
+                score=score_value,
+                score_std_error=_score_std_error_from_trial_rows(rows),
+                selection_rule=config.model_selection.selection_rule,
+            )
+        )
         trial_rows.extend(rows)
 
     scored_count = len(scored)
-    ranked = _rank_selected_candidates(scored, config.model_selection.selection_metric)
+    ranked = _rank_selected_candidates(scored, config)
     ranked_unique = _dedupe_ranked_candidates_by_params(ranked)
     available_unique = len(ranked_unique)
     if available_unique < scored_count:
@@ -2040,7 +2189,7 @@ def _summarize_model_selection_trials(model_selection_trials: pl.DataFrame) -> p
         .otherwise(pl.col("metric_value"))
         .alias("_metric_value_valid")
     )
-    return scored.group_by(
+    summary = scored.group_by(
         ["fold_id", "sample_set_id", "candidate_index", "metric_name", "params_json"]
     ).agg(
         [
@@ -2049,6 +2198,15 @@ def _summarize_model_selection_trials(model_selection_trials: pl.DataFrame) -> p
             pl.col("_metric_value_valid").mean().alias("metric_value_mean"),
             pl.col("_metric_value_valid").std(ddof=0).alias("metric_value_std"),
         ]
+    )
+    return summary.with_columns(
+        pl.when(pl.col("n_valid_inner_folds") > 0)
+        .then(
+            pl.col("metric_value_std")
+            / pl.col("n_valid_inner_folds").cast(pl.Float64).sqrt()
+        )
+        .otherwise(pl.lit(None, dtype=pl.Float64))
+        .alias("metric_value_se")
     ).sort(["fold_id", "sample_set_id", "candidate_index"])
 
 
@@ -2664,6 +2822,11 @@ def run_final_refit(
         if selection_active:
             for rank, selected in enumerate(source_result.selected_candidates, start=1):
                 score_value = np.nan if selected.score is None else float(selected.score)
+                score_std_error = (
+                    np.nan
+                    if selected.score_std_error is None
+                    else float(selected.score_std_error)
+                )
                 model_selection_selected_rows.append(
                     {
                         "selection_scope": "final_refit",
@@ -2674,6 +2837,8 @@ def run_final_refit(
                         "candidate_index": selected.candidate.candidate_index,
                         "metric_name": config.model_selection.selection_metric,
                         "metric_value": score_value,
+                        "metric_value_se": score_std_error,
+                        "selection_rule": selected.selection_rule,
                         "n_available_candidates": source_result.n_available_candidates,
                         "n_scored_candidates": source_result.n_scored_candidates,
                         "selected_candidate_count_requested": (
@@ -3085,6 +3250,11 @@ def _run_outer_fold(
         if selection_active:
             for rank, selected in enumerate(source_result.selected_candidates, start=1):
                 selected_score = np.nan if selected.score is None else float(selected.score)
+                selected_score_std_error = (
+                    np.nan
+                    if selected.score_std_error is None
+                    else float(selected.score_std_error)
+                )
                 model_selection_selected_rows.append(
                     {
                         "selection_scope": "outer_fold",
@@ -3095,6 +3265,8 @@ def _run_outer_fold(
                         "candidate_index": selected.candidate.candidate_index,
                         "metric_name": config.model_selection.selection_metric,
                         "metric_value": selected_score,
+                        "metric_value_se": selected_score_std_error,
+                        "selection_rule": selected.selection_rule,
                         "n_available_candidates": source_result.n_available_candidates,
                         "n_scored_candidates": source_result.n_scored_candidates,
                         "selected_candidate_count_requested": (

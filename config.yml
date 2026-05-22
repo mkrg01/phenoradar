@@ -18,10 +18,10 @@ split:
   outer_cv_n_splits: null
 
 sampling:
-  strategy: group_balanced  # choices: all_samples, group_balanced
-  max_samples_per_label_per_group: 1
+  strategy: all_samples  # choices: all_samples, group_balanced
+  max_samples_per_label_per_group: null
   sampled_set_count: 1
-  weighting: none  # choices: none, group_label_inverse
+  weighting: group_label_inverse  # choices: none, group_label_inverse
 
 preprocess:
   max_pivot_cells: 50000000
@@ -58,13 +58,14 @@ model_selection:
       base: 10
       start_exp: -2
       end_exp: 1
-      step_exp: 0.1
+      step_exp: 0.5
       inclusive_end: true
     l1_ratio: [1]
     max_iter: [10000]
-  inner_cv_strategy: group_kfold  # choices: logo, group_kfold
-  inner_cv_n_splits: 3
+  inner_cv_strategy: logo  # choices: logo, group_kfold
+  inner_cv_n_splits: null
   selection_metric: log_loss  # choices: mcc, balanced_accuracy, log_loss
+  selection_rule: one_se  # choices: best, one_se
 
 ensemble:
   probability_aggregation: mean  # choices: mean, median

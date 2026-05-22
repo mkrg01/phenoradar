@@ -105,6 +105,7 @@ Conditionally written:
 - `model_selection_trials.tsv` (model selection enabled)
 - `model_selection_trials_summary.tsv` (model selection enabled)
 - `model_selection_selected.tsv` (candidate selection enabled)
+- `figures/model_selection_one_se_curve.svg` (candidate selection enabled)
 
 ## `config`
 

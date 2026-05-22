@@ -479,6 +479,8 @@ model_selection:
         "candidate_index",
         "metric_name",
         "metric_value",
+        "metric_value_se",
+        "selection_rule",
         "n_available_candidates",
         "n_scored_candidates",
         "selected_candidate_count_requested",
@@ -504,6 +506,7 @@ model_selection:
         "n_valid_inner_folds",
         "metric_value_mean",
         "metric_value_std",
+        "metric_value_se",
     }.issubset(cv_artifacts.model_selection_trials_summary.columns)
 
 
@@ -2200,6 +2203,79 @@ model_selection:
     )
 
     assert result.selected_candidates[0].candidate.candidate_index == 0
+
+
+def test_prepare_source_selection_one_se_prefers_simpler_candidate_within_best_se(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+model_selection:
+  selected_candidate_count: 1
+  inner_cv_strategy: logo
+  selection_metric: log_loss
+  selection_rule: one_se
+""".strip(),
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        cv_mod,
+        "generate_candidates",
+        lambda **_kwargs: [
+            Candidate(candidate_index=0, params={"C": 0.01}),
+            Candidate(candidate_index=1, params={"C": 0.1}),
+            Candidate(candidate_index=2, params={"C": 1.0}),
+        ],
+    )
+
+    def _fake_score_candidate_inner_cv(**kwargs: object) -> tuple[float, list[dict[str, object]]]:
+        candidate = kwargs["candidate"]
+        if not isinstance(candidate, Candidate):
+            raise AssertionError("candidate must be a Candidate instance")
+        fold_values_by_candidate = {
+            0: [0.40, 0.40],
+            1: [0.23, 0.23],
+            2: [0.15, 0.25],
+        }
+        fold_values = fold_values_by_candidate[candidate.candidate_index]
+        rows = [
+            {
+                "candidate_index": candidate.candidate_index,
+                "inner_fold_id": str(inner_fold_id),
+                "metric_name": "log_loss",
+                "metric_value": value,
+                "params_json": "{}",
+            }
+            for inner_fold_id, value in enumerate(fold_values, start=1)
+        ]
+        return float(np.mean(fold_values)), rows
+
+    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+
+    result = _prepare_source_selection(
+        config=config,
+        training_scope_id="fold_0",
+        source_sample_set_id=0,
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
+        feature_names=["OG1"],
+        warnings=[],
+    )
+
+    selected = result.selected_candidates[0]
+    assert selected.candidate.candidate_index == 1
+    assert selected.score == pytest.approx(0.23)
+    assert selected.selection_rule == "one_se"
 
 
 def test_score_candidate_inner_cv_uses_estimator_n_jobs_for_native_thread_limit(

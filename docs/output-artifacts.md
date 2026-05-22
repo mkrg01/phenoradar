@@ -129,6 +129,7 @@ Always written:
     - `selected_features_by_fold_after_preprocessing.svg`
     - `non_zero_feature_count_by_fold.svg`
     - `model_selection_trials.svg` (candidate selection active)
+    - `model_selection_one_se_curve.svg` (candidate selection active)
     - `roc_pr_curves_cv.svg` (may be skipped with warning for degenerate folds)
     - `final_refit_loss_by_split.svg` (attempted in `full_run`)
     - `external_species_probability_by_trait.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
@@ -158,11 +159,11 @@ Conditionally written:
   - columns: `fold_id`, `sample_set_id`, `candidate_index`, `inner_fold_id`, `metric_name`, `metric_value`, `params_json`
 - `model_selection_trials_summary.tsv` (candidate selection active)
   - columns: `fold_id`, `sample_set_id`, `candidate_index`, `metric_name`, `params_json`
-  - columns: `n_inner_folds`, `n_valid_inner_folds`, `metric_value_mean`, `metric_value_std`
+  - columns: `n_inner_folds`, `n_valid_inner_folds`, `metric_value_mean`, `metric_value_std`, `metric_value_se`
 - `model_selection_selected.tsv` (candidate selection active)
   - columns:
     - `selection_scope`, `fold_id`, `sample_set_id`, `selection_source_sample_set_id`
-    - `rank`, `candidate_index`, `metric_name`, `metric_value`
+    - `rank`, `candidate_index`, `metric_name`, `metric_value`, `metric_value_se`, `selection_rule`
     - `n_available_candidates`, `n_scored_candidates`
     - `selected_candidate_count_requested`, `selected_candidate_count_effective`
     - `params_json`
@@ -449,6 +450,8 @@ Conditionally written:
   - inner-fold mean score (NaN values are ignored).
 - `metric_value_std`:
   - population std (`ddof=0`) across valid inner-fold scores.
+- `metric_value_se`:
+  - `metric_value_std / sqrt(n_valid_inner_folds)`.
 - `n_inner_folds` / `n_valid_inner_folds`:
   - total inner folds vs folds with valid numeric score.
 
@@ -457,10 +460,14 @@ Conditionally written:
 - `selection_scope`:
   - `outer_fold`: selections used in outer CV training.
   - `final_refit`: selections used for full-run refit.
-- `rank`: rank among selected candidates by inner-CV score.
-  - Direction depends on `metric_name`:
+- `rank`: rank among selected candidates after applying `selection_rule`.
+  - With `best`, direction depends on `metric_name`:
     - `mcc` / `balanced_accuracy`: higher is better.
     - `log_loss`: lower is better.
+  - With `one_se`, candidates within one standard error of the best mean score
+    are ranked by model simplicity first.
+- `metric_value_se`:
+  - standard error used by `selection_rule=one_se`; NaN when not available.
 - `selection_source_sample_set_id`:
   - sampled set used for candidate selection (`reuse_first_sample_set` uses `0` for all rows).
 - `selected_candidate_count_requested` vs `selected_candidate_count_effective`:
@@ -516,10 +523,16 @@ Conditionally written:
   - Boxplots are shown when a fold has multiple models; points show individual models.
 - `model_selection_trials.svg` (candidate selection active)
   - Panels are laid out automatically in a compact grid.
-  - Candidate scores are shown as `metric_value_mean ± metric_value_std`.
+  - Candidate scores are shown as `metric_value_mean ± metric_value_se`.
   - All folds are shown; per fold, only the first `sample_set_id` is plotted.
   - Y-axis labels include `candidate_index` and parameter JSON
     (keys fixed across candidates in the panel are omitted).
+- `model_selection_one_se_curve.svg` (candidate selection active)
+  - Shows candidate mean score with SE, one-SE threshold, best mean candidate,
+    one-SE-eligible candidates, and the selected candidate.
+  - Uses `log10(C)` on the x-axis when all candidates expose positive `C`;
+    otherwise falls back to `candidate_index`.
+  - All folds are shown; per fold, only the first `sample_set_id` is plotted.
 - `external_species_probability_by_trait.svg` (`full_run` with external samples)
   - External-test species probabilities grouped by `true_label`.
   - Boxplot with per-species points and trait-wise mean markers.

@@ -89,6 +89,7 @@ model_selection:
   inner_cv_strategy: null
   inner_cv_n_splits: null
   selection_metric: log_loss
+  selection_rule: best
 ensemble:
   probability_aggregation: mean
 figures:
@@ -127,6 +128,7 @@ runtime:
 - `ensemble.probability_aggregation`: `mean` | `median`
 - `model_selection.search_strategy`: `grid` | `random` | `tpe`
 - `model_selection.selection_metric`: `mcc` | `balanced_accuracy` | `log_loss`
+- `model_selection.selection_rule`: `best` | `one_se`
 - `report.auto_threshold_selection_metric`: `mcc` | `balanced_accuracy`
 
 ## `data`
@@ -351,12 +353,24 @@ Compatibility rules:
 - `model_selection.selection_metric`
   - type: `mcc | balanced_accuracy | log_loss`
   - default: `log_loss`
+- `model_selection.selection_rule`
+  - type: `best | one_se`
+  - default: `best`
+  - behavior:
+    - `best`: rank candidates by the inner-CV mean `selection_metric`.
+    - `one_se`: find the best inner-CV mean score, keep candidates within one
+      standard error of that best score, then prefer the simpler model among
+      that eligible set.
 
 Compatibility rules:
 
 - `selected_candidate_count` and `selected_candidate_percent` are mutually exclusive.
 - `selected_candidate_count` or `selected_candidate_percent` requires `inner_cv_strategy`.
 - when selection is active, top-N selection is applied per sampled set and selected models are always distinct by hyperparameter set.
+- with `selection_rule=one_se`, "simpler" means smaller `C` for linear SVM and
+  logistic elastic-net; for logistic elastic-net, larger `l1_ratio` breaks ties.
+  For random forest, shallower trees, larger split/leaf minima, and fewer trees
+  are preferred in that order.
 - `candidate_source_policy=per_sample_set`: select candidates independently for each sampled set.
 - `candidate_source_policy=reuse_first_sample_set`: select candidates once from sampled set `0` and reuse them for all sampled sets.
 - `search_strategy=grid` cannot use

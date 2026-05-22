@@ -23,6 +23,7 @@ ProbabilityAggregation = Literal["mean", "median"]
 SearchStrategy = Literal["grid", "random", "tpe"]
 CandidateSourcePolicy = Literal["per_sample_set", "reuse_first_sample_set"]
 SelectionMetricName = Literal["mcc", "balanced_accuracy", "log_loss"]
+SelectionRule = Literal["best", "one_se"]
 ThresholdSelectionMetricName = Literal["mcc", "balanced_accuracy"]
 CorrelationMethod = Literal["pearson", "spearman"]
 ExpressionTransformMethod = Literal["none", "log1p", "sample_rank", "sample_percentile_rank"]
@@ -308,6 +309,7 @@ class ModelSelectionConfig(StrictModel):
     inner_cv_strategy: OuterCvStrategy | None = None
     inner_cv_n_splits: PositiveInt | None = None
     selection_metric: SelectionMetricName = "log_loss"
+    selection_rule: SelectionRule = "best"
 
     @property
     def has_continuous_search_space(self) -> bool:

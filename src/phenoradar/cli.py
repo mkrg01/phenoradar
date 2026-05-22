@@ -827,10 +827,12 @@ def run(
         except BundleError as exc:
             raise typer.BadParameter(str(exc)) from exc
         _log(f"Model bundle exported: {bundle_export_result.bundle_dir}.")
+    model_selection_selected_table: pl.DataFrame | None = None
     if selected_tables:
-        pl.concat(selected_tables, how="vertical_relaxed").sort(
+        model_selection_selected_table = pl.concat(selected_tables, how="vertical_relaxed").sort(
             ["selection_scope", "fold_id", "sample_set_id", "rank", "candidate_index"]
-        ).write_csv(
+        )
+        model_selection_selected_table.write_csv(
             run_dir / "model_selection_selected.tsv",
             separator="\t",
             float_precision=8,
@@ -1007,6 +1009,7 @@ def run(
             ensemble_model_probs=cv_artifacts.ensemble_model_probs,
             model_selection_trials=cv_artifacts.model_selection_trials,
             model_selection_trials_summary=cv_artifacts.model_selection_trials_summary,
+            model_selection_selected=model_selection_selected_table,
             auto_threshold_metric=resolved.report.auto_threshold_selection_metric,
             loss_by_split_cv=cv_artifacts.loss_by_split_cv,
             loss_by_split_final_refit=(

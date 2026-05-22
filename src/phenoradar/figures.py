@@ -1867,7 +1867,7 @@ def _summarize_model_selection_trials_for_figure(
         .otherwise(pl.col("_metric_value_raw"))
         .alias("_metric_value_valid")
     )
-    return scored.group_by(
+    summary = scored.group_by(
         ["fold_id", "sample_set_id", "candidate_index", "metric_name", "params_json"]
     ).agg(
         [
@@ -1876,6 +1876,15 @@ def _summarize_model_selection_trials_for_figure(
             pl.col("_metric_value_valid").mean().alias("metric_value_mean"),
             pl.col("_metric_value_valid").std(ddof=0).alias("metric_value_std"),
         ]
+    )
+    return summary.with_columns(
+        pl.when(pl.col("n_valid_inner_folds") > 0)
+        .then(
+            pl.col("metric_value_std")
+            / pl.col("n_valid_inner_folds").cast(pl.Float64).sqrt()
+        )
+        .otherwise(pl.lit(None, dtype=pl.Float64))
+        .alias("metric_value_se")
     ).sort(["fold_id", "sample_set_id", "candidate_index"])
 
 
@@ -1944,6 +1953,58 @@ def _compact_params_label(
     return json.dumps(parsed, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
+def _model_selection_metric_axis_label(metric_names: Sequence[str]) -> str:
+    unique = sorted({str(value) for value in metric_names})
+    if len(unique) != 1:
+        return "Score"
+    return {
+        "mcc": "MCC",
+        "balanced_accuracy": "Balanced Accuracy",
+        "log_loss": "Log Loss",
+    }.get(unique[0], unique[0].replace("_", " ").title())
+
+
+def _model_selection_higher_is_better(metric_name: str) -> bool:
+    return metric_name != "log_loss"
+
+
+def _numeric_param_from_json(params_json: str | None, key: str) -> float | None:
+    params = _params_dict(params_json)
+    if params is None or key not in params:
+        return None
+    try:
+        value = float(params[key])
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(value):
+        return None
+    return value
+
+
+def _model_selection_summary_with_se(
+    model_selection_trials_summary: pl.DataFrame,
+) -> pl.DataFrame:
+    summary = model_selection_trials_summary
+    if "params_json" not in summary.columns:
+        summary = summary.with_columns(pl.lit("{}").alias("params_json"))
+    if "metric_value_std" not in summary.columns:
+        summary = summary.with_columns(pl.lit(None, dtype=pl.Float64).alias("metric_value_std"))
+    if "metric_value_se" not in summary.columns:
+        if "n_valid_inner_folds" in summary.columns:
+            summary = summary.with_columns(
+                pl.when(pl.col("n_valid_inner_folds").cast(pl.Float64, strict=False) > 0)
+                .then(
+                    pl.col("metric_value_std").cast(pl.Float64, strict=False)
+                    / pl.col("n_valid_inner_folds").cast(pl.Float64, strict=False).sqrt()
+                )
+                .otherwise(pl.lit(None, dtype=pl.Float64))
+                .alias("metric_value_se")
+            )
+        else:
+            summary = summary.with_columns(pl.col("metric_value_std").alias("metric_value_se"))
+    return summary
+
+
 def _model_selection_trials_summary_panels(
     model_selection_trials_summary: pl.DataFrame,
     out_path: Path,
@@ -1963,9 +2024,7 @@ def _model_selection_trials_summary_panels(
             "model_selection_trials_summary.tsv schema is invalid for model_selection_trials.svg"
         )
 
-    summary = model_selection_trials_summary
-    if "params_json" not in summary.columns:
-        summary = summary.with_columns(pl.lit("{}").alias("params_json"))
+    summary = _model_selection_summary_with_se(model_selection_trials_summary)
 
     data = (
         summary.select(
@@ -1975,15 +2034,16 @@ def _model_selection_trials_summary_panels(
             pl.col("metric_name").cast(pl.String, strict=False).alias("__metric_name"),
             pl.col("metric_value_mean").cast(pl.Float64, strict=False).alias("__mean"),
             pl.col("metric_value_std").cast(pl.Float64, strict=False).alias("__std"),
+            pl.col("metric_value_se").cast(pl.Float64, strict=False).alias("__se"),
             pl.col("params_json").cast(pl.String, strict=False).alias("__params_json"),
         )
         .with_columns(
             pl.when(
-                pl.col("__std").is_null() | pl.col("__std").is_nan() | (pl.col("__std") < 0.0)
+                pl.col("__se").is_null() | pl.col("__se").is_nan() | (pl.col("__se") < 0.0)
             )
             .then(0.0)
-            .otherwise(pl.col("__std"))
-            .alias("__std_plot")
+            .otherwise(pl.col("__se"))
+            .alias("__se_plot")
         )
         .filter(
             pl.col("__fold_id").is_not_null()
@@ -2044,7 +2104,7 @@ def _model_selection_trials_summary_panels(
 
         candidates = [int(v) for v in panel_data.select("__candidate_index").to_series().to_list()]
         means = np.array(panel_data.select("__mean").to_series().to_list(), dtype=float)
-        stds = np.array(panel_data.select("__std_plot").to_series().to_list(), dtype=float)
+        ses = np.array(panel_data.select("__se_plot").to_series().to_list(), dtype=float)
         params_json_values = [
             None if value is None else str(value)
             for value in panel_data.select("__params_json").to_series().to_list()
@@ -2061,8 +2121,8 @@ def _model_selection_trials_summary_panels(
 
         max_candidates = max(max_candidates, len(candidates))
         max_label_length = max(max_label_length, max(len(label) for label in y_labels))
-        for mean_value, std_value in zip(means.tolist(), stds.tolist(), strict=True):
-            x_values.extend([mean_value - std_value, mean_value + std_value])
+        for mean_value, se_value in zip(means.tolist(), ses.tolist(), strict=True):
+            x_values.extend([mean_value - se_value, mean_value + se_value])
 
         panels.append(
             {
@@ -2070,7 +2130,7 @@ def _model_selection_trials_summary_panels(
                 "sample_set_id": sample_set_id,
                 "candidates": candidates,
                 "means": means,
-                "stds": stds,
+                "ses": ses,
                 "y_labels": y_labels,
             }
         )
@@ -2111,17 +2171,10 @@ def _model_selection_trials_summary_panels(
     )
     fig.patch.set_facecolor("white")
 
-    metric_names = sorted(
-        {str(v) for v in data.select("__metric_name").unique().to_series().to_list()}
-    )
-    if len(metric_names) == 1:
-        metric_axis_label = {
-            "mcc": "MCC",
-            "balanced_accuracy": "Balanced Accuracy",
-            "log_loss": "Log Loss",
-        }.get(metric_names[0], metric_names[0].replace("_", " ").title())
-    else:
-        metric_axis_label = "Score"
+    metric_names = [
+        str(v) for v in data.select("__metric_name").unique().to_series().to_list()
+    ]
+    metric_axis_label = f"{_model_selection_metric_axis_label(metric_names)} mean +/- SE"
     for panel_index, panel in enumerate(panels):
         row_index, col_index = divmod(panel_index, n_cols)
         ax = axes[row_index][col_index]
@@ -2129,7 +2182,7 @@ def _model_selection_trials_summary_panels(
         ax.errorbar(
             panel["means"],
             y_pos,
-            xerr=panel["stds"],
+            xerr=panel["ses"],
             fmt="o",
             color=_COLOR_BLUE,
             ecolor=_COLOR_SKY,
@@ -2167,6 +2220,339 @@ def _model_selection_trials_summary_panels(
         wspace=0.32,
         hspace=0.55,
     )
+    _save_svg_figure(fig, out_path)
+
+
+def _model_selection_one_se_curve(
+    model_selection_trials_summary: pl.DataFrame,
+    model_selection_selected: pl.DataFrame | None,
+    out_path: Path,
+    *,
+    max_sample_sets_per_fold: int,
+) -> None:
+    required = {
+        "fold_id",
+        "sample_set_id",
+        "candidate_index",
+        "metric_name",
+        "metric_value_mean",
+    }
+    if not required.issubset(model_selection_trials_summary.columns):
+        raise FigureError(
+            "model_selection_trials_summary.tsv schema is invalid for "
+            "model_selection_one_se_curve.svg"
+        )
+
+    summary = _model_selection_summary_with_se(model_selection_trials_summary)
+    data = (
+        summary.select(
+            pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
+            pl.col("sample_set_id").cast(pl.Int64, strict=False).alias("__sample_set_id"),
+            pl.col("candidate_index").cast(pl.Int64, strict=False).alias("__candidate_index"),
+            pl.col("metric_name").cast(pl.String, strict=False).alias("__metric_name"),
+            pl.col("metric_value_mean").cast(pl.Float64, strict=False).alias("__mean"),
+            pl.col("metric_value_se").cast(pl.Float64, strict=False).alias("__se"),
+            pl.col("params_json").cast(pl.String, strict=False).alias("__params_json"),
+        )
+        .with_columns(
+            pl.when(pl.col("__se").is_null() | pl.col("__se").is_nan() | (pl.col("__se") < 0.0))
+            .then(0.0)
+            .otherwise(pl.col("__se"))
+            .alias("__se_plot")
+        )
+        .filter(
+            pl.col("__fold_id").is_not_null()
+            & (pl.col("__fold_id") != "")
+            & pl.col("__sample_set_id").is_not_null()
+            & pl.col("__candidate_index").is_not_null()
+            & pl.col("__metric_name").is_not_null()
+            & (pl.col("__metric_name") != "")
+            & pl.col("__mean").is_not_null()
+            & pl.col("__mean").is_finite()
+        )
+    )
+    if data.height == 0:
+        return
+
+    if max_sample_sets_per_fold < 1:
+        raise FigureError("max_sample_sets_per_fold must be >= 1")
+
+    selected_by_key: dict[tuple[str, int], int] = {}
+    if model_selection_selected is not None:
+        selected_required = {
+            "selection_scope",
+            "fold_id",
+            "sample_set_id",
+            "candidate_index",
+            "rank",
+        }
+        if not selected_required.issubset(model_selection_selected.columns):
+            raise FigureError(
+                "model_selection_selected.tsv schema is invalid for "
+                "model_selection_one_se_curve.svg"
+            )
+        selected_rows = (
+            model_selection_selected.select(
+                pl.col("selection_scope").cast(pl.String, strict=False).alias("__scope"),
+                pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
+                pl.col("sample_set_id").cast(pl.Int64, strict=False).alias("__sample_set_id"),
+                pl.col("candidate_index").cast(pl.Int64, strict=False).alias("__candidate_index"),
+                pl.col("rank").cast(pl.Int64, strict=False).alias("__rank"),
+            )
+            .filter(
+                (pl.col("__scope") == "outer_fold")
+                & (pl.col("__rank") == 1)
+                & pl.col("__fold_id").is_not_null()
+                & pl.col("__sample_set_id").is_not_null()
+                & pl.col("__candidate_index").is_not_null()
+            )
+            .to_dicts()
+        )
+        for row in selected_rows:
+            selected_by_key[(str(row["__fold_id"]), int(row["__sample_set_id"]))] = int(
+                row["__candidate_index"]
+            )
+
+    fold_ids = [str(v) for v in data.select("__fold_id").unique().to_series().to_list()]
+    fold_ids = sorted(
+        fold_ids,
+        key=lambda value: (0, int(value)) if value.isdigit() else (1, value),
+    )
+    panels: list[dict[str, Any]] = []
+    all_x: list[float] = []
+    all_y: list[float] = []
+    use_log_c_values: list[bool] = []
+
+    for fold_id in fold_ids:
+        sample_set_ids = sorted(
+            int(v)
+            for v in data.filter(pl.col("__fold_id") == fold_id)
+            .select("__sample_set_id")
+            .unique()
+            .to_series()
+            .to_list()
+        )[:max_sample_sets_per_fold]
+        for sample_set_id in sample_set_ids:
+            panel_data = data.filter(
+                (pl.col("__fold_id") == fold_id) & (pl.col("__sample_set_id") == sample_set_id)
+            ).sort("__candidate_index")
+            if panel_data.height == 0:
+                continue
+
+            rows = panel_data.to_dicts()
+            c_values = [
+                _numeric_param_from_json(
+                    None if row["__params_json"] is None else str(row["__params_json"]), "C"
+                )
+                for row in rows
+            ]
+            use_log_c = all(value is not None and value > 0.0 for value in c_values)
+            if use_log_c:
+                positive_c_values = [float(value) for value in c_values if value is not None]
+                x_values = np.array([np.log10(value) for value in positive_c_values], dtype=float)
+                x_label = "log10(C)"
+            else:
+                x_values = np.array([int(row["__candidate_index"]) for row in rows], dtype=float)
+                x_label = "candidate_index"
+            means = np.array([float(row["__mean"]) for row in rows], dtype=float)
+            ses = np.array([float(row["__se_plot"]) for row in rows], dtype=float)
+            candidate_indices = [int(row["__candidate_index"]) for row in rows]
+            metric_names = [str(row["__metric_name"]) for row in rows]
+            metric_name = metric_names[0]
+            higher_is_better = _model_selection_higher_is_better(metric_name)
+            best_offset = int(np.argmax(means) if higher_is_better else np.argmin(means))
+            best_mean = float(means[best_offset])
+            best_se = float(ses[best_offset])
+            threshold = best_mean - best_se if higher_is_better else best_mean + best_se
+            eligible = means >= threshold if higher_is_better else means <= threshold
+            selected_candidate = selected_by_key.get((fold_id, sample_set_id))
+
+            order = np.argsort(x_values)
+            panels.append(
+                {
+                    "fold_id": fold_id,
+                    "sample_set_id": sample_set_id,
+                    "x": x_values[order],
+                    "means": means[order],
+                    "ses": ses[order],
+                    "eligible": eligible[order],
+                    "candidate_indices": [candidate_indices[int(index)] for index in order],
+                    "metric_names": metric_names,
+                    "metric_name": metric_name,
+                    "threshold": threshold,
+                    "best_candidate": candidate_indices[best_offset],
+                    "selected_candidate": selected_candidate,
+                    "x_label": x_label,
+                }
+            )
+            all_x.extend(x_values.tolist())
+            for mean, se in zip(means.tolist(), ses.tolist(), strict=True):
+                all_y.extend([mean - se, mean + se])
+            all_y.append(threshold)
+            use_log_c_values.append(use_log_c)
+
+    if not panels:
+        return
+
+    x_label = "log10(C)" if all(use_log_c_values) else "candidate_index"
+    metric_axis_label = _model_selection_metric_axis_label(
+        [panel["metric_name"] for panel in panels]
+    )
+    x_min, x_max = _padded_domain(all_x, include_zero=False)
+    y_min, y_max = _padded_domain(all_y, include_zero=False)
+
+    n_panels = len(panels)
+    max_cols = min(4, n_panels)
+    n_cols = min(
+        range(1, max_cols + 1),
+        key=lambda cols: (
+            abs((cols / int(np.ceil(n_panels / cols))) - 1.4)
+            + (int(np.ceil(n_panels / cols)) * cols - n_panels) * 0.15,
+            int(np.ceil(n_panels / cols)) * cols - n_panels,
+        ),
+    )
+    n_rows = int(np.ceil(n_panels / n_cols))
+    fig_width_px = max(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 230 * n_cols + 80)
+    fig_height_px = max(250, 200 * n_rows + 66)
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=_figure_size_inches(fig_width_px, fig_height_px),
+        dpi=_FIG_DPI,
+        squeeze=False,
+    )
+    fig.patch.set_facecolor("white")
+
+    for panel_index, panel in enumerate(panels):
+        row_index, col_index = divmod(panel_index, n_cols)
+        ax = axes[row_index][col_index]
+        x_values = np.asarray(panel["x"], dtype=float)
+        means = np.asarray(panel["means"], dtype=float)
+        ses = np.asarray(panel["ses"], dtype=float)
+        eligible = np.asarray(panel["eligible"], dtype=bool)
+        candidate_indices = [int(value) for value in panel["candidate_indices"]]
+        ax.plot(x_values, means, color=_COLOR_BLUE, linewidth=0.8, alpha=0.75)
+        ax.errorbar(
+            x_values,
+            means,
+            yerr=ses,
+            fmt="none",
+            ecolor=_COLOR_SKY,
+            elinewidth=0.8,
+            capsize=2.2,
+            zorder=1,
+        )
+        ax.scatter(
+            x_values[~eligible],
+            means[~eligible],
+            s=18,
+            color=_COLOR_BLUE,
+            edgecolor="white",
+            linewidth=0.4,
+            zorder=2,
+            label="Candidate",
+        )
+        ax.scatter(
+            x_values[eligible],
+            means[eligible],
+            s=24,
+            color=_COLOR_GREEN,
+            edgecolor="white",
+            linewidth=0.4,
+            zorder=3,
+            label="Within one-SE",
+        )
+        ax.axhline(
+            float(panel["threshold"]),
+            color=_COLOR_ORANGE,
+            linewidth=0.9,
+            linestyle="--",
+            label="one-SE threshold",
+        )
+
+        best_candidate = int(panel["best_candidate"])
+        if best_candidate in candidate_indices:
+            best_offset = candidate_indices.index(best_candidate)
+            ax.scatter(
+                [x_values[best_offset]],
+                [means[best_offset]],
+                marker="D",
+                s=28,
+                color=_COLOR_PURPLE,
+                edgecolor="white",
+                linewidth=0.4,
+                zorder=4,
+                label="Best mean",
+            )
+        selected_candidate = panel["selected_candidate"]
+        if selected_candidate is not None and int(selected_candidate) in candidate_indices:
+            selected_offset = candidate_indices.index(int(selected_candidate))
+            ax.scatter(
+                [x_values[selected_offset]],
+                [means[selected_offset]],
+                marker="*",
+                s=72,
+                color=_COLOR_ORANGE,
+                edgecolor=_AXIS_COLOR,
+                linewidth=0.4,
+                zorder=5,
+                label="Selected candidate",
+            )
+
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+        ax.grid(color=_GRID_COLOR, linewidth=0.5)
+        ax.set_axisbelow(True)
+        title = f"fold={panel['fold_id']}"
+        if int(panel["sample_set_id"]) != 0:
+            title += f", sample_set={panel['sample_set_id']}"
+        ax.set_title(title, fontsize=_LABEL_FONTSIZE, pad=5.0)
+        if col_index == 0:
+            ax.set_ylabel(f"{metric_axis_label} mean", fontsize=_LABEL_FONTSIZE)
+        ax.set_xlabel(x_label, fontsize=_LABEL_FONTSIZE)
+        if x_label == "candidate_index":
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    for panel_index in range(n_panels, n_rows * n_cols):
+        row_index, col_index = divmod(panel_index, n_cols)
+        axes[row_index][col_index].axis("off")
+
+    legend_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="none",
+            markerfacecolor=_COLOR_GREEN,
+            label="Within one-SE",
+        ),
+        Line2D([0], [0], color=_COLOR_ORANGE, linestyle="--", label="one-SE threshold"),
+        Line2D(
+            [0],
+            [0],
+            marker="D",
+            color="none",
+            markerfacecolor=_COLOR_PURPLE,
+            label="Best mean",
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker="*",
+            color="none",
+            markerfacecolor=_COLOR_ORANGE,
+            markeredgecolor=_AXIS_COLOR,
+            label="Selected candidate",
+        ),
+    ]
+    fig.legend(
+        handles=legend_handles,
+        loc="lower center",
+        ncol=min(4, len(legend_handles)),
+        frameon=False,
+        bbox_to_anchor=(0.5, 0.01),
+    )
+    fig.subplots_adjust(left=0.10, right=0.995, top=0.93, bottom=0.18, wspace=0.30, hspace=0.48)
     _save_svg_figure(fig, out_path)
 
 
@@ -2669,6 +3055,7 @@ def write_run_figures(
     pred_external_test: pl.DataFrame | None = None,
     trait_name: str = "trait",
     model_selection_trials_summary: pl.DataFrame | None = None,
+    model_selection_selected: pl.DataFrame | None = None,
     feature_filter_counts_summary: pl.DataFrame | None = None,
     retained_features_summary: pl.DataFrame | None = None,
     model_sparsity: pl.DataFrame | None = None,
@@ -2738,6 +3125,12 @@ def write_run_figures(
         _model_selection_trials_summary_panels(
             selection_summary,
             figures_dir / "model_selection_trials.svg",
+            max_sample_sets_per_fold=_MODEL_SELECTION_SAMPLE_SET_LIMIT,
+        )
+        _model_selection_one_se_curve(
+            selection_summary,
+            model_selection_selected,
+            figures_dir / "model_selection_one_se_curve.svg",
             max_sample_sets_per_fold=_MODEL_SELECTION_SAMPLE_SET_LIMIT,
         )
     if feature_filter_counts_summary is not None:

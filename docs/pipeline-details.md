@@ -163,6 +163,9 @@ Inner-CV selection:
 
 - enabled only when selection is active (`selected_candidate_count` or `selected_candidate_percent` is set).
 - `inner_cv_strategy`: `logo` or `group_kfold`.
+- `selection_rule=best` ranks by mean inner-CV score.
+- `selection_rule=one_se` first identifies candidates within one standard error
+  of the best mean score, then prefers the simpler candidate.
 - threshold-dependent candidate metrics (`mcc`/`balanced_accuracy`) use
   `report.fixed_probability_threshold`; `log_loss` is threshold-independent.
 
