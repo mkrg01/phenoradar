@@ -64,7 +64,7 @@ preprocess:
     method: log1p
   sparse_feature_filter:
     enabled: true
-    min_nonzero_fraction_in_at_least_one_trait: 0.5
+    min_nonzero_fraction_in_at_least_one_trait: 0.8
   low_variance_filter:
     enabled: false
     min_variance: null
@@ -249,7 +249,7 @@ Compatibility rules:
   - default: `true`
 - `min_nonzero_fraction_in_at_least_one_trait`
   - type: `float in [0, 1] | null`
-  - default: `0.5`
+  - default: `0.8`
   - rule: required when `enabled=true`
   - behavior: keeps a feature when its train-fold nonzero fraction is at least
     this value in at least one trait class

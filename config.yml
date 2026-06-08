@@ -29,7 +29,7 @@ preprocess:
     method: log1p  # choices: none, log1p, sample_rank, sample_percentile_rank
   sparse_feature_filter:
     enabled: true
-    min_nonzero_fraction_in_at_least_one_trait: 0.5
+    min_nonzero_fraction_in_at_least_one_trait: 0.8
   low_variance_filter:
     enabled: false
     min_variance: null

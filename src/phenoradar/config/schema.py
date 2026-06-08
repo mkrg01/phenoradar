@@ -173,7 +173,7 @@ class SparseFeatureFilterConfig(StrictModel):
 
     enabled: bool = True
     min_nonzero_fraction_in_at_least_one_trait: float | None = Field(
-        default=0.5,
+        default=0.8,
         ge=0.0,
         le=1.0,
     )

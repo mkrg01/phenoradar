@@ -67,7 +67,7 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.preprocess.sparse_feature_filter.enabled is True
     assert (
         resolved.preprocess.sparse_feature_filter.min_nonzero_fraction_in_at_least_one_trait
-        == 0.5
+        == 0.8
     )
     assert resolved.preprocess.feature_scaling.method == "standard"
     assert resolved.figures.top_features == 30
@@ -89,7 +89,7 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
     assert resolved.preprocess.sparse_feature_filter.enabled is True
     assert (
         resolved.preprocess.sparse_feature_filter.min_nonzero_fraction_in_at_least_one_trait
-        == 0.5
+        == 0.8
     )
     assert resolved.preprocess.feature_scaling.method == "standard"
     assert resolved.figures.top_features == 30

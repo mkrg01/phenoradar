@@ -3136,10 +3136,10 @@ def test_select_feature_indices_sparse_feature_filter_keeps_any_trait_signal(
             [
                 [1.0, 1.0, 0.0],
                 [2.0, 0.0, 0.0],
-                [0.0, 0.0, 0.0],
+                [1.5, 0.0, 0.0],
                 [0.0, 1.0, 3.0],
                 [0.0, 0.0, 4.0],
-                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 5.0],
             ],
             dtype=float,
         ),
