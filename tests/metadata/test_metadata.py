@@ -533,8 +533,8 @@ def test_build_species_metadata_from_skim_writes_taxon_rank_blocks(
         "taxon_order_test_holdout\ttaxon_order_exclude\n"
         "sp1\t1\t1\tno\t100\tFamilyA\tno\tno\t10\tOrderA\tno\tno\n"
         "sp2\t0\t1\tno\t100\tFamilyA\tno\tno\t10\tOrderA\tno\tno\n"
-        "sp3\t1\t\tyes\t\t\tyes\tno\t10\tOrderA\tno\tno\n"
-        "sp4\t0\t\tyes\t\t\tyes\tno\t\t\tyes\tno\n"
+        "sp3\t1\t\tyes\t200\tFamilyB\tyes\tno\t10\tOrderA\tno\tno\n"
+        "sp4\t0\t\tyes\t300\tFamilyC\tyes\tno\t20\tOrderB\tyes\tno\n"
         "sp5\t1\t\tyes\t\t\tno\tyes\t\t\tno\tyes\n"
         "sp6\t\t\tno\t\t\tno\tno\t\t\tno\tno\n"
     )
@@ -589,7 +589,7 @@ def test_build_species_metadata_from_skim_can_hold_out_mixed_taxon_blocks(
     assert result.taxon_block_counts == {"family": 1}
     assert result.taxon_block_test_holdout_counts == {"family": 2}
     assert table.filter(pl.col("taxon_family_test_holdout") == "yes").height == 2
-    assert table.filter(pl.col("taxon_family_id").is_not_null()).height == 2
+    assert table.filter(pl.col("taxon_family_id").is_not_null()).height == 4
 
 
 def test_build_species_metadata_from_skim_generates_taxid_for_taxon_blocks(

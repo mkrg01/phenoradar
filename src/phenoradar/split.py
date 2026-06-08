@@ -329,28 +329,6 @@ def _preflight_training_pool(config: AppConfig, training_df: pl.DataFrame) -> No
                 f"offending groups: {groups_str}"
             )
 
-    if config.preprocess.pair_aware_filter.enabled:
-        missing_contrast_groups = training_df.filter(pl.col("__contrast_group").is_null()).height
-        if missing_contrast_groups > 0:
-            raise SplitError(
-                "pair_aware_filter requires non-empty data.contrast_pair_col values for all "
-                f"training species; missing={missing_contrast_groups}"
-            )
-        invalid_contrast_groups = (
-            training_df.group_by("__contrast_group")
-            .agg(pl.col("__label").n_unique().alias("n_labels"))
-            .filter(pl.col("n_labels") < 2)
-            .select("__contrast_group")
-            .to_series()
-            .to_list()
-        )
-        if invalid_contrast_groups:
-            groups_str = ", ".join(str(v) for v in sorted(invalid_contrast_groups))
-            raise SplitError(
-                "pair_aware_filter requires both labels in each contrast pair before CV; "
-                f"offending contrast groups: {groups_str}"
-            )
-
 
 def _validate_fold_labels(
     training_df: pl.DataFrame, folds: list[tuple[list[int], list[int]]]
@@ -363,31 +341,6 @@ def _validate_fold_labels(
             raise SplitError(f"Fold {fold_id} training split contains fewer than two labels")
         if len(valid_labels) < 2:
             raise SplitError(f"Fold {fold_id} validation split contains fewer than two labels")
-
-
-def _validate_pair_aware_fold_contrasts(
-    config: AppConfig,
-    training_df: pl.DataFrame,
-    folds: list[tuple[list[int], list[int]]],
-) -> None:
-    if not config.preprocess.pair_aware_filter.enabled:
-        return
-    labels = training_df.select("__label").to_series().to_list()
-    contrast_groups = training_df.select("__contrast_group").to_series().to_list()
-    for fold_id, (train_idx, _valid_idx) in enumerate(folds, start=1):
-        labels_by_group: dict[str, set[int]] = {}
-        for idx in train_idx:
-            group = str(contrast_groups[idx])
-            labels_by_group.setdefault(group, set()).add(int(labels[idx]))
-        invalid = sorted(
-            group for group, group_labels in labels_by_group.items() if len(group_labels) < 2
-        )
-        if invalid:
-            groups_str = ", ".join(invalid[:10])
-            raise SplitError(
-                "pair_aware_filter requires both labels in each training contrast pair "
-                f"within every fold; fold_id={fold_id}, offending contrast groups: {groups_str}"
-            )
 
 
 def _build_fold_indices(
@@ -567,7 +520,6 @@ def build_split_artifacts(config: AppConfig) -> SplitArtifacts:
     _preflight_training_pool(config, training_df)
     folds = _build_fold_indices(config, training_df)
     _validate_fold_labels(training_df, folds)
-    _validate_pair_aware_fold_contrasts(config, training_df, folds)
     manifest = _build_split_manifest(training_df, external_df, inference_df, folds)
     fold_validation_groups = _build_fold_validation_groups(training_df, folds)
 

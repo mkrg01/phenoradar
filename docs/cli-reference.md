@@ -184,7 +184,9 @@ first resolves species names with `ete4.NCBITaxa`, writes a generated
 `species_taxid.tsv` (or `--species-taxid-out`), and reuses that file for rank
 blocking. Rank blocks with both labels are usable as CV groups. Single-label
 rank blocks are marked as test holdout, while labeled species with missing
-taxid/rank are marked as excluded.
+taxid/rank are marked as excluded. The `taxon_<rank>_id` and
+`taxon_<rank>_name` columns keep the resolved annotation even when that rank
+block is held out; use the matching holdout/exclude columns for split behavior.
 
 ## `predict`
 

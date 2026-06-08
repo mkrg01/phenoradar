@@ -271,16 +271,22 @@ Compatibility rules:
   - type: `int >= 1 | null`
   - default: `null`
   - rule: required when `enabled=true`
+- `min_contrast_pairs`
+  - type: `int >= 1`
+  - default: `1`
 - behavior:
   - computes train-only per-group label contrasts after `expression_transform`
-  - ranks features by an internal paired t-like score
+  - uses only `data.contrast_pair_col` groups in the training fold that contain
+    both labels
+  - ranks features by an internal paired t-like score when at least 2 valid
+    contrast pairs are available; with 1 valid pair, ranks by absolute mean
+    contrast
   - keeps the top `max_features`
-  - when fewer than 2 training groups are available in a split, the filter is
-    skipped with a warning
+  - when fewer than `min_contrast_pairs` valid contrast pairs are available in a
+    split, the filter is skipped with a warning
   - requires `data.contrast_pair_col`; this is independent from
-    `split.group_col`, except that `group_balanced` sampling with
-    `pair_aware_filter` requires the two columns to match so sampled sets retain
-    complete contrast pairs.
+    `split.group_col`, so taxonomic-rank splits can still use contrast-pair
+    feature scoring where contrast pairs are available.
 
 ### `preprocess.correlation_filter`
 

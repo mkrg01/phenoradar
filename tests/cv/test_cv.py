@@ -3217,7 +3217,54 @@ preprocess:
     assert warnings == []
 
 
-def test_select_feature_indices_pair_aware_filter_skips_when_too_few_groups(
+def test_select_feature_indices_pair_aware_filter_uses_available_valid_contrast_pairs(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  low_prevalence_filter:
+    enabled: false
+  pair_aware_filter:
+    enabled: true
+    max_features: 1
+    min_contrast_pairs: 2
+""".strip(),
+            )
+        ]
+    )
+    warnings: list[str] = []
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [0.0, 0.0],
+                [2.0, 1.0],
+                [0.0, 100.0],
+                [5.0, 5.0],
+                [0.0, 0.0],
+                [2.2, -1.0],
+            ],
+            dtype=float,
+        ),
+        ["OG1", "OG2"],
+        y_train=np.array([0, 1, 0, 1, 0, 1], dtype=int),
+        groups_train=np.array(["g1", "g1", None, "g2", "g3", "g3"], dtype=object),
+        warnings=warnings,
+    )
+
+    assert selected.tolist() == [0]
+    assert warnings == []
+
+
+def test_select_feature_indices_pair_aware_filter_uses_single_valid_pair_by_default(
     tmp_path: Path,
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
@@ -3244,6 +3291,49 @@ preprocess:
         config,
         np.array(
             [
+                [0.0, 0.0],
+                [1.0, 5.0],
+            ],
+            dtype=float,
+        ),
+        ["OG1", "OG2"],
+        y_train=np.array([0, 1], dtype=int),
+        groups_train=np.array(["g1", "g1"], dtype=object),
+        warnings=warnings,
+    )
+
+    assert selected.tolist() == [1]
+    assert any("one valid contrast pair" in item for item in warnings)
+
+
+def test_select_feature_indices_pair_aware_filter_skips_when_too_few_groups(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  low_prevalence_filter:
+    enabled: false
+  pair_aware_filter:
+    enabled: true
+    max_features: 1
+    min_contrast_pairs: 2
+""".strip(),
+            )
+        ]
+    )
+    warnings: list[str] = []
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
                 [1.0, 0.0],
                 [2.0, 3.0],
             ],
@@ -3256,7 +3346,7 @@ preprocess:
     )
 
     assert selected.tolist() == [0, 1]
-    assert any("fewer than 2 training groups" in item for item in warnings)
+    assert any("too few valid contrast pairs" in item for item in warnings)
 
 
 def test_select_feature_indices_calls_correlation_filter_when_enabled(

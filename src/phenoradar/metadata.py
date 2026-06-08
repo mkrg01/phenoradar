@@ -671,14 +671,8 @@ def _build_taxon_block_metadata(
                 "__taxon_exclude"
             ),
         ).with_columns(
-            pl.when(pl.col("__taxon_keep"))
-            .then(pl.col(raw_id_col))
-            .otherwise(None)
-            .alias(out_id_col),
-            pl.when(pl.col("__taxon_keep"))
-            .then(pl.col(raw_name_col))
-            .otherwise(None)
-            .alias(out_name_col),
+            pl.col(raw_id_col).alias(out_id_col),
+            pl.col(raw_name_col).alias(out_name_col),
             pl.when(
                 pl.col("__trait").is_not_null()
                 & ~pl.col("__taxon_keep")

@@ -223,6 +223,7 @@ class PairAwareFilterConfig(StrictModel):
 
     enabled: bool = False
     max_features: PositiveInt | None = None
+    min_contrast_pairs: PositiveInt = 1
 
     @model_validator(mode="after")
     def validate_enabled_args(self) -> PairAwareFilterConfig:
@@ -430,15 +431,5 @@ class AppConfig(StrictModel):
         if self.preprocess.pair_aware_filter.enabled and self.data.contrast_pair_col is None:
             raise ValueError(
                 "preprocess.pair_aware_filter requires data.contrast_pair_col"
-            )
-        if (
-            self.preprocess.pair_aware_filter.enabled
-            and self.sampling.strategy == "group_balanced"
-            and self.data.contrast_pair_col != self.split.group_col
-        ):
-            raise ValueError(
-                "preprocess.pair_aware_filter with sampling.strategy=group_balanced "
-                "requires split.group_col to match data.contrast_pair_col; use "
-                "sampling.strategy=all_samples when splitting by broader phylogenetic groups"
             )
         return self

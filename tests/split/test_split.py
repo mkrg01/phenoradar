@@ -137,6 +137,60 @@ split:
     ]
 
 
+def test_pair_aware_filter_allows_missing_contrast_pairs_for_rank_split(
+    tmp_path: Path,
+) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\tcontrast_pair_id\ttaxon_order_id\ttaxon_order_test_holdout",
+                "sp1\t1\tcp1\torder_a\tno",
+                "sp2\t0\tcp1\torder_a\tno",
+                "sp3\t1\t\torder_b\tno",
+                "sp4\t0\t\torder_b\tno",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp2\tOG1\t2.0",
+                "sp3\tOG1\t3.0",
+                "sp4\tOG1\t4.0",
+            ]
+        )
+        + "\n",
+    )
+    cfg = _write(
+        tmp_path / "config.yml",
+        f"""
+data:
+  metadata_path: {metadata}
+  tpm_path: {tpm}
+  contrast_pair_col: contrast_pair_id
+split:
+  group_col: taxon_order_id
+  test_holdout_col: taxon_order_test_holdout
+preprocess:
+  pair_aware_filter:
+    enabled: true
+    max_features: 1
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([cfg])
+
+    manifest = build_split_artifacts(config).split_manifest
+
+    assert manifest.filter(pl.col("pool").is_in(["train", "validation"])).height > 0
+    assert manifest.filter(pl.col("contrast_group_id").is_null()).height > 0
+
+
 def test_null_contrast_pair_col_uses_split_group_without_contrast_column(
     tmp_path: Path,
 ) -> None:

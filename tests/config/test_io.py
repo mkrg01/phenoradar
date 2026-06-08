@@ -424,11 +424,11 @@ preprocess:
         load_and_resolve_config([cfg])
 
 
-def test_pair_aware_group_balanced_requires_split_group_to_match_contrast_pair(
+def test_pair_aware_group_balanced_allows_split_group_to_differ_from_contrast_pair(
     tmp_path: Path,
 ) -> None:
     cfg = _write(
-        tmp_path / "invalid.yml",
+        tmp_path / "valid.yml",
         """
 data:
   contrast_pair_col: contrast_pair_id
@@ -442,7 +442,27 @@ preprocess:
         + "\n",
     )
 
-    with pytest.raises(ConfigError, match="split.group_col"):
+    resolved = load_and_resolve_config([cfg])
+
+    assert resolved.data.contrast_pair_col == "contrast_pair_id"
+    assert resolved.split.group_col == "taxon_family_id"
+    assert resolved.preprocess.pair_aware_filter.min_contrast_pairs == 1
+
+
+def test_pair_aware_filter_rejects_zero_min_contrast_pairs(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+preprocess:
+  pair_aware_filter:
+    enabled: true
+    max_features: 10
+    min_contrast_pairs: 0
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError, match="min_contrast_pairs"):
         load_and_resolve_config([cfg])
 
 

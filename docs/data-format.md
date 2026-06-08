@@ -63,7 +63,10 @@ requested rank, metadata includes:
 
 Rank blocks with both trait labels enter CV. Single-label rank blocks become
 `*_test_holdout=yes`. Labeled species with missing taxid or missing requested rank become
-`*_exclude=yes`, so they are not used for CV or external test.
+`*_exclude=yes`, so they are not used for CV or external test. The `taxon_<rank>_id`
+and `taxon_<rank>_name` columns are raw taxonomic annotations when the requested
+rank can be resolved; CV eligibility is represented by the matching holdout/exclude
+columns rather than by blanking the annotation.
 
 Use a generated rank block by selecting its columns in config:
 
@@ -162,8 +165,10 @@ Training preflight requirements:
 - the full `training_validation` pool must include both labels (`0` and `1`)
 - with `sampling.strategy: group_balanced`, each `split.group_col` group must
   include both labels before CV
-- with `preprocess.pair_aware_filter.enabled: true`, each contrast pair must
-  include both labels before CV
+- with `preprocess.pair_aware_filter.enabled: true`, valid contrast pairs used
+  for feature scoring must include both labels; species without a valid
+  `data.contrast_pair_col` value remain eligible for model training when the
+  split metadata assigns them to the training pool
 
 Example:
 

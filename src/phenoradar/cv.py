@@ -887,19 +887,27 @@ def _pair_group_contrasts(
     groups_train: np.ndarray,
     selected: np.ndarray,
 ) -> np.ndarray:
-    groups_str = groups_train.astype(str)
-    unique_groups = sorted(set(groups_str.tolist()))
+    groups_by_key: dict[str, list[int]] = {}
+    for idx, raw_group in enumerate(groups_train.tolist()):
+        if raw_group is None:
+            continue
+        try:
+            if bool(np.isnan(raw_group)):
+                continue
+        except (TypeError, ValueError):
+            pass
+        group = str(raw_group).strip()
+        if not group:
+            continue
+        groups_by_key.setdefault(group, []).append(idx)
     contrast_rows: list[np.ndarray] = []
 
-    for group in unique_groups:
-        group_indices = np.where(groups_str == group)[0]
+    for group in sorted(groups_by_key):
+        group_indices = np.array(groups_by_key[group], dtype=int)
         label0_idx = group_indices[y_train[group_indices] == 0]
         label1_idx = group_indices[y_train[group_indices] == 1]
         if label0_idx.size == 0 or label1_idx.size == 0:
-            raise CVError(
-                "pair_aware_filter requires both labels within each training group; "
-                f"offending group={group}"
-            )
+            continue
         label1_mean = np.mean(x_train_expr[label1_idx][:, selected], axis=0)
         label0_mean = np.mean(x_train_expr[label0_idx][:, selected], axis=0)
         contrast_rows.append(np.asarray(label1_mean - label0_mean, dtype=float))
@@ -924,29 +932,44 @@ def _apply_pair_aware_filter(
     if selected.size == 0:
         return selected, np.empty(0, dtype=float)
 
+    min_contrast_pairs = int(config.preprocess.pair_aware_filter.min_contrast_pairs)
     contrasts = _pair_group_contrasts(x_train_expr, y_train, groups_train, selected)
-    n_groups = int(contrasts.shape[0])
-    if n_groups < 2:
+    n_contrast_pairs = int(contrasts.shape[0])
+    if n_contrast_pairs < min_contrast_pairs:
         if warnings is not None:
             warnings.append(
-                "pair_aware_filter skipped because fewer than 2 training groups were available "
-                "in a split"
+                "pair_aware_filter skipped because too few valid contrast pairs were available "
+                f"in a split; valid_contrast_pairs={n_contrast_pairs}, "
+                f"min_contrast_pairs={min_contrast_pairs}"
             )
         return selected, None
 
     effect = np.asarray(np.mean(contrasts, axis=0), dtype=float)
-    se = np.asarray(np.std(contrasts, axis=0, ddof=1), dtype=float) / np.sqrt(float(n_groups))
-    positive_se = se[np.isfinite(se) & (se > 0.0)]
-    if positive_se.size == 0:
+    if n_contrast_pairs == 1:
         if warnings is not None:
             warnings.append(
                 "pair_aware_filter used absolute mean group contrast because all per-feature "
-                "standard errors were zero"
+                "standard errors were unavailable with one valid contrast pair"
             )
         score = np.abs(effect)
     else:
-        s0 = max(float(np.quantile(positive_se, _PAIR_AWARE_SE_QUANTILE)), _PAIR_AWARE_SCORE_FLOOR)
-        score = np.abs(effect) / np.maximum(se, s0)
+        se = np.asarray(np.std(contrasts, axis=0, ddof=1), dtype=float) / np.sqrt(
+            float(n_contrast_pairs)
+        )
+        positive_se = se[np.isfinite(se) & (se > 0.0)]
+        if positive_se.size == 0:
+            if warnings is not None:
+                warnings.append(
+                    "pair_aware_filter used absolute mean group contrast because all per-feature "
+                    "standard errors were zero"
+                )
+            score = np.abs(effect)
+        else:
+            s0 = max(
+                float(np.quantile(positive_se, _PAIR_AWARE_SE_QUANTILE)),
+                _PAIR_AWARE_SCORE_FLOOR,
+            )
+            score = np.abs(effect) / np.maximum(se, s0)
     score = np.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0)
     if np.all(np.isclose(score, 0.0)):
         if warnings is not None:
@@ -2715,12 +2738,6 @@ def run_final_refit(
         raise CVError("No species available for final refit training pool")
     if train_pool.filter(pl.col("label").is_null() | pl.col("group_id").is_null()).height > 0:
         raise CVError("Final refit training pool contains null label/group values")
-    if (
-        config.preprocess.pair_aware_filter.enabled
-        and train_pool.filter(pl.col("contrast_group_id").is_null()).height > 0
-    ):
-        raise CVError("Final refit training pool contains null contrast group values")
-
     external_pool = (
         split_manifest.filter(pl.col("pool") == "external_test")
         .group_by("species")
@@ -2761,7 +2778,7 @@ def run_final_refit(
     contrast_groups_train: np.ndarray | None = None
     if config.data.contrast_pair_col is not None or config.preprocess.pair_aware_filter.enabled:
         contrast_values = train_pool.select("contrast_group_id").to_series().to_list()
-        contrast_groups_train = np.array(contrast_values, dtype=str)
+        contrast_groups_train = np.array(contrast_values, dtype=object)
     sampled_sets = _sample_training_sets(
         config=config,
         y_train=y_train,
@@ -3103,11 +3120,7 @@ def _run_outer_fold(
     contrast_groups_train: np.ndarray | None = None
     if config.data.contrast_pair_col is not None or config.preprocess.pair_aware_filter.enabled:
         contrast_values = train_df.select("contrast_group_id").to_series().to_list()
-        if config.preprocess.pair_aware_filter.enabled and any(v is None for v in contrast_values):
-            raise CVError(
-                "pair_aware_filter requires non-empty contrast_group_id values in each fold"
-            )
-        contrast_groups_train = np.array(contrast_values, dtype=str)
+        contrast_groups_train = np.array(contrast_values, dtype=object)
     _emit_fold_progress(
         "start",
         (

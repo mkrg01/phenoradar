@@ -70,9 +70,10 @@ Preflight before CV:
 - each outer fold's train and validation side must contain both labels.
 - `sampling.strategy: group_balanced` requires each `split.group_col` group to
   contain both labels.
-- `preprocess.pair_aware_filter.enabled: true` requires complete
-  `data.contrast_pair_col` values and both labels in each contrast pair before
-  pair-aware filtering.
+- `preprocess.pair_aware_filter.enabled: true` requires `data.contrast_pair_col`.
+  Pair-aware scoring uses only contrast pairs in the training fold that contain
+  both labels. The stage is skipped with a warning when fewer than
+  `preprocess.pair_aware_filter.min_contrast_pairs` valid pairs are available.
 
 Outer CV splits:
 
