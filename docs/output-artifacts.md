@@ -70,7 +70,7 @@ Always written:
   - columns:
     - `scope`, `fold_id`, `sample_set_id`
     - `n_features_before`
-    - `n_features_after_low_prevalence`
+    - `n_features_after_sparse_feature_filter`
     - `n_features_after_low_variance`
     - `n_features_after_pair_aware`
     - `n_features_after_correlation`
@@ -323,7 +323,7 @@ Conditionally written:
 - One row per preprocessing result (`scope`, `fold_id`, `sample_set_id`).
 - Values are stage-wise feature counts through:
   - raw (`n_features_before`)
-  - low prevalence
+  - sparse feature
   - low variance
   - pair aware
   - correlation

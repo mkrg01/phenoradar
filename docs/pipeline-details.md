@@ -111,7 +111,7 @@ For each outer fold:
     - `search_strategy=tpe` remains sequential
 4. For each sampled training set, preprocess sampled-train/valid and fit selected models:
   - `preprocess.expression_transform` (`none`, `log1p`, `sample_rank`, or `sample_percentile_rank`)
-  - optional low-prevalence filter
+  - optional sparse feature filter
   - optional low-variance filter
   - optional pair-aware filter (train-only group-contrast ranking)
   - optional correlation filter (pearson/spearman)
@@ -133,7 +133,7 @@ After all folds:
 - sampled sets can run in parallel up to `runtime.n_jobs` budget.
 - each sampled set is preprocessed independently before fit:
   - `preprocess.expression_transform` (`none`, `log1p`, `sample_rank`, or `sample_percentile_rank`)
-  - optional low-prevalence filter
+  - optional sparse feature filter
   - optional low-variance filter
   - optional pair-aware filter (train-only group-contrast ranking)
   - optional correlation filter (pearson/spearman)

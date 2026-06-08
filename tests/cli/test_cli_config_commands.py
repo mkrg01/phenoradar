@@ -81,7 +81,7 @@ def _stub_resolved_config(
         figures=SimpleNamespace(top_features=top_features),
         model_selection=SimpleNamespace(),
         preprocess=SimpleNamespace(
-            low_prevalence_filter=SimpleNamespace(enabled=True),
+            sparse_feature_filter=SimpleNamespace(enabled=True),
             low_variance_filter=SimpleNamespace(enabled=True),
             pair_aware_filter=SimpleNamespace(enabled=False),
             correlation_filter=SimpleNamespace(enabled=False),
@@ -556,8 +556,8 @@ data:
         encoding="utf-8"
     )
     assert "Input" in funnel_svg
-    assert "Low prevalence" in funnel_svg
-    assert "low_prevalence" not in funnel_svg
+    assert "Sparse feature" in funnel_svg
+    assert "sparse_feature" not in funnel_svg
     assert "Low variance" not in funnel_svg
     assert "Pair aware" not in funnel_svg
     assert "Correlation" not in funnel_svg
@@ -683,7 +683,7 @@ data:
     assert "progress=1/2" in result.output
     assert "progress=2/2" in result.output
     assert "features_before=" in result.output
-    assert "features_after_low_prevalence=" in result.output
+    assert "features_after_sparse_feature_filter=" in result.output
     assert "features_after_low_variance=" in result.output
     assert "features_after_correlation=" in result.output
     assert "features_after=" in result.output

@@ -64,8 +64,11 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.model_selection.selection_rule == "best"
     assert resolved.model_selection.candidate_source_policy == "per_sample_set"
     assert resolved.preprocess.expression_transform.method == "log1p"
-    assert resolved.preprocess.low_prevalence_filter.enabled is True
-    assert resolved.preprocess.low_prevalence_filter.min_species_per_feature == 2
+    assert resolved.preprocess.sparse_feature_filter.enabled is True
+    assert (
+        resolved.preprocess.sparse_feature_filter.min_nonzero_fraction_in_at_least_one_trait
+        == 0.5
+    )
     assert resolved.preprocess.feature_scaling.method == "standard"
     assert resolved.figures.top_features == 30
 
@@ -83,6 +86,11 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
     assert resolved.model_selection.selection_rule == "best"
     assert resolved.model_selection.candidate_source_policy == "per_sample_set"
     assert resolved.preprocess.expression_transform.method == "log1p"
+    assert resolved.preprocess.sparse_feature_filter.enabled is True
+    assert (
+        resolved.preprocess.sparse_feature_filter.min_nonzero_fraction_in_at_least_one_trait
+        == 0.5
+    )
     assert resolved.preprocess.feature_scaling.method == "standard"
     assert resolved.figures.top_features == 30
 
@@ -308,14 +316,14 @@ sampling:
         load_and_resolve_config([cfg])
 
 
-def test_preprocess_low_prevalence_rejects_null_min_species_when_enabled(tmp_path: Path) -> None:
+def test_preprocess_sparse_feature_rejects_null_fraction_when_enabled(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path / "invalid.yml",
         """
 preprocess:
-  low_prevalence_filter:
+  sparse_feature_filter:
     enabled: true
-    min_species_per_feature: null
+    min_nonzero_fraction_in_at_least_one_trait: null
 """.strip()
         + "\n",
     )

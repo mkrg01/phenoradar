@@ -189,7 +189,7 @@ def _minimal_feature_filter_counts() -> pl.DataFrame:
             "fold_id": ["0", "0", "1", "1"],
             "sample_set_id": [0, 1, 0, 1],
             "n_features_before": [100, 100, 100, 100],
-            "n_features_after_low_prevalence": [80, 82, 78, 79],
+            "n_features_after_sparse_feature_filter": [80, 82, 78, 79],
             "n_features_after_low_variance": [60, 61, 59, 60],
             "n_features_after_correlation": [52, 53, 50, 52],
             "n_features_after_all": [52, 53, 50, 52],
@@ -203,7 +203,7 @@ def _minimal_feature_filter_counts_summary() -> pl.DataFrame:
             "scope": ["outer_fold"] * 6,
             "stage": [
                 "n_features_before",
-                "n_features_after_low_prevalence",
+                "n_features_after_sparse_feature_filter",
                 "n_features_after_low_variance",
                 "n_features_after_pair_aware",
                 "n_features_after_correlation",
@@ -379,7 +379,7 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
         feature_filter_counts_summary=_minimal_feature_filter_counts_summary(),
         feature_filter_funnel_stage_order=[
             "n_features_before",
-            "n_features_after_low_prevalence",
+            "n_features_after_sparse_feature_filter",
             "n_features_after_pair_aware",
         ],
         retained_features_summary=_minimal_retained_features_summary(),
@@ -398,9 +398,9 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
     assert "min-max" in funnel_svg
     assert "outer_fold (median" not in funnel_svg
     assert "Input" in funnel_svg
-    assert "Low prevalence" in funnel_svg
+    assert "Sparse feature" in funnel_svg
     assert "Pair aware" in funnel_svg
-    assert "low_prevalence" not in funnel_svg
+    assert "sparse_feature" not in funnel_svg
     assert "Low variance" not in funnel_svg
     assert "Correlation" not in funnel_svg
     assert "Final" not in funnel_svg

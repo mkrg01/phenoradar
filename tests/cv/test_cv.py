@@ -176,7 +176,7 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "fold_id",
         "sample_set_id",
         "n_features_before",
-        "n_features_after_low_prevalence",
+        "n_features_after_sparse_feature_filter",
         "n_features_after_low_variance",
         "n_features_after_pair_aware",
         "n_features_after_correlation",
@@ -1314,6 +1314,7 @@ def test_preprocess_fold_scales_validation_with_training_statistics(tmp_path: Pa
         x_train_raw,
         x_valid_raw,
         ["OG1", "OG2"],
+        y_train=np.array([0, 1, 0], dtype=int),
     )
 
     x_train_log = np.log1p(x_train_raw)
@@ -1341,9 +1342,9 @@ def test_select_feature_indices_raises_when_filters_remove_all_features(
                 tpm,
                 extra="""
 preprocess:
-  low_prevalence_filter:
+  sparse_feature_filter:
     enabled: true
-    min_species_per_feature: 10
+    min_nonzero_fraction_in_at_least_one_trait: 0.5
 """.strip(),
             )
         ]
@@ -1358,7 +1359,12 @@ preprocess:
     )
 
     with pytest.raises(CVError, match="removed all features"):
-        _select_feature_indices(config, x_train_log, ["OG1", "OG2"])
+        _select_feature_indices(
+            config,
+            x_train_log,
+            ["OG1", "OG2"],
+            y_train=np.array([0, 1, 0], dtype=int),
+        )
 
 
 def test_expression_matrix_builder_rejects_missing_expression_file(tmp_path: Path) -> None:
@@ -1463,6 +1469,7 @@ def test_preprocess_train_and_target_returns_training_fitted_scaler(tmp_path: Pa
         x_train_raw,
         x_target_raw,
         ["OG1", "OG2"],
+        y_train=np.array([0, 1, 0], dtype=int),
     )
 
     x_train_log = np.log1p(x_train_raw)
@@ -1515,7 +1522,7 @@ def test_preprocess_train_and_target_can_disable_feature_scaling(tmp_path: Path)
 preprocess:
   expression_transform:
     method: sample_percentile_rank
-  low_prevalence_filter:
+  sparse_feature_filter:
     enabled: false
   feature_scaling:
     method: none
@@ -3086,7 +3093,7 @@ preprocess:
     assert features == ["OG1"]
 
 
-def test_select_feature_indices_rejects_missing_low_prevalence_threshold_when_mutated(
+def test_select_feature_indices_rejects_missing_sparse_feature_threshold_when_mutated(
     tmp_path: Path,
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
@@ -3095,20 +3102,52 @@ def test_select_feature_indices_rejects_missing_low_prevalence_threshold_when_mu
         update={
             "preprocess": config.preprocess.model_copy(
                 update={
-                    "low_prevalence_filter": config.preprocess.low_prevalence_filter.model_copy(
-                        update={"enabled": True, "min_species_per_feature": None}
+                    "sparse_feature_filter": config.preprocess.sparse_feature_filter.model_copy(
+                        update={
+                            "enabled": True,
+                            "min_nonzero_fraction_in_at_least_one_trait": None,
+                        }
                     )
                 }
             )
         }
     )
 
-    with pytest.raises(CVError, match="min_species_per_feature is missing"):
+    with pytest.raises(
+        CVError, match="min_nonzero_fraction_in_at_least_one_trait is missing"
+    ):
         _select_feature_indices(
             config_bad,
             np.array([[0.0, 0.1], [0.2, 0.3]], dtype=float),
             ["OG1", "OG2"],
+            y_train=np.array([0, 1], dtype=int),
         )
+
+
+def test_select_feature_indices_sparse_feature_filter_keeps_any_trait_signal(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [1.0, 1.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 1.0, 3.0],
+                [0.0, 0.0, 4.0],
+                [0.0, 0.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        ["OG_C3", "OG_RARE", "OG_C4"],
+        y_train=np.array([0, 0, 0, 1, 1, 1], dtype=int),
+    )
+
+    assert selected.tolist() == [0, 2]
 
 
 def test_select_feature_indices_rejects_missing_low_variance_threshold_when_mutated(
@@ -3120,6 +3159,9 @@ def test_select_feature_indices_rejects_missing_low_variance_threshold_when_muta
         update={
             "preprocess": config.preprocess.model_copy(
                 update={
+                    "sparse_feature_filter": config.preprocess.sparse_feature_filter.model_copy(
+                        update={"enabled": False}
+                    ),
                     "low_variance_filter": config.preprocess.low_variance_filter.model_copy(
                         update={"enabled": True, "min_variance": None}
                     )
@@ -3146,6 +3188,8 @@ def test_select_feature_indices_applies_low_variance_filter(tmp_path: Path) -> N
                 tpm,
                 extra="""
 preprocess:
+  sparse_feature_filter:
+    enabled: false
   low_variance_filter:
     enabled: true
     min_variance: 0.01
@@ -3181,7 +3225,7 @@ def test_select_feature_indices_pair_aware_filter_prefers_consistent_signal(
                 tpm,
                 extra="""
 preprocess:
-  low_prevalence_filter:
+  sparse_feature_filter:
     enabled: false
   pair_aware_filter:
     enabled: true
@@ -3229,7 +3273,7 @@ def test_select_feature_indices_pair_aware_filter_uses_available_valid_contrast_
                 tpm,
                 extra="""
 preprocess:
-  low_prevalence_filter:
+  sparse_feature_filter:
     enabled: false
   pair_aware_filter:
     enabled: true
@@ -3276,7 +3320,7 @@ def test_select_feature_indices_pair_aware_filter_uses_single_valid_pair_by_defa
                 tpm,
                 extra="""
 preprocess:
-  low_prevalence_filter:
+  sparse_feature_filter:
     enabled: false
   pair_aware_filter:
     enabled: true
@@ -3318,7 +3362,7 @@ def test_select_feature_indices_pair_aware_filter_skips_when_too_few_groups(
                 tpm,
                 extra="""
 preprocess:
-  low_prevalence_filter:
+  sparse_feature_filter:
     enabled: false
   pair_aware_filter:
     enabled: true
@@ -3361,7 +3405,7 @@ def test_select_feature_indices_calls_correlation_filter_when_enabled(
                 tpm,
                 extra="""
 preprocess:
-  low_prevalence_filter:
+  sparse_feature_filter:
     enabled: false
   correlation_filter:
     enabled: true

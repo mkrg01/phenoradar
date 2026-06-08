@@ -87,7 +87,7 @@ _COEFFICIENTS_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
 _COEFFICIENTS_AXIS_LABEL_FONTSIZE = _LABEL_FONTSIZE
 _FEATURE_FILTER_FIGURE_DEFAULT_STAGE_ORDER = (
     "n_features_before",
-    "n_features_after_low_prevalence",
+    "n_features_after_sparse_feature_filter",
     "n_features_after_low_variance",
     "n_features_after_pair_aware",
     "n_features_after_correlation",
@@ -95,7 +95,7 @@ _FEATURE_FILTER_FIGURE_DEFAULT_STAGE_ORDER = (
 )
 _FEATURE_FILTER_FIGURE_STAGE_LABELS = {
     "n_features_before": "Input",
-    "n_features_after_low_prevalence": "Low prevalence",
+    "n_features_after_sparse_feature_filter": "Sparse feature",
     "n_features_after_low_variance": "Low variance",
     "n_features_after_pair_aware": "Pair aware",
     "n_features_after_correlation": "Correlation",

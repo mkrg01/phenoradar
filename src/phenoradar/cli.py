@@ -75,8 +75,8 @@ LogVerbosity = Literal["quiet", "normal", "verbose"]
 
 def _feature_filter_funnel_stage_order(config: AppConfig) -> list[str]:
     stages = ["n_features_before"]
-    if config.preprocess.low_prevalence_filter.enabled:
-        stages.append("n_features_after_low_prevalence")
+    if config.preprocess.sparse_feature_filter.enabled:
+        stages.append("n_features_after_sparse_feature_filter")
     if config.preprocess.low_variance_filter.enabled:
         stages.append("n_features_after_low_variance")
     if config.preprocess.pair_aware_filter.enabled:

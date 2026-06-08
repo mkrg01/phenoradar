@@ -62,9 +62,9 @@ preprocess:
   max_pivot_cells: 50000000
   expression_transform:
     method: log1p
-  low_prevalence_filter:
+  sparse_feature_filter:
     enabled: true
-    min_species_per_feature: 2
+    min_nonzero_fraction_in_at_least_one_trait: 0.5
   low_variance_filter:
     enabled: false
     min_variance: null
@@ -242,15 +242,17 @@ Compatibility rules:
     - `sample_percentile_rank`: same zero-preserving sample-wise ranking, scaled
       by the number of positive features so the largest positive feature is `1`
 
-### `preprocess.low_prevalence_filter`
+### `preprocess.sparse_feature_filter`
 
 - `enabled`
   - type: `bool`
   - default: `true`
-- `min_species_per_feature`
-  - type: `int >= 1 | null`
-  - default: `2`
+- `min_nonzero_fraction_in_at_least_one_trait`
+  - type: `float in [0, 1] | null`
+  - default: `0.5`
   - rule: required when `enabled=true`
+  - behavior: keeps a feature when its train-fold nonzero fraction is at least
+    this value in at least one trait class
 
 ### `preprocess.low_variance_filter`
 

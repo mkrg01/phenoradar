@@ -165,7 +165,7 @@ class OuterFoldResult:
     model_sparsity_rows: list[dict[str, Any]]
     fold_model_count: int
     n_features_before_preprocess: int
-    n_features_after_low_prevalence: int
+    n_features_after_sparse_feature_filter: int
     n_features_after_low_variance: int
     n_features_after_pair_aware: int
     n_features_after_correlation: int
@@ -187,7 +187,7 @@ class FeatureFilterCounts:
     """Feature counts after each preprocessing filter stage."""
 
     n_features_before: int
-    n_features_after_low_prevalence: int
+    n_features_after_sparse_feature_filter: int
     n_features_after_low_variance: int
     n_features_after_pair_aware: int
     n_features_after_correlation: int
@@ -236,7 +236,7 @@ class FinalModelEntry:
 
 _FEATURE_FILTER_STAGE_COLUMNS = [
     "n_features_before",
-    "n_features_after_low_prevalence",
+    "n_features_after_sparse_feature_filter",
     "n_features_after_low_variance",
     "n_features_after_pair_aware",
     "n_features_after_correlation",
@@ -244,7 +244,7 @@ _FEATURE_FILTER_STAGE_COLUMNS = [
 ]
 _FEATURE_FILTER_STAGE_ORDER = {
     "n_features_before": 0,
-    "n_features_after_low_prevalence": 1,
+    "n_features_after_sparse_feature_filter": 1,
     "n_features_after_low_variance": 2,
     "n_features_after_pair_aware": 3,
     "n_features_after_correlation": 4,
@@ -262,7 +262,7 @@ def _empty_feature_filter_counts() -> pl.DataFrame:
             "fold_id": pl.String,
             "sample_set_id": pl.Int64,
             "n_features_before": pl.Int64,
-            "n_features_after_low_prevalence": pl.Int64,
+            "n_features_after_sparse_feature_filter": pl.Int64,
             "n_features_after_low_variance": pl.Int64,
             "n_features_after_pair_aware": pl.Int64,
             "n_features_after_correlation": pl.Int64,
@@ -329,7 +329,9 @@ def _feature_filter_count_row(
         "fold_id": fold_id,
         "sample_set_id": int(sample_set_id),
         "n_features_before": int(counts.n_features_before),
-        "n_features_after_low_prevalence": int(counts.n_features_after_low_prevalence),
+        "n_features_after_sparse_feature_filter": int(
+            counts.n_features_after_sparse_feature_filter
+        ),
         "n_features_after_low_variance": int(counts.n_features_after_low_variance),
         "n_features_after_pair_aware": int(counts.n_features_after_pair_aware),
         "n_features_after_correlation": int(counts.n_features_after_correlation),
@@ -1005,13 +1007,34 @@ def _select_feature_indices_with_counts(
     selected = np.arange(x_train_expr.shape[1], dtype=int)
     n_features_before = int(selected.size)
 
-    if config.preprocess.low_prevalence_filter.enabled:
-        min_species = config.preprocess.low_prevalence_filter.min_species_per_feature
-        if min_species is None:
-            raise CVError("low_prevalence_filter is enabled but min_species_per_feature is missing")
-        prevalence = np.count_nonzero(x_train_expr[:, selected] > 0.0, axis=0)
-        selected = selected[prevalence >= int(min_species)]
-    n_features_after_low_prevalence = int(selected.size)
+    if config.preprocess.sparse_feature_filter.enabled:
+        min_fraction = (
+            config.preprocess.sparse_feature_filter.min_nonzero_fraction_in_at_least_one_trait
+        )
+        if min_fraction is None:
+            raise CVError(
+                "sparse_feature_filter is enabled but "
+                "min_nonzero_fraction_in_at_least_one_trait is missing"
+            )
+        if y_train is None:
+            raise CVError("sparse_feature_filter requires y_train in preprocessing")
+        if len(y_train) != x_train_expr.shape[0]:
+            raise CVError("sparse_feature_filter y_train length does not match training rows")
+
+        y_train_arr = np.asarray(y_train)
+        max_nonzero_fraction = np.zeros(selected.size, dtype=float)
+        for trait_value in np.unique(y_train_arr):
+            trait_mask = y_train_arr == trait_value
+            trait_count = int(np.count_nonzero(trait_mask))
+            if trait_count == 0:
+                continue
+            trait_nonzero_fraction = np.count_nonzero(
+                x_train_expr[trait_mask][:, selected] > _NONZERO_TOLERANCE,
+                axis=0,
+            ) / trait_count
+            max_nonzero_fraction = np.maximum(max_nonzero_fraction, trait_nonzero_fraction)
+        selected = selected[max_nonzero_fraction >= float(min_fraction)]
+    n_features_after_sparse_feature_filter = int(selected.size)
 
     if config.preprocess.low_variance_filter.enabled:
         min_variance = config.preprocess.low_variance_filter.min_variance
@@ -1050,7 +1073,7 @@ def _select_feature_indices_with_counts(
         raise CVError("Preprocessing removed all features in a fold")
     return selected, FeatureFilterCounts(
         n_features_before=n_features_before,
-        n_features_after_low_prevalence=n_features_after_low_prevalence,
+        n_features_after_sparse_feature_filter=n_features_after_sparse_feature_filter,
         n_features_after_low_variance=n_features_after_low_variance,
         n_features_after_pair_aware=n_features_after_pair_aware,
         n_features_after_correlation=n_features_after_correlation,
@@ -3360,7 +3383,8 @@ def _run_outer_fold(
             (
                 f"sample_set_id={sample_set_id}, "
                 f"features_before={counts.n_features_before}, "
-                f"features_after_low_prevalence={counts.n_features_after_low_prevalence}, "
+                f"features_after_sparse_feature_filter="
+                f"{counts.n_features_after_sparse_feature_filter}, "
                 f"features_after_low_variance={counts.n_features_after_low_variance}, "
                 f"features_after_pair_aware={counts.n_features_after_pair_aware}, "
                 f"features_after_correlation={counts.n_features_after_correlation}, "
@@ -3387,7 +3411,9 @@ def _run_outer_fold(
         raise CVError(f"Fold {fold_id} produced zero sampled-set fit results")
     first_filter_counts = first_sample_result.filter_counts
     n_features_before_preprocess = first_filter_counts.n_features_before
-    n_features_after_low_prevalence = first_filter_counts.n_features_after_low_prevalence
+    n_features_after_sparse_feature_filter = (
+        first_filter_counts.n_features_after_sparse_feature_filter
+    )
     n_features_after_low_variance = first_filter_counts.n_features_after_low_variance
     n_features_after_pair_aware = first_filter_counts.n_features_after_pair_aware
     n_features_after_correlation = first_filter_counts.n_features_after_correlation
@@ -3520,7 +3546,7 @@ def _run_outer_fold(
         model_sparsity_rows=model_sparsity_rows,
         fold_model_count=fold_model_count,
         n_features_before_preprocess=n_features_before_preprocess,
-        n_features_after_low_prevalence=n_features_after_low_prevalence,
+        n_features_after_sparse_feature_filter=n_features_after_sparse_feature_filter,
         n_features_after_low_variance=n_features_after_low_variance,
         n_features_after_pair_aware=n_features_after_pair_aware,
         n_features_after_correlation=n_features_after_correlation,

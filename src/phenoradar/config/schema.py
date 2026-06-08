@@ -168,17 +168,22 @@ class SplitConfig(StrictModel):
         return self
 
 
-class LowPrevalenceFilterConfig(StrictModel):
-    """Low prevalence feature filter settings."""
+class SparseFeatureFilterConfig(StrictModel):
+    """Sparse feature filter settings."""
 
     enabled: bool = True
-    min_species_per_feature: PositiveInt | None = 2
+    min_nonzero_fraction_in_at_least_one_trait: float | None = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+    )
 
     @model_validator(mode="after")
-    def validate_enabled_args(self) -> LowPrevalenceFilterConfig:
-        if self.enabled and self.min_species_per_feature is None:
+    def validate_enabled_args(self) -> SparseFeatureFilterConfig:
+        if self.enabled and self.min_nonzero_fraction_in_at_least_one_trait is None:
             raise ValueError(
-                "preprocess.low_prevalence_filter.min_species_per_feature "
+                "preprocess.sparse_feature_filter."
+                "min_nonzero_fraction_in_at_least_one_trait "
                 "is required when enabled=true"
             )
         return self
@@ -253,8 +258,8 @@ class PreprocessConfig(StrictModel):
     expression_transform: ExpressionTransformConfig = Field(
         default_factory=ExpressionTransformConfig
     )
-    low_prevalence_filter: LowPrevalenceFilterConfig = Field(
-        default_factory=LowPrevalenceFilterConfig
+    sparse_feature_filter: SparseFeatureFilterConfig = Field(
+        default_factory=SparseFeatureFilterConfig
     )
     low_variance_filter: LowVarianceFilterConfig = Field(default_factory=LowVarianceFilterConfig)
     pair_aware_filter: PairAwareFilterConfig = Field(default_factory=PairAwareFilterConfig)
