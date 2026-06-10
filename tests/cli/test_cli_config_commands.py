@@ -572,6 +572,7 @@ data:
     assert not (run_dirs[0] / "figures" / "model_sparsity_scatter.svg").exists()
     assert (run_dirs[0] / "figures" / "final_refit_loss_by_split.svg").exists()
     assert (run_dirs[0] / "figures" / "external_species_probability_by_trait.svg").exists()
+    assert (run_dirs[0] / "figures" / "inference_probability_distribution.svg").exists()
     cv_trait_svg = (run_dirs[0] / "figures" / "cv_species_probability_by_trait.svg").read_text(
         encoding="utf-8"
     )

@@ -1020,6 +1020,9 @@ def run(
             pred_external_test=(
                 None if final_refit_artifacts is None else final_refit_artifacts.pred_external_test
             ),
+            pred_inference=(
+                None if final_refit_artifacts is None else final_refit_artifacts.pred_inference
+            ),
             trait_name=resolved.data.trait_col,
             feature_filter_counts_summary=feature_filter_counts_summary_table,
             feature_filter_funnel_stage_order=_feature_filter_funnel_stage_order(resolved),

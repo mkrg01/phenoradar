@@ -372,6 +372,7 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
     assert (figures_dir / "roc_pr_curves_cv.svg").exists()
     assert not (figures_dir / "final_refit_loss_by_split.svg").exists()
     assert not (figures_dir / "external_species_probability_by_trait.svg").exists()
+    assert not (figures_dir / "inference_probability_distribution.svg").exists()
     assert warnings == []
 
 
@@ -445,6 +446,13 @@ def test_write_run_figures_writes_external_trait_probability_when_available(tmp_
                 "prob": [0.3, 0.7],
             }
         ),
+        pred_inference=pl.DataFrame(
+            {
+                "species": ["sp7", "sp8", "sp9"],
+                "true_label": [None, None, None],
+                "prob": [0.1, 0.55, 0.9],
+            }
+        ),
     )
 
     figures_dir = tmp_path / "run" / "figures"
@@ -453,6 +461,7 @@ def test_write_run_figures_writes_external_trait_probability_when_available(tmp_
     label_y, viewbox_height = _svg_text_y_and_viewbox_height(final_refit_loss_path, "Log Loss")
     assert label_y < viewbox_height
     assert (figures_dir / "external_species_probability_by_trait.svg").exists()
+    assert (figures_dir / "inference_probability_distribution.svg").exists()
     assert warnings == []
 
 

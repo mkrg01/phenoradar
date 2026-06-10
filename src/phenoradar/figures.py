@@ -1240,16 +1240,21 @@ def _coefficients_signed_top(
     _save_svg_figure(fig, out_path)
 
 
-def _predict_probability_distribution(pred_predict: pl.DataFrame, out_path: Path) -> None:
+def _predict_probability_distribution(
+    pred_predict: pl.DataFrame,
+    out_path: Path,
+    *,
+    figure_name: str = "predict_probability_distribution.svg",
+) -> None:
     if "prob" not in pred_predict.columns:
         raise FigureError(
-            "prediction_inference.tsv schema is invalid for predict_probability_distribution.svg"
+            f"prediction_inference.tsv schema is invalid for {figure_name}"
         )
 
     probs = np.array(pred_predict.select("prob").to_series().to_list(), dtype=float)
     if probs.size == 0:
         raise FigureError(
-            "prediction_inference.tsv is empty; cannot draw predict_probability_distribution.svg"
+            f"prediction_inference.tsv is empty; cannot draw {figure_name}"
         )
 
     counts, _bins = np.histogram(probs, bins=10, range=(0.0, 1.0))
@@ -3064,6 +3069,7 @@ def write_run_figures(
     loss_by_split_cv: pl.DataFrame | None = None,
     loss_by_split_final_refit: pl.DataFrame | None = None,
     pred_external_test: pl.DataFrame | None = None,
+    pred_inference: pl.DataFrame | None = None,
     trait_name: str = "trait",
     model_selection_trials_summary: pl.DataFrame | None = None,
     model_selection_selected: pl.DataFrame | None = None,
@@ -3171,6 +3177,15 @@ def write_run_figures(
                 subtitle="Final-refit probabilities grouped by external-test true labels",
                 source_table_name="prediction_external_test.tsv",
                 figure_name="external_species_probability_by_trait.svg",
+            )
+        except FigureError as exc:
+            warnings.append(str(exc))
+    if pred_inference is not None:
+        try:
+            _predict_probability_distribution(
+                pred_inference,
+                figures_dir / "inference_probability_distribution.svg",
+                figure_name="inference_probability_distribution.svg",
             )
         except FigureError as exc:
             warnings.append(str(exc))

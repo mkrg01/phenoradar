@@ -133,6 +133,7 @@ Always written:
     - `roc_pr_curves_cv.svg` (may be skipped with warning for degenerate folds)
     - `final_refit_loss_by_split.svg` (attempted in `full_run`)
     - `external_species_probability_by_trait.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
+    - `inference_probability_distribution.svg` (attempted in `full_run`; may be skipped with warning when inference set is empty)
 
 Conditionally written:
 
@@ -536,6 +537,9 @@ Conditionally written:
 - `external_species_probability_by_trait.svg` (`full_run` with external samples)
   - External-test species probabilities grouped by `true_label`.
   - Boxplot with per-species points and trait-wise mean markers.
+- `inference_probability_distribution.svg` (`full_run` with inference samples)
+  - Histogram of `prediction_inference.tsv` probabilities in bins
+    `[0.0, 0.1), ... , [0.9, 1.0]`.
 - `final_refit_loss_by_split.svg` (`full_run`)
   - Final-refit `log_loss` comparison of `train` and `external_test`.
   - Useful for quick train-vs-external generalization diagnostics.
