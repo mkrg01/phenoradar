@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree as ET
 
 import matplotlib
 import matplotlib.colors
@@ -20,6 +21,9 @@ class TreePredictionError(ValueError):
 _MISSING_COLOR = "#eeeeee"
 _TEXT_COLOR = "#000000"
 _FEATURE_HEATMAP_LIMIT = 30
+_SVG_NS = "http://www.w3.org/2000/svg"
+_SVG_BACKGROUND_ID = "phenoradar-svg-background"
+_SVG_BACKGROUND_FILL = "#ffffff"
 
 
 def _stage_figures_dir(run_dir: Path, stage: str) -> Path:
@@ -911,8 +915,7 @@ def _draw_toytree_heatmap(
             color=_TEXT_COLOR,
             style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
         )
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    toytree_module.save(canvas, str(out_path))
+    _save_toytree_svg(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
 
 
 def _draw_toytree_feature_heatmap(
@@ -1055,8 +1058,63 @@ def _draw_toytree_feature_heatmap(
             color=_TEXT_COLOR,
             style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
         )
+    _save_toytree_svg(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
+
+
+def _save_toytree_svg(*, canvas: Any, out_path: Path, toytree_module: Any) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     toytree_module.save(canvas, str(out_path))
+    _ensure_svg_white_background(out_path)
+
+
+def _ensure_svg_white_background(svg_path: Path) -> None:
+    ET.register_namespace("", _SVG_NS)
+    try:
+        tree = ET.parse(svg_path)
+    except ET.ParseError as exc:
+        raise TreePredictionError(f"Failed to parse SVG output: {svg_path}") from exc
+    except OSError as exc:
+        raise TreePredictionError(f"Failed to read SVG output: {svg_path}") from exc
+
+    root = tree.getroot()
+    if _xml_local_name(root.tag) != "svg":
+        raise TreePredictionError(f"SVG output root is not <svg>: {svg_path}")
+
+    namespace = _xml_namespace(root.tag)
+    rect_tag = f"{{{namespace}}}rect" if namespace else "rect"
+    for child in list(root):
+        if child.get("id") == _SVG_BACKGROUND_ID:
+            root.remove(child)
+    root.insert(
+        0,
+        ET.Element(
+            rect_tag,
+            {
+                "id": _SVG_BACKGROUND_ID,
+                "x": "0",
+                "y": "0",
+                "width": "100%",
+                "height": "100%",
+                "fill": _SVG_BACKGROUND_FILL,
+            },
+        ),
+    )
+    try:
+        tree.write(svg_path, encoding="utf-8", xml_declaration=True)
+    except OSError as exc:
+        raise TreePredictionError(f"Failed to write SVG output: {svg_path}") from exc
+
+
+def _xml_namespace(tag: str) -> str:
+    if tag.startswith("{"):
+        return tag[1:].partition("}")[0]
+    return ""
+
+
+def _xml_local_name(tag: str) -> str:
+    if tag.startswith("{"):
+        return tag.partition("}")[2]
+    return tag
 
 
 def _draw_heatmap_legend(

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import polars as pl
 
 from phenoradar.tree_prediction import (
+    _ensure_svg_white_background,
     build_contrast_pair_tree_annotation,
     build_cv_tree_prediction_annotation,
     build_external_tree_prediction_annotation,
@@ -66,6 +68,27 @@ def _write_tpm(path: Path) -> None:
             "tpm": [0.0, 3.0, 3.0, 15.0, 7.0, 0.0],
         }
     ).write_csv(path, separator="\t")
+
+
+def test_ensure_svg_white_background_inserts_single_root_rect(tmp_path: Path) -> None:
+    svg_path = tmp_path / "tree.svg"
+    svg_path.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><g id="content" /></svg>',
+        encoding="utf-8",
+    )
+
+    _ensure_svg_white_background(svg_path)
+    _ensure_svg_white_background(svg_path)
+
+    root = ET.parse(svg_path).getroot()
+    children = list(root)
+    backgrounds = [child for child in children if child.get("id") == "phenoradar-svg-background"]
+    assert len(backgrounds) == 1
+    assert children[0] is backgrounds[0]
+    assert backgrounds[0].tag == "{http://www.w3.org/2000/svg}rect"
+    assert backgrounds[0].get("fill") == "#ffffff"
+    assert backgrounds[0].get("width") == "100%"
+    assert backgrounds[0].get("height") == "100%"
 
 
 def test_build_contrast_pair_tree_annotation_filters_to_grouped_species() -> None:
