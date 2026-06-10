@@ -351,9 +351,10 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
     assert (figures_dir / "feature_filter_funnel.svg").exists()
     funnel_svg = (figures_dir / "feature_filter_funnel.svg").read_text(encoding="utf-8")
     assert "Feature selection step" in funnel_svg
-    assert "Number of features" in funnel_svg
+    assert "Number of selected features" in funnel_svg
+    assert "Number of features" not in funnel_svg
     assert "Feature Count" not in funnel_svg
-    assert "n=4" in funnel_svg
+    assert "n=4" not in funnel_svg
     assert "median" in funnel_svg
     assert "IQR (25-75%)" in funnel_svg
     assert "min-max" in funnel_svg
