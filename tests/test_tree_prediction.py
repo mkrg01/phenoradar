@@ -185,8 +185,8 @@ def test_build_cv_tree_prediction_annotation_uses_taxon_name_for_group_display()
         {
             "species": ["sp1", "sp2"],
             "C4": [0, 1],
-            "taxon_family_id": ["100", "100"],
-            "taxon_family_name": ["Poaceae", "Poaceae"],
+            "family_id": ["100", "100"],
+            "family_name": ["Poaceae", "Poaceae"],
         }
     )
 
@@ -201,7 +201,7 @@ def test_build_cv_tree_prediction_annotation_uses_taxon_name_for_group_display()
             }
         ),
         thresholds=_thresholds(),
-        group_col="taxon_family_id",
+        group_col="family_id",
     )
 
     assert annotation.select(["group_id", "group_name"]).unique().to_dicts() == [

@@ -76,6 +76,15 @@ Always written:
 - `cv/tables/prediction_cv.tsv`
   - columns: `fold_id`, `species`, `label`, `prob`
   - optional `uncertainty_std` (ensemble size > 1)
+- `<stage>/tables/group_summary_<group>.tsv` (when `summary.group_col` is present in metadata)
+  - written for `cv`; also for `external_test` and `inference` in `full_run` when those prediction pools are non-empty
+  - `<group>` is derived from `summary.group_col`; for example `family_id` writes `group_summary_family.tsv`
+  - columns:
+    - `group_col`, `group_id`, `group_name`
+    - `n_species`, `n_true_positive`, `n_true_negative`, `n_pred_positive`,
+      `pred_positive_rate`
+    - `prob_min`, `prob_q1`, `prob_median`, `prob_mean`, `prob_q3`, `prob_max`
+    - `uncertainty_mean`, `top_species`, `top_prob`
 - `model/tables/feature_filter_counts.tsv`
   - columns:
     - `scope`, `fold_id`, `sample_set_id`
@@ -137,6 +146,7 @@ Always written:
     - `cv/figures/cv_fold_trait_probability.svg`
     - `cv/figures/feature_filter_funnel.svg`
     - `cv/figures/non_zero_feature_count_by_fold.svg`
+    - `cv/figures/probability_by_<group>.svg` (attempted when `summary.group_col` is present in metadata)
     - `cv/figures/model_selection_trials.svg` (candidate selection active)
     - `cv/figures/model_selection_one_se_curve.svg` (candidate selection active)
     - `cv/figures/roc_curve_cv.svg` (may be skipped with warning for degenerate folds)
@@ -148,6 +158,7 @@ Always written:
     - `external_test/figures/external_roc_curve.svg` (attempted in `full_run`; may be skipped with warning when external test labels are single-class)
     - `external_test/figures/external_pr_curve.svg` (attempted in `full_run`; may be skipped with warning when external test labels are single-class)
     - `inference/figures/inference_probability_distribution.svg` (attempted in `full_run`; may be skipped with warning when inference set is empty)
+    - `<stage>/figures/probability_by_<group>.svg` (attempted for non-empty prediction stages when `summary.group_col` is present in metadata)
 
 Conditionally written:
 
@@ -285,7 +296,7 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - Columns: `label`, `species`, `true_label`, `prob`, `pred_label`, `uncertainty_std`,
   `group_id`, `group_name`, `fold_id`.
 - `group_id` is the `split.group_col` value. `group_name` is populated when a matching
-  name column is available, such as `taxon_family_name` for `taxon_family_id`.
+  name column is available, such as `family_name` for `family_id`.
 - `pred_label` uses the CV-derived threshold when available.
 
 #### `tree_contrast_pairs_annotation.tsv` (optional)
@@ -551,6 +562,10 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - `external_test/figures/external_roc_curve.svg` / `external_test/figures/external_pr_curve.svg` (`full_run` with both external-test labels)
   - External-test ROC and precision-recall curves from `prediction_external_test.tsv`.
   - The ROC panel annotates ROC AUC. The PR panel annotates average precision and the external-test positive rate.
+- `<stage>/figures/probability_by_<group>.svg` (when `summary.group_col` is present in metadata)
+  - Group-wise predicted probability distributions for the configured summary group.
+  - Uses `summary.group_name_col` for y-axis labels when available.
+  - For example, `summary.group_col: family_id` writes `probability_by_family.svg`.
 - `inference/figures/inference_probability_distribution.svg` (`full_run` with inference samples)
   - Histogram of `prediction_inference.tsv` probabilities in bins
     `[0.0, 0.1), ... , [0.9, 1.0]`.
@@ -585,10 +600,13 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
     - optional `uncertainty_std`
   - `true_label` values are `NA` because inference labels are unknown
   - `prob` is predicted probability of label `1`
+- `inference/tables/group_summary_<group>.tsv` (when `summary.group_col` is present in metadata)
+  - Same schema as run-stage grouped summaries.
 - `run_metadata.json`
   - includes bundle manifest/payload hash values and bundle source metadata
 - `inference/figures/`
   - `predict_probability_distribution.svg`
+  - `probability_by_<group>.svg` (when `summary.group_col` is present in metadata)
   - optional `predict_uncertainty.svg` (bundle ensemble size > 1)
 
 ### Predict figures
@@ -597,6 +615,8 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
   - Histogram of predicted probabilities in bins `[0.0, 0.1), ... , [0.9, 1.0]`.
 - `inference/figures/predict_uncertainty.svg` (ensemble only)
   - Top species by `uncertainty_std`; high bars indicate less stable predictions.
+- `inference/figures/probability_by_<group>.svg`
+  - Group-wise predicted probability distributions for `summary.group_col`.
 - `inference/figures/tree_prediction_predict.svg` (optional)
   - Written when `data.tree_path` is set and Toytree is available.
   - Tree view with aligned tracks for true label when known, probability,

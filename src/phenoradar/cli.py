@@ -29,7 +29,16 @@ from phenoradar.config import (
     write_resolved_config,
 )
 from phenoradar.cv import CVError, run_final_refit, run_outer_cv
-from phenoradar.figures import FigureError, write_predict_figures, write_run_figures
+from phenoradar.figures import (
+    FigureError,
+    write_group_probability_figure,
+    write_predict_figures,
+    write_run_figures,
+)
+from phenoradar.group_summary import (
+    GroupSummaryError,
+    build_group_summary_artifacts,
+)
 from phenoradar.metadata import (
     MetadataError,
     build_species_metadata_from_skim,
@@ -90,6 +99,53 @@ def _stage_tables_dir(run_dir: Path, stage: str) -> Path:
     tables_dir = run_dir / stage / "tables"
     tables_dir.mkdir(parents=True, exist_ok=True)
     return tables_dir
+
+
+def _stage_figures_dir(run_dir: Path, stage: str) -> Path:
+    figures_dir = run_dir / stage / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    return figures_dir
+
+
+def _write_group_summary_artifacts(
+    *,
+    run_dir: Path,
+    stage: str,
+    predictions: pl.DataFrame,
+    source_table_name: str,
+    config: AppConfig,
+) -> list[str]:
+    try:
+        artifacts = build_group_summary_artifacts(
+            predictions=predictions,
+            metadata_path=Path(config.data.metadata_path),
+            species_col=config.data.species_col,
+            group_col=config.summary.group_col,
+            group_name_col=config.summary.group_name_col,
+            source_table_name=source_table_name,
+        )
+    except GroupSummaryError as exc:
+        return [str(exc)]
+
+    tables_dir = _stage_tables_dir(run_dir, stage)
+    figures_dir = _stage_figures_dir(run_dir, stage)
+    artifacts.summary.write_csv(
+        tables_dir / f"group_summary_{artifacts.suffix}.tsv",
+        separator="\t",
+        float_precision=8,
+        null_value="NA",
+    )
+    try:
+        write_group_probability_figure(
+            grouped_predictions=artifacts.predictions,
+            out_path=figures_dir / f"probability_by_{artifacts.suffix}.svg",
+            group_label=artifacts.group_label,
+            source_table_name=source_table_name,
+            figure_name=f"probability_by_{artifacts.suffix}.svg",
+        )
+    except FigureError as exc:
+        return [str(exc)]
+    return []
 
 
 def _run_table_dirs(run_dir: Path) -> dict[str, Path]:
@@ -1003,6 +1059,40 @@ def run(
         float_precision=8,
         null_value="NA",
     )
+
+    group_summary_warnings: list[str] = []
+    group_summary_warnings.extend(
+        _write_group_summary_artifacts(
+            run_dir=run_dir,
+            stage="cv",
+            predictions=cv_artifacts.oof_predictions,
+            source_table_name="prediction_cv.tsv",
+            config=resolved,
+        )
+    )
+    if final_refit_artifacts is not None:
+        if final_refit_artifacts.pred_external_test.height > 0:
+            group_summary_warnings.extend(
+                _write_group_summary_artifacts(
+                    run_dir=run_dir,
+                    stage="external_test",
+                    predictions=final_refit_artifacts.pred_external_test,
+                    source_table_name="prediction_external_test.tsv",
+                    config=resolved,
+                )
+            )
+        if final_refit_artifacts.pred_inference.height > 0:
+            group_summary_warnings.extend(
+                _write_group_summary_artifacts(
+                    run_dir=run_dir,
+                    stage="inference",
+                    predictions=final_refit_artifacts.pred_inference,
+                    source_table_name="prediction_inference.tsv",
+                    config=resolved,
+                )
+            )
+    warnings.extend(group_summary_warnings)
+
     figure_warnings: list[str] = []
     _log("Generate run figures.")
     tree_path = getattr(resolved.data, "tree_path", None)
@@ -1217,7 +1307,8 @@ def metadata_command(
             dir_okay=False,
             help=(
                 "Output generated species/taxid TSV when --species-taxid is omitted. "
-                "Defaults to species_taxid.tsv next to --out when taxon rank blocks need it."
+                "Defaults to species_taxid.tsv next to --out when taxon rank annotations "
+                "or blocks need it."
             ),
         ),
     ] = None,
@@ -1285,6 +1376,16 @@ def metadata_command(
             help="Output column marking labeled species held out from contrast-pair CV.",
         ),
     ] = "contrast_pair_test_holdout",
+    taxon_annotation_rank: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--taxon-annotation-rank",
+            help=(
+                "NCBI taxonomy rank to emit as annotation columns. Repeat for multiple "
+                "ranks. Defaults to order and family."
+            ),
+        ),
+    ] = None,
     taxon_block_rank: Annotated[
         list[str] | None,
         typer.Option(
@@ -1362,8 +1463,12 @@ def metadata_command(
 
     resolved_species_taxid = species_taxid
     generated_taxid_result = None
+    taxon_annotation_rank_values = (
+        ["order", "family"] if taxon_annotation_rank is None else list(taxon_annotation_rank)
+    )
     should_generate_taxid = species_taxid is None and (
-        species_taxid_out is not None or (write_metadata and bool(taxon_block_rank))
+        species_taxid_out is not None
+        or (write_metadata and bool(taxon_annotation_rank_values or taxon_block_rank))
     )
 
     try:
@@ -1435,6 +1540,7 @@ def metadata_command(
                 trait_col=trait_col,
                 contrast_pair_col=contrast_pair_col,
                 contrast_pair_test_holdout_col=contrast_pair_test_holdout_col,
+                taxon_annotation_ranks=taxon_annotation_rank_values,
                 taxon_block_ranks=taxon_block_rank,
                 taxon_block_min_species_per_label=taxon_block_min_species_per_label,
                 taxon_block_mixed_test_fraction=taxon_block_mixed_test_fraction,
@@ -1602,6 +1708,16 @@ def predict(
         float_precision=8,
         null_value="NA",
     )
+    if pred_predict.height > 0:
+        predict_warnings.extend(
+            _write_group_summary_artifacts(
+                run_dir=run_dir,
+                stage="inference",
+                predictions=pred_predict,
+                source_table_name="prediction_inference.tsv",
+                config=resolved,
+            )
+        )
     _log("Generate prediction figures.")
     tree_path = getattr(resolved.data, "tree_path", None)
     try:

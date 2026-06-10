@@ -40,13 +40,13 @@ def _write_split_fixture(tmp_path: Path) -> tuple[Path, Path]:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "sp1\t1\tg1\tno",
-                "sp2\t0\tg1\tno",
-                "sp3\t1\tg2\tno",
-                "sp4\t0\tg2\tno",
-                "sp5\t1\t\tyes",
-                "sp6\t\t\tno",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\tfamily_id\tfamily_name",
+                "sp1\t1\tg1\tno\tf1\tFamily 1",
+                "sp2\t0\tg1\tno\tf1\tFamily 1",
+                "sp3\t1\tg2\tno\tf2\tFamily 2",
+                "sp4\t0\tg2\tno\tf2\tFamily 2",
+                "sp5\t1\t\tyes\tf3\tFamily 3",
+                "sp6\t\t\tno\tf3\tFamily 3",
             ]
         )
         + "\n",
@@ -78,6 +78,7 @@ def _stub_resolved_config(
     return SimpleNamespace(
         runtime=SimpleNamespace(execution_stage=execution_stage, seed=42),
         report=SimpleNamespace(),
+        summary=SimpleNamespace(group_col="family_id", group_name_col="family_name"),
         figures=SimpleNamespace(top_features=top_features),
         model_selection=SimpleNamespace(),
         preprocess=SimpleNamespace(
@@ -550,6 +551,8 @@ data:
     assert (run_dirs[0] / "cv" / "figures" / "roc_curve_cv.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "pr_curve_cv.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "feature_filter_funnel.svg").exists()
+    assert (run_dirs[0] / "cv" / "tables" / "group_summary_family.tsv").exists()
+    assert (run_dirs[0] / "cv" / "figures" / "probability_by_family.svg").exists()
     funnel_svg = (run_dirs[0] / "cv" / "figures" / "feature_filter_funnel.svg").read_text(
         encoding="utf-8"
     )
@@ -583,6 +586,12 @@ data:
     assert (
         run_dirs[0] / "inference" / "figures" / "inference_probability_distribution.svg"
     ).exists()
+    assert (run_dirs[0] / "external_test" / "tables" / "group_summary_family.tsv").exists()
+    assert (
+        run_dirs[0] / "external_test" / "figures" / "probability_by_family.svg"
+    ).exists()
+    assert (run_dirs[0] / "inference" / "tables" / "group_summary_family.tsv").exists()
+    assert (run_dirs[0] / "inference" / "figures" / "probability_by_family.svg").exists()
     cv_trait_svg = (
         run_dirs[0] / "cv" / "figures" / "cv_species_probability_by_trait.svg"
     ).read_text(encoding="utf-8")
@@ -723,6 +732,8 @@ data:
     assert (run_dirs[0] / "cv" / "figures" / "roc_curve_cv.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "pr_curve_cv.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "feature_filter_funnel.svg").exists()
+    assert (run_dirs[0] / "cv" / "tables" / "group_summary_family.tsv").exists()
+    assert (run_dirs[0] / "cv" / "figures" / "probability_by_family.svg").exists()
     assert not (
         run_dirs[0] / "cv" / "figures" / "selected_features_by_fold_after_preprocessing.svg"
     ).exists()
@@ -800,17 +811,17 @@ def test_run_emits_model_selection_artifacts_when_selection_active(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "g1_pos\t1\tg1\tno",
-                "g1_neg\t0\tg1\tno",
-                "g2_pos\t1\tg2\tno",
-                "g2_neg\t0\tg2\tno",
-                "g3_pos\t1\tg3\tno",
-                "g3_neg\t0\tg3\tno",
-                "g4_pos\t1\tg4\tno",
-                "g4_neg\t0\tg4\tno",
-                "ext1\t1\t\tyes",
-                "inf1\t\t\tno",
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\tfamily_id\tfamily_name",
+                "g1_pos\t1\tg1\tno\tf1\tFamily 1",
+                "g1_neg\t0\tg1\tno\tf1\tFamily 1",
+                "g2_pos\t1\tg2\tno\tf2\tFamily 2",
+                "g2_neg\t0\tg2\tno\tf2\tFamily 2",
+                "g3_pos\t1\tg3\tno\tf3\tFamily 3",
+                "g3_neg\t0\tg3\tno\tf3\tFamily 3",
+                "g4_pos\t1\tg4\tno\tf4\tFamily 4",
+                "g4_neg\t0\tg4\tno\tf4\tFamily 4",
+                "ext1\t1\t\tyes\tf5\tFamily 5",
+                "inf1\t\t\tno\tf5\tFamily 5",
             ]
         )
         + "\n",
@@ -931,6 +942,10 @@ def test_run_emits_warning_summary_and_quiet_mode_suppresses_progress(
     )
     monkeypatch.setattr("phenoradar.cli.write_resolved_config", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("phenoradar.cli.write_run_figures", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "phenoradar.cli._write_group_summary_artifacts",
+        lambda *_args, **_kwargs: [],
+    )
     monkeypatch.setattr("phenoradar.cli.collect_input_files", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("phenoradar.cli.git_snapshot", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
@@ -1021,6 +1036,8 @@ data:
     predict_dirs = sorted((tmp_path / "runs").glob("*_predict_*"))
     assert len(predict_dirs) == 1
     assert (predict_dirs[0] / "inference" / "tables" / "prediction_inference.tsv").exists()
+    assert (predict_dirs[0] / "inference" / "tables" / "group_summary_family.tsv").exists()
+    assert (predict_dirs[0] / "inference" / "figures" / "probability_by_family.svg").exists()
     assert not (predict_dirs[0] / "pred_predict.tsv").exists()
     assert (predict_dirs[0] / "resolved_config.yml").exists()
     assert (predict_dirs[0] / "run_metadata.json").exists()

@@ -389,6 +389,13 @@ class ReportConfig(StrictModel):
     pass
 
 
+class SummaryConfig(StrictModel):
+    """Stage-level grouped summary controls."""
+
+    group_col: str = Field(default="family_id", min_length=1)
+    group_name_col: str | None = Field(default="family_name")
+
+
 class FiguresConfig(StrictModel):
     """Figure output controls."""
 
@@ -419,6 +426,7 @@ class AppConfig(StrictModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     model_selection: ModelSelectionConfig = Field(default_factory=ModelSelectionConfig)
     ensemble: EnsembleConfig = Field(default_factory=EnsembleConfig)
+    summary: SummaryConfig = Field(default_factory=SummaryConfig)
     figures: FiguresConfig = Field(default_factory=FiguresConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)

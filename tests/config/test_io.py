@@ -70,6 +70,8 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
         == 0.8
     )
     assert resolved.preprocess.feature_scaling.method == "standard"
+    assert resolved.summary.group_col == "family_id"
+    assert resolved.summary.group_name_col == "family_name"
     assert resolved.figures.top_features == 30
 
 
@@ -92,7 +94,26 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
         == 0.8
     )
     assert resolved.preprocess.feature_scaling.method == "standard"
+    assert resolved.summary.group_col == "family_id"
+    assert resolved.summary.group_name_col == "family_name"
     assert resolved.figures.top_features == 30
+
+
+def test_summary_group_columns_are_configurable(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "config.yml",
+        """
+summary:
+  group_col: order_id
+  group_name_col: order_name
+""".strip()
+        + "\n",
+    )
+
+    resolved = load_and_resolve_config([cfg])
+
+    assert resolved.summary.group_col == "order_id"
+    assert resolved.summary.group_name_col == "order_name"
 
 
 def test_unknown_key_is_rejected(tmp_path: Path) -> None:
@@ -400,7 +421,7 @@ def test_generic_group_options_allow_null_contrast_pair_col(tmp_path: Path) -> N
 data:
   contrast_pair_col: null
 split:
-  group_col: taxon_family_id
+  group_col: family_id
 sampling:
   weighting: group_label_inverse
 """.strip()
@@ -410,7 +431,7 @@ sampling:
     resolved = load_and_resolve_config([cfg])
 
     assert resolved.data.contrast_pair_col is None
-    assert resolved.split.group_col == "taxon_family_id"
+    assert resolved.split.group_col == "family_id"
     assert resolved.sampling.weighting == "group_label_inverse"
 
 
@@ -441,7 +462,7 @@ def test_pair_aware_group_balanced_allows_split_group_to_differ_from_contrast_pa
 data:
   contrast_pair_col: contrast_pair_id
 split:
-  group_col: taxon_family_id
+  group_col: family_id
 preprocess:
   pair_aware_filter:
     enabled: true
@@ -453,7 +474,7 @@ preprocess:
     resolved = load_and_resolve_config([cfg])
 
     assert resolved.data.contrast_pair_col == "contrast_pair_id"
-    assert resolved.split.group_col == "taxon_family_id"
+    assert resolved.split.group_col == "family_id"
     assert resolved.preprocess.pair_aware_filter.min_contrast_pairs == 1
 
 

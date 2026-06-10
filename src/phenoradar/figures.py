@@ -22,6 +22,8 @@ from sklearn.metrics import (
     roc_curve,
 )
 
+from phenoradar.group_summary import GroupSummaryError, finite_group_probabilities
+
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
@@ -1381,6 +1383,163 @@ def _species_probability_by_trait(
     ax.set_axisbelow(True)
 
     fig.subplots_adjust(left=0.13, right=0.98, top=0.90, bottom=0.16)
+    _save_svg_figure(fig, out_path)
+
+
+def write_group_probability_figure(
+    *,
+    grouped_predictions: pl.DataFrame,
+    out_path: Path,
+    group_label: str,
+    source_table_name: str,
+    figure_name: str,
+) -> None:
+    """Write a grouped probability distribution figure from joined predictions."""
+    try:
+        data = finite_group_probabilities(grouped_predictions)
+    except GroupSummaryError as exc:
+        raise FigureError(str(exc)) from exc
+    if data.height == 0:
+        raise FigureError(f"{source_table_name} is empty; cannot draw {figure_name}")
+
+    group_order = (
+        data.group_by(["group_id", "group_name"])
+        .agg(
+            pl.col("prob").max().alias("__prob_max"),
+            pl.col("prob").mean().alias("__prob_mean"),
+            pl.len().alias("__n_species"),
+        )
+        .sort(["__prob_max", "__prob_mean", "group_name"], descending=[True, True, False])
+    )
+    if group_order.height == 0:
+        raise FigureError(f"{source_table_name} has no groups for {figure_name}")
+
+    groups = [
+        (str(row["group_id"]), str(row["group_name"]), int(row["__n_species"]))
+        for row in group_order.iter_rows(named=True)
+    ]
+    group_ids = [group_id for group_id, _group_name, _n in groups]
+    data = data.filter(pl.col("group_id").is_in(group_ids))
+
+    labels = [
+        f"{_ellipsize_label(group_name, max_chars=34)} (n={n_species})"
+        for _group_id, group_name, n_species in groups
+    ]
+    values_by_group: list[np.ndarray] = []
+    pred_labels_by_group: list[np.ndarray] = []
+    for group_id, _group_name, _n_species in groups:
+        subset = data.filter(pl.col("group_id") == group_id).sort(["prob", "species"])
+        values_by_group.append(np.array(subset.select("prob").to_series().to_list(), dtype=float))
+        pred_labels_by_group.append(
+            np.array(
+                subset.select("pred_label_fixed_threshold").to_series().to_list(),
+                dtype=float,
+            )
+        )
+
+    height_px = max(260, 90 + len(groups) * 24)
+    width_px = _NATURE_DOUBLE_COLUMN_WIDTH_PX
+    fig, ax = plt.subplots(figsize=_figure_size_inches(width_px, height_px), dpi=_FIG_DPI)
+    fig.patch.set_facecolor("white")
+
+    y_positions = np.arange(len(groups), dtype=float)
+    ax.boxplot(
+        [values.tolist() for values in values_by_group],
+        orientation="horizontal",
+        positions=y_positions,
+        widths=0.58,
+        patch_artist=True,
+        showmeans=True,
+        showfliers=False,
+        manage_ticks=False,
+        boxprops={"facecolor": "#eeeeee", "edgecolor": _MUTED_TEXT_COLOR, "linewidth": 0.8},
+        whiskerprops={"color": _MUTED_TEXT_COLOR, "linewidth": 0.8},
+        capprops={"color": _MUTED_TEXT_COLOR, "linewidth": 0.8},
+        medianprops={"color": "#111111", "linewidth": 0.9},
+        meanprops={
+            "marker": "D",
+            "markerfacecolor": "#111111",
+            "markeredgecolor": "#111111",
+            "markersize": 3.0,
+            "zorder": 5,
+        },
+        flierprops={"marker": ""},
+    )
+
+    for y_value, probs, pred_labels in zip(
+        y_positions,
+        values_by_group,
+        pred_labels_by_group,
+        strict=True,
+    ):
+        offsets = _deterministic_offsets(probs.size, 0.18)
+        colors = [
+            _TRAIT_POSITIVE_COLOR if int(label) == 1 else _TRAIT_NEGATIVE_COLOR
+            for label in pred_labels
+        ]
+        ax.scatter(
+            probs,
+            np.full(probs.shape[0], y_value, dtype=float) + offsets,
+            s=16,
+            color=colors,
+            edgecolors="white",
+            linewidths=0.35,
+            alpha=0.78,
+            zorder=4,
+        )
+
+    ax.axvline(0.5, color="#999999", linewidth=0.8, linestyle=(0, (4, 4)))
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels(labels, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
+    ax.invert_yaxis()
+    ax.set_xlabel("Predicted probability", fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel(group_label, fontsize=_LABEL_FONTSIZE)
+    ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
+    ax.set_axisbelow(True)
+    legend_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="none",
+            markerfacecolor=_TRAIT_NEGATIVE_COLOR,
+            markeredgecolor="white",
+            markersize=4,
+            label="pred 0",
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="none",
+            markerfacecolor=_TRAIT_POSITIVE_COLOR,
+            markeredgecolor="white",
+            markersize=4,
+            label="pred 1",
+        ),
+        Line2D([0], [0], color="#999999", linewidth=0.8, linestyle=(0, (4, 4)), label="0.5"),
+    ]
+    ax.legend(
+        handles=legend_handles,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.005),
+        ncol=3,
+        frameon=True,
+        framealpha=0.95,
+        facecolor="white",
+        edgecolor="#dddddd",
+        borderpad=0.25,
+        handlelength=1.2,
+        columnspacing=0.9,
+    )
+
+    fig.subplots_adjust(
+        left=_label_left_margin(labels, width_px=width_px, fontsize_px=_MONO_FONTSIZE),
+        right=0.985,
+        top=0.90,
+        bottom=_compact_bottom_margin(height_px),
+    )
     _save_svg_figure(fig, out_path)
 
 

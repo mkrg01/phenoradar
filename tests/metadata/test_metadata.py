@@ -528,9 +528,9 @@ def test_build_species_metadata_from_skim_writes_taxon_rank_blocks(
     assert result.taxon_block_exclude_counts == {"family": 1, "order": 1}
     assert out.read_text(encoding="utf-8") == (
         "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\t"
-        "taxon_family_id\ttaxon_family_name\ttaxon_family_test_holdout\t"
-        "taxon_family_exclude\ttaxon_order_id\ttaxon_order_name\t"
-        "taxon_order_test_holdout\ttaxon_order_exclude\n"
+        "family_id\tfamily_name\tfamily_test_holdout\t"
+        "family_exclude\torder_id\torder_name\t"
+        "order_test_holdout\torder_exclude\n"
         "sp1\t1\t1\tno\t100\tFamilyA\tno\tno\t10\tOrderA\tno\tno\n"
         "sp2\t0\t1\tno\t100\tFamilyA\tno\tno\t10\tOrderA\tno\tno\n"
         "sp3\t1\t\tyes\t200\tFamilyB\tyes\tno\t10\tOrderA\tno\tno\n"
@@ -588,8 +588,8 @@ def test_build_species_metadata_from_skim_can_hold_out_mixed_taxon_blocks(
     table = pl.read_csv(out, separator="\t")
     assert result.taxon_block_counts == {"family": 1}
     assert result.taxon_block_test_holdout_counts == {"family": 2}
-    assert table.filter(pl.col("taxon_family_test_holdout") == "yes").height == 2
-    assert table.filter(pl.col("taxon_family_id").is_not_null()).height == 4
+    assert table.filter(pl.col("family_test_holdout") == "yes").height == 2
+    assert table.filter(pl.col("family_id").is_not_null()).height == 4
 
 
 def test_build_species_metadata_from_skim_generates_taxid_for_taxon_blocks(
@@ -632,8 +632,8 @@ def test_build_species_metadata_from_skim_generates_taxid_for_taxon_blocks(
     assert taxid_out.read_text(encoding="utf-8") == "species\ttaxid\nsp1\t1\nsp2\t2\n"
     assert out.read_text(encoding="utf-8") == (
         "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\t"
-        "taxon_family_id\ttaxon_family_name\ttaxon_family_test_holdout\t"
-        "taxon_family_exclude\n"
+        "family_id\tfamily_name\tfamily_test_holdout\t"
+        "family_exclude\n"
         "sp1\t1\t1\tno\t100\tFamilyA\tno\tno\n"
         "sp2\t0\t1\tno\t100\tFamilyA\tno\tno\n"
     )
@@ -670,6 +670,15 @@ def test_metadata_cli_writes_metadata_with_existing_tree(
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "phenoradar.metadata._load_ncbi_taxa",
+        lambda _db=None: _FakeNCBITaxa(
+            lineages={1: [1, 10, 100], 2: [2, 10, 100]},
+            ranks={10: "order", 100: "family"},
+            names={10: "OrderA", 100: "FamilyA"},
+            name_taxids={"sp1": [1], "sp2": [2]},
+        ),
+    )
 
     result = CliRunner().invoke(
         app,
@@ -691,7 +700,10 @@ def test_metadata_cli_writes_metadata_with_existing_tree(
     assert "contrast_pair_test_holdouts=0" in result.output
     assert "tree_missing_species=0" in result.output
     assert out.read_text(encoding="utf-8") == (
-        "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\nsp1\t1\t1\tno\nsp2\t0\t1\tno\n"
+        "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\t"
+        "order_id\torder_name\tfamily_id\tfamily_name\n"
+        "sp1\t1\t1\tno\t10\tOrderA\t100\tFamilyA\n"
+        "sp2\t0\t1\tno\t10\tOrderA\t100\tFamilyA\n"
     )
 
 
@@ -713,9 +725,9 @@ def test_metadata_cli_writes_taxon_rank_blocks_with_existing_tree(
     monkeypatch.setattr(
         "phenoradar.metadata._load_ncbi_taxa",
         lambda _db=None: _FakeNCBITaxa(
-            lineages={1: [1, 100], 2: [2, 100]},
-            ranks={100: "family"},
-            names={100: "FamilyA"},
+            lineages={1: [1, 10, 100], 2: [2, 10, 100]},
+            ranks={10: "order", 100: "family"},
+            names={10: "OrderA", 100: "FamilyA"},
         ),
     )
 
@@ -740,10 +752,11 @@ def test_metadata_cli_writes_taxon_rank_blocks_with_existing_tree(
     assert "taxon_blocks=[family:blocks=1,test_holdouts=0,excluded=0]" in result.output
     assert out.read_text(encoding="utf-8") == (
         "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\t"
-        "taxon_family_id\ttaxon_family_name\ttaxon_family_test_holdout\t"
-        "taxon_family_exclude\n"
-        "sp1\t1\t1\tno\t100\tFamilyA\tno\tno\n"
-        "sp2\t0\t1\tno\t100\tFamilyA\tno\tno\n"
+        "order_id\torder_name\t"
+        "family_id\tfamily_name\tfamily_test_holdout\t"
+        "family_exclude\n"
+        "sp1\t1\t1\tno\t10\tOrderA\t100\tFamilyA\tno\tno\n"
+        "sp2\t0\t1\tno\t10\tOrderA\t100\tFamilyA\tno\tno\n"
     )
 
 
@@ -765,9 +778,9 @@ def test_metadata_cli_generates_taxid_for_taxon_rank_blocks(
     monkeypatch.setattr(
         "phenoradar.metadata._load_ncbi_taxa",
         lambda _db=None: _FakeNCBITaxa(
-            lineages={1: [1, 100], 2: [2, 100]},
-            ranks={100: "family"},
-            names={100: "FamilyA"},
+            lineages={1: [1, 10, 100], 2: [2, 10, 100]},
+            ranks={10: "order", 100: "family"},
+            names={10: "OrderA", 100: "FamilyA"},
             name_taxids={"sp1": [1], "sp2": [2]},
         ),
     )
@@ -793,10 +806,11 @@ def test_metadata_cli_generates_taxid_for_taxon_rank_blocks(
     assert taxid_out.read_text(encoding="utf-8") == "species\ttaxid\nsp1\t1\nsp2\t2\n"
     assert out.read_text(encoding="utf-8") == (
         "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\t"
-        "taxon_family_id\ttaxon_family_name\ttaxon_family_test_holdout\t"
-        "taxon_family_exclude\n"
-        "sp1\t1\t1\tno\t100\tFamilyA\tno\tno\n"
-        "sp2\t0\t1\tno\t100\tFamilyA\tno\tno\n"
+        "order_id\torder_name\t"
+        "family_id\tfamily_name\tfamily_test_holdout\t"
+        "family_exclude\n"
+        "sp1\t1\t1\tno\t10\tOrderA\t100\tFamilyA\tno\tno\n"
+        "sp2\t0\t1\tno\t10\tOrderA\t100\tFamilyA\tno\tno\n"
     )
 
 

@@ -81,7 +81,7 @@ def test_split_group_col_can_differ_from_contrast_pair_col(tmp_path: Path) -> No
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\ttaxon_family_id\tcontrast_pair_test_holdout",
+                "species\tC4\tcontrast_pair_id\tfamily_id\tcontrast_pair_test_holdout",
                 "sp1\t1\tcp1\tfamily_a\tno",
                 "sp2\t0\tcp1\tfamily_a\tno",
                 "sp3\t1\tcp2\tfamily_b\tno",
@@ -111,7 +111,7 @@ data:
   tpm_path: {tpm}
   contrast_pair_col: contrast_pair_id
 split:
-  group_col: taxon_family_id
+  group_col: family_id
 """.strip()
         + "\n",
     )
@@ -144,7 +144,7 @@ def test_pair_aware_filter_allows_missing_contrast_pairs_for_rank_split(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\ttaxon_order_id\ttaxon_order_test_holdout",
+                "species\tC4\tcontrast_pair_id\torder_id\torder_test_holdout",
                 "sp1\t1\tcp1\torder_a\tno",
                 "sp2\t0\tcp1\torder_a\tno",
                 "sp3\t1\t\torder_b\tno",
@@ -174,8 +174,8 @@ data:
   tpm_path: {tpm}
   contrast_pair_col: contrast_pair_id
 split:
-  group_col: taxon_order_id
-  test_holdout_col: taxon_order_test_holdout
+  group_col: order_id
+  test_holdout_col: order_test_holdout
 preprocess:
   pair_aware_filter:
     enabled: true
@@ -198,7 +198,7 @@ def test_null_contrast_pair_col_uses_split_group_without_contrast_column(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\ttaxon_family_id\tcontrast_pair_test_holdout",
+                "species\tC4\tfamily_id\tcontrast_pair_test_holdout",
                 "sp1\t1\tfamily_a\tno",
                 "sp2\t0\tfamily_a\tno",
                 "sp3\t1\tfamily_b\tno",
@@ -228,7 +228,7 @@ data:
   tpm_path: {tpm}
   contrast_pair_col: null
 split:
-  group_col: taxon_family_id
+  group_col: family_id
 """.strip()
         + "\n",
     )

@@ -1,21 +1,21 @@
-species	C4	contrast_pair_id	contrast_pair_test_holdout
-Euphorbia_pulcherrima	0	3	no
-Euphorbia_maculata	1	3	no
-Flaveria_cronquistii	0	2	no
-Flaveria_bidentis	1	2	no
-Grayia_spinosa	0	1	no
-Atriplex_centralasiatica	1	1	no
-Atriplex_lentiformis	1	1	no
-Suaeda_linearis	0	1	no
-Suaeda_salsa	0	1	no
-Bassia_scoparia	1	1	no
-Halogeton_glomeratus	1	1	no
-Salsola_foliosa	1	1	no
-Carex_breviculmis	0	4	no
-Carex_nigra	0	4	no
-Cyperus_brevifolius	1	4	no
-Cyperus_esculentus-var-sativus	1	4	no
-Abelia_chinensis	0		yes
-Abelmoschus_esculentus	0		yes
-Abronia_glabrifolia			no
-Abronia_nealleyi			no
+species	C4	contrast_pair_id	contrast_pair_test_holdout	order_id	order_name	family_id	family_name
+Euphorbia_pulcherrima	0	3	no	3646	Malpighiales	3977	Euphorbiaceae
+Euphorbia_maculata	1	3	no	3646	Malpighiales	3977	Euphorbiaceae
+Flaveria_cronquistii	0	2	no	4209	Asterales	4210	Asteraceae
+Flaveria_bidentis	1	2	no	4209	Asterales	4210	Asteraceae
+Grayia_spinosa	0	1	no	3524	Caryophyllales	3563	Amaranthaceae
+Atriplex_centralasiatica	1	1	no	3524	Caryophyllales	3563	Amaranthaceae
+Atriplex_lentiformis	1	1	no	3524	Caryophyllales	3563	Amaranthaceae
+Suaeda_linearis	0	1	no	3524	Caryophyllales	3563	Amaranthaceae
+Suaeda_salsa	0	1	no	3524	Caryophyllales	3563	Amaranthaceae
+Bassia_scoparia	1	1	no	3524	Caryophyllales	3563	Amaranthaceae
+Halogeton_glomeratus	1	1	no	3524	Caryophyllales	3563	Amaranthaceae
+Salsola_foliosa	1	1	no	3524	Caryophyllales	3563	Amaranthaceae
+Carex_breviculmis	0	4	no	38820	Poales	4609	Cyperaceae
+Carex_nigra	0	4	no	38820	Poales	4609	Cyperaceae
+Cyperus_brevifolius	1	4	no	38820	Poales	4609	Cyperaceae
+Cyperus_esculentus-var-sativus	1	4	no	38820	Poales	4609	Cyperaceae
+Abelia_chinensis	0		yes	4199	Dipsacales	4200	Caprifoliaceae
+Abelmoschus_esculentus	0		yes	41938	Malvales	3629	Malvaceae
+Abronia_glabrifolia			no	3524	Caryophyllales	3536	Nyctaginaceae
+Abronia_nealleyi			no	3524	Caryophyllales	3536	Nyctaginaceae

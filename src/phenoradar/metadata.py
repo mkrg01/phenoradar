@@ -359,13 +359,17 @@ def _normalize_taxon_block_ranks(ranks: Sequence[str] | None) -> list[str]:
 
 
 def _taxon_block_columns(rank: str) -> tuple[str, str, str, str]:
-    prefix = f"taxon_{rank}"
+    id_col, name_col = _taxon_annotation_columns(rank)
     return (
-        f"{prefix}_id",
-        f"{prefix}_name",
-        f"{prefix}_test_holdout",
-        f"{prefix}_exclude",
+        id_col,
+        name_col,
+        f"{rank}_test_holdout",
+        f"{rank}_exclude",
     )
+
+
+def _taxon_annotation_columns(rank: str) -> tuple[str, str]:
+    return (f"{rank}_id", f"{rank}_name")
 
 
 def _load_ncbi_taxa(ncbi_taxonomy_db: Path | None = None) -> _NCBITaxa:
@@ -572,13 +576,14 @@ def _taxon_block_holdout_groups(
     return set(shuffled[:holdout_count])
 
 
-def _build_taxon_block_metadata(
+def _build_taxon_metadata(
     species_for_metadata: pl.DataFrame,
     species_taxid_path: Path,
     *,
     species_col: str,
     taxid_col: str,
-    ranks: Sequence[str],
+    annotation_ranks: Sequence[str],
+    block_ranks: Sequence[str],
     min_species_per_label: int,
     mixed_test_fraction: float,
     mixed_test_seed: int,
@@ -597,11 +602,16 @@ def _build_taxon_block_metadata(
     metadata = species_for_metadata.select("__species", "__trait").join(
         species_taxid, on="__species", how="left"
     )
+    ranks = list(annotation_ranks)
+    for rank in block_ranks:
+        if rank not in ranks:
+            ranks.append(rank)
     taxids = [
         int(value) for value in metadata.select("taxid").drop_nulls().unique().to_series().to_list()
     ]
     ncbi_taxa = _load_ncbi_taxa(ncbi_taxonomy_db)
     rank_lookup = _rank_taxon_lookup(taxids, ranks, ncbi_taxa)
+    block_rank_set = set(block_ranks)
 
     rows: list[dict[str, object]] = []
     for row in metadata.to_dicts():
@@ -631,7 +641,22 @@ def _build_taxon_block_metadata(
     for rank in ranks:
         raw_id_col = f"__taxon_{rank}_raw_id"
         raw_name_col = f"__taxon_{rank}_raw_name"
-        out_id_col, out_name_col, holdout_col, exclude_col = _taxon_block_columns(rank)
+        out_id_col, out_name_col = _taxon_annotation_columns(rank)
+        if rank not in block_rank_set:
+            output = output.join(
+                rank_frame.select(
+                    [
+                        "__species",
+                        pl.col(raw_id_col).alias(out_id_col),
+                        pl.col(raw_name_col).alias(out_name_col),
+                    ]
+                ),
+                on="__species",
+                how="left",
+            )
+            continue
+
+        _id_col, _name_col, holdout_col, exclude_col = _taxon_block_columns(rank)
         label_counts = (
             rank_frame.filter(pl.col("__trait").is_not_null() & pl.col(raw_id_col).is_not_null())
             .group_by(raw_id_col)
@@ -741,6 +766,7 @@ def build_species_metadata_from_skim(
     trait_col: str = "C4",
     contrast_pair_col: str = "contrast_pair_id",
     contrast_pair_test_holdout_col: str = "contrast_pair_test_holdout",
+    taxon_annotation_ranks: Sequence[str] | None = None,
     taxon_block_ranks: Sequence[str] | None = None,
     taxon_block_min_species_per_label: int = 1,
     taxon_block_mixed_test_fraction: float = 0.0,
@@ -758,10 +784,18 @@ def build_species_metadata_from_skim(
         raise MetadataError("species_taxid_out_path cannot be used with species_taxid_path")
     if not tree_path.exists():
         raise MetadataError(f"Input tree not found: {tree_path}")
-    taxon_ranks = _normalize_taxon_block_ranks(taxon_block_ranks)
+    taxon_annotation_rank_values = _normalize_taxon_block_ranks(taxon_annotation_ranks)
+    taxon_block_rank_values = _normalize_taxon_block_ranks(taxon_block_ranks)
+    taxon_output_ranks = list(taxon_annotation_rank_values)
+    for rank in taxon_block_rank_values:
+        if rank not in taxon_output_ranks:
+            taxon_output_ranks.append(rank)
     output_columns = [species_col, trait_col, contrast_pair_col, contrast_pair_test_holdout_col]
-    for rank in taxon_ranks:
-        output_columns.extend(_taxon_block_columns(rank))
+    for rank in taxon_output_ranks:
+        output_columns.extend(_taxon_annotation_columns(rank))
+        if rank in taxon_block_rank_values:
+            _id_col, _name_col, holdout_col, exclude_col = _taxon_block_columns(rank)
+            output_columns.extend([holdout_col, exclude_col])
     _validate_output_column_names(output_columns)
 
     species_trait = _normalize_species_trait_for_metadata(
@@ -774,7 +808,9 @@ def build_species_metadata_from_skim(
 
     resolved_species_taxid_path = species_taxid_path
     generated_species_taxid_result: SpeciesTaxidResult | None = None
-    if resolved_species_taxid_path is None and (taxon_ranks or species_taxid_out_path is not None):
+    if resolved_species_taxid_path is None and (
+        taxon_output_ranks or species_taxid_out_path is not None
+    ):
         generated_species_taxid_result = _write_species_taxid_from_frame(
             species_trait,
             species_taxid_out_path or out.with_name("species_taxid.tsv"),
@@ -885,20 +921,21 @@ def build_species_metadata_from_skim(
     taxon_block_counts: dict[str, int] = {}
     taxon_block_test_holdout_counts: dict[str, int] = {}
     taxon_block_exclude_counts: dict[str, int] = {}
-    if taxon_ranks:
+    if taxon_output_ranks:
         if resolved_species_taxid_path is None:
-            raise MetadataError("Taxonomic rank blocking requires species_taxid_path")
+            raise MetadataError("Taxonomic rank annotation requires species_taxid_path")
         (
             taxon_blocks,
             taxon_block_counts,
             taxon_block_test_holdout_counts,
             taxon_block_exclude_counts,
-        ) = _build_taxon_block_metadata(
+        ) = _build_taxon_metadata(
             species_for_skim,
             resolved_species_taxid_path,
             species_col=species_col,
             taxid_col=taxid_col,
-            ranks=taxon_ranks,
+            annotation_ranks=taxon_annotation_rank_values,
+            block_ranks=taxon_block_rank_values,
             min_species_per_label=taxon_block_min_species_per_label,
             mixed_test_fraction=taxon_block_mixed_test_fraction,
             mixed_test_seed=taxon_block_mixed_test_seed,

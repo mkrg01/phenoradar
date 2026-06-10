@@ -92,6 +92,9 @@ model_selection:
   selection_rule: best
 ensemble:
   probability_aggregation: mean
+summary:
+  group_col: family_id
+  group_name_col: family_name
 figures:
   top_features: 30
 runtime:
@@ -109,6 +112,7 @@ runtime:
 - `model`
 - `model_selection`
 - `ensemble`
+- `summary`
 - `figures`
 - `report`
 - `runtime`
@@ -544,6 +548,23 @@ Unknown parameter names are rejected at training time.
 - `ensemble.probability_aggregation`
   - type: `mean | median`
   - default: `mean`
+
+## `summary`
+
+- `summary.group_col`
+  - type: `str`
+  - default: `family_id`
+  - behavior:
+    - metadata column used for stage-level grouped prediction summaries.
+    - if the column is absent from `data.metadata_path`, grouped summary tables
+      and figures are skipped with a warning; model training/prediction still
+      proceeds.
+- `summary.group_name_col`
+  - type: `str | null`
+  - default: `family_name`
+  - behavior:
+    - optional metadata column used as the display label for `summary.group_col`.
+    - when null or absent, the group id values are used as labels.
 
 ## `figures`
 

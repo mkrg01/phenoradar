@@ -49,22 +49,28 @@ minimal clades containing both `0` and `1` receive the same `contrast_pair_id`. 
 species present in the tree but outside contrastive clades keep an empty contrast-pair value
 and are marked `contrast_pair_test_holdout=yes` by default.
 
-Taxonomic rank blocking can be requested with repeated `--taxon-block-rank` options, for
-example `--taxon-block-rank family --taxon-block-rank order`. If
-`--species-taxid` is omitted, `phenoradar metadata` resolves species names with
-`ete4.NCBITaxa`, writes `species_taxid.tsv` next to `--out` (or the path from
-`--species-taxid-out`), and then uses that TSV for rank-aware metadata. For each
-requested rank, metadata includes:
+Taxonomic rank annotation is written from species/taxid metadata. By default,
+`phenoradar metadata` emits `order_id`, `order_name`, `family_id`, and
+`family_name`; additional ranks can be requested with repeated
+`--taxon-annotation-rank` options. Taxonomic rank blocking can be requested with
+repeated `--taxon-block-rank` options, for example `--taxon-block-rank family`.
+If `--species-taxid` is omitted, `phenoradar metadata` resolves species names
+with `ete4.NCBITaxa`, writes `species_taxid.tsv` next to `--out` (or the path
+from `--species-taxid-out`), and then uses that TSV for rank-aware metadata.
+For each annotation rank, metadata includes:
 
-- `taxon_<rank>_id`
-- `taxon_<rank>_name`
-- `taxon_<rank>_test_holdout`
-- `taxon_<rank>_exclude`
+- `<rank>_id`
+- `<rank>_name`
+
+For each block rank, metadata additionally includes:
+
+- `<rank>_test_holdout`
+- `<rank>_exclude`
 
 Rank blocks with both trait labels enter CV. Single-label rank blocks become
 `*_test_holdout=yes`. Labeled species with missing taxid or missing requested rank become
-`*_exclude=yes`, so they are not used for CV or external test. The `taxon_<rank>_id`
-and `taxon_<rank>_name` columns are raw taxonomic annotations when the requested
+`*_exclude=yes`, so they are not used for CV or external test. The `<rank>_id`
+and `<rank>_name` columns are raw taxonomic annotations when the requested
 rank can be resolved; CV eligibility is represented by the matching holdout/exclude
 columns rather than by blanking the annotation.
 
@@ -72,9 +78,9 @@ Use a generated rank block by selecting its columns in config:
 
 ```yaml
 split:
-  group_col: taxon_family_id
-  test_holdout_col: taxon_family_test_holdout
-  exclude_col: taxon_family_exclude
+  group_col: family_id
+  test_holdout_col: family_test_holdout
+  exclude_col: family_exclude
 ```
 
 ## Species Taxid TSV

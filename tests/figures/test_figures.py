@@ -1016,6 +1016,33 @@ def test_species_probability_by_trait_writes_svg(tmp_path: Path) -> None:
     assert "mean=" not in svg_text
 
 
+def test_group_probability_figure_writes_all_groups(tmp_path: Path) -> None:
+    out_path = tmp_path / "probability_by_family.svg"
+    rows = [
+        {
+            "species": f"sp{i:02d}",
+            "prob": 1.0 - (i * 0.01),
+            "group_id": f"f{i:02d}",
+            "group_name": f"Family {i:02d}",
+            "pred_label_fixed_threshold": 1 if i <= 20 else 0,
+        }
+        for i in range(1, 32)
+    ]
+
+    figures_mod.write_group_probability_figure(
+        grouped_predictions=pl.DataFrame(rows),
+        out_path=out_path,
+        group_label="family",
+        source_table_name="prediction_inference.tsv",
+        figure_name="probability_by_family.svg",
+    )
+
+    assert out_path.exists()
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "Family 01" in svg_text
+    assert "Family 31" in svg_text
+
+
 def test_cv_fold_trait_probability_rejects_invalid_schema(tmp_path: Path) -> None:
     with pytest.raises(FigureError, match="schema is invalid"):
         figures_mod._cv_fold_trait_probability(
