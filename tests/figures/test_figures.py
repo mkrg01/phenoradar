@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import numpy as np
 import polars as pl
@@ -14,6 +15,15 @@ from phenoradar.figures import (
     write_report_figures,
     write_run_figures,
 )
+
+
+def _svg_text_y_and_viewbox_height(svg_path: Path, text: str) -> tuple[float, float]:
+    root = ET.parse(svg_path).getroot()
+    viewbox_height = float(root.attrib["viewBox"].split()[3])
+    for element in root.iter():
+        if element.tag.endswith("text") and "".join(element.itertext()) == text:
+            return float(element.attrib["y"]), viewbox_height
+    raise AssertionError(f"{text!r} not found in {svg_path}")
 
 
 def _minimal_metrics_cv() -> pl.DataFrame:
@@ -438,7 +448,10 @@ def test_write_run_figures_writes_external_trait_probability_when_available(tmp_
     )
 
     figures_dir = tmp_path / "run" / "figures"
-    assert (figures_dir / "final_refit_loss_by_split.svg").exists()
+    final_refit_loss_path = figures_dir / "final_refit_loss_by_split.svg"
+    assert final_refit_loss_path.exists()
+    label_y, viewbox_height = _svg_text_y_and_viewbox_height(final_refit_loss_path, "Log Loss")
+    assert label_y < viewbox_height
     assert (figures_dir / "external_species_probability_by_trait.svg").exists()
     assert warnings == []
 

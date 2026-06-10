@@ -120,7 +120,7 @@ def _label_left_margin(labels: list[str], *, width_px: int, fontsize_px: int) ->
 
 
 def _compact_bottom_margin(height_px: int) -> float:
-    return min(0.14, max(0.065, 42 / height_px))
+    return min(0.24, max(0.065, 42 / height_px))
 
 
 def _save_svg_figure(fig: Figure, out_path: Path) -> None:
@@ -211,7 +211,12 @@ def _plot_horizontal_values(
             fontfamily="monospace",
         )
 
-    fig.subplots_adjust(left=left_margin, right=right_margin, top=0.96, bottom=0.12)
+    fig.subplots_adjust(
+        left=left_margin,
+        right=right_margin,
+        top=0.96,
+        bottom=_compact_bottom_margin(height_px),
+    )
     _save_svg_figure(fig, out_path)
 
 
@@ -567,7 +572,7 @@ def _final_refit_loss_by_split(loss_by_split_final_refit: pl.DataFrame, out_path
             fontsize_px=_TICK_FONTSIZE,
         ),
         right_margin=0.96,
-        x_label="log_loss",
+        x_label="Log Loss",
         y_tick_fontsize=_TICK_FONTSIZE,
     )
 
