@@ -73,7 +73,6 @@ _COLOR_PURPLE = "#CC79A7"
 _TRAIT_NEGATIVE_COLOR = "#d62728"
 _TRAIT_POSITIVE_COLOR = "#1f77b4"
 _MODEL_SELECTION_SAMPLE_SET_LIMIT = 1
-_RETAINED_FEATURE_LIMIT = 40
 _DEFAULT_TOP_FEATURES = 30
 _FEATURE_IMPORTANCE_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
 _FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE = _LABEL_FONTSIZE
@@ -2601,146 +2600,6 @@ def _feature_filter_funnel(
     _save_svg_figure(fig, out_path)
 
 
-def _selected_features_by_fold_after_preprocessing(
-    retained_features_summary: pl.DataFrame, out_path: Path
-) -> None:
-    required = {"scope", "fold_id", "feature", "retained_count", "n_sample_sets", "retained_rate"}
-    if not required.issubset(retained_features_summary.columns):
-        raise FigureError(
-            "retained_features_summary.tsv schema is invalid for "
-            "selected_features_by_fold_after_preprocessing.svg"
-        )
-    data = (
-        retained_features_summary.select(
-            pl.col("scope").cast(pl.String, strict=False).alias("__scope"),
-            pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
-            pl.col("feature").cast(pl.String, strict=False).alias("__feature"),
-            pl.col("retained_count").cast(pl.Int64, strict=False).alias("__retained_count"),
-            pl.col("n_sample_sets").cast(pl.Int64, strict=False).alias("__n_sample_sets"),
-            pl.col("retained_rate").cast(pl.Float64, strict=False).alias("__retained_rate"),
-        )
-        .filter(
-            (pl.col("__scope") == "outer_fold")
-            & pl.col("__fold_id").is_not_null()
-            & (pl.col("__fold_id") != "")
-            & pl.col("__feature").is_not_null()
-            & (pl.col("__feature") != "")
-            & pl.col("__retained_count").is_not_null()
-            & pl.col("__n_sample_sets").is_not_null()
-            & (pl.col("__n_sample_sets") > 0)
-            & pl.col("__retained_rate").is_not_null()
-            & pl.col("__retained_rate").is_finite()
-        )
-    )
-    if data.height == 0:
-        _write_message_figure(
-            title="Selected Features by Fold after Preprocessing",
-            message="No outer-fold selected-feature summary rows are available.",
-            out_path=out_path,
-            width_px=980,
-            height_px=520,
-        )
-        return
-
-    fold_ids = [str(v) for v in data.select("__fold_id").unique().to_series().to_list()]
-    fold_ids = sorted(
-        fold_ids,
-        key=lambda value: (0, int(value)) if value.isdigit() else (1, value),
-    )
-    ranked_features = (
-        data.group_by("__feature")
-        .agg(
-            pl.col("__retained_rate").max().alias("__retained_rate_max"),
-            pl.col("__retained_rate").mean().alias("__retained_rate_mean"),
-            pl.len().alias("__n_folds_retained"),
-        )
-        .sort(
-            [
-                "__retained_rate_max",
-                "__retained_rate_mean",
-                "__n_folds_retained",
-                "__feature",
-            ],
-            descending=[True, True, True, False],
-        )
-    )
-    shown_feature_table = ranked_features.head(_RETAINED_FEATURE_LIMIT)
-    features = [str(v) for v in shown_feature_table.select("__feature").to_series().to_list()]
-    if not fold_ids or not features:
-        _write_message_figure(
-            title="Selected Features by Fold after Preprocessing",
-            message="No selected features are available after filtering.",
-            out_path=out_path,
-            width_px=980,
-            height_px=520,
-        )
-        return
-
-    feature_index = {feature: idx for idx, feature in enumerate(features)}
-    fold_index = {fold_id: idx for idx, fold_id in enumerate(fold_ids)}
-    rate_matrix = np.zeros((len(features), len(fold_ids)), dtype=float)
-    count_labels: dict[tuple[int, int], str] = {}
-    visible = data.filter(pl.col("__feature").is_in(features))
-    for row in visible.iter_rows(named=True):
-        feature_name = str(row["__feature"])
-        fold_id = str(row["__fold_id"])
-        row_index = feature_index[feature_name]
-        col_index = fold_index[fold_id]
-        rate_matrix[row_index, col_index] = float(row["__retained_rate"])
-        retained_count = int(row["__retained_count"])
-        n_sample_sets = int(row["__n_sample_sets"])
-        count_labels[(row_index, col_index)] = f"{retained_count}/{n_sample_sets}"
-
-    height_px = max(320, 110 + len(features) * 14)
-    width_px = _fold_axis_width_px(len(fold_ids), base_px=210, per_fold_px=36)
-    fig, ax = plt.subplots(figsize=_figure_size_inches(width_px, height_px), dpi=_FIG_DPI)
-    fig.patch.set_facecolor("white")
-
-    image = ax.imshow(
-        rate_matrix,
-        aspect="auto",
-        cmap="Blues",
-        interpolation="nearest",
-        vmin=0.0,
-        vmax=1.0,
-    )
-    ax.set_xticks(np.arange(len(fold_ids), dtype=float))
-    ax.set_xticklabels([str(fold_id) for fold_id in fold_ids], fontsize=_TICK_FONTSIZE)
-    ax.set_yticks(np.arange(len(features), dtype=float))
-    ax.set_yticklabels(features, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
-    ax.set_xlabel("CV fold", fontsize=_LABEL_FONTSIZE)
-    ax.set_ylabel("Selected features after preprocessing", fontsize=_LABEL_FONTSIZE)
-    ax.set_xticks(np.arange(-0.5, len(fold_ids), 1.0), minor=True)
-    ax.set_yticks(np.arange(-0.5, len(features), 1.0), minor=True)
-    ax.grid(which="minor", color="#ffffff", linewidth=0.5)
-    ax.tick_params(which="minor", bottom=False, left=False)
-
-    if len(features) <= 12 and len(fold_ids) <= 8:
-        for (row_index, col_index), label in count_labels.items():
-            color = _AXIS_COLOR if rate_matrix[row_index, col_index] < 0.6 else "#ffffff"
-            ax.text(
-                col_index,
-                row_index,
-                label,
-                ha="center",
-                va="center",
-                fontsize=_MONO_FONTSIZE,
-                color=color,
-                fontfamily="monospace",
-            )
-
-    colorbar = fig.colorbar(image, ax=ax, fraction=0.025, pad=0.02)
-    colorbar.set_label("selection_rate", rotation=90, fontsize=_LABEL_FONTSIZE)
-    colorbar.ax.tick_params(labelsize=_TICK_FONTSIZE)
-    fig.subplots_adjust(
-        left=_label_left_margin(features, width_px=width_px, fontsize_px=_MONO_FONTSIZE),
-        right=0.94,
-        top=0.98,
-        bottom=0.12,
-    )
-    _save_svg_figure(fig, out_path)
-
-
 def _non_zero_feature_count_by_fold(model_sparsity: pl.DataFrame, out_path: Path) -> None:
     required = {"scope", "fold_id", "n_nonzero_features"}
     if not required.issubset(model_sparsity.columns):
@@ -2905,7 +2764,6 @@ def write_run_figures(
     model_selection_trials_summary: pl.DataFrame | None = None,
     model_selection_selected: pl.DataFrame | None = None,
     feature_filter_counts_summary: pl.DataFrame | None = None,
-    retained_features_summary: pl.DataFrame | None = None,
     model_sparsity: pl.DataFrame | None = None,
     model_sparsity_summary: pl.DataFrame | None = None,
     feature_filter_funnel_stage_order: Sequence[str] | None = None,
@@ -2983,11 +2841,6 @@ def write_run_figures(
             feature_filter_counts_summary,
             cv_dir / "feature_filter_funnel.svg",
             stage_order=feature_filter_funnel_stage_order,
-        )
-    if retained_features_summary is not None:
-        _selected_features_by_fold_after_preprocessing(
-            retained_features_summary,
-            cv_dir / "selected_features_by_fold_after_preprocessing.svg",
         )
     if model_sparsity is not None:
         _non_zero_feature_count_by_fold(

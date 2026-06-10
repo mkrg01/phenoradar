@@ -135,7 +135,6 @@ Always written:
     - `cv/figures/cv_species_probability_by_trait.svg`
     - `cv/figures/cv_fold_trait_probability.svg`
     - `cv/figures/feature_filter_funnel.svg`
-    - `cv/figures/selected_features_by_fold_after_preprocessing.svg`
     - `cv/figures/non_zero_feature_count_by_fold.svg`
     - `cv/figures/model_selection_trials.svg` (candidate selection active)
     - `cv/figures/model_selection_one_se_curve.svg` (candidate selection active)
@@ -514,10 +513,6 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
   - Feature-count trend by scope through the enabled `preprocess.*_filter` steps.
   - Line is median count; shaded band is IQR; dashed lines are min-max.
   - Legend identifies median/IQR/min-max; the figure annotates the `n_records` count.
-- `cv/figures/selected_features_by_fold_after_preprocessing.svg`
-  - Outer-fold retained-feature heatmap after preprocessing.
-  - Rows are features, columns are folds, color is the feature retention rate across sampled sets.
-  - Useful for spotting fold-specific preprocessing retention differences.
 - `cv/figures/non_zero_feature_count_by_fold.svg`
   - Fold-wise distribution of `n_nonzero_features` from `model_sparsity.tsv`.
   - Boxplots are shown when a fold has multiple models; points show individual models.

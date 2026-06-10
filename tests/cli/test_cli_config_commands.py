@@ -559,7 +559,7 @@ data:
     assert "Pair aware" not in funnel_svg
     assert "Correlation" not in funnel_svg
     assert ">Final<" not in funnel_svg
-    assert (
+    assert not (
         run_dirs[0] / "cv" / "figures" / "selected_features_by_fold_after_preprocessing.svg"
     ).exists()
     assert not (
@@ -715,7 +715,7 @@ data:
     assert (run_dirs[0] / "cv" / "figures" / "cv_fold_trait_probability.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "roc_pr_curves_cv.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "feature_filter_funnel.svg").exists()
-    assert (
+    assert not (
         run_dirs[0] / "cv" / "figures" / "selected_features_by_fold_after_preprocessing.svg"
     ).exists()
     assert not (

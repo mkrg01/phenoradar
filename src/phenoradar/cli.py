@@ -1034,7 +1034,6 @@ def run(
             trait_name=resolved.data.trait_col,
             feature_filter_counts_summary=feature_filter_counts_summary_table,
             feature_filter_funnel_stage_order=_feature_filter_funnel_stage_order(resolved),
-            retained_features_summary=retained_features_summary_table,
             model_sparsity=model_sparsity_table,
             model_sparsity_summary=model_sparsity_summary_table,
             top_features=resolved.figures.top_features,

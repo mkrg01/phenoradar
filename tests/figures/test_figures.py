@@ -200,19 +200,6 @@ def _minimal_feature_filter_counts_summary() -> pl.DataFrame:
     )
 
 
-def _minimal_retained_features_summary() -> pl.DataFrame:
-    return pl.DataFrame(
-        {
-            "scope": ["outer_fold", "outer_fold", "outer_fold", "outer_fold"],
-            "fold_id": ["0", "0", "1", "1"],
-            "feature": ["OG1", "OG2", "OG1", "OG3"],
-            "retained_count": [2, 1, 2, 1],
-            "n_sample_sets": [2, 2, 2, 2],
-            "retained_rate": [1.0, 0.5, 1.0, 0.5],
-        }
-    )
-
-
 def _minimal_model_sparsity() -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -343,7 +330,6 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
             "n_features_after_sparse_feature_filter",
             "n_features_after_pair_aware",
         ],
-        retained_features_summary=_minimal_retained_features_summary(),
         model_sparsity=_minimal_model_sparsity(),
     )
 
@@ -367,7 +353,7 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
     assert "Correlation" not in funnel_svg
     assert "Final" not in funnel_svg
     assert "79.5" in funnel_svg
-    assert (figures_dir / "selected_features_by_fold_after_preprocessing.svg").exists()
+    assert not (figures_dir / "selected_features_by_fold_after_preprocessing.svg").exists()
     assert not (figures_dir / "selected_features_after_preprocessing.svg").exists()
     assert not (figures_dir / "selected_features_by_fold.svg").exists()
     assert (figures_dir / "non_zero_feature_count_by_fold.svg").exists()
@@ -1008,27 +994,6 @@ def test_cv_fold_trait_probability_writes_svg(tmp_path: Path) -> None:
     assert "C4=1" not in svg_text
     assert "#f7f7f7" in svg_text
     assert "#d9d9d9" in svg_text
-
-
-def test_selected_features_by_fold_after_preprocessing_rejects_invalid_schema(
-    tmp_path: Path,
-) -> None:
-    with pytest.raises(FigureError, match="schema is invalid"):
-        figures_mod._selected_features_by_fold_after_preprocessing(
-            retained_features_summary=pl.DataFrame({"feature": ["OG1"]}),
-            out_path=tmp_path / "selected_features_by_fold_after_preprocessing.svg",
-        )
-
-
-def test_selected_features_by_fold_after_preprocessing_writes_svg(tmp_path: Path) -> None:
-    out_path = tmp_path / "selected_features_by_fold_after_preprocessing.svg"
-    figures_mod._selected_features_by_fold_after_preprocessing(
-        retained_features_summary=_minimal_retained_features_summary(),
-        out_path=out_path,
-    )
-    assert out_path.exists()
-    svg_text = out_path.read_text(encoding="utf-8")
-    assert "Selected features after preprocessing" in svg_text
 
 
 def test_non_zero_feature_count_by_fold_rejects_invalid_schema(tmp_path: Path) -> None:

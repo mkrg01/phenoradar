@@ -87,7 +87,6 @@ Notes:
   - `cv/figures/cv_species_probability_by_trait.svg`
   - `cv/figures/cv_fold_trait_probability.svg`
   - `cv/figures/feature_filter_funnel.svg`
-  - `cv/figures/selected_features_by_fold_after_preprocessing.svg`
   - `cv/figures/non_zero_feature_count_by_fold.svg`
   - `cv/figures/model_selection_trials.svg` (model selection enabled)
   - `cv/figures/roc_pr_curves_cv.svg` (may be skipped when degenerate)
