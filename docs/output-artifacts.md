@@ -11,7 +11,8 @@ For one `run` result directory, a practical order is:
 2. `cv/tables/metrics_cv.tsv`, `cv/tables/loss_by_split_cv.tsv`,
    `model/tables/thresholds.tsv`, and `summary/tables/classification_summary.tsv`
    (overall quality, train/validation loss gap, thresholds, and threshold-wise classification tradeoffs)
-3. `cv/tables/prediction_cv.tsv` and `cv/figures/roc_pr_curves_cv.svg`
+3. `cv/tables/prediction_cv.tsv`, `cv/figures/roc_curve_cv.svg`, and
+   `cv/figures/pr_curve_cv.svg`
    (overall CV ranking behavior)
 4. `external_test/tables/prediction_external_test.tsv` /
    `inference/tables/prediction_inference.tsv` (`full_run` only)
@@ -138,7 +139,8 @@ Always written:
     - `cv/figures/non_zero_feature_count_by_fold.svg`
     - `cv/figures/model_selection_trials.svg` (candidate selection active)
     - `cv/figures/model_selection_one_se_curve.svg` (candidate selection active)
-    - `cv/figures/roc_pr_curves_cv.svg` (may be skipped with warning for degenerate folds)
+    - `cv/figures/roc_curve_cv.svg` (may be skipped with warning for degenerate folds)
+    - `cv/figures/pr_curve_cv.svg` (may be skipped with warning for degenerate folds)
     - `external_test/figures/final_refit_loss_by_split.svg` (attempted in `full_run`)
     - `external_test/figures/external_species_probability_by_trait.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
     - `inference/figures/inference_probability_distribution.svg` (attempted in `full_run`; may be skipped with warning when inference set is empty)
@@ -488,9 +490,12 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - `cv/figures/cv_loss_by_split.svg`
   - Fold-wise final `log_loss` comparison of `train` vs `validation`.
   - Useful for quick overfitting diagnostics without per-iteration learning curves.
-- `cv/figures/roc_pr_curves_cv.svg`
-  - Left: pooled OOF ROC, right: pooled OOF PR.
-  - Curves summarize all folds together (not per-fold overlays).
+- `cv/figures/roc_curve_cv.svg`
+  - Pooled OOF ROC curve.
+  - Curve summarizes all folds together (not per-fold overlays).
+- `cv/figures/pr_curve_cv.svg`
+  - Pooled OOF precision-recall curve.
+  - Curve summarizes all folds together (not per-fold overlays).
 - `cv/figures/feature_importance_top.svg`
   - Top `figures.top_features` features by mean fold-level `importance_mean`.
   - Horizontal boxplot plus fold-level points.

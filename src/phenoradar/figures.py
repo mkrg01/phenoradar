@@ -1521,66 +1521,90 @@ def _cv_fold_trait_probability(
     _save_svg_figure(fig, out_path)
 
 
-def _roc_pr_curves_cv(oof_predictions: pl.DataFrame, out_path: Path) -> None:
+def _cv_curve_inputs(oof_predictions: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     required = {"fold_id", "label", "prob"}
     if not required.issubset(oof_predictions.columns):
-        raise FigureError("prediction_cv.tsv schema is invalid for roc_pr_curves_cv.svg")
+        raise FigureError("prediction_cv.tsv schema is invalid for ROC/PR curve figures")
     if oof_predictions.height == 0:
-        raise FigureError("prediction_cv.tsv is empty; cannot draw roc_pr_curves_cv.svg")
+        raise FigureError("prediction_cv.tsv is empty; cannot draw ROC/PR curve figures")
 
     y_true = np.array(oof_predictions.select("label").to_series().to_list(), dtype=int)
     prob = np.array(oof_predictions.select("prob").to_series().to_list(), dtype=float)
     if y_true.size == 0 or np.unique(y_true).size < 2:
-        raise FigureError("roc_pr_curves_cv.svg could not be drawn (no folds with both labels)")
+        raise FigureError("ROC/PR curve figures could not be drawn (no folds with both labels)")
+    return y_true, prob
 
+
+def _roc_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     fpr, tpr, _ = roc_curve(y_true, prob)
-    precision, recall, _ = precision_recall_curve(y_true, prob)
-    # Keep sklearn's threshold order; sorting recall can reorder tied-recall steps.
-    recall_plot = np.asarray(recall, dtype=float)
-    precision_plot = np.asarray(precision, dtype=float)
     roc_auc = float(roc_auc_score(y_true, prob))
-    pr_auc = float(average_precision_score(y_true, prob))
-    prevalence = float(np.mean(y_true))
 
-    fig, (ax_roc, ax_pr) = plt.subplots(
-        1,
-        2,
-        figsize=_figure_size_inches(_NATURE_DOUBLE_COLUMN_WIDTH_PX, 340),
+    fig, ax = plt.subplots(
+        figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 340),
         dpi=_FIG_DPI,
     )
     fig.patch.set_facecolor("white")
 
-    ax_roc.plot([0.0, 1.0], [0.0, 1.0], color="#999999", linewidth=0.7, linestyle=(0, (4, 4)))
-    ax_roc.plot(fpr, tpr, color=_COLOR_BLUE, linewidth=1.0)
-    ax_roc.set_xlim(0.0, 1.0)
-    ax_roc.set_ylim(0.0, 1.0)
-    ax_roc.set_xlabel("False Positive Rate", fontsize=_LABEL_FONTSIZE)
-    ax_roc.set_ylabel("True Positive Rate", fontsize=_LABEL_FONTSIZE)
-    ax_roc.grid(color=_GRID_COLOR, linewidth=0.5)
-    ax_roc.set_axisbelow(True)
-    ax_roc.set_title(f"ROC AUC={roc_auc:.6f}", fontsize=_LABEL_FONTSIZE)
+    ax.plot([0.0, 1.0], [0.0, 1.0], color="#999999", linewidth=0.7, linestyle=(0, (4, 4)))
+    ax.plot(fpr, tpr, color=_COLOR_BLUE, linewidth=1.0)
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xlabel("False Positive Rate", fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel("True Positive Rate", fontsize=_LABEL_FONTSIZE)
+    ax.grid(color=_GRID_COLOR, linewidth=0.5)
+    ax.set_axisbelow(True)
+    ax.set_title(f"ROC AUC={roc_auc:.6f}", fontsize=_LABEL_FONTSIZE)
 
-    ax_pr.axhline(prevalence, color="#999999", linewidth=0.7, linestyle=(0, (4, 4)))
-    ax_pr.plot(
+    fig.subplots_adjust(left=0.12, right=0.98, top=0.92, bottom=0.14)
+    _save_svg_figure(fig, out_path)
+
+
+def _pr_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
+    precision, recall, _ = precision_recall_curve(y_true, prob)
+    # Keep sklearn's threshold order; sorting recall can reorder tied-recall steps.
+    recall_plot = np.asarray(recall, dtype=float)
+    precision_plot = np.asarray(precision, dtype=float)
+    pr_auc = float(average_precision_score(y_true, prob))
+    prevalence = float(np.mean(y_true))
+
+    fig, ax = plt.subplots(
+        figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 340),
+        dpi=_FIG_DPI,
+    )
+    fig.patch.set_facecolor("white")
+
+    ax.axhline(prevalence, color="#999999", linewidth=0.7, linestyle=(0, (4, 4)))
+    ax.plot(
         recall_plot,
         precision_plot,
         color=_COLOR_ORANGE,
         linewidth=1.0,
         drawstyle="steps-post",
     )
-    ax_pr.set_xlim(0.0, 1.0)
-    ax_pr.set_ylim(0.0, 1.0)
-    ax_pr.set_xlabel("Recall", fontsize=_LABEL_FONTSIZE)
-    ax_pr.set_ylabel("Precision", fontsize=_LABEL_FONTSIZE)
-    ax_pr.grid(color=_GRID_COLOR, linewidth=0.5)
-    ax_pr.set_axisbelow(True)
-    ax_pr.set_title(
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xlabel("Recall", fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel("Precision", fontsize=_LABEL_FONTSIZE)
+    ax.grid(color=_GRID_COLOR, linewidth=0.5)
+    ax.set_axisbelow(True)
+    ax.set_title(
         f"PR AUC={pr_auc:.6f}, positive_rate={prevalence:.6f}",
         fontsize=_LABEL_FONTSIZE,
     )
 
-    fig.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.14, wspace=0.28)
+    fig.subplots_adjust(left=0.12, right=0.98, top=0.92, bottom=0.14)
     _save_svg_figure(fig, out_path)
+
+
+def _roc_pr_curves_cv(
+    oof_predictions: pl.DataFrame,
+    *,
+    roc_out_path: Path,
+    pr_out_path: Path,
+) -> None:
+    y_true, prob = _cv_curve_inputs(oof_predictions)
+    _roc_curve_cv(y_true, prob, roc_out_path)
+    _pr_curve_cv(y_true, prob, pr_out_path)
 
 
 def _report_metric_ranking(report_ranking: pl.DataFrame, out_path: Path) -> None:
@@ -2818,7 +2842,11 @@ def write_run_figures(
         trait_name=trait_name,
     )
     try:
-        _roc_pr_curves_cv(oof_predictions, cv_dir / "roc_pr_curves_cv.svg")
+        _roc_pr_curves_cv(
+            oof_predictions,
+            roc_out_path=cv_dir / "roc_curve_cv.svg",
+            pr_out_path=cv_dir / "pr_curve_cv.svg",
+        )
     except FigureError as exc:
         warnings.append(str(exc))
     selection_summary = model_selection_trials_summary

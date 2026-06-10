@@ -89,7 +89,8 @@ Notes:
   - `cv/figures/feature_filter_funnel.svg`
   - `cv/figures/non_zero_feature_count_by_fold.svg`
   - `cv/figures/model_selection_trials.svg` (model selection enabled)
-  - `cv/figures/roc_pr_curves_cv.svg` (may be skipped when degenerate)
+  - `cv/figures/roc_curve_cv.svg` (may be skipped when degenerate)
+  - `cv/figures/pr_curve_cv.svg` (may be skipped when degenerate)
   - `external_test/figures/final_refit_loss_by_split.svg` (`full_run`)
   - `external_test/figures/external_species_probability_by_trait.svg` (`full_run` when external test rows exist)
   - `inference/figures/inference_probability_distribution.svg` (`full_run` when inference rows exist)

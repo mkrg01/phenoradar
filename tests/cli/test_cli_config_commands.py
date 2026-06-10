@@ -547,7 +547,8 @@ data:
     assert (run_dirs[0] / "cv" / "figures" / "coefficients_signed_top.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "cv_species_probability_by_trait.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "cv_fold_trait_probability.svg").exists()
-    assert (run_dirs[0] / "cv" / "figures" / "roc_pr_curves_cv.svg").exists()
+    assert (run_dirs[0] / "cv" / "figures" / "roc_curve_cv.svg").exists()
+    assert (run_dirs[0] / "cv" / "figures" / "pr_curve_cv.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "feature_filter_funnel.svg").exists()
     funnel_svg = (run_dirs[0] / "cv" / "figures" / "feature_filter_funnel.svg").read_text(
         encoding="utf-8"
@@ -713,7 +714,8 @@ data:
     assert (run_dirs[0] / "cv" / "figures" / "coefficients_signed_top.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "cv_species_probability_by_trait.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "cv_fold_trait_probability.svg").exists()
-    assert (run_dirs[0] / "cv" / "figures" / "roc_pr_curves_cv.svg").exists()
+    assert (run_dirs[0] / "cv" / "figures" / "roc_curve_cv.svg").exists()
+    assert (run_dirs[0] / "cv" / "figures" / "pr_curve_cv.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "feature_filter_funnel.svg").exists()
     assert not (
         run_dirs[0] / "cv" / "figures" / "selected_features_by_fold_after_preprocessing.svg"
