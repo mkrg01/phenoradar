@@ -65,7 +65,6 @@ class LoadedBundle:
     models: list[Any]
     probability_aggregation: str
     threshold_fixed: float
-    threshold_cv_derived: float
     source_run_id: str
     expression_transform: str
     feature_scaling: str
@@ -329,7 +328,6 @@ def export_model_bundle(
         files_info[filename] = _file_info(bundle_dir / filename)
 
     threshold_fixed = _threshold_value(thresholds, "fixed_probability_threshold")
-    threshold_cv = _threshold_value(thresholds, "cv_derived_threshold")
     manifest_base = {
         "bundle_format_version": BUNDLE_FORMAT_VERSION,
         "source_run_dir": str(run_dir),
@@ -342,7 +340,6 @@ def export_model_bundle(
         "ensemble_size": final_refit_artifacts.ensemble_size,
         "ensemble_probability_aggregation": config.ensemble.probability_aggregation,
         "threshold_fixed": threshold_fixed,
-        "threshold_cv_derived": threshold_cv,
         "python_version": platform.python_version(),
         "library_versions": {
             "polars": package_version("polars"),
@@ -530,7 +527,6 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
 
     thresholds = pl.read_csv(bundle_dir / "thresholds.tsv", separator="\t")
     threshold_fixed = _threshold_value(thresholds, "fixed_probability_threshold")
-    threshold_cv = _threshold_value(thresholds, "cv_derived_threshold")
 
     source_run_id_raw = manifest.get("source_run_id")
     source_run_id = str(source_run_id_raw) if source_run_id_raw is not None else "unknown"
@@ -545,7 +541,6 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
         models=models,
         probability_aggregation=aggregation,
         threshold_fixed=threshold_fixed,
-        threshold_cv_derived=threshold_cv,
         source_run_id=source_run_id,
         expression_transform=expression_transform,
         feature_scaling=feature_scaling,
@@ -662,9 +657,6 @@ def predict_with_bundle(
         "species": species_list,
         "prob": prob.astype(float, copy=False).tolist(),
         "pred_label_fixed_threshold": pred_label.astype(int, copy=False).tolist(),
-        "pred_label_cv_derived_threshold": (
-            prob >= bundle.threshold_cv_derived
-        ).astype(int).tolist(),
     }
     if uncertainty_std is not None:
         payload["uncertainty_std"] = uncertainty_std.astype(float, copy=False).tolist()

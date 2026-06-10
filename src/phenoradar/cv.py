@@ -61,6 +61,7 @@ except ImportError:  # pragma: no cover - available via scikit-learn dependency.
 
 _THREADPOOL_CONTROLLER: ThreadpoolController | None = None
 _THREADPOOL_CONTROLLER_LOCK = Lock()
+_FIXED_PROBABILITY_THRESHOLD = 0.5
 
 
 class CVError(ValueError):
@@ -1450,7 +1451,7 @@ def _selection_metric_from_probability(
     if metric_name == "log_loss":
         return _binary_log_loss(y_true, prob)
 
-    threshold = float(config.report.fixed_probability_threshold)
+    threshold = _FIXED_PROBABILITY_THRESHOLD
     pred = (prob >= threshold).astype(int)
     if metric_name == "mcc":
         return float(matthews_corrcoef(y_true, pred))
@@ -2256,36 +2257,6 @@ def _summarize_model_selection_trials(model_selection_trials: pl.DataFrame) -> p
     ).sort(["fold_id", "sample_set_id", "candidate_index"])
 
 
-def _derive_cv_threshold(
-    config: AppConfig, y_true: np.ndarray, prob: np.ndarray
-) -> tuple[float, str | None]:
-    if prob.size == 0:
-        raise CVError("Cannot derive CV threshold from empty prediction set")
-
-    metric_name = config.report.auto_threshold_selection_metric
-    candidates = np.unique(np.concatenate([np.array([0.0, 1.0]), prob]))
-    best_threshold = 0.5
-    best_score = -np.inf
-
-    for threshold in candidates:
-        pred = (prob >= float(threshold)).astype(int)
-        if metric_name == "mcc":
-            score = float(matthews_corrcoef(y_true, pred))
-        else:
-            score = float(balanced_accuracy_score(y_true, pred))
-        if np.isnan(score):
-            continue
-        if score > best_score or (
-            np.isclose(score, best_score) and float(threshold) < best_threshold
-        ):
-            best_score = score
-            best_threshold = float(threshold)
-
-    if np.isinf(best_score):
-        return 0.5, "cv_derived_threshold fallback to 0.5 because all candidate scores were NaN"
-    return best_threshold, None
-
-
 def _fold_ids(split_manifest: pl.DataFrame) -> list[str]:
     fold_values = (
         split_manifest.filter((pl.col("pool") == "validation") & (pl.col("fold_id") != "NA"))
@@ -2453,7 +2424,6 @@ def _build_prediction_table(
     species: list[str],
     prob: np.ndarray,
     fixed_threshold: float,
-    cv_threshold: float,
     uncertainty_std: np.ndarray | None,
     true_label: np.ndarray | None = None,
     include_true_label_column: bool = False,
@@ -2469,7 +2439,6 @@ def _build_prediction_table(
         "species": species,
         "prob": prob.astype(float, copy=False).tolist(),
         "pred_label_fixed_threshold": (prob >= fixed_threshold).astype(int).tolist(),
-        "pred_label_cv_derived_threshold": (prob >= cv_threshold).astype(int).tolist(),
     }
     if include_true_label_column:
         payload["true_label"] = [None] * len(species)
@@ -2737,7 +2706,6 @@ def _fit_final_refit_sample_set(
 def run_final_refit(
     config: AppConfig,
     split_manifest: pl.DataFrame,
-    cv_threshold: float,
 ) -> FinalRefitArtifacts:
     """Refit final model(s) on full training pool and predict external/inference pools."""
     split_manifest = _with_contrast_group_column(config, split_manifest)
@@ -3048,12 +3016,11 @@ def run_final_refit(
         None if uncertainty_std is None else uncertainty_std[external_count:]
     )
 
-    fixed_threshold = float(config.report.fixed_probability_threshold)
+    fixed_threshold = _FIXED_PROBABILITY_THRESHOLD
     pred_external = _build_prediction_table(
         species=external_species,
         prob=external_prob,
         fixed_threshold=fixed_threshold,
-        cv_threshold=cv_threshold,
         uncertainty_std=external_uncertainty,
         true_label=external_true_label,
         include_true_label_column=True,
@@ -3062,7 +3029,6 @@ def run_final_refit(
         species=inference_species,
         prob=inference_prob,
         fixed_threshold=fixed_threshold,
-        cv_threshold=cv_threshold,
         uncertainty_std=inference_uncertainty,
         include_true_label_column=True,
     )
@@ -3566,7 +3532,7 @@ def run_outer_cv(
     polars_warning = _polars_thread_pool_warning(config)
     if polars_warning is not None:
         warnings.append(polars_warning)
-    fixed_threshold = float(config.report.fixed_probability_threshold)
+    fixed_threshold = _FIXED_PROBABILITY_THRESHOLD
     selection_active = _selection_is_active(config)
 
     fold_metric_list: list[dict[str, float]] = []
@@ -3704,24 +3670,14 @@ def run_outer_cv(
 
     metrics_df = pl.DataFrame(metric_rows).sort(["aggregate_scope", "fold_id", "metric"])
     loss_by_split_df = pl.DataFrame(loss_rows).sort(["fold_id", "split"])
-    cv_threshold, threshold_warning = _derive_cv_threshold(config, oof_y, oof_prob)
-    if threshold_warning is not None:
-        warnings.append(threshold_warning)
     thresholds_df = pl.DataFrame(
         [
             {
                 "threshold_name": "fixed_probability_threshold",
                 "threshold_value": fixed_threshold,
-                "source": "config",
+                "source": "constant",
                 "selection_metric": "NA",
                 "selection_scope": "NA",
-            },
-            {
-                "threshold_name": "cv_derived_threshold",
-                "threshold_value": cv_threshold,
-                "source": "oof_predictions",
-                "selection_metric": config.report.auto_threshold_selection_metric,
-                "selection_scope": "outer_cv",
             },
         ]
     ).sort("threshold_name")

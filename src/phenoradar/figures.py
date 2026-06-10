@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import matplotlib
 import numpy as np
@@ -17,8 +17,6 @@ from matplotlib.patches import Patch
 from matplotlib.ticker import MaxNLocator
 from sklearn.metrics import (
     average_precision_score,
-    balanced_accuracy_score,
-    matthews_corrcoef,
     precision_recall_curve,
     roc_auc_score,
     roc_curve,
@@ -299,23 +297,6 @@ def _place_x_axis_at_zero(ax: Any) -> None:
     ax.xaxis.set_label_position("bottom")
 
 
-def _metric_score(
-    y_true: np.ndarray, prob: np.ndarray, threshold: float, metric: str
-) -> float:
-    pred = (prob >= threshold).astype(int)
-    if metric == "mcc":
-        return float(matthews_corrcoef(y_true, pred))
-    return float(balanced_accuracy_score(y_true, pred))
-
-
-def _threshold_metric_axis_label(metric: str) -> str:
-    if metric == "mcc":
-        return "MCC score"
-    if metric == "balanced_accuracy":
-        return "Balanced accuracy score"
-    return f"{metric} score"
-
-
 def _cv_metrics_overview(metrics_cv: pl.DataFrame, out_path: Path) -> None:
     required_columns = {"aggregate_scope", "fold_id", "metric", "metric_value"}
     if not required_columns.issubset(metrics_cv.columns):
@@ -575,131 +556,6 @@ def _final_refit_loss_by_split(loss_by_split_final_refit: pl.DataFrame, out_path
         x_label="Log Loss",
         y_tick_fontsize=_TICK_FONTSIZE,
     )
-
-
-def _threshold_selection_curve(
-    oof_predictions: pl.DataFrame,
-    thresholds: pl.DataFrame,
-    selection_metric: str,
-    out_path: Path,
-) -> None:
-    required_oof = {"label", "prob"}
-    if not required_oof.issubset(oof_predictions.columns):
-        raise FigureError("prediction_cv.tsv schema is invalid for threshold_selection_curve.svg")
-
-    y_true = np.array(oof_predictions.select("label").to_series().to_list(), dtype=int)
-    prob = np.array(oof_predictions.select("prob").to_series().to_list(), dtype=float)
-    if y_true.size == 0:
-        raise FigureError("prediction_cv.tsv is empty; cannot plot threshold selection curve")
-
-    finite_prob = prob[np.isfinite(prob)]
-    candidate_thresholds = np.unique(np.concatenate([np.array([0.0, 1.0]), finite_prob]))
-    score_points: list[tuple[float, float]] = []
-    for threshold in candidate_thresholds.tolist():
-        score = _metric_score(y_true, prob, float(threshold), selection_metric)
-        if np.isnan(score):
-            continue
-        score_points.append((float(threshold), float(score)))
-
-    cv_threshold_values = (
-        thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
-        .select("threshold_value")
-        .to_series()
-        .to_list()
-    )
-    selected_threshold = float(cv_threshold_values[0]) if len(cv_threshold_values) == 1 else 0.5
-
-    fig, ax = plt.subplots(
-        figsize=_figure_size_inches(_NATURE_DOUBLE_COLUMN_WIDTH_PX, 360),
-        dpi=_FIG_DPI,
-    )
-    fig.patch.set_facecolor("white")
-
-    if score_points:
-        score_points = sorted(score_points, key=lambda item: item[0])
-        thresholds_plot = np.array([point[0] for point in score_points], dtype=float)
-        scores_plot = np.array([point[1] for point in score_points], dtype=float)
-        score_min, score_max = _score_domain_with_zero_floor(scores_plot)
-        metric_axis_label = _threshold_metric_axis_label(selection_metric)
-
-        ax.plot(
-            thresholds_plot,
-            scores_plot,
-            color=_COLOR_BLUE,
-            linewidth=1.0,
-            label="Threshold score curve",
-        )
-        ax.set_xlim(0.0, 1.0)
-        ax.set_ylim(score_min, score_max)
-        ax.set_xlabel("Threshold", fontsize=_LABEL_FONTSIZE)
-        ax.set_ylabel(metric_axis_label, fontsize=_LABEL_FONTSIZE)
-        ax.grid(color=_GRID_COLOR, linewidth=0.5)
-        ax.set_axisbelow(True)
-        _place_x_axis_at_zero(ax)
-
-        legend_handles: list[Line2D] = [
-            Line2D(
-                [0],
-                [0],
-                color=_COLOR_BLUE,
-                linewidth=1.0,
-                label="Threshold score curve",
-            )
-        ]
-        if np.isfinite(selected_threshold):
-            ax.axvline(
-                selected_threshold,
-                color=_TRAIT_NEGATIVE_COLOR,
-                linewidth=0.8,
-                linestyle=(0, (5, 4)),
-                label="CV-derived threshold",
-            )
-            legend_handles.append(
-                Line2D(
-                    [0],
-                    [0],
-                    color=_TRAIT_NEGATIVE_COLOR,
-                    linewidth=0.8,
-                    linestyle=(0, (5, 4)),
-                    label="CV-derived threshold",
-                )
-            )
-
-        selected_score = _metric_score(y_true, prob, selected_threshold, selection_metric)
-        if np.isfinite(selected_score) and np.isfinite(selected_threshold):
-            ax.scatter(
-                [selected_threshold],
-                [selected_score],
-                color=_TRAIT_NEGATIVE_COLOR,
-                s=18,
-                zorder=3,
-                label="Selected threshold score",
-            )
-            legend_handles.append(
-                Line2D(
-                    [0],
-                    [0],
-                    marker="o",
-                    color="none",
-                    markerfacecolor=_TRAIT_NEGATIVE_COLOR,
-                    markeredgecolor=_TRAIT_NEGATIVE_COLOR,
-                    markersize=3.2,
-                    label="Selected threshold score",
-                )
-            )
-        ax.legend(handles=legend_handles, loc="best", frameon=False)
-    else:
-        ax.axis("off")
-        ax.text(
-            0.02,
-            0.50,
-            "No valid threshold scores (all NaN)",
-            transform=ax.transAxes,
-            fontsize=_LABEL_FONTSIZE,
-        )
-
-    fig.subplots_adjust(left=0.08, right=0.99, top=0.96, bottom=0.15)
-    _save_svg_figure(fig, out_path)
 
 
 def _feature_importance_top(
@@ -3058,12 +2914,10 @@ def write_run_figures(
     run_dir: Path,
     metrics_cv: pl.DataFrame,
     oof_predictions: pl.DataFrame,
-    thresholds: pl.DataFrame,
     feature_importance: pl.DataFrame,
     coefficients: pl.DataFrame,
     ensemble_model_probs: pl.DataFrame | None,
     model_selection_trials: pl.DataFrame | None,
-    auto_threshold_metric: Literal["mcc", "balanced_accuracy"],
     feature_importance_by_fold: pl.DataFrame | None = None,
     coefficients_by_fold: pl.DataFrame | None = None,
     loss_by_split_cv: pl.DataFrame | None = None,
@@ -3091,12 +2945,6 @@ def write_run_figures(
         _final_refit_loss_by_split(
             loss_by_split_final_refit, figures_dir / "final_refit_loss_by_split.svg"
         )
-    _threshold_selection_curve(
-        oof_predictions,
-        thresholds,
-        selection_metric=auto_threshold_metric,
-        out_path=figures_dir / "threshold_selection_curve.svg",
-    )
     _feature_importance_top(
         feature_importance,
         figures_dir / "feature_importance_top.svg",

@@ -474,7 +474,7 @@ preprocess:
         load_and_resolve_config([cfg])
 
 
-def test_report_fixed_probability_threshold_must_be_between_zero_and_one(tmp_path: Path) -> None:
+def test_report_fixed_probability_threshold_is_no_longer_configurable(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path / "invalid.yml",
         """

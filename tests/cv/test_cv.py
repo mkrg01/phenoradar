@@ -19,7 +19,6 @@ from phenoradar.cv import (
     _build_estimator,
     _build_prediction_table,
     _compute_fold_metrics,
-    _derive_cv_threshold,
     _fit_estimator,
     _group_label_inverse_weights,
     _inner_cv_splits,
@@ -129,7 +128,7 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "validation",
     }
     threshold_names = set(cv_artifacts.thresholds.select("threshold_name").to_series().to_list())
-    assert threshold_names == {"fixed_probability_threshold", "cv_derived_threshold"}
+    assert threshold_names == {"fixed_probability_threshold"}
     assert {
         "feature",
         "importance_mean",
@@ -685,15 +684,8 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     split_artifacts = build_split_artifacts(config)
-    cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
-    cv_threshold = (
-        cv_artifacts.thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
-        .select("threshold_value")
-        .to_series()
-        .item()
-    )
 
-    refit_artifacts = run_final_refit(config, split_artifacts.split_manifest, float(cv_threshold))
+    refit_artifacts = run_final_refit(config, split_artifacts.split_manifest)
 
     assert refit_artifacts.pred_external_test.height == 1
     assert refit_artifacts.pred_inference.height == 1
@@ -705,7 +697,6 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
         "true_label",
         "prob",
         "pred_label_fixed_threshold",
-        "pred_label_cv_derived_threshold",
     }.issubset(
         refit_artifacts.pred_external_test.columns
     )
@@ -724,7 +715,6 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
         "species",
         "prob",
         "pred_label_fixed_threshold",
-        "pred_label_cv_derived_threshold",
         "true_label",
     }.issubset(
         refit_artifacts.pred_inference.columns
@@ -1146,47 +1136,6 @@ runtime:
     assert set(estimator_n_jobs) == {2}
 
 
-def test_derive_cv_threshold_prefers_smallest_threshold_on_tie(
-    tmp_path: Path, monkeypatch
-) -> None:
-    metadata, tpm = _write_fixture(tmp_path)
-    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
-    y_true = np.array([0, 1], dtype=int)
-    prob = np.array([0.25, 0.75], dtype=float)
-
-    monkeypatch.setattr("phenoradar.cv.matthews_corrcoef", lambda _y, _p: 0.5)
-
-    threshold, warning = _derive_cv_threshold(config, y_true, prob)
-
-    assert threshold == pytest.approx(0.0)
-    assert warning is None
-
-
-def test_derive_cv_threshold_falls_back_when_all_scores_nan(
-    tmp_path: Path, monkeypatch
-) -> None:
-    metadata, tpm = _write_fixture(tmp_path)
-    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
-    y_true = np.array([0, 1], dtype=int)
-    prob = np.array([0.25, 0.75], dtype=float)
-
-    monkeypatch.setattr("phenoradar.cv.matthews_corrcoef", lambda _y, _p: float("nan"))
-
-    threshold, warning = _derive_cv_threshold(config, y_true, prob)
-
-    assert threshold == pytest.approx(0.5)
-    assert warning is not None
-    assert "fallback to 0.5" in warning
-
-
-def test_derive_cv_threshold_rejects_empty_probabilities(tmp_path: Path) -> None:
-    metadata, tpm = _write_fixture(tmp_path)
-    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
-
-    with pytest.raises(CVError, match="empty prediction set"):
-        _derive_cv_threshold(config, np.array([], dtype=int), np.array([], dtype=float))
-
-
 def test_compute_fold_metrics_returns_nan_when_metrics_are_undefined() -> None:
     y_true = np.array([], dtype=int)
     prob = np.array([], dtype=float)
@@ -1566,7 +1515,6 @@ def test_build_prediction_table_rejects_probability_length_mismatch() -> None:
             species=["sp1", "sp2"],
             prob=np.array([0.5], dtype=float),
             fixed_threshold=0.5,
-            cv_threshold=0.4,
             uncertainty_std=None,
         )
 
@@ -1577,7 +1525,6 @@ def test_build_prediction_table_rejects_uncertainty_length_mismatch() -> None:
             species=["sp1", "sp2"],
             prob=np.array([0.2, 0.8], dtype=float),
             fixed_threshold=0.5,
-            cv_threshold=0.4,
             uncertainty_std=np.array([0.1], dtype=float),
         )
 
@@ -1588,7 +1535,6 @@ def test_build_prediction_table_rejects_true_label_length_mismatch() -> None:
             species=["sp1", "sp2"],
             prob=np.array([0.2, 0.8], dtype=float),
             fixed_threshold=0.5,
-            cv_threshold=0.4,
             uncertainty_std=None,
             true_label=np.array([1], dtype=int),
         )
@@ -1599,7 +1545,6 @@ def test_build_prediction_table_can_include_empty_true_label_column() -> None:
         species=["sp1", "sp2"],
         prob=np.array([0.2, 0.8], dtype=float),
         fixed_threshold=0.5,
-        cv_threshold=0.4,
         uncertainty_std=None,
         include_true_label_column=True,
     )
@@ -2524,15 +2469,8 @@ def test_run_final_refit_supports_no_external_or_inference_species(tmp_path: Pat
     )
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     split_artifacts = build_split_artifacts(config)
-    cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
-    cv_threshold = (
-        cv_artifacts.thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
-        .select("threshold_value")
-        .to_series()
-        .item()
-    )
 
-    refit = run_final_refit(config, split_artifacts.split_manifest, float(cv_threshold))
+    refit = run_final_refit(config, split_artifacts.split_manifest)
 
     assert refit.pred_external_test.height == 0
     assert refit.pred_inference.height == 0
@@ -2553,7 +2491,7 @@ def test_run_final_refit_rejects_empty_training_pool(tmp_path: Path) -> None:
     )
 
     with pytest.raises(CVError, match="No species available for final refit training pool"):
-        run_final_refit(config, split_manifest, cv_threshold=0.5)
+        run_final_refit(config, split_manifest)
 
 
 def test_run_outer_cv_wraps_interpretation_error(
@@ -2570,19 +2508,6 @@ def test_run_outer_cv_wraps_interpretation_error(
 
     with pytest.raises(CVError, match="forced interp fail"):
         run_outer_cv(config, split_artifacts.split_manifest)
-
-
-def test_run_outer_cv_appends_threshold_warning(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    metadata, tpm = _write_fixture(tmp_path)
-    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
-    split_artifacts = build_split_artifacts(config)
-    monkeypatch.setattr(cv_mod, "_derive_cv_threshold", lambda *_args, **_kwargs: (0.5, "warn"))
-
-    artifacts = run_outer_cv(config, split_artifacts.split_manifest)
-
-    assert "warn" in artifacts.warnings
 
 
 def test_prepare_source_selection_tpe_requires_selection_setting(
@@ -3878,38 +3803,11 @@ model_selection:
         )
 
 
-def test_derive_cv_threshold_supports_balanced_accuracy_metric(tmp_path: Path) -> None:
-    metadata, tpm = _write_fixture(tmp_path)
-    config = load_and_resolve_config(
-        [
-            _config_path(
-                tmp_path,
-                metadata,
-                tpm,
-                extra="""
-report:
-  auto_threshold_selection_metric: balanced_accuracy
-""".strip(),
-            )
-        ]
-    )
-
-    threshold, warning = _derive_cv_threshold(
-        config,
-        y_true=np.array([0, 1], dtype=int),
-        prob=np.array([0.2, 0.8], dtype=float),
-    )
-
-    assert threshold == pytest.approx(0.8)
-    assert warning is None
-
-
 def test_build_prediction_table_includes_uncertainty_when_provided() -> None:
     table = _build_prediction_table(
         species=["sp1", "sp2"],
         prob=np.array([0.2, 0.8], dtype=float),
         fixed_threshold=0.5,
-        cv_threshold=0.4,
         uncertainty_std=np.array([0.01, 0.02], dtype=float),
     )
 
@@ -3930,7 +3828,7 @@ def test_run_final_refit_rejects_null_label_or_group_values(tmp_path: Path) -> N
     )
 
     with pytest.raises(CVError, match="contains null label/group values"):
-        run_final_refit(config, split_manifest, cv_threshold=0.5)
+        run_final_refit(config, split_manifest)
 
 
 def _one_selected_candidate_result() -> cv_mod.SourceSelectionResult:
@@ -3966,7 +3864,7 @@ def test_run_final_refit_rejects_when_no_candidates_are_selected(
     )
 
     with pytest.raises(CVError, match="No candidates were selected for final_refit"):
-        run_final_refit(config, split_artifacts.split_manifest, cv_threshold=0.5)
+        run_final_refit(config, split_artifacts.split_manifest)
 
 
 def test_run_final_refit_rejects_single_class_sampled_training_set(
@@ -3987,7 +3885,7 @@ def test_run_final_refit_rejects_single_class_sampled_training_set(
     )
 
     with pytest.raises(CVError, match="Final refit sampled training set became single-class"):
-        run_final_refit(config, split_artifacts.split_manifest, cv_threshold=0.5)
+        run_final_refit(config, split_artifacts.split_manifest)
 
 
 def test_run_outer_cv_rejects_fold_with_empty_train_or_validation_split(tmp_path: Path) -> None:

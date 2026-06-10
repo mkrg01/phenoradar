@@ -337,18 +337,11 @@ def _emit_predict_summary(
 ) -> None:
     n_species = pred_predict.height
     n_positive = None
-    n_positive_cv = None
     if "pred_label_fixed_threshold" in pred_predict.columns:
         n_positive = int(pred_predict.filter(pl.col("pred_label_fixed_threshold") == 1).height)
-    if "pred_label_cv_derived_threshold" in pred_predict.columns:
-        n_positive_cv = int(
-            pred_predict.filter(pl.col("pred_label_cv_derived_threshold") == 1).height
-        )
     message = f"Prediction summary (n_species={n_species}"
     if n_positive is not None:
         message += f", n_pred_positive={n_positive}"
-    if n_positive_cv is not None:
-        message += f", n_pred_positive_cv={n_positive_cv}"
     message += ")."
     _progress_log("predict", message, start_time=start_time, log_verbosity=log_verbosity)
 
@@ -480,7 +473,7 @@ def _threshold_lookup(thresholds: pl.DataFrame) -> dict[str, float]:
         if raw_value is None:
             continue
         values[name] = float(raw_value)
-    for required_name in ("fixed_probability_threshold", "cv_derived_threshold"):
+    for required_name in ("fixed_probability_threshold",):
         if required_name not in values:
             raise typer.BadParameter(f"{required_name} was not found in thresholds table")
     return values
@@ -696,17 +689,6 @@ def run(
         raise typer.BadParameter(str(exc)) from exc
     _log("Outer cross-validation completed.")
 
-    _log("Derive CV threshold from thresholds table.")
-    cv_threshold_values = (
-        cv_artifacts.thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
-        .select("threshold_value")
-        .to_series()
-        .to_list()
-    )
-    if len(cv_threshold_values) != 1:
-        raise typer.BadParameter("cv_derived_threshold was not found in thresholds table")
-    cv_threshold = float(cv_threshold_values[0])
-    _log(f"Derived cv_derived_threshold={cv_threshold:.8f}.")
     _emit_run_metric_summary(
         cv_artifacts.metrics_cv,
         start_time=start_time,
@@ -722,7 +704,6 @@ def run(
             final_refit_artifacts = run_final_refit(
                 config=resolved,
                 split_manifest=split_artifacts.split_manifest,
-                cv_threshold=cv_threshold,
             )
         except CVError as exc:
             raise typer.BadParameter(str(exc)) from exc
@@ -1001,7 +982,6 @@ def run(
             run_dir=run_dir,
             metrics_cv=cv_artifacts.metrics_cv,
             oof_predictions=cv_artifacts.oof_predictions,
-            thresholds=cv_artifacts.thresholds,
             feature_importance=cv_artifacts.feature_importance,
             coefficients=cv_artifacts.coefficients,
             feature_importance_by_fold=cv_artifacts.feature_importance_by_fold,
@@ -1010,7 +990,6 @@ def run(
             model_selection_trials=cv_artifacts.model_selection_trials,
             model_selection_trials_summary=cv_artifacts.model_selection_trials_summary,
             model_selection_selected=model_selection_selected_table,
-            auto_threshold_metric=resolved.report.auto_threshold_selection_metric,
             loss_by_split_cv=cv_artifacts.loss_by_split_cv,
             loss_by_split_final_refit=(
                 None
@@ -1581,7 +1560,6 @@ def predict(
                 "true_label",
                 "prob",
                 "pred_label_fixed_threshold",
-                "pred_label_cv_derived_threshold",
                 "uncertainty_std",
             ]
             if name in pred_predict.columns

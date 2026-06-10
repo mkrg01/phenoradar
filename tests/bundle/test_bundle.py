@@ -88,13 +88,7 @@ def _export_and_load_bundle(
     config = load_and_resolve_config([_config(tmp_path, metadata, tpm, extra)])
     split_artifacts = build_split_artifacts(config)
     cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
-    cv_threshold = (
-        cv_artifacts.thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
-        .select("threshold_value")
-        .to_series()
-        .item()
-    )
-    refit = run_final_refit(config, split_artifacts.split_manifest, float(cv_threshold))
+    refit = run_final_refit(config, split_artifacts.split_manifest)
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -161,13 +155,7 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
     config = load_and_resolve_config([_config(tmp_path, metadata, tpm)])
     split_artifacts = build_split_artifacts(config)
     cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
-    cv_threshold = (
-        cv_artifacts.thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
-        .select("threshold_value")
-        .to_series()
-        .item()
-    )
-    refit = run_final_refit(config, split_artifacts.split_manifest, float(cv_threshold))
+    refit = run_final_refit(config, split_artifacts.split_manifest)
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -210,7 +198,6 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
         models=refit.models,
         probability_aggregation=config.ensemble.probability_aggregation,
         threshold_fixed=float(threshold_fixed),
-        threshold_cv_derived=float(cv_threshold),
         source_run_id=run_dir.name,
         expression_transform=config.preprocess.expression_transform.method,
         feature_scaling=config.preprocess.feature_scaling.method,
@@ -230,18 +217,15 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
         rtol=0.0,
         atol=1e-12,
     )
-    assert (
-        pred_df.select("pred_label_fixed_threshold", "pred_label_cv_derived_threshold").to_dicts()
-        == refit_pred_df.select("pred_label_fixed_threshold", "pred_label_cv_derived_threshold")
-        .to_dicts()
-    )
+    assert pred_df.select("pred_label_fixed_threshold").to_dicts() == refit_pred_df.select(
+        "pred_label_fixed_threshold"
+    ).to_dicts()
     assert warnings == refit_warnings
     assert pred_df.height == 6
     assert {
         "species",
         "prob",
         "pred_label_fixed_threshold",
-        "pred_label_cv_derived_threshold",
     }.issubset(pred_df.columns)
     assert bundle.source_run_id == run_dir.name
     assert isinstance(warnings, list)
@@ -279,13 +263,7 @@ def test_bundle_integrity_failure_on_tampered_file(tmp_path: Path) -> None:
     config = load_and_resolve_config([_config(tmp_path, metadata, tpm)])
     split_artifacts = build_split_artifacts(config)
     cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
-    cv_threshold = (
-        cv_artifacts.thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
-        .select("threshold_value")
-        .to_series()
-        .item()
-    )
-    refit = run_final_refit(config, split_artifacts.split_manifest, float(cv_threshold))
+    refit = run_final_refit(config, split_artifacts.split_manifest)
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -309,20 +287,16 @@ def test_bundle_integrity_failure_on_tampered_file(tmp_path: Path) -> None:
 def test_predict_with_bundle_uses_thresholds_from_loaded_bundle(tmp_path: Path) -> None:
     metadata, tpm = _fixture_data(tmp_path)
     config, bundle = _export_and_load_bundle(tmp_path, metadata, tpm)
-    bundle_low = replace(bundle, threshold_fixed=0.0, threshold_cv_derived=0.0)
-    bundle_high = replace(bundle, threshold_fixed=1.0, threshold_cv_derived=1.0)
+    bundle_low = replace(bundle, threshold_fixed=0.0)
+    bundle_high = replace(bundle, threshold_fixed=1.0)
 
     pred_low, _ = predict_with_bundle(config, bundle_low)
     pred_high, _ = predict_with_bundle(config, bundle_high)
 
     low_labels = set(pred_low.select("pred_label_fixed_threshold").to_series().to_list())
-    low_cv_labels = set(pred_low.select("pred_label_cv_derived_threshold").to_series().to_list())
     high_labels = set(pred_high.select("pred_label_fixed_threshold").to_series().to_list())
-    high_cv_labels = set(pred_high.select("pred_label_cv_derived_threshold").to_series().to_list())
     assert low_labels == {1}
-    assert low_cv_labels == {1}
     assert high_labels == {0}
-    assert high_cv_labels == {0}
 
 
 def test_predict_with_bundle_feature_alignment_missing_and_extra(tmp_path: Path) -> None:
@@ -497,13 +471,7 @@ model:
     )
     split_artifacts = build_split_artifacts(config)
     cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
-    cv_threshold = (
-        cv_artifacts.thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
-        .select("threshold_value")
-        .to_series()
-        .item()
-    )
-    refit = run_final_refit(config, split_artifacts.split_manifest, float(cv_threshold))
+    refit = run_final_refit(config, split_artifacts.split_manifest)
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()

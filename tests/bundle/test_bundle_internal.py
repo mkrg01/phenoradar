@@ -82,13 +82,7 @@ def _export_and_load_bundle(tmp_path: Path, metadata: Path, tpm: Path) -> tuple[
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     split_artifacts = build_split_artifacts(config)
     cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
-    cv_threshold = (
-        cv_artifacts.thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
-        .select("threshold_value")
-        .to_series()
-        .item()
-    )
-    refit = run_final_refit(config, split_artifacts.split_manifest, float(cv_threshold))
+    refit = run_final_refit(config, split_artifacts.split_manifest)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     resolved_config_path = run_dir / "resolved_config.yml"
@@ -110,13 +104,7 @@ def _prepare_export_inputs(
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     split_artifacts = build_split_artifacts(config)
     cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
-    cv_threshold = (
-        cv_artifacts.thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
-        .select("threshold_value")
-        .to_series()
-        .item()
-    )
-    refit = run_final_refit(config, split_artifacts.split_manifest, float(cv_threshold))
+    refit = run_final_refit(config, split_artifacts.split_manifest)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     resolved_config_path = run_dir / "resolved_config.yml"

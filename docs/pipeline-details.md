@@ -123,7 +123,7 @@ For each outer fold:
 After all folds:
 
 - write macro/micro aggregate metrics.
-- derive `cv_derived_threshold` from OOF predictions by scanning candidate thresholds.
+- write the configured fixed prediction threshold.
 - build interpretation tables (`feature_importance`, `coefficients`).
 
 ### 4) Final refit (`execution_stage=full_run`)
@@ -167,8 +167,8 @@ Inner-CV selection:
 - `selection_rule=best` ranks by mean inner-CV score.
 - `selection_rule=one_se` first identifies candidates within one standard error
   of the best mean score, then prefers the simpler candidate.
-- threshold-dependent candidate metrics (`mcc`/`balanced_accuracy`) use
-  `report.fixed_probability_threshold`; `log_loss` is threshold-independent.
+- threshold-dependent candidate metrics (`mcc`/`balanced_accuracy`) use the fixed
+  probability threshold `0.5`; `log_loss` is threshold-independent.
 
 ## Reproducibility and seeding
 
@@ -201,7 +201,6 @@ Inference:
 - run all bundled models.
 - aggregate probs by bundled aggregation mode.
 - derive `pred_label_fixed_threshold` by bundled fixed threshold.
-- derive `pred_label_cv_derived_threshold` by bundled CV-derived threshold.
 
 ## `report`: step-by-step
 

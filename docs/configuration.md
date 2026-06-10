@@ -94,9 +94,6 @@ ensemble:
   probability_aggregation: mean
 figures:
   top_features: 30
-report:
-  fixed_probability_threshold: 0.5
-  auto_threshold_selection_metric: mcc
 runtime:
   seed: 42
   n_jobs: 1
@@ -129,7 +126,6 @@ runtime:
 - `model_selection.search_strategy`: `grid` | `random` | `tpe`
 - `model_selection.selection_metric`: `mcc` | `balanced_accuracy` | `log_loss`
 - `model_selection.selection_rule`: `best` | `one_se`
-- `report.auto_threshold_selection_metric`: `mcc` | `balanced_accuracy`
 
 ## `data`
 
@@ -563,13 +559,8 @@ Unknown parameter names are rejected at training time.
 
 ## `report`
 
-- `report.fixed_probability_threshold`
-  - type: `float`
-  - default: `0.5`
-  - rule: must be in `[0, 1]`
-- `report.auto_threshold_selection_metric`
-  - type: `mcc | balanced_accuracy`
-  - default: `mcc`
+- No user-configurable report settings are currently defined.
+- Prediction labels use the fixed probability threshold `0.5`.
 
 ## `runtime`
 

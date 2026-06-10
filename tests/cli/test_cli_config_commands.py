@@ -77,7 +77,7 @@ def _stub_resolved_config(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         runtime=SimpleNamespace(execution_stage=execution_stage, seed=42),
-        report=SimpleNamespace(auto_threshold_selection_metric="mcc"),
+        report=SimpleNamespace(),
         figures=SimpleNamespace(top_features=top_features),
         model_selection=SimpleNamespace(),
         preprocess=SimpleNamespace(
@@ -124,11 +124,11 @@ def _stub_cv_artifacts(
     return SimpleNamespace(
         thresholds=pl.DataFrame(
             {
-                "threshold_name": ["fixed_probability_threshold", "cv_derived_threshold"],
-                "threshold_value": [0.5, 0.4],
-                "source": ["config", "oof_predictions"],
-                "selection_metric": ["NA", "mcc"],
-                "selection_scope": ["NA", "outer_cv"],
+                "threshold_name": ["fixed_probability_threshold"],
+                "threshold_value": [0.5],
+                "source": ["constant"],
+                "selection_metric": ["NA"],
+                "selection_scope": ["NA"],
             }
         ),
         warnings=[],
@@ -229,7 +229,6 @@ def _stub_final_refit_artifacts() -> SimpleNamespace:
                 "true_label": [1],
                 "prob": [0.7],
                 "pred_label_fixed_threshold": [1],
-                "pred_label_cv_derived_threshold": [1],
             }
         ),
         pred_inference=pl.DataFrame(
@@ -238,7 +237,6 @@ def _stub_final_refit_artifacts() -> SimpleNamespace:
                 "true_label": [None],
                 "prob": [0.6],
                 "pred_label_fixed_threshold": [1],
-                "pred_label_cv_derived_threshold": [1],
             }
         ),
         loss_by_split_final_refit=pl.DataFrame(
@@ -544,7 +542,6 @@ data:
     assert (run_dirs[0] / "model_bundle").exists()
     assert (run_dirs[0] / "figures" / "cv_metrics_overview.svg").exists()
     assert (run_dirs[0] / "figures" / "cv_loss_by_split.svg").exists()
-    assert (run_dirs[0] / "figures" / "threshold_selection_curve.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_importance_top.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_importance_by_fold_heatmap.svg").exists()
     assert (run_dirs[0] / "figures" / "coefficients_signed_top.svg").exists()
@@ -596,7 +593,6 @@ data:
     thresholds = pl.read_csv(run_dirs[0] / "thresholds.tsv", separator="\t")
     assert set(thresholds.select("threshold_name").to_series().to_list()) == {
         "fixed_probability_threshold",
-        "cv_derived_threshold",
     }
     pred_external = pl.read_csv(run_dirs[0] / "prediction_external_test.tsv", separator="\t")
     pred_inference = pl.read_csv(run_dirs[0] / "prediction_inference.tsv", separator="\t")
@@ -609,14 +605,12 @@ data:
         "true_label",
         "prob",
         "pred_label_fixed_threshold",
-        "pred_label_cv_derived_threshold",
     }.issubset(pred_external.columns)
     assert {
         "species",
         "true_label",
         "prob",
         "pred_label_fixed_threshold",
-        "pred_label_cv_derived_threshold",
     }.issubset(pred_inference.columns)
     assert "uncertainty_std" not in pred_external.columns
     assert "uncertainty_std" not in pred_inference.columns
@@ -640,14 +634,13 @@ data:
         "mcc",
     }.issubset(classification_summary.columns)
     assert classification_summary.filter((pl.col("mcc") < -1.0) | (pl.col("mcc") > 1.0)).height == 0
-    assert classification_summary.height == 8
+    assert classification_summary.height == 4
     assert set(classification_summary.select("pool").to_series().to_list()) == {
         "validation_oof",
         "external_test",
     }
     assert set(classification_summary.select("threshold_name").to_series().to_list()) == {
         "fixed_probability_threshold",
-        "cv_derived_threshold",
     }
     run_metadata = yaml.safe_load((run_dirs[0] / "run_metadata.json").read_text(encoding="utf-8"))
     assert "git_commit" in run_metadata
@@ -703,7 +696,6 @@ data:
     assert (run_dirs[0] / "model_sparsity_summary.tsv").exists()
     assert (run_dirs[0] / "figures" / "cv_metrics_overview.svg").exists()
     assert (run_dirs[0] / "figures" / "cv_loss_by_split.svg").exists()
-    assert (run_dirs[0] / "figures" / "threshold_selection_curve.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_importance_top.svg").exists()
     assert (run_dirs[0] / "figures" / "feature_importance_by_fold_heatmap.svg").exists()
     assert (run_dirs[0] / "figures" / "coefficients_signed_top.svg").exists()
@@ -729,7 +721,7 @@ data:
         run_dirs[0] / "classification_summary.tsv",
         separator="\t",
     )
-    assert classification_summary.height == 6
+    assert classification_summary.height == 3
     assert set(classification_summary.select("pool").to_series().to_list()) == {"validation_oof"}
 
 
@@ -1012,7 +1004,6 @@ data:
         "true_label",
         "prob",
         "pred_label_fixed_threshold",
-        "pred_label_cv_derived_threshold",
     }.issubset(pred_inference.columns)
     assert pred_inference.height == 6
     assert pred_inference.get_column("true_label").to_list() == ["NA"] * pred_inference.height
@@ -1250,44 +1241,6 @@ def test_config_fails_for_invalid_yaml(
     assert "Invalid YAML in config file" in result.output
 
 
-def test_run_fails_when_cv_threshold_is_missing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    runner = CliRunner()
-    monkeypatch.chdir(tmp_path)
-    config = _write(tmp_path / "config.yml", "{}\n")
-
-    monkeypatch.setattr(
-        "phenoradar.cli.load_and_resolve_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            runtime=SimpleNamespace(execution_stage="cv_only")
-        ),
-    )
-    monkeypatch.setattr(
-        "phenoradar.cli.build_split_artifacts",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            split_manifest=pl.DataFrame(),
-            fold_validation_groups=pl.DataFrame(),
-        ),
-    )
-    monkeypatch.setattr(
-        "phenoradar.cli.run_outer_cv",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            thresholds=pl.DataFrame(
-                {
-                    "threshold_name": ["fixed_probability_threshold"],
-                    "threshold_value": [0.5],
-                }
-            )
-        ),
-    )
-
-    result = runner.invoke(app, ["run", "-c", str(config)])
-
-    assert result.exit_code != 0
-    assert "cv_derived_threshold was not found in thresholds table" in result.output
-
-
 def test_predict_fails_when_predict_figure_generation_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1323,7 +1276,6 @@ data:
                     "species": ["sp1"],
                     "prob": [0.5],
                     "pred_label_fixed_threshold": [1],
-                    "pred_label_cv_derived_threshold": [1],
                 }
             ),
             [],
@@ -1668,7 +1620,6 @@ def test_predict_fails_when_input_provenance_collection_raises(
                     "species": ["sp1"],
                     "prob": [0.5],
                     "pred_label_fixed_threshold": [1],
-                    "pred_label_cv_derived_threshold": [1],
                 }
             ),
             [],

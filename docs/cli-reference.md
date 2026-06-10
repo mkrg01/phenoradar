@@ -81,7 +81,6 @@ Notes:
 - `figures/` includes:
   - `cv_metrics_overview.svg`
   - `cv_loss_by_split.svg`
-  - `threshold_selection_curve.svg`
   - `feature_importance_top.svg`
   - `feature_importance_by_fold_heatmap.svg`
   - `coefficients_signed_top.svg`

@@ -27,8 +27,8 @@ def _metadata() -> pl.DataFrame:
 def _thresholds() -> pl.DataFrame:
     return pl.DataFrame(
         {
-            "threshold_name": ["fixed_probability_threshold", "cv_derived_threshold"],
-            "threshold_value": [0.5, 0.7],
+            "threshold_name": ["fixed_probability_threshold"],
+            "threshold_value": [0.5],
         }
     )
 
@@ -195,7 +195,6 @@ def test_build_external_tree_prediction_annotation_keeps_external_species() -> N
                 "true_label": [0],
                 "prob": [0.9],
                 "pred_label_fixed_threshold": [1],
-                "pred_label_cv_derived_threshold": [1],
             }
         ),
         group_col="contrast_pair_id",
@@ -215,7 +214,7 @@ def test_build_external_tree_prediction_annotation_keeps_external_species() -> N
     ]
 
 
-def test_build_predict_tree_prediction_annotation_preserves_both_prediction_labels() -> None:
+def test_build_predict_tree_prediction_annotation_preserves_fixed_prediction_label() -> None:
     annotation = build_predict_tree_prediction_annotation(
         metadata=_metadata(),
         pred_predict=pl.DataFrame(
@@ -224,7 +223,6 @@ def test_build_predict_tree_prediction_annotation_preserves_both_prediction_labe
                 "true_label": [0, None],
                 "prob": [0.2, 0.6],
                 "pred_label_fixed_threshold": [0, 1],
-                "pred_label_cv_derived_threshold": [0, 0],
             }
         ),
         group_col="contrast_pair_id",
@@ -232,7 +230,6 @@ def test_build_predict_tree_prediction_annotation_preserves_both_prediction_labe
 
     assert annotation.select("species").to_series().to_list() == ["sp1", "sp4"]
     assert annotation.select("pred_label_fixed_threshold").to_series().to_list() == [0, 1]
-    assert annotation.select("pred_label_cv_derived_threshold").to_series().to_list() == [0, 0]
 
 
 def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extra(

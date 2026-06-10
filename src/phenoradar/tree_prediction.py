@@ -220,7 +220,7 @@ def write_predict_tree_prediction_artifacts(
         tracks=[
             "true_label",
             "prob",
-            "pred_label_cv_derived_threshold",
+            "pred_label_fixed_threshold",
             "uncertainty_std",
             "group_id",
         ],
@@ -375,7 +375,7 @@ def build_cv_tree_prediction_annotation(
 ) -> pl.DataFrame:
     """Build ggtree-friendly CV annotation for grouped validation species."""
     _require_columns(oof_predictions, {"fold_id", "species", "label", "prob"}, "prediction_cv.tsv")
-    threshold = _cv_derived_threshold(thresholds)
+    threshold = _fixed_probability_threshold(thresholds)
     predictions = oof_predictions.with_columns(
         pl.col("species").cast(pl.String, strict=False).str.strip_chars().alias("species"),
         pl.col("fold_id").cast(pl.String, strict=False).alias("fold_id"),
@@ -421,14 +421,14 @@ def build_external_tree_prediction_annotation(
     """Build ggtree-friendly external-test annotation."""
     _require_columns(
         pred_external_test,
-        {"species", "true_label", "prob", "pred_label_cv_derived_threshold"},
+        {"species", "true_label", "prob", "pred_label_fixed_threshold"},
         "prediction_external_test.tsv",
     )
     predictions = pred_external_test.with_columns(
         pl.col("species").cast(pl.String, strict=False).str.strip_chars().alias("species"),
         pl.col("true_label").cast(pl.Int8, strict=False).alias("true_label"),
         pl.col("prob").cast(pl.Float64, strict=False).alias("prob"),
-        pl.col("pred_label_cv_derived_threshold")
+        pl.col("pred_label_fixed_threshold")
         .cast(pl.Int8, strict=False)
         .alias("pred_label"),
     )
@@ -473,7 +473,6 @@ def build_predict_tree_prediction_annotation(
             "true_label",
             "prob",
             "pred_label_fixed_threshold",
-            "pred_label_cv_derived_threshold",
         },
         "prediction_inference.tsv",
     )
@@ -484,9 +483,6 @@ def build_predict_tree_prediction_annotation(
         pl.col("pred_label_fixed_threshold")
         .cast(pl.Int8, strict=False)
         .alias("pred_label_fixed_threshold"),
-        pl.col("pred_label_cv_derived_threshold")
-        .cast(pl.Int8, strict=False)
-        .alias("pred_label_cv_derived_threshold"),
     )
     if "uncertainty_std" not in predictions.columns:
         predictions = predictions.with_columns(
@@ -506,7 +502,6 @@ def build_predict_tree_prediction_annotation(
                 "true_label",
                 "prob",
                 "pred_label_fixed_threshold",
-                "pred_label_cv_derived_threshold",
                 "uncertainty_std",
                 "group_id",
                 "group_name",
@@ -674,15 +669,11 @@ def _require_columns(frame: pl.DataFrame, required: set[str], context: str) -> N
         raise TreePredictionError(f"Missing required columns in {context}: {', '.join(missing)}")
 
 
-def _cv_derived_threshold(thresholds: pl.DataFrame) -> float:
+def _fixed_probability_threshold(thresholds: pl.DataFrame) -> float:
     _require_columns(thresholds, {"threshold_name", "threshold_value"}, "thresholds.tsv")
-    row = thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
+    row = thresholds.filter(pl.col("threshold_name") == "fixed_probability_threshold")
     if row.height == 0:
-        row = thresholds.filter(pl.col("threshold_name") == "fixed_probability_threshold")
-    if row.height == 0:
-        raise TreePredictionError(
-            "thresholds.tsv must contain cv_derived_threshold or fixed_probability_threshold"
-        )
+        raise TreePredictionError("thresholds.tsv must contain fixed_probability_threshold")
     raw = row.select("threshold_value").to_series().to_list()[0]
     if raw is None:
         raise TreePredictionError("Selected threshold_value is null")
@@ -1240,7 +1231,7 @@ def _track_label(track: str) -> str:
         "true_label": "trait",
         "prob": "prob",
         "pred_label": "pred",
-        "pred_label_cv_derived_threshold": "pred_cv",
+        "pred_label_fixed_threshold": "pred",
         "uncertainty_std": "uncert",
         "group_id": "group",
         "fold_id": "fold",

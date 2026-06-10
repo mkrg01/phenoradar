@@ -69,7 +69,6 @@ def test_write_predict_figures_requires_uncertainty_when_requested(tmp_path) -> 
                     "species": ["sp1", "sp2"],
                     "prob": [0.1, 0.9],
                     "pred_label_fixed_threshold": [0, 1],
-                    "pred_label_cv_derived_threshold": [0, 1],
                 }
             ),
             require_uncertainty=True,
@@ -82,26 +81,7 @@ def test_write_run_figures_does_not_emit_ensemble_uncertainty(
     warnings = write_run_figures(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
-        oof_predictions=pl.DataFrame(
-            {
-                "fold_id": ["0", "0"],
-                "species": ["sp1", "sp2"],
-                "label": [0, 1],
-                "prob": [0.2, 0.8],
-            }
-        ),
-        thresholds=pl.DataFrame(
-            {
-                "threshold_name": [
-                    "fixed_probability_threshold",
-                    "cv_derived_threshold",
-                ],
-                "threshold_value": [0.5, 0.4],
-                "source": ["config", "oof_predictions"],
-                "selection_metric": ["NA", "mcc"],
-                "selection_scope": ["NA", "outer_cv"],
-            }
-        ),
+        oof_predictions=_minimal_oof(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=pl.DataFrame(
@@ -113,7 +93,6 @@ def test_write_run_figures_does_not_emit_ensemble_uncertainty(
             }
         ),
         model_selection_trials=None,
-        auto_threshold_metric="mcc",
     )
 
     figures_dir = tmp_path / "run" / "figures"
@@ -128,21 +107,6 @@ def _minimal_oof() -> pl.DataFrame:
             "species": ["sp1", "sp2", "sp3", "sp4"],
             "label": [0, 1, 0, 1],
             "prob": [0.2, 0.8, 0.3, 0.7],
-        }
-    )
-
-
-def _minimal_thresholds() -> pl.DataFrame:
-    return pl.DataFrame(
-        {
-            "threshold_name": [
-                "fixed_probability_threshold",
-                "cv_derived_threshold",
-            ],
-            "threshold_value": [0.5, 0.4],
-            "source": ["config", "oof_predictions"],
-            "selection_metric": ["NA", "mcc"],
-            "selection_scope": ["NA", "outer_cv"],
         }
     )
 
@@ -281,18 +245,6 @@ def test_place_x_axis_at_zero_moves_bottom_spine() -> None:
         figures_mod.plt.close(fig)
 
 
-def test_metric_score_supports_balanced_accuracy() -> None:
-    y_true = [0, 0, 1, 1]
-    prob = [0.1, 0.7, 0.4, 0.9]
-    score = figures_mod._metric_score(
-        y_true=np.array(y_true, dtype=int),
-        prob=np.array(prob, dtype=float),
-        threshold=0.5,
-        metric="balanced_accuracy",
-    )
-    assert score == pytest.approx(0.5)
-
-
 def _minimal_coefficients() -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -314,7 +266,6 @@ def test_write_predict_figures_writes_uncertainty_when_available(tmp_path: Path)
                 "species": ["sp1", "sp2"],
                 "prob": [0.1, 0.9],
                 "pred_label_fixed_threshold": [0, 1],
-                "pred_label_cv_derived_threshold": [0, 1],
                 "uncertainty_std": [0.01, 0.02],
             }
         ),
@@ -334,7 +285,6 @@ def test_write_predict_figures_skips_uncertainty_when_not_required(tmp_path: Pat
                 "species": ["sp1", "sp2"],
                 "prob": [0.1, 0.9],
                 "pred_label_fixed_threshold": [0, 1],
-                "pred_label_cv_derived_threshold": [0, 1],
             }
         ),
         require_uncertainty=False,
@@ -350,20 +300,17 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         feature_importance_by_fold=_minimal_feature_importance_by_fold(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
         model_selection_trials=None,
-        auto_threshold_metric="mcc",
         loss_by_split_cv=_minimal_loss_by_split(),
     )
 
     figures_dir = tmp_path / "run" / "figures"
     assert (figures_dir / "cv_metrics_overview.svg").exists()
     assert (figures_dir / "cv_loss_by_split.svg").exists()
-    assert (figures_dir / "threshold_selection_curve.svg").exists()
     assert (figures_dir / "feature_importance_top.svg").exists()
     assert (figures_dir / "feature_importance_by_fold_heatmap.svg").exists()
     assert (figures_dir / "coefficients_signed_top.svg").exists()
@@ -381,12 +328,10 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
         model_selection_trials=None,
-        auto_threshold_metric="mcc",
         feature_filter_counts_summary=_minimal_feature_filter_counts_summary(),
         feature_filter_funnel_stage_order=[
             "n_features_before",
@@ -432,12 +377,10 @@ def test_write_run_figures_writes_external_trait_probability_when_available(tmp_
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
         model_selection_trials=None,
-        auto_threshold_metric="mcc",
         loss_by_split_final_refit=_minimal_final_refit_loss_by_split(),
         pred_external_test=pl.DataFrame(
             {
@@ -537,7 +480,6 @@ def test_write_run_figures_ignores_empty_model_selection_trials_when_provided(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
@@ -551,7 +493,6 @@ def test_write_run_figures_ignores_empty_model_selection_trials_when_provided(
                 "metric_value": pl.Float64,
             }
         ),
-        auto_threshold_metric="mcc",
     )
 
     figures_dir = tmp_path / "run" / "figures"
@@ -566,7 +507,6 @@ def test_write_run_figures_writes_model_selection_trials_when_summary_provided(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
@@ -584,7 +524,6 @@ def test_write_run_figures_writes_model_selection_trials_when_summary_provided(
                 "metric_value_std": [0.02, 0.03, 0.01, 0.02],
             }
         ),
-        auto_threshold_metric="mcc",
     )
 
     figures_dir = tmp_path / "run" / "figures"
@@ -601,7 +540,6 @@ def test_write_run_figures_uses_log_loss_axis_label_for_model_selection_trials(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
@@ -619,7 +557,6 @@ def test_write_run_figures_uses_log_loss_axis_label_for_model_selection_trials(
                 "metric_value_std": [0.02, 0.03],
             }
         ),
-        auto_threshold_metric="mcc",
     )
 
     figures_dir = tmp_path / "run" / "figures"
@@ -635,7 +572,6 @@ def test_write_run_figures_hides_fixed_params_in_model_selection_labels(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
@@ -656,7 +592,6 @@ def test_write_run_figures_hides_fixed_params_in_model_selection_labels(
                 "metric_value_std": [0.02, 0.03],
             }
         ),
-        auto_threshold_metric="mcc",
     )
 
     figures_dir = tmp_path / "run" / "figures"
@@ -715,14 +650,12 @@ def test_write_run_figures_writes_one_se_model_selection_figure(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
         model_selection_trials=None,
         model_selection_trials_summary=summary,
         model_selection_selected=selected,
-        auto_threshold_metric="mcc",
     )
 
     figures_dir = tmp_path / "run" / "figures"
@@ -765,13 +698,11 @@ def test_write_run_figures_limits_model_selection_sample_sets_per_fold(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
         model_selection_trials=None,
         model_selection_trials_summary=summary,
-        auto_threshold_metric="mcc",
     )
 
     figures_dir = tmp_path / "run" / "figures"
@@ -787,7 +718,6 @@ def test_write_run_figures_ignores_empty_ensemble_inputs(tmp_path: Path) -> None
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=pl.DataFrame(
@@ -799,7 +729,6 @@ def test_write_run_figures_ignores_empty_ensemble_inputs(tmp_path: Path) -> None
             }
         ),
         model_selection_trials=None,
-        auto_threshold_metric="mcc",
     )
 
     figures_dir = tmp_path / "run" / "figures"
@@ -819,17 +748,13 @@ def test_write_run_figures_collects_warning_when_roc_curves_cannot_be_drawn(tmp_
                 "prob": [0.2, 0.8, 0.3, 0.7],
             }
         ),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
         model_selection_trials=None,
-        auto_threshold_metric="mcc",
     )
 
     assert any("no folds with both labels" in warning for warning in warnings)
-    figures_dir = tmp_path / "run" / "figures"
-    assert (figures_dir / "threshold_selection_curve.svg").exists()
 
 
 def test_write_run_figures_rejects_invalid_metrics_schema(tmp_path: Path) -> None:
@@ -838,12 +763,10 @@ def test_write_run_figures_rejects_invalid_metrics_schema(tmp_path: Path) -> Non
             run_dir=tmp_path / "run",
             metrics_cv=pl.DataFrame({"aggregate_scope": ["macro"]}),
             oof_predictions=_minimal_oof(),
-            thresholds=_minimal_thresholds(),
             feature_importance=_minimal_feature_importance(),
             coefficients=_minimal_coefficients(),
             ensemble_model_probs=None,
             model_selection_trials=None,
-            auto_threshold_metric="mcc",
         )
 
 
@@ -860,12 +783,10 @@ def test_write_run_figures_rejects_metrics_without_aggregate_rows(tmp_path: Path
                 }
             ),
             oof_predictions=_minimal_oof(),
-            thresholds=_minimal_thresholds(),
             feature_importance=_minimal_feature_importance(),
             coefficients=_minimal_coefficients(),
             ensemble_model_probs=None,
             model_selection_trials=None,
-            auto_threshold_metric="mcc",
         )
 
 
@@ -878,7 +799,6 @@ def test_write_predict_figures_rejects_empty_prediction_table(tmp_path: Path) ->
                     "species": pl.String,
                     "prob": pl.Float64,
                     "pred_label_fixed_threshold": pl.Int64,
-                    "pred_label_cv_derived_threshold": pl.Int64,
                 }
             ),
             require_uncertainty=False,
@@ -936,7 +856,6 @@ def test_write_run_figures_ignores_ensemble_model_probs_for_figure_generation(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=pl.DataFrame(
@@ -948,7 +867,6 @@ def test_write_run_figures_ignores_ensemble_model_probs_for_figure_generation(
             }
         ),
         model_selection_trials=None,
-        auto_threshold_metric="mcc",
     )
 
     figures_dir = tmp_path / "run" / "figures"
@@ -963,7 +881,6 @@ def test_write_run_figures_ignores_model_selection_trials_with_all_null_metrics(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
@@ -977,71 +894,11 @@ def test_write_run_figures_ignores_model_selection_trials_with_all_null_metrics(
                 "metric_value": [None],
             }
         ),
-        auto_threshold_metric="mcc",
     )
 
     figures_dir = tmp_path / "run" / "figures"
     assert not (figures_dir / "model_selection_trials.svg").exists()
     assert warnings == []
-
-
-def test_threshold_selection_curve_rejects_invalid_schema(tmp_path: Path) -> None:
-    with pytest.raises(FigureError, match="prediction_cv.tsv schema is invalid"):
-        figures_mod._threshold_selection_curve(
-            oof_predictions=pl.DataFrame({"prob": [0.1, 0.9]}),
-            thresholds=_minimal_thresholds(),
-            selection_metric="mcc",
-            out_path=tmp_path / "threshold_selection_curve.svg",
-        )
-
-
-def test_threshold_selection_curve_rejects_empty_predictions(tmp_path: Path) -> None:
-    with pytest.raises(FigureError, match="prediction_cv.tsv is empty"):
-        figures_mod._threshold_selection_curve(
-            oof_predictions=pl.DataFrame(
-                schema={
-                    "label": pl.Int64,
-                    "prob": pl.Float64,
-                }
-            ),
-            thresholds=_minimal_thresholds(),
-            selection_metric="mcc",
-            out_path=tmp_path / "threshold_selection_curve.svg",
-        )
-
-
-def test_threshold_selection_curve_handles_all_nan_scores(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(figures_mod, "_metric_score", lambda *_args, **_kwargs: float("nan"))
-    out_path = tmp_path / "threshold_selection_curve.svg"
-
-    figures_mod._threshold_selection_curve(
-        oof_predictions=pl.DataFrame({"label": [0, 1], "prob": [0.1, 0.9]}),
-        thresholds=_minimal_thresholds(),
-        selection_metric="mcc",
-        out_path=out_path,
-    )
-
-    assert "No valid threshold scores" in out_path.read_text(encoding="utf-8")
-
-
-def test_threshold_selection_curve_labels_legend_and_nonnegative_axis(tmp_path: Path) -> None:
-    out_path = tmp_path / "threshold_selection_curve.svg"
-
-    figures_mod._threshold_selection_curve(
-        oof_predictions=pl.DataFrame({"label": [0, 1], "prob": [0.1, 0.9]}),
-        thresholds=_minimal_thresholds(),
-        selection_metric="mcc",
-        out_path=out_path,
-    )
-
-    svg = out_path.read_text(encoding="utf-8")
-    assert "MCC score" in svg
-    assert "Threshold score curve" in svg
-    assert "CV-derived threshold" in svg
-    assert "Selected threshold score" in svg
-    assert ">−" not in svg
 
 
 def test_species_probability_by_trait_rejects_invalid_schema(tmp_path: Path) -> None:

@@ -53,7 +53,7 @@ Always written:
   - current `metric` value: `log_loss`
 - `thresholds.tsv`
   - columns: `threshold_name`, `threshold_value`, `source`, `selection_metric`, `selection_scope`
-  - threshold names: `fixed_probability_threshold`, `cv_derived_threshold`
+  - threshold names: `fixed_probability_threshold`
 - `feature_importance.tsv`
   - columns: `feature`, `importance_mean`, `importance_std`, `n_models`, `n_folds`, `method`
 - `feature_importance_by_fold.tsv`
@@ -119,7 +119,6 @@ Always written:
   - always attempts:
     - `cv_metrics_overview.svg`
     - `cv_loss_by_split.svg`
-    - `threshold_selection_curve.svg`
     - `feature_importance_top.svg`
     - `feature_importance_by_fold_heatmap.svg`
     - `coefficients_signed_top.svg`
@@ -140,12 +139,12 @@ Conditionally written:
 - `prediction_external_test.tsv` (`full_run` only)
   - columns:
     - `species`, `true_label`, `prob`
-    - `pred_label_fixed_threshold`, `pred_label_cv_derived_threshold`
+    - `pred_label_fixed_threshold`
     - optional `uncertainty_std`
 - `prediction_inference.tsv` (`full_run` only)
   - columns:
     - `species`, `true_label`, `prob`
-    - `pred_label_fixed_threshold`, `pred_label_cv_derived_threshold`
+    - `pred_label_fixed_threshold`
     - optional `uncertainty_std`
   - `true_label` values are `NA` because inference labels are unknown
 - `loss_by_split_final_refit.tsv` (`full_run` only)
@@ -223,14 +222,9 @@ Conditionally written:
 #### `thresholds.tsv`
 
 - `fixed_probability_threshold`:
-  - Comes from config (`report.fixed_probability_threshold`).
+  - Constant probability threshold `0.5`.
   - Used for `pred_label_fixed_threshold` and threshold-dependent metrics in CV.
-- `cv_derived_threshold`:
-  - Chosen from out-of-fold probabilities to maximize
-    `report.auto_threshold_selection_metric` (`mcc` or `balanced_accuracy`).
-  - Used for `pred_label_cv_derived_threshold`.
-- `selection_scope`:
-  - `outer_cv` indicates threshold was derived from CV OOF predictions.
+- `selection_scope` is `NA` because the threshold is fixed rather than selected from CV.
 
 #### `loss_by_split_cv.tsv`
 
@@ -300,7 +294,6 @@ Conditionally written:
 
 - `prob`: predicted probability of label `1`.
 - `pred_label_fixed_threshold`: hard label from fixed threshold.
-- `pred_label_cv_derived_threshold`: hard label from CV-derived threshold.
 - `true_label`:
   - present in `prediction_external_test.tsv` (known trait labels).
   - present in `prediction_inference.tsv` as `NA` (labels are unknown).
@@ -314,8 +307,7 @@ Conditionally written:
 - External-test columns: `label`, `species`, `true_label`, `prob`, `pred_label`,
   `uncertainty_std`, `group_id`, `group_name`.
 - Predict columns: `label`, `species`, `true_label`, `prob`,
-  `pred_label_fixed_threshold`, `pred_label_cv_derived_threshold`, `uncertainty_std`,
-  `group_id`, `group_name`.
+  `pred_label_fixed_threshold`, `uncertainty_std`, `group_id`, `group_name`.
 - The annotation TSV retains predicted species even when a species is absent from the tree;
   Toytree SVG output is pruned to species present in the tree.
 
@@ -431,8 +423,7 @@ Conditionally written:
   - Matthews correlation coefficient in `[-1, 1]`.
   - `1` is perfect agreement, `0` is no better than random-like agreement, `-1` is total disagreement.
 - `threshold_name`:
-  - compare classification tradeoffs under `fixed_probability_threshold` and
-    `cv_derived_threshold`.
+  - currently `fixed_probability_threshold`.
 
 #### `model_selection_trials.tsv` (when candidate selection is enabled)
 
@@ -481,12 +472,6 @@ Conditionally written:
 - `cv_metrics_overview.svg`
   - Blue: macro, orange: micro.
   - Axis is drawn from observed metric range; the x-axis is placed at the zero score baseline.
-- `threshold_selection_curve.svg`
-  - x-axis: threshold, y-axis: selected score metric.
-  - The x-axis is placed at the zero score baseline; nonnegative score ranges are not
-    padded below zero.
-  - Legend entries identify the threshold score curve, chosen `cv_derived_threshold`,
-    and selected-threshold score marker.
 - `cv_loss_by_split.svg`
   - Fold-wise final `log_loss` comparison of `train` vs `validation`.
   - Useful for quick overfitting diagnostics without per-iteration learning curves.
@@ -567,7 +552,7 @@ Conditionally written:
 - `prediction_inference.tsv`
   - columns:
     - `species`, `true_label`, `prob`
-    - `pred_label_fixed_threshold`, `pred_label_cv_derived_threshold`
+    - `pred_label_fixed_threshold`
     - optional `uncertainty_std`
   - `true_label` values are `NA` because inference labels are unknown
   - `prob` is predicted probability of label `1`

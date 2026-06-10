@@ -24,7 +24,6 @@ SearchStrategy = Literal["grid", "random", "tpe"]
 CandidateSourcePolicy = Literal["per_sample_set", "reuse_first_sample_set"]
 SelectionMetricName = Literal["mcc", "balanced_accuracy", "log_loss"]
 SelectionRule = Literal["best", "one_se"]
-ThresholdSelectionMetricName = Literal["mcc", "balanced_accuracy"]
 CorrelationMethod = Literal["pearson", "spearman"]
 ExpressionTransformMethod = Literal["none", "log1p", "sample_rank", "sample_percentile_rank"]
 FeatureScalingMethod = Literal["none", "standard"]
@@ -385,16 +384,9 @@ class ModelSelectionConfig(StrictModel):
 
 
 class ReportConfig(StrictModel):
-    """Threshold derivation settings."""
+    """Prediction threshold settings."""
 
-    fixed_probability_threshold: float = 0.5
-    auto_threshold_selection_metric: ThresholdSelectionMetricName = "mcc"
-
-    @model_validator(mode="after")
-    def validate_thresholds(self) -> ReportConfig:
-        if not (0 <= self.fixed_probability_threshold <= 1):
-            raise ValueError("report.fixed_probability_threshold must be between 0 and 1")
-        return self
+    pass
 
 
 class FiguresConfig(StrictModel):
