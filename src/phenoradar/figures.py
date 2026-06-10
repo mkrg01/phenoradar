@@ -478,7 +478,7 @@ def _cv_loss_by_split(loss_by_split_cv: pl.DataFrame, out_path: Path) -> None:
     ax.set_xticks(x_positions)
     ax.set_xticklabels([str(fold_id) for fold_id in fold_ids], fontsize=_TICK_FONTSIZE)
     ax.set_xlabel("CV fold", fontsize=_LABEL_FONTSIZE)
-    ax.set_ylabel("log_loss", fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel("Log loss", fontsize=_LABEL_FONTSIZE)
     ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
     ax.legend(loc="upper right", frameon=False)

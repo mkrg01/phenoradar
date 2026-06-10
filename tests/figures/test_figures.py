@@ -302,7 +302,10 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
     assert external_figures_dir.is_dir()
     assert inference_figures_dir.is_dir()
     assert (cv_figures_dir / "cv_metrics_overview.svg").exists()
-    assert (cv_figures_dir / "cv_loss_by_split.svg").exists()
+    cv_loss_path = cv_figures_dir / "cv_loss_by_split.svg"
+    assert cv_loss_path.exists()
+    label_y, viewbox_height = _svg_text_y_and_viewbox_height(cv_loss_path, "Log loss")
+    assert label_y < viewbox_height
     assert (cv_figures_dir / "feature_importance_top.svg").exists()
     assert (cv_figures_dir / "feature_importance_by_fold_heatmap.svg").exists()
     assert (cv_figures_dir / "coefficients_signed_top.svg").exists()
