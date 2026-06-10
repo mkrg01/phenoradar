@@ -383,6 +383,7 @@ def test_write_run_figures_writes_external_trait_probability_when_available(tmp_
                 "species": ["sp5", "sp6"],
                 "true_label": [0, 1],
                 "prob": [0.3, 0.7],
+                "pred_label_fixed_threshold": [0, 1],
             }
         ),
         pred_inference=pl.DataFrame(
@@ -401,6 +402,9 @@ def test_write_run_figures_writes_external_trait_probability_when_available(tmp_
     label_y, viewbox_height = _svg_text_y_and_viewbox_height(final_refit_loss_path, "Log Loss")
     assert label_y < viewbox_height
     assert (external_figures_dir / "external_species_probability_by_trait.svg").exists()
+    assert (external_figures_dir / "external_confusion_matrix.svg").exists()
+    assert (external_figures_dir / "external_roc_curve.svg").exists()
+    assert (external_figures_dir / "external_pr_curve.svg").exists()
     assert (inference_figures_dir / "inference_probability_distribution.svg").exists()
     assert not (tmp_path / "run" / "figures" / "cv_metrics_overview.svg").exists()
     assert warnings == []
@@ -753,6 +757,35 @@ def test_write_run_figures_collects_warning_when_roc_curves_cannot_be_drawn(tmp_
     )
 
     assert any("no folds with both labels" in warning for warning in warnings)
+
+
+def test_write_run_figures_skips_external_curves_for_single_class_external_test(
+    tmp_path: Path,
+) -> None:
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_minimal_oof(),
+        feature_importance=_minimal_feature_importance(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        pred_external_test=pl.DataFrame(
+            {
+                "species": ["sp5", "sp6"],
+                "true_label": [1, 1],
+                "prob": [0.7, 0.9],
+                "pred_label_fixed_threshold": [1, 1],
+            }
+        ),
+    )
+
+    external_figures_dir = tmp_path / "run" / "external_test" / "figures"
+    assert (external_figures_dir / "external_confusion_matrix.svg").exists()
+    assert (external_figures_dir / "external_species_probability_by_trait.svg").exists()
+    assert not (external_figures_dir / "external_roc_curve.svg").exists()
+    assert not (external_figures_dir / "external_pr_curve.svg").exists()
+    assert any("external_test requires both labels" in warning for warning in warnings)
 
 
 def test_write_run_figures_rejects_invalid_metrics_schema(tmp_path: Path) -> None:

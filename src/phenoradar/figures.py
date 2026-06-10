@@ -80,6 +80,10 @@ _FEATURE_IMPORTANCE_HEATMAP_CMAP = LinearSegmentedColormap.from_list(
     "phenoradar_feature_importance_blues",
     ["#ffffff", "#deebf7", "#9ecae1", "#3182bd", "#08519c"],
 )
+_CONFUSION_MATRIX_CMAP = LinearSegmentedColormap.from_list(
+    "phenoradar_confusion_matrix_blues",
+    ["#ffffff", "#deebf7", "#9ecae1", "#3182bd", "#08519c"],
+)
 _COEFFICIENTS_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
 _COEFFICIENTS_AXIS_LABEL_FONTSIZE = _LABEL_FONTSIZE
 _FEATURE_FILTER_FIGURE_DEFAULT_STAGE_ORDER = (
@@ -1535,6 +1539,50 @@ def _cv_curve_inputs(oof_predictions: pl.DataFrame) -> tuple[np.ndarray, np.ndar
     return y_true, prob
 
 
+def _binary_prediction_curve_inputs(
+    predictions: pl.DataFrame,
+    *,
+    label_col: str,
+    source_table_name: str,
+    figure_name: str,
+    empty_message: str,
+    degenerate_message: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    required = {label_col, "prob"}
+    if not required.issubset(predictions.columns):
+        raise FigureError(f"{source_table_name} schema is invalid for {figure_name}")
+    if predictions.height == 0:
+        raise FigureError(empty_message)
+
+    data = (
+        predictions.select(
+            pl.col(label_col).cast(pl.Int64, strict=False).alias("__label"),
+            pl.col("prob").cast(pl.Float64, strict=False).alias("__prob"),
+        )
+        .filter(
+            pl.col("__label").is_not_null()
+            & pl.col("__prob").is_not_null()
+            & pl.col("__prob").is_finite()
+        )
+    )
+    if data.height == 0:
+        raise FigureError(empty_message)
+
+    labels = [int(v) for v in data.select("__label").to_series().to_list()]
+    non_binary = sorted({value for value in labels if value not in (0, 1)})
+    if non_binary:
+        values = ", ".join(str(value) for value in non_binary)
+        raise FigureError(
+            f"{source_table_name} contains non-binary labels for {figure_name}: {values}"
+        )
+
+    y_true = np.array(labels, dtype=int)
+    prob = np.array(data.select("__prob").to_series().to_list(), dtype=float)
+    if y_true.size == 0 or np.unique(y_true).size < 2:
+        raise FigureError(degenerate_message)
+    return y_true, prob
+
+
 def _roc_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     fpr, tpr, _ = roc_curve(y_true, prob)
     roc_auc = float(roc_auc_score(y_true, prob))
@@ -1605,6 +1653,270 @@ def _roc_pr_curves_cv(
     y_true, prob = _cv_curve_inputs(oof_predictions)
     _roc_curve_cv(y_true, prob, roc_out_path)
     _pr_curve_cv(y_true, prob, pr_out_path)
+
+
+def _roc_curve_external(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
+    fpr, tpr, _ = roc_curve(y_true, prob)
+    roc_auc = float(roc_auc_score(y_true, prob))
+
+    fig, ax = plt.subplots(
+        figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 340),
+        dpi=_FIG_DPI,
+    )
+    fig.patch.set_facecolor("white")
+
+    ax.plot([0.0, 1.0], [0.0, 1.0], color="#999999", linewidth=0.7, linestyle=(0, (4, 4)))
+    ax.plot(fpr, tpr, color=_COLOR_BLUE, linewidth=1.15)
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("False positive rate", fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel("True positive rate", fontsize=_LABEL_FONTSIZE)
+    ax.grid(color=_GRID_COLOR, linewidth=0.5)
+    ax.set_axisbelow(True)
+    ax.text(
+        0.97,
+        0.05,
+        f"ROC AUC = {roc_auc:.3f}",
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
+        fontsize=_ANNOTATION_FONTSIZE,
+        bbox={
+            "boxstyle": "square,pad=0.22",
+            "facecolor": "white",
+            "edgecolor": "#dddddd",
+            "linewidth": 0.5,
+        },
+    )
+
+    fig.subplots_adjust(left=0.13, right=0.98, top=0.98, bottom=0.14)
+    _save_svg_figure(fig, out_path)
+
+
+def _pr_curve_external(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
+    precision, recall, _ = precision_recall_curve(y_true, prob)
+    average_precision = float(average_precision_score(y_true, prob))
+    prevalence = float(np.mean(y_true))
+
+    fig, ax = plt.subplots(
+        figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 340),
+        dpi=_FIG_DPI,
+    )
+    fig.patch.set_facecolor("white")
+
+    ax.axhline(prevalence, color="#999999", linewidth=0.7, linestyle=(0, (4, 4)))
+    ax.plot(
+        np.asarray(recall, dtype=float),
+        np.asarray(precision, dtype=float),
+        color=_COLOR_ORANGE,
+        linewidth=1.15,
+        drawstyle="steps-post",
+    )
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("Recall", fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel("Precision", fontsize=_LABEL_FONTSIZE)
+    ax.grid(color=_GRID_COLOR, linewidth=0.5)
+    ax.set_axisbelow(True)
+    ax.text(
+        0.03,
+        0.05,
+        f"AP = {average_precision:.3f}\nPositive rate = {prevalence:.3f}",
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=_ANNOTATION_FONTSIZE,
+        bbox={
+            "boxstyle": "square,pad=0.22",
+            "facecolor": "white",
+            "edgecolor": "#dddddd",
+            "linewidth": 0.5,
+        },
+    )
+
+    fig.subplots_adjust(left=0.13, right=0.98, top=0.98, bottom=0.14)
+    _save_svg_figure(fig, out_path)
+
+
+def _external_roc_pr_curves(
+    pred_external_test: pl.DataFrame,
+    *,
+    roc_out_path: Path,
+    pr_out_path: Path,
+) -> None:
+    y_true, prob = _binary_prediction_curve_inputs(
+        pred_external_test,
+        label_col="true_label",
+        source_table_name="prediction_external_test.tsv",
+        figure_name="external ROC/PR curve figures",
+        empty_message=(
+            "prediction_external_test.tsv is empty; cannot draw external ROC/PR curve figures"
+        ),
+        degenerate_message=(
+            "External ROC/PR curve figures could not be drawn "
+            "(external_test requires both labels)"
+        ),
+    )
+    _roc_curve_external(y_true, prob, roc_out_path)
+    _pr_curve_external(y_true, prob, pr_out_path)
+
+
+def _format_metric_for_confusion(value: float | None) -> str:
+    if value is None or np.isnan(value):
+        return "NA"
+    return f"{value:.3f}"
+
+
+def _binary_metric_summary_from_counts(
+    *, tn: int, fp: int, fn: int, tp: int
+) -> dict[str, float | None]:
+    n_total = tn + fp + fn + tp
+    if n_total == 0:
+        return {
+            "accuracy": None,
+            "precision": None,
+            "recall": None,
+            "specificity": None,
+            "f1": None,
+            "mcc": None,
+        }
+
+    accuracy = float((tp + tn) / n_total)
+    precision = None if (tp + fp) == 0 else float(tp / (tp + fp))
+    recall = None if (tp + fn) == 0 else float(tp / (tp + fn))
+    specificity = None if (tn + fp) == 0 else float(tn / (tn + fp))
+    f1 = None
+    if precision is not None and recall is not None and (precision + recall) > 0.0:
+        f1 = float(2.0 * precision * recall / (precision + recall))
+    mcc_denom = np.sqrt(float((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn)))
+    mcc = float((tp * tn - fp * fn) / mcc_denom) if mcc_denom > 0.0 else 0.0
+    return {
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "specificity": specificity,
+        "f1": f1,
+        "mcc": mcc,
+    }
+
+
+def _external_confusion_matrix(pred_external_test: pl.DataFrame, out_path: Path) -> None:
+    required = {"true_label", "pred_label_fixed_threshold"}
+    if not required.issubset(pred_external_test.columns):
+        raise FigureError(
+            "prediction_external_test.tsv schema is invalid for external_confusion_matrix.svg"
+        )
+
+    data = (
+        pred_external_test.select(
+            pl.col("true_label").cast(pl.Int64, strict=False).alias("__true_label"),
+            pl.col("pred_label_fixed_threshold")
+            .cast(pl.Int64, strict=False)
+            .alias("__pred_label"),
+        )
+        .filter(pl.col("__true_label").is_not_null() & pl.col("__pred_label").is_not_null())
+    )
+    if data.height == 0:
+        raise FigureError(
+            "prediction_external_test.tsv is empty; cannot draw external_confusion_matrix.svg"
+        )
+
+    true_labels = [int(v) for v in data.select("__true_label").to_series().to_list()]
+    pred_labels = [int(v) for v in data.select("__pred_label").to_series().to_list()]
+    non_binary = sorted(
+        {value for value in [*true_labels, *pred_labels] if value not in (0, 1)}
+    )
+    if non_binary:
+        values = ", ".join(str(value) for value in non_binary)
+        raise FigureError(
+            "prediction_external_test.tsv contains non-binary labels for "
+            f"external_confusion_matrix.svg: {values}"
+        )
+
+    matrix = np.zeros((2, 2), dtype=int)
+    for true_label, pred_label in zip(true_labels, pred_labels, strict=True):
+        matrix[true_label, pred_label] += 1
+    tn = int(matrix[0, 0])
+    fp = int(matrix[0, 1])
+    fn = int(matrix[1, 0])
+    tp = int(matrix[1, 1])
+    metrics = _binary_metric_summary_from_counts(tn=tn, fp=fp, fn=fn, tp=tp)
+
+    max_count = max(int(matrix.max()), 1)
+    fig = plt.figure(
+        figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 330),
+        dpi=_FIG_DPI,
+    )
+    fig.patch.set_facecolor("white")
+    grid = fig.add_gridspec(1, 2, width_ratios=[1.0, 0.72], wspace=0.34)
+    ax = fig.add_subplot(grid[0, 0])
+    summary_ax = fig.add_subplot(grid[0, 1])
+
+    image = ax.imshow(matrix, cmap=_CONFUSION_MATRIX_CMAP, vmin=0, vmax=max_count)
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["0", "1"], fontsize=_TICK_FONTSIZE)
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(["0", "1"], fontsize=_TICK_FONTSIZE)
+    ax.set_xlabel("Predicted label", fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel("True label", fontsize=_LABEL_FONTSIZE)
+    ax.set_xticks(np.arange(-0.5, 2.0, 1.0), minor=True)
+    ax.set_yticks(np.arange(-0.5, 2.0, 1.0), minor=True)
+    ax.grid(which="minor", color="#ffffff", linewidth=0.9)
+    ax.tick_params(which="minor", bottom=False, left=False)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    row_totals = matrix.sum(axis=1)
+    for row_idx in range(2):
+        for col_idx in range(2):
+            count = int(matrix[row_idx, col_idx])
+            denominator = int(row_totals[row_idx])
+            percent = None if denominator == 0 else count / denominator
+            text = f"{count}"
+            if percent is not None:
+                text = f"{text}\n{percent:.1%}"
+            text_color = "#ffffff" if count > max_count * 0.55 else _AXIS_COLOR
+            ax.text(
+                col_idx,
+                row_idx,
+                text,
+                ha="center",
+                va="center",
+                fontsize=_LABEL_FONTSIZE,
+                fontfamily="monospace",
+                color=text_color,
+            )
+
+    colorbar = fig.colorbar(image, ax=ax, fraction=0.045, pad=0.04)
+    colorbar.set_label("Count", rotation=90, fontsize=_LABEL_FONTSIZE)
+    colorbar.ax.tick_params(labelsize=_TICK_FONTSIZE)
+
+    summary_ax.axis("off")
+    summary_lines = [
+        f"n = {data.height}",
+        f"Accuracy = {_format_metric_for_confusion(metrics['accuracy'])}",
+        f"Precision = {_format_metric_for_confusion(metrics['precision'])}",
+        f"Recall = {_format_metric_for_confusion(metrics['recall'])}",
+        f"Specificity = {_format_metric_for_confusion(metrics['specificity'])}",
+        f"F1 = {_format_metric_for_confusion(metrics['f1'])}",
+        f"MCC = {_format_metric_for_confusion(metrics['mcc'])}",
+    ]
+    summary_ax.text(
+        0.0,
+        0.95,
+        "\n".join(summary_lines),
+        transform=summary_ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=_MONO_FONTSIZE,
+        fontfamily="monospace",
+        linespacing=1.45,
+    )
+
+    fig.subplots_adjust(left=0.12, right=0.98, top=0.96, bottom=0.16)
+    _save_svg_figure(fig, out_path)
 
 
 def _report_metric_ranking(report_ranking: pl.DataFrame, out_path: Path) -> None:
@@ -2877,6 +3189,13 @@ def write_run_figures(
         )
     if pred_external_test is not None:
         try:
+            _external_confusion_matrix(
+                pred_external_test,
+                external_test_dir / "external_confusion_matrix.svg",
+            )
+        except FigureError as exc:
+            warnings.append(str(exc))
+        try:
             _species_probability_by_trait(
                 predictions=pred_external_test,
                 trait_col="true_label",
@@ -2886,6 +3205,14 @@ def write_run_figures(
                 subtitle="Final-refit probabilities grouped by external-test true labels",
                 source_table_name="prediction_external_test.tsv",
                 figure_name="external_species_probability_by_trait.svg",
+            )
+        except FigureError as exc:
+            warnings.append(str(exc))
+        try:
+            _external_roc_pr_curves(
+                pred_external_test,
+                roc_out_path=external_test_dir / "external_roc_curve.svg",
+                pr_out_path=external_test_dir / "external_pr_curve.svg",
             )
         except FigureError as exc:
             warnings.append(str(exc))

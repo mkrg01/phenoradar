@@ -93,6 +93,8 @@ Notes:
   - `cv/figures/pr_curve_cv.svg` (may be skipped when degenerate)
   - `external_test/figures/final_refit_loss_by_split.svg` (`full_run`)
   - `external_test/figures/external_species_probability_by_trait.svg` (`full_run` when external test rows exist)
+  - `external_test/figures/external_confusion_matrix.svg` (`full_run` when external test rows exist)
+  - `external_test/figures/external_roc_curve.svg` / `external_test/figures/external_pr_curve.svg` (`full_run` when external test rows contain both labels)
   - `inference/figures/inference_probability_distribution.svg` (`full_run` when inference rows exist)
 
 Conditionally written:
