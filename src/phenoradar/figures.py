@@ -99,6 +99,7 @@ _FEATURE_FILTER_FIGURE_STAGE_LABELS = {
     "n_features_after_correlation": "Correlation",
     "n_features_after_all": "Final",
 }
+_RUN_FIGURE_STAGES = ("cv", "external_test", "inference")
 
 
 def _figure_size_inches(width_px: int, height_px: int) -> tuple[float, float]:
@@ -129,6 +130,13 @@ def _save_svg_figure(fig: Figure, out_path: Path) -> None:
         metadata={"Date": None},
     )
     plt.close(fig)
+
+
+def _stage_figure_dirs(run_dir: Path) -> dict[str, Path]:
+    figure_dirs = {stage: run_dir / stage / "figures" for stage in _RUN_FIGURE_STAGES}
+    for figures_dir in figure_dirs.values():
+        figures_dir.mkdir(parents=True, exist_ok=True)
+    return figure_dirs
 
 
 def _write_message_figure(
@@ -2934,20 +2942,23 @@ def write_run_figures(
     feature_filter_funnel_stage_order: Sequence[str] | None = None,
     top_features: int = _DEFAULT_TOP_FEATURES,
 ) -> list[str]:
-    """Write run-level SVG figures under <run_dir>/figures."""
+    """Write run-level SVG figures under <run_dir>/<stage>/figures."""
     warnings: list[str] = []
-    figures_dir = run_dir / "figures"
-    figures_dir.mkdir(parents=True, exist_ok=False)
-    _cv_metrics_overview(metrics_cv, figures_dir / "cv_metrics_overview.svg")
+    stage_dirs = _stage_figure_dirs(run_dir)
+    cv_dir = stage_dirs["cv"]
+    external_test_dir = stage_dirs["external_test"]
+    inference_dir = stage_dirs["inference"]
+
+    _cv_metrics_overview(metrics_cv, cv_dir / "cv_metrics_overview.svg")
     if loss_by_split_cv is not None:
-        _cv_loss_by_split(loss_by_split_cv, figures_dir / "cv_loss_by_split.svg")
+        _cv_loss_by_split(loss_by_split_cv, cv_dir / "cv_loss_by_split.svg")
     if loss_by_split_final_refit is not None:
         _final_refit_loss_by_split(
-            loss_by_split_final_refit, figures_dir / "final_refit_loss_by_split.svg"
+            loss_by_split_final_refit, external_test_dir / "final_refit_loss_by_split.svg"
         )
     _feature_importance_top(
         feature_importance,
-        figures_dir / "feature_importance_top.svg",
+        cv_dir / "feature_importance_top.svg",
         feature_importance_by_fold=feature_importance_by_fold,
         top_features=top_features,
     )
@@ -2955,12 +2966,12 @@ def write_run_figures(
         _feature_importance_by_fold_heatmap(
             feature_importance,
             feature_importance_by_fold,
-            figures_dir / "feature_importance_by_fold_heatmap.svg",
+            cv_dir / "feature_importance_by_fold_heatmap.svg",
             top_features=top_features,
         )
     _coefficients_signed_top(
         coefficients,
-        figures_dir / "coefficients_signed_top.svg",
+        cv_dir / "coefficients_signed_top.svg",
         coefficients_by_fold=coefficients_by_fold,
         top_features=top_features,
     )
@@ -2968,7 +2979,7 @@ def write_run_figures(
         predictions=oof_predictions,
         trait_col="label",
         trait_name=trait_name,
-        out_path=figures_dir / "cv_species_probability_by_trait.svg",
+        out_path=cv_dir / "cv_species_probability_by_trait.svg",
         title="CV Species Probability by Trait",
         subtitle="Out-of-fold probabilities grouped by observed trait labels",
         source_table_name="prediction_cv.tsv",
@@ -2976,11 +2987,11 @@ def write_run_figures(
     )
     _cv_fold_trait_probability(
         oof_predictions,
-        figures_dir / "cv_fold_trait_probability.svg",
+        cv_dir / "cv_fold_trait_probability.svg",
         trait_name=trait_name,
     )
     try:
-        _roc_pr_curves_cv(oof_predictions, figures_dir / "roc_pr_curves_cv.svg")
+        _roc_pr_curves_cv(oof_predictions, cv_dir / "roc_pr_curves_cv.svg")
     except FigureError as exc:
         warnings.append(str(exc))
     selection_summary = model_selection_trials_summary
@@ -2989,30 +3000,30 @@ def write_run_figures(
     if selection_summary is not None:
         _model_selection_trials_summary_panels(
             selection_summary,
-            figures_dir / "model_selection_trials.svg",
+            cv_dir / "model_selection_trials.svg",
             max_sample_sets_per_fold=_MODEL_SELECTION_SAMPLE_SET_LIMIT,
         )
         _model_selection_one_se_curve(
             selection_summary,
             model_selection_selected,
-            figures_dir / "model_selection_one_se_curve.svg",
+            cv_dir / "model_selection_one_se_curve.svg",
             max_sample_sets_per_fold=_MODEL_SELECTION_SAMPLE_SET_LIMIT,
         )
     if feature_filter_counts_summary is not None:
         _feature_filter_funnel(
             feature_filter_counts_summary,
-            figures_dir / "feature_filter_funnel.svg",
+            cv_dir / "feature_filter_funnel.svg",
             stage_order=feature_filter_funnel_stage_order,
         )
     if retained_features_summary is not None:
         _selected_features_by_fold_after_preprocessing(
             retained_features_summary,
-            figures_dir / "selected_features_by_fold_after_preprocessing.svg",
+            cv_dir / "selected_features_by_fold_after_preprocessing.svg",
         )
     if model_sparsity is not None:
         _non_zero_feature_count_by_fold(
             model_sparsity,
-            figures_dir / "non_zero_feature_count_by_fold.svg",
+            cv_dir / "non_zero_feature_count_by_fold.svg",
         )
     if pred_external_test is not None:
         try:
@@ -3020,7 +3031,7 @@ def write_run_figures(
                 predictions=pred_external_test,
                 trait_col="true_label",
                 trait_name=trait_name,
-                out_path=figures_dir / "external_species_probability_by_trait.svg",
+                out_path=external_test_dir / "external_species_probability_by_trait.svg",
                 title="External Test Species Probability by Trait",
                 subtitle="Final-refit probabilities grouped by external-test true labels",
                 source_table_name="prediction_external_test.tsv",
@@ -3032,7 +3043,7 @@ def write_run_figures(
         try:
             _predict_probability_distribution(
                 pred_inference,
-                figures_dir / "inference_probability_distribution.svg",
+                inference_dir / "inference_probability_distribution.svg",
                 figure_name="inference_probability_distribution.svg",
             )
         except FigureError as exc:
@@ -3046,16 +3057,15 @@ def write_predict_figures(
     pred_predict: pl.DataFrame,
     require_uncertainty: bool = False,
 ) -> None:
-    """Write predict-level SVG figures under <run_dir>/figures."""
-    figures_dir = run_dir / "figures"
-    figures_dir.mkdir(parents=True, exist_ok=False)
+    """Write predict-level SVG figures under <run_dir>/inference/figures."""
+    inference_dir = _stage_figure_dirs(run_dir)["inference"]
     _predict_probability_distribution(
         pred_predict,
-        figures_dir / "predict_probability_distribution.svg",
+        inference_dir / "predict_probability_distribution.svg",
     )
     _predict_uncertainty(
         pred_predict,
-        figures_dir / "predict_uncertainty.svg",
+        inference_dir / "predict_uncertainty.svg",
         required=require_uncertainty,
     )
 

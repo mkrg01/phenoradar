@@ -117,18 +117,18 @@ runs/<timestamp>_run_<id>/
 Core outputs include:
 
 - `resolved_config.yml`
-- `split_manifest.tsv`
-- `fold_validation_groups.tsv`
-- `metrics_cv.tsv`
-- `thresholds.tsv`
-- `feature_importance.tsv`
-- `feature_importance_by_fold.tsv`
-- `coefficients.tsv`
-- `coefficients_by_fold.tsv`
-- `prediction_cv.tsv`
-- `classification_summary.tsv`
+- `split/tables/split_manifest.tsv`
+- `split/tables/fold_validation_groups.tsv`
+- `cv/tables/metrics_cv.tsv`
+- `cv/tables/feature_importance.tsv`
+- `cv/tables/feature_importance_by_fold.tsv`
+- `cv/tables/coefficients.tsv`
+- `cv/tables/coefficients_by_fold.tsv`
+- `cv/tables/prediction_cv.tsv`
+- `model/tables/thresholds.tsv`
+- `summary/tables/classification_summary.tsv`
 - `run_metadata.json`
-- `figures/`
+- `cv/figures/`
 
 If warnings are recorded, they are printed at command end and stored in
 `run_metadata.json` (`warnings` field).
@@ -141,8 +141,10 @@ phenoradar run -c config.yml --execution-stage full_run
 
 `full_run` adds:
 
-- `prediction_external_test.tsv`
-- `prediction_inference.tsv`
+- `external_test/tables/prediction_external_test.tsv`
+- `inference/tables/prediction_inference.tsv`
+- `external_test/figures/`
+- `inference/figures/`
 - `model_bundle/`
 
 ## 6) Predict with a model bundle
@@ -171,9 +173,9 @@ runs/<timestamp>_predict_<id>/
 
 With:
 
-- `prediction_inference.tsv`
+- `inference/tables/prediction_inference.tsv`
 - `run_metadata.json`
-- `figures/`
+- `inference/figures/`
 
 ## 7) Aggregate multiple runs
 

@@ -86,6 +86,26 @@ def _feature_filter_funnel_stage_order(config: AppConfig) -> list[str]:
     return stages
 
 
+def _stage_tables_dir(run_dir: Path, stage: str) -> Path:
+    tables_dir = run_dir / stage / "tables"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    return tables_dir
+
+
+def _run_table_dirs(run_dir: Path) -> dict[str, Path]:
+    table_dirs = {
+        "split": run_dir / "split" / "tables",
+        "cv": run_dir / "cv" / "tables",
+        "external_test": run_dir / "external_test" / "tables",
+        "inference": run_dir / "inference" / "tables",
+        "model": run_dir / "model" / "tables",
+        "summary": run_dir / "summary" / "tables",
+    }
+    for tables_dir in table_dirs.values():
+        tables_dir.mkdir(parents=True, exist_ok=True)
+    return table_dirs
+
+
 ConfigPathsArg = Annotated[
     list[Path],
     typer.Option(
@@ -715,58 +735,67 @@ def run(
 
     _log("Create run directory and write core tabular artifacts.")
     run_dir = _build_run_dir("run")
+    table_dirs = _run_table_dirs(run_dir)
+    split_tables_dir = table_dirs["split"]
+    cv_tables_dir = table_dirs["cv"]
+    external_test_tables_dir = table_dirs["external_test"]
+    inference_tables_dir = table_dirs["inference"]
+    model_tables_dir = table_dirs["model"]
+    summary_tables_dir = table_dirs["summary"]
     write_resolved_config(resolved, run_dir / "resolved_config.yml")
-    split_artifacts.split_manifest.write_csv(run_dir / "split_manifest.tsv", separator="\t")
+    split_artifacts.split_manifest.write_csv(
+        split_tables_dir / "split_manifest.tsv", separator="\t"
+    )
     split_artifacts.fold_validation_groups.write_csv(
-        run_dir / "fold_validation_groups.tsv", separator="\t"
+        split_tables_dir / "fold_validation_groups.tsv", separator="\t"
     )
     cv_artifacts.metrics_cv.write_csv(
-        run_dir / "metrics_cv.tsv", separator="\t", float_precision=8, null_value="NA"
+        cv_tables_dir / "metrics_cv.tsv", separator="\t", float_precision=8, null_value="NA"
     )
     cv_artifacts.loss_by_split_cv.write_csv(
-        run_dir / "loss_by_split_cv.tsv", separator="\t", float_precision=8, null_value="NA"
+        cv_tables_dir / "loss_by_split_cv.tsv", separator="\t", float_precision=8, null_value="NA"
     )
     cv_artifacts.thresholds.write_csv(
-        run_dir / "thresholds.tsv", separator="\t", float_precision=8, null_value="NA"
+        model_tables_dir / "thresholds.tsv", separator="\t", float_precision=8, null_value="NA"
     )
     cv_artifacts.feature_importance.write_csv(
-        run_dir / "feature_importance.tsv", separator="\t", float_precision=8, null_value="NA"
+        cv_tables_dir / "feature_importance.tsv", separator="\t", float_precision=8, null_value="NA"
     )
     cv_artifacts.feature_importance_by_fold.write_csv(
-        run_dir / "feature_importance_by_fold.tsv",
+        cv_tables_dir / "feature_importance_by_fold.tsv",
         separator="\t",
         float_precision=8,
         null_value="NA",
     )
     cv_artifacts.coefficients.write_csv(
-        run_dir / "coefficients.tsv", separator="\t", float_precision=8, null_value="NA"
+        cv_tables_dir / "coefficients.tsv", separator="\t", float_precision=8, null_value="NA"
     )
     cv_artifacts.coefficients_by_fold.write_csv(
-        run_dir / "coefficients_by_fold.tsv",
+        cv_tables_dir / "coefficients_by_fold.tsv",
         separator="\t",
         float_precision=8,
         null_value="NA",
     )
     cv_artifacts.oof_predictions.write_csv(
-        run_dir / "prediction_cv.tsv", separator="\t", float_precision=8, null_value="NA"
+        cv_tables_dir / "prediction_cv.tsv", separator="\t", float_precision=8, null_value="NA"
     )
     if cv_artifacts.ensemble_model_probs is not None:
         cv_artifacts.ensemble_model_probs.write_csv(
-            run_dir / "ensemble_model_probs.tsv",
+            cv_tables_dir / "ensemble_model_probs.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
         )
     if cv_artifacts.model_selection_trials is not None:
         cv_artifacts.model_selection_trials.write_csv(
-            run_dir / "model_selection_trials.tsv",
+            cv_tables_dir / "model_selection_trials.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
         )
     if cv_artifacts.model_selection_trials_summary is not None:
         cv_artifacts.model_selection_trials_summary.write_csv(
-            run_dir / "model_selection_trials_summary.tsv",
+            cv_tables_dir / "model_selection_trials_summary.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
@@ -777,19 +806,19 @@ def run(
         selected_tables.append(cv_artifacts.model_selection_selected)
     if final_refit_artifacts is not None:
         final_refit_artifacts.pred_external_test.write_csv(
-            run_dir / "prediction_external_test.tsv",
+            external_test_tables_dir / "prediction_external_test.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
         )
         final_refit_artifacts.pred_inference.write_csv(
-            run_dir / "prediction_inference.tsv",
+            inference_tables_dir / "prediction_inference.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
         )
         final_refit_artifacts.loss_by_split_final_refit.write_csv(
-            run_dir / "loss_by_split_final_refit.tsv",
+            external_test_tables_dir / "loss_by_split_final_refit.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
@@ -814,7 +843,7 @@ def run(
             ["selection_scope", "fold_id", "sample_set_id", "rank", "candidate_index"]
         )
         model_selection_selected_table.write_csv(
-            run_dir / "model_selection_selected.tsv",
+            model_tables_dir / "model_selection_selected.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
@@ -837,7 +866,7 @@ def run(
             feature_filter_counts_tables, how="vertical_relaxed"
         ).sort(["scope", "fold_id", "sample_set_id"])
         feature_filter_counts_table.write_csv(
-            run_dir / "feature_filter_counts.tsv",
+            model_tables_dir / "feature_filter_counts.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
@@ -860,7 +889,7 @@ def run(
             feature_filter_summary_tables, how="vertical_relaxed"
         ).sort(["scope", "stage"])
         feature_filter_counts_summary_table.write_csv(
-            run_dir / "feature_filter_counts_summary.tsv",
+            model_tables_dir / "feature_filter_counts_summary.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
@@ -883,7 +912,7 @@ def run(
             ["scope", "fold_id", "sample_set_id", "feature"]
         )
         retained_features_table.write_csv(
-            run_dir / "retained_features.tsv",
+            model_tables_dir / "retained_features.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
@@ -909,7 +938,7 @@ def run(
             descending=[False, False, True, True, False],
         )
         retained_features_summary_table.write_csv(
-            run_dir / "retained_features_summary.tsv",
+            model_tables_dir / "retained_features_summary.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
@@ -932,7 +961,7 @@ def run(
             ["scope", "fold_id", "sample_set_id", "model_index"]
         )
         model_sparsity_table.write_csv(
-            run_dir / "model_sparsity.tsv",
+            model_tables_dir / "model_sparsity.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
@@ -955,7 +984,7 @@ def run(
             model_sparsity_summary_tables, how="vertical_relaxed"
         ).sort(["scope", "model_name"])
         model_sparsity_summary_table.write_csv(
-            run_dir / "model_sparsity_summary.tsv",
+            model_tables_dir / "model_sparsity_summary.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
@@ -969,7 +998,7 @@ def run(
         ),
     )
     classification_summary.write_csv(
-        run_dir / "classification_summary.tsv",
+        summary_tables_dir / "classification_summary.tsv",
         separator="\t",
         float_precision=8,
         null_value="NA",
@@ -1101,20 +1130,16 @@ def run(
     if final_refit_artifacts is not None:
         full_run_suffix = (
             "; full_run outputs: "
-            "prediction_external_test.tsv, "
-            "prediction_inference.tsv, "
-            "loss_by_split_final_refit.tsv, "
+            "external_test/tables/, "
+            "external_test/figures/, "
+            "inference/tables/, "
+            "inference/figures/, "
             "model_bundle/"
         )
     typer.echo(
         f"Wrote run artifacts at {run_dir} "
-        "(resolved_config.yml, split_manifest.tsv, fold_validation_groups.tsv, "
-        "metrics_cv.tsv, loss_by_split_cv.tsv, thresholds.tsv, "
-        "feature_importance.tsv, coefficients.tsv, prediction_cv.tsv, "
-        "feature_filter_counts.tsv, feature_filter_counts_summary.tsv, "
-        "retained_features.tsv, retained_features_summary.tsv, "
-        "model_sparsity.tsv, model_sparsity_summary.tsv, "
-        "classification_summary.tsv, "
+        "(resolved_config.yml, split/tables/, cv/tables/, cv/figures/, "
+        "model/tables/, summary/tables/, "
         "run_metadata.json"
         f"{full_run_suffix}; warnings={len(warnings)}).",
     )
@@ -1569,9 +1594,10 @@ def predict(
 
     _log("Write prediction artifacts.")
     run_dir = _build_run_dir("predict")
+    inference_tables_dir = _stage_tables_dir(run_dir, "inference")
     write_resolved_config(resolved, run_dir / "resolved_config.yml")
     pred_predict.write_csv(
-        run_dir / "prediction_inference.tsv",
+        inference_tables_dir / "prediction_inference.tsv",
         separator="\t",
         float_precision=8,
         null_value="NA",
@@ -1655,7 +1681,8 @@ def predict(
     )
     typer.echo(
         f"Wrote predict artifacts at {run_dir} "
-        "(resolved_config.yml, prediction_inference.tsv, "
+        "(resolved_config.yml, inference/tables/prediction_inference.tsv, "
+        "inference/figures/, "
         f"run_metadata.json; warnings={len(predict_warnings)}).",
     )
     _log("Completed.")

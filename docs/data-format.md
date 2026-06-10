@@ -150,8 +150,9 @@ Optional path/key:
 - `data.tree_path` (default: `null`)
 
 When `data.tree_path` is set, `phenoradar run` and `phenoradar predict` write
-ggtree-friendly tree prediction annotation TSV files. Toytree SVG figures are also written
-under `figures/` when Toytree is available.
+ggtree-friendly tree prediction annotation TSV files under the relevant stage
+`tables/` directory. Toytree SVG figures are also written under the matching
+stage `figures/` directory when Toytree is available.
 
 Tree tip labels must match metadata and prediction `species` values. In CV runs, tree
 contrast-pair QC and prediction artifacts focus on species with non-empty

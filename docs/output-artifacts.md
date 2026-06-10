@@ -8,17 +8,26 @@ them for `run` / `predict` / `report`.
 For one `run` result directory, a practical order is:
 
 1. `run_metadata.json` (status, warnings, pool counts, timing)
-2. `metrics_cv.tsv`, `loss_by_split_cv.tsv`, `thresholds.tsv`, and `classification_summary.tsv`
+2. `cv/tables/metrics_cv.tsv`, `cv/tables/loss_by_split_cv.tsv`,
+   `model/tables/thresholds.tsv`, and `summary/tables/classification_summary.tsv`
    (overall quality, train/validation loss gap, thresholds, and threshold-wise classification tradeoffs)
-3. `prediction_cv.tsv` and `figures/roc_pr_curves_cv.svg` (overall CV ranking behavior)
-4. `prediction_external_test.tsv` / `prediction_inference.tsv` (`full_run` only)
-5. `feature_importance.tsv` and `coefficients.tsv` (model interpretation)
+3. `cv/tables/prediction_cv.tsv` and `cv/figures/roc_pr_curves_cv.svg`
+   (overall CV ranking behavior)
+4. `external_test/tables/prediction_external_test.tsv` /
+   `inference/tables/prediction_inference.tsv` (`full_run` only)
+5. `cv/tables/feature_importance.tsv` and `cv/tables/coefficients.tsv`
+   (model interpretation)
 
 ## Run directory layout
 
 `phenoradar run` writes:
 
 - `runs/<timestamp>_run_<id>/...`
+
+Run outputs use a stage-first layout. Stage-specific TSVs are placed in
+`<stage>/tables/`, and stage-specific SVGs are placed in `<stage>/figures/`.
+The main stage directories are `split/`, `cv/`, `model/`, `summary/`,
+`external_test/`, and `inference/`.
 
 `phenoradar predict` writes:
 
@@ -34,39 +43,39 @@ Always written:
 
 - `resolved_config.yml`
   - composed + validated config used in execution
-- `split_manifest.tsv`
+- `split/tables/split_manifest.tsv`
   - columns: `species`, `pool`, `fold_id`, `group_id`, `contrast_group_id`, `label`
   - pools: `train`, `validation`, `external_test`, `discovery_inference`
   - `train` / `validation` rows are the per-fold expansion of the internal
     `training_validation` pool.
-- `fold_validation_groups.tsv`
+- `split/tables/fold_validation_groups.tsv`
   - columns: `fold_id`, `group_id`, `n_validation_species`, `n_validation_pos`, `n_validation_neg`
   - one row per validation-side group in each outer fold
   - for `logo`, each `fold_id` has exactly one row
   - for `group_kfold`, a `fold_id` can have multiple rows
-- `metrics_cv.tsv`
+- `cv/tables/metrics_cv.tsv`
   - columns: `aggregate_scope`, `fold_id`, `metric`, `metric_value`, `n_pos`, `n_neg`, `n_valid_folds`
   - `aggregate_scope`: per-fold rows use `NA`, aggregate rows use `macro`/`micro`
-- `loss_by_split_cv.tsv`
+- `cv/tables/loss_by_split_cv.tsv`
   - columns: `fold_id`, `split`, `metric`, `metric_value`
   - current `split` values: `train`, `validation`
   - current `metric` value: `log_loss`
-- `thresholds.tsv`
+- `model/tables/thresholds.tsv`
   - columns: `threshold_name`, `threshold_value`, `source`, `selection_metric`, `selection_scope`
   - threshold names: `fixed_probability_threshold`
-- `feature_importance.tsv`
+- `cv/tables/feature_importance.tsv`
   - columns: `feature`, `importance_mean`, `importance_std`, `n_models`, `n_folds`, `method`
-- `feature_importance_by_fold.tsv`
+- `cv/tables/feature_importance_by_fold.tsv`
   - columns: `fold_id`, `feature`, `importance_mean`, `n_models`, `method`
-- `coefficients.tsv`
+- `cv/tables/coefficients.tsv`
   - columns: `feature`, `coef_mean`, `coef_std`, `n_models`, `n_folds`, `method`, `reason`
-- `coefficients_by_fold.tsv`
+- `cv/tables/coefficients_by_fold.tsv`
   - columns: `fold_id`, `feature`, `coef_mean`, `n_models`, `method`, `reason`
   - for non-linear models, coefficient values can be `NA` with `reason=unsupported_model_non_linear`
-- `prediction_cv.tsv`
+- `cv/tables/prediction_cv.tsv`
   - columns: `fold_id`, `species`, `label`, `prob`
   - optional `uncertainty_std` (ensemble size > 1)
-- `feature_filter_counts.tsv`
+- `model/tables/feature_filter_counts.tsv`
   - columns:
     - `scope`, `fold_id`, `sample_set_id`
     - `n_features_before`
@@ -75,32 +84,32 @@ Always written:
     - `n_features_after_pair_aware`
     - `n_features_after_correlation`
     - `n_features_after_all`
-- `feature_filter_counts_summary.tsv`
+- `model/tables/feature_filter_counts_summary.tsv`
   - columns:
     - `scope`, `stage`, `n_records`
     - `n_features_min`, `n_features_q1`, `n_features_median`, `n_features_mean`,
       `n_features_q3`, `n_features_max`
     - `retained_ratio_min`, `retained_ratio_q1`, `retained_ratio_median`,
       `retained_ratio_mean`, `retained_ratio_q3`, `retained_ratio_max`
-- `retained_features.tsv`
+- `model/tables/retained_features.tsv`
   - columns:
     - `scope`, `fold_id`, `sample_set_id`, `feature`
-- `retained_features_summary.tsv`
+- `model/tables/retained_features_summary.tsv`
   - columns:
     - `scope`, `fold_id`, `feature`
     - `retained_count`, `n_sample_sets`, `retained_rate`
-- `model_sparsity.tsv`
+- `model/tables/model_sparsity.tsv`
   - columns:
     - `scope`, `fold_id`, `sample_set_id`, `model_index`, `model_name`
     - `n_features_after_all`, `n_nonzero_features`, `nonzero_ratio`
     - `count_method`, `reason`
-- `model_sparsity_summary.tsv`
+- `model/tables/model_sparsity_summary.tsv`
   - columns:
     - `scope`, `model_name`
     - `n_models`, `n_models_with_nonzero_count`
     - `n_nonzero_min`, `n_nonzero_median`, `n_nonzero_mean`, `n_nonzero_max`
     - `nonzero_ratio_min`, `nonzero_ratio_median`, `nonzero_ratio_mean`, `nonzero_ratio_max`
-- `classification_summary.tsv`
+- `summary/tables/classification_summary.tsv`
   - columns:
     - `pool`, `fold_id`
     - `threshold_name`, `threshold_value`
@@ -115,52 +124,53 @@ Always written:
     - `external_test` pooled row (`full_run` only, `fold_id=NA`)
 - `run_metadata.json`
   - provenance and execution metadata (`status`, timings, seed policy, git/runtime snapshot, warnings)
-- `figures/`
+- stage-specific `figures/` directories
+  - always creates `cv/figures/`, `external_test/figures/`, and `inference/figures/`.
   - always attempts:
-    - `cv_metrics_overview.svg`
-    - `cv_loss_by_split.svg`
-    - `feature_importance_top.svg`
-    - `feature_importance_by_fold_heatmap.svg`
-    - `coefficients_signed_top.svg`
-    - `cv_species_probability_by_trait.svg`
-    - `cv_fold_trait_probability.svg`
-    - `feature_filter_funnel.svg`
-    - `selected_features_by_fold_after_preprocessing.svg`
-    - `non_zero_feature_count_by_fold.svg`
-    - `model_selection_trials.svg` (candidate selection active)
-    - `model_selection_one_se_curve.svg` (candidate selection active)
-    - `roc_pr_curves_cv.svg` (may be skipped with warning for degenerate folds)
-    - `final_refit_loss_by_split.svg` (attempted in `full_run`)
-    - `external_species_probability_by_trait.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
-    - `inference_probability_distribution.svg` (attempted in `full_run`; may be skipped with warning when inference set is empty)
+    - `cv/figures/cv_metrics_overview.svg`
+    - `cv/figures/cv_loss_by_split.svg`
+    - `cv/figures/feature_importance_top.svg`
+    - `cv/figures/feature_importance_by_fold_heatmap.svg`
+    - `cv/figures/coefficients_signed_top.svg`
+    - `cv/figures/cv_species_probability_by_trait.svg`
+    - `cv/figures/cv_fold_trait_probability.svg`
+    - `cv/figures/feature_filter_funnel.svg`
+    - `cv/figures/selected_features_by_fold_after_preprocessing.svg`
+    - `cv/figures/non_zero_feature_count_by_fold.svg`
+    - `cv/figures/model_selection_trials.svg` (candidate selection active)
+    - `cv/figures/model_selection_one_se_curve.svg` (candidate selection active)
+    - `cv/figures/roc_pr_curves_cv.svg` (may be skipped with warning for degenerate folds)
+    - `external_test/figures/final_refit_loss_by_split.svg` (attempted in `full_run`)
+    - `external_test/figures/external_species_probability_by_trait.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
+    - `inference/figures/inference_probability_distribution.svg` (attempted in `full_run`; may be skipped with warning when inference set is empty)
 
 Conditionally written:
 
-- `prediction_external_test.tsv` (`full_run` only)
+- `external_test/tables/prediction_external_test.tsv` (`full_run` only)
   - columns:
     - `species`, `true_label`, `prob`
     - `pred_label_fixed_threshold`
     - optional `uncertainty_std`
-- `prediction_inference.tsv` (`full_run` only)
+- `inference/tables/prediction_inference.tsv` (`full_run` only)
   - columns:
     - `species`, `true_label`, `prob`
     - `pred_label_fixed_threshold`
     - optional `uncertainty_std`
   - `true_label` values are `NA` because inference labels are unknown
-- `loss_by_split_final_refit.tsv` (`full_run` only)
+- `external_test/tables/loss_by_split_final_refit.tsv` (`full_run` only)
   - columns: `split`, `metric`, `metric_value`
   - current `split` values: `train`, `external_test` (external row is omitted when external pool is empty)
   - current `metric` value: `log_loss`
 - `model_bundle/` (`full_run` only)
   - reusable inference bundle (see bundle section below)
-- `ensemble_model_probs.tsv` (ensemble size > 1)
+- `cv/tables/ensemble_model_probs.tsv` (ensemble size > 1)
   - columns: `fold_id`, `model_index`, `species`, `prob`
-- `model_selection_trials.tsv` (candidate selection active)
+- `cv/tables/model_selection_trials.tsv` (candidate selection active)
   - columns: `fold_id`, `sample_set_id`, `candidate_index`, `inner_fold_id`, `metric_name`, `metric_value`, `params_json`
-- `model_selection_trials_summary.tsv` (candidate selection active)
+- `cv/tables/model_selection_trials_summary.tsv` (candidate selection active)
   - columns: `fold_id`, `sample_set_id`, `candidate_index`, `metric_name`, `params_json`
   - columns: `n_inner_folds`, `n_valid_inner_folds`, `metric_value_mean`, `metric_value_std`, `metric_value_se`
-- `model_selection_selected.tsv` (candidate selection active)
+- `model/tables/model_selection_selected.tsv` (candidate selection active)
   - columns:
     - `selection_scope`, `fold_id`, `sample_set_id`, `selection_source_sample_set_id`
     - `rank`, `candidate_index`, `metric_name`, `metric_value`, `metric_value_se`, `selection_rule`
@@ -169,6 +179,10 @@ Conditionally written:
     - `params_json`
 
 ## Run interpretation guide
+
+The section headings below use short artifact names. The write locations follow
+the run layout above, for example CV tables live under `cv/tables/`, model
+diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 
 ### Metric semantics (`metrics_cv.tsv`)
 
@@ -378,8 +392,8 @@ Conditionally written:
 - One row per (`fold_id`, `feature`).
 - `importance_mean` is the mean normalized importance across fitted models in that fold.
 - These fold-level values are the points and boxplot distribution in
-  `feature_importance_top.svg` and the cells in
-  `feature_importance_by_fold_heatmap.svg`.
+  `cv/figures/feature_importance_top.svg` and the cells in
+  `cv/figures/feature_importance_by_fold_heatmap.svg`.
 
 #### `coefficients.tsv`
 
@@ -394,7 +408,7 @@ Conditionally written:
 - One row per (`fold_id`, `feature`).
 - `coef_mean` is the mean signed coefficient across fitted linear models in that fold.
 - These fold-level values are the points and boxplot distribution in
-  `coefficients_signed_top.svg`.
+  `cv/figures/coefficients_signed_top.svg`.
 
 #### `classification_summary.tsv`
 
@@ -469,73 +483,73 @@ Conditionally written:
 
 ### Run figures
 
-- `cv_metrics_overview.svg`
+- `cv/figures/cv_metrics_overview.svg`
   - Blue: macro, orange: micro.
   - Axis is drawn from observed metric range; the x-axis is placed at the zero score baseline.
-- `cv_loss_by_split.svg`
+- `cv/figures/cv_loss_by_split.svg`
   - Fold-wise final `log_loss` comparison of `train` vs `validation`.
   - Useful for quick overfitting diagnostics without per-iteration learning curves.
-- `roc_pr_curves_cv.svg`
+- `cv/figures/roc_pr_curves_cv.svg`
   - Left: pooled OOF ROC, right: pooled OOF PR.
   - Curves summarize all folds together (not per-fold overlays).
-- `feature_importance_top.svg`
+- `cv/figures/feature_importance_top.svg`
   - Top `figures.top_features` features by mean fold-level `importance_mean`.
   - Horizontal boxplot plus fold-level points.
-- `feature_importance_by_fold_heatmap.svg`
+- `cv/figures/feature_importance_by_fold_heatmap.svg`
   - Top `figures.top_features` features by mean fold-level `importance_mean`.
   - Rows are features, columns are CV folds, and color is fold-level
     `importance_mean` from `feature_importance_by_fold.tsv`.
   - The continuous white-to-blue scale starts at zero, so unimportant fold-feature
     cells remain white and larger importances become darker blue.
-- `coefficients_signed_top.svg`
+- `cv/figures/coefficients_signed_top.svg`
   - Top `figures.top_features` by absolute mean fold-level coefficient magnitude.
   - Horizontal boxplot plus fold-level points; right is positive and left is negative.
-- `cv_species_probability_by_trait.svg`
+- `cv/figures/cv_species_probability_by_trait.svg`
   - Out-of-fold species probabilities grouped by trait (`label`).
   - Boxplot with per-species points and trait-wise mean markers.
-- `cv_fold_trait_probability.svg`
+- `cv/figures/cv_fold_trait_probability.svg`
   - Fold-level probability distribution grouped by trait.
   - Useful for checking fold-to-fold drift or fold-specific overlap.
-- `feature_filter_funnel.svg`
+- `cv/figures/feature_filter_funnel.svg`
   - Feature-count trend by scope through the enabled `preprocess.*_filter` steps.
   - Line is median count; shaded band is IQR; dashed lines are min-max.
   - Legend identifies median/IQR/min-max; the figure annotates the `n_records` count.
-- `selected_features_by_fold_after_preprocessing.svg`
+- `cv/figures/selected_features_by_fold_after_preprocessing.svg`
   - Outer-fold retained-feature heatmap after preprocessing.
   - Rows are features, columns are folds, color is the feature retention rate across sampled sets.
   - Useful for spotting fold-specific preprocessing retention differences.
-- `non_zero_feature_count_by_fold.svg`
+- `cv/figures/non_zero_feature_count_by_fold.svg`
   - Fold-wise distribution of `n_nonzero_features` from `model_sparsity.tsv`.
   - Boxplots are shown when a fold has multiple models; points show individual models.
-- `model_selection_trials.svg` (candidate selection active)
+- `cv/figures/model_selection_trials.svg` (candidate selection active)
   - Panels are laid out automatically in a compact grid.
   - Candidate scores are shown as `metric_value_mean ± metric_value_se`.
   - All folds are shown; per fold, only the first `sample_set_id` is plotted.
   - Y-axis labels include `candidate_index` and parameter JSON
     (keys fixed across candidates in the panel are omitted).
-- `model_selection_one_se_curve.svg` (candidate selection active)
+- `cv/figures/model_selection_one_se_curve.svg` (candidate selection active)
   - Shows candidate mean score with SE, one-SE threshold, best mean candidate,
     one-SE-eligible candidates, and the selected candidate.
   - Uses `log10(C)` on the x-axis when all candidates expose positive `C`;
     otherwise falls back to `candidate_index`.
   - All folds are shown; per fold, only the first `sample_set_id` is plotted.
-- `external_species_probability_by_trait.svg` (`full_run` with external samples)
+- `external_test/figures/external_species_probability_by_trait.svg` (`full_run` with external samples)
   - External-test species probabilities grouped by `true_label`.
   - Boxplot with per-species points and trait-wise mean markers.
-- `inference_probability_distribution.svg` (`full_run` with inference samples)
+- `inference/figures/inference_probability_distribution.svg` (`full_run` with inference samples)
   - Histogram of `prediction_inference.tsv` probabilities in bins
     `[0.0, 0.1), ... , [0.9, 1.0]`.
-- `final_refit_loss_by_split.svg` (`full_run`)
+- `external_test/figures/final_refit_loss_by_split.svg` (`full_run`)
   - Final-refit `log_loss` comparison of `train` and `external_test`.
   - Useful for quick train-vs-external generalization diagnostics.
-- `tree_prediction_cv.svg` / `tree_prediction_external.svg` (optional)
+- `cv/figures/tree_prediction_cv.svg` / `external_test/figures/tree_prediction_external.svg` (optional)
   - Written when `data.tree_path` is set and Toytree is available.
   - Rectangular Toytree view with aligned tracks for trait label, probability,
     predicted label, uncertainty, group, and fold where applicable.
-- `tree_group.svg` (optional)
+- `cv/figures/tree_group.svg` (optional)
   - Written when `data.tree_path` is set and Toytree is available.
   - Rectangular Toytree view with trait-label and split-group tracks for metadata QC.
-- `tree_feature_heatmap_zscore.svg` / `tree_feature_heatmap_log2_tpm.svg` (optional)
+- `cv/figures/tree_feature_heatmap_zscore.svg` / `cv/figures/tree_feature_heatmap_log2_tpm.svg` (optional)
   - Written when `data.tree_path` is set and Toytree is available.
   - Rectangular Toytree views with top-feature heatmap tiles ordered by
     `importance_mean`; the feature count is controlled by `figures.top_features`.
@@ -549,7 +563,7 @@ Conditionally written:
 ## `predict` artifacts (schemas and interpretation)
 
 - `resolved_config.yml`
-- `prediction_inference.tsv`
+- `inference/tables/prediction_inference.tsv`
   - columns:
     - `species`, `true_label`, `prob`
     - `pred_label_fixed_threshold`
@@ -558,17 +572,17 @@ Conditionally written:
   - `prob` is predicted probability of label `1`
 - `run_metadata.json`
   - includes bundle manifest/payload hash values and bundle source metadata
-- `figures/`
+- `inference/figures/`
   - `predict_probability_distribution.svg`
   - optional `predict_uncertainty.svg` (bundle ensemble size > 1)
 
 ### Predict figures
 
-- `predict_probability_distribution.svg`
+- `inference/figures/predict_probability_distribution.svg`
   - Histogram of predicted probabilities in bins `[0.0, 0.1), ... , [0.9, 1.0]`.
-- `predict_uncertainty.svg` (ensemble only)
+- `inference/figures/predict_uncertainty.svg` (ensemble only)
   - Top species by `uncertainty_std`; high bars indicate less stable predictions.
-- `tree_prediction_predict.svg` (optional)
+- `inference/figures/tree_prediction_predict.svg` (optional)
   - Written when `data.tree_path` is set and Toytree is available.
   - Tree view with aligned tracks for true label when known, probability,
     CV-threshold prediction, uncertainty, and group when available.

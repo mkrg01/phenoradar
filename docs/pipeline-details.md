@@ -57,7 +57,7 @@ Pool assignment:
 - trait missing -> `discovery_inference`
 
 `training_validation` is an internal pool label before fold expansion.
-In `split_manifest.tsv`, these species appear as `train` and `validation`.
+In `split/tables/split_manifest.tsv`, these species appear as `train` and `validation`.
 
 Expression coverage checks:
 
@@ -144,7 +144,8 @@ After all folds:
 - Fit selected model(s) and predict:
   - `external_test`
   - `discovery_inference`
-- Produce `prediction_external_test.tsv` and `prediction_inference.tsv`.
+- Produce `external_test/tables/prediction_external_test.tsv` and
+  `inference/tables/prediction_inference.tsv`.
 - Export `model_bundle/` with model-local preprocessing state.
 
 ## Model selection behavior details
@@ -211,8 +212,8 @@ Run selection:
 Per-run ingestion:
 
 - requires `run_metadata.json` and `resolved_config.yml`.
-- for non-predict runs, missing `metrics_cv.tsv` is an error in `--strict`.
-- in non-strict mode, missing/invalid `metrics_cv.tsv` records warnings and can leave runs included but unranked.
+- for non-predict runs, missing `cv/tables/metrics_cv.tsv` is an error in `--strict`.
+- in non-strict mode, missing/invalid `cv/tables/metrics_cv.tsv` records warnings and can leave runs included but unranked.
 - applies stage filter (`--include-stage`).
 
 Ranking:

@@ -55,57 +55,57 @@ Options:
 Always written:
 
 - `resolved_config.yml`
-- `split_manifest.tsv`
-- `fold_validation_groups.tsv`
-- `metrics_cv.tsv`
-- `loss_by_split_cv.tsv`
-- `thresholds.tsv`
-- `feature_importance.tsv`
-- `feature_importance_by_fold.tsv`
-- `coefficients.tsv`
-- `coefficients_by_fold.tsv`
-- `prediction_cv.tsv`
-- `feature_filter_counts.tsv`
-- `feature_filter_counts_summary.tsv`
-- `retained_features.tsv`
-- `retained_features_summary.tsv`
-- `model_sparsity.tsv`
-- `model_sparsity_summary.tsv`
-- `classification_summary.tsv`
+- `split/tables/split_manifest.tsv`
+- `split/tables/fold_validation_groups.tsv`
+- `cv/tables/metrics_cv.tsv`
+- `cv/tables/loss_by_split_cv.tsv`
+- `cv/tables/feature_importance.tsv`
+- `cv/tables/feature_importance_by_fold.tsv`
+- `cv/tables/coefficients.tsv`
+- `cv/tables/coefficients_by_fold.tsv`
+- `cv/tables/prediction_cv.tsv`
+- `model/tables/thresholds.tsv`
+- `model/tables/feature_filter_counts.tsv`
+- `model/tables/feature_filter_counts_summary.tsv`
+- `model/tables/retained_features.tsv`
+- `model/tables/retained_features_summary.tsv`
+- `model/tables/model_sparsity.tsv`
+- `model/tables/model_sparsity_summary.tsv`
+- `summary/tables/classification_summary.tsv`
 - `run_metadata.json`
-- `figures/` (SVG files)
+- stage-specific figure directories (`cv/figures/`, `external_test/figures/`, `inference/figures/`)
 
 Notes:
 
 - `prediction_cv.tsv` may include optional `uncertainty_std` when ensemble size > 1.
-- `figures/` includes:
-  - `cv_metrics_overview.svg`
-  - `cv_loss_by_split.svg`
-  - `feature_importance_top.svg`
-  - `feature_importance_by_fold_heatmap.svg`
-  - `coefficients_signed_top.svg`
-  - `cv_species_probability_by_trait.svg`
-  - `cv_fold_trait_probability.svg`
-  - `feature_filter_funnel.svg`
-  - `selected_features_by_fold_after_preprocessing.svg`
-  - `non_zero_feature_count_by_fold.svg`
-  - `model_selection_trials.svg` (model selection enabled)
-  - `roc_pr_curves_cv.svg` (may be skipped when degenerate)
-  - `final_refit_loss_by_split.svg` (`full_run`)
-  - `external_species_probability_by_trait.svg` (`full_run` when external test rows exist)
-  - `inference_probability_distribution.svg` (`full_run` when inference rows exist)
+- Stage figure directories include:
+  - `cv/figures/cv_metrics_overview.svg`
+  - `cv/figures/cv_loss_by_split.svg`
+  - `cv/figures/feature_importance_top.svg`
+  - `cv/figures/feature_importance_by_fold_heatmap.svg`
+  - `cv/figures/coefficients_signed_top.svg`
+  - `cv/figures/cv_species_probability_by_trait.svg`
+  - `cv/figures/cv_fold_trait_probability.svg`
+  - `cv/figures/feature_filter_funnel.svg`
+  - `cv/figures/selected_features_by_fold_after_preprocessing.svg`
+  - `cv/figures/non_zero_feature_count_by_fold.svg`
+  - `cv/figures/model_selection_trials.svg` (model selection enabled)
+  - `cv/figures/roc_pr_curves_cv.svg` (may be skipped when degenerate)
+  - `external_test/figures/final_refit_loss_by_split.svg` (`full_run`)
+  - `external_test/figures/external_species_probability_by_trait.svg` (`full_run` when external test rows exist)
+  - `inference/figures/inference_probability_distribution.svg` (`full_run` when inference rows exist)
 
 Conditionally written:
 
-- `prediction_external_test.tsv` (`full_run` only)
-- `prediction_inference.tsv` (`full_run` only)
-- `loss_by_split_final_refit.tsv` (`full_run` only)
+- `external_test/tables/prediction_external_test.tsv` (`full_run` only)
+- `inference/tables/prediction_inference.tsv` (`full_run` only)
+- `external_test/tables/loss_by_split_final_refit.tsv` (`full_run` only)
 - `model_bundle/` (`full_run` only)
-- `ensemble_model_probs.tsv` (ensemble size > 1)
-- `model_selection_trials.tsv` (model selection enabled)
-- `model_selection_trials_summary.tsv` (model selection enabled)
-- `model_selection_selected.tsv` (candidate selection enabled)
-- `figures/model_selection_one_se_curve.svg` (candidate selection enabled)
+- `cv/tables/ensemble_model_probs.tsv` (ensemble size > 1)
+- `cv/tables/model_selection_trials.tsv` (model selection enabled)
+- `cv/tables/model_selection_trials_summary.tsv` (model selection enabled)
+- `model/tables/model_selection_selected.tsv` (candidate selection enabled)
+- `cv/figures/model_selection_one_se_curve.svg` (candidate selection enabled)
 
 ## `config`
 
@@ -206,9 +206,9 @@ Options:
 Outputs:
 
 - `resolved_config.yml`
-- `prediction_inference.tsv`
+- `inference/tables/prediction_inference.tsv`
 - `run_metadata.json`
-- `figures/`
+- `inference/figures/`
   - `predict_probability_distribution.svg`
   - optional `predict_uncertainty.svg` (bundle ensemble size > 1)
 

@@ -22,6 +22,18 @@ _TEXT_COLOR = "#000000"
 _FEATURE_HEATMAP_LIMIT = 30
 
 
+def _stage_figures_dir(run_dir: Path, stage: str) -> Path:
+    figures_dir = run_dir / stage / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    return figures_dir
+
+
+def _stage_tables_dir(run_dir: Path, stage: str) -> Path:
+    tables_dir = run_dir / stage / "tables"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    return tables_dir
+
+
 def write_run_tree_prediction_artifacts(
     *,
     run_dir: Path,
@@ -56,8 +68,10 @@ def write_run_tree_prediction_artifacts(
         group_col=group_col,
     )
     if contrast_annotation.height > 0:
+        cv_figures_dir = _stage_figures_dir(run_dir, "cv")
+        cv_tables_dir = _stage_tables_dir(run_dir, "cv")
         contrast_annotation.write_csv(
-            run_dir / "tree_contrast_pairs_annotation.tsv",
+            cv_tables_dir / "tree_contrast_pairs_annotation.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
@@ -66,7 +80,7 @@ def write_run_tree_prediction_artifacts(
             _write_tree_prediction_svg(
                 tree_path=tree_path,
                 annotation=contrast_annotation,
-                out_path=run_dir / "figures" / "tree_group.svg",
+                out_path=cv_figures_dir / "tree_group.svg",
                 title="",
                 tracks=["true_label", "group_id"],
             )
@@ -87,8 +101,10 @@ def write_run_tree_prediction_artifacts(
         feature_limit=feature_limit,
     )
     if feature_annotation.height > 0:
+        cv_figures_dir = _stage_figures_dir(run_dir, "cv")
+        cv_tables_dir = _stage_tables_dir(run_dir, "cv")
         feature_annotation.write_csv(
-            run_dir / "tree_feature_heatmap_annotation.tsv",
+            cv_tables_dir / "tree_feature_heatmap_annotation.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
@@ -98,7 +114,7 @@ def write_run_tree_prediction_artifacts(
                 tree_path=tree_path,
                 annotation=feature_annotation,
                 value_col="z_score_log2_tpm",
-                out_path=run_dir / "figures" / "tree_feature_heatmap_zscore.svg",
+                out_path=cv_figures_dir / "tree_feature_heatmap_zscore.svg",
                 title="",
                 cmap_name="coolwarm",
             )
@@ -108,7 +124,7 @@ def write_run_tree_prediction_artifacts(
                 tree_path=tree_path,
                 annotation=feature_annotation,
                 value_col="log2_tpm_plus1",
-                out_path=run_dir / "figures" / "tree_feature_heatmap_log2_tpm.svg",
+                out_path=cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg",
                 title="",
                 cmap_name="viridis",
             )
@@ -123,8 +139,10 @@ def write_run_tree_prediction_artifacts(
         group_col=group_col,
     )
     if cv_annotation.height > 0:
+        cv_figures_dir = _stage_figures_dir(run_dir, "cv")
+        cv_tables_dir = _stage_tables_dir(run_dir, "cv")
         cv_annotation.write_csv(
-            run_dir / "tree_prediction_cv_annotation.tsv",
+            cv_tables_dir / "tree_prediction_cv_annotation.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
@@ -133,7 +151,7 @@ def write_run_tree_prediction_artifacts(
             _write_tree_prediction_svg(
                 tree_path=tree_path,
                 annotation=cv_annotation,
-                out_path=run_dir / "figures" / "tree_prediction_cv.svg",
+                out_path=cv_figures_dir / "tree_prediction_cv.svg",
                 title="",
                 tracks=[
                     "true_label",
@@ -151,13 +169,15 @@ def write_run_tree_prediction_artifacts(
         )
 
     if pred_external_test is not None and pred_external_test.height > 0:
+        external_test_figures_dir = _stage_figures_dir(run_dir, "external_test")
+        external_test_tables_dir = _stage_tables_dir(run_dir, "external_test")
         external_annotation = build_external_tree_prediction_annotation(
             metadata=metadata,
             pred_external_test=pred_external_test,
             group_col=group_col,
         )
         external_annotation.write_csv(
-            run_dir / "tree_prediction_external_annotation.tsv",
+            external_test_tables_dir / "tree_prediction_external_annotation.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
@@ -166,7 +186,7 @@ def write_run_tree_prediction_artifacts(
             _write_tree_prediction_svg(
                 tree_path=tree_path,
                 annotation=external_annotation,
-                out_path=run_dir / "figures" / "tree_prediction_external.svg",
+                out_path=external_test_figures_dir / "tree_prediction_external.svg",
                 title="External Test Tree Prediction",
                 tracks=[
                     "true_label",
@@ -207,15 +227,16 @@ def write_predict_tree_prediction_artifacts(
         group_col=group_col,
     )
     annotation.write_csv(
-        run_dir / "tree_prediction_predict_annotation.tsv",
+        _stage_tables_dir(run_dir, "inference") / "tree_prediction_predict_annotation.tsv",
         separator="\t",
         float_precision=8,
         null_value="NA",
     )
+    inference_figures_dir = _stage_figures_dir(run_dir, "inference")
     return _write_tree_prediction_svg(
         tree_path=tree_path,
         annotation=annotation,
-        out_path=run_dir / "figures" / "tree_prediction_predict.svg",
+        out_path=inference_figures_dir / "tree_prediction_predict.svg",
         title="Prediction Tree",
         tracks=[
             "true_label",

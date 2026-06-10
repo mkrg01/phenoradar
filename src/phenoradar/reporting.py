@@ -47,6 +47,13 @@ def _json_load(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _run_metrics_path(run_dir: Path) -> Path:
+    staged_path = run_dir / "cv" / "tables" / "metrics_cv.tsv"
+    if staged_path.exists():
+        return staged_path
+    return run_dir / "metrics_cv.tsv"
+
+
 def _yaml_load(path: Path) -> dict[str, Any]:
     try:
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -282,7 +289,7 @@ def generate_report(
         duration_sec = _float_or_none(metadata.get("duration_sec"))
 
         metric_value: float | None = None
-        metrics_path = run_dir / "metrics_cv.tsv"
+        metrics_path = _run_metrics_path(run_dir)
         if metrics_path.exists():
             try:
                 metric_value = _load_metric_value(

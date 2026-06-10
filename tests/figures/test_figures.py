@@ -95,7 +95,7 @@ def test_write_run_figures_does_not_emit_ensemble_uncertainty(
         model_selection_trials=None,
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     assert not (figures_dir / "ensemble_uncertainty.svg").exists()
     assert warnings == []
 
@@ -272,7 +272,7 @@ def test_write_predict_figures_writes_uncertainty_when_available(tmp_path: Path)
         require_uncertainty=True,
     )
 
-    figures_dir = tmp_path / "predict_run" / "figures"
+    figures_dir = tmp_path / "predict_run" / "inference" / "figures"
     assert (figures_dir / "predict_probability_distribution.svg").exists()
     assert (figures_dir / "predict_uncertainty.svg").exists()
 
@@ -290,7 +290,7 @@ def test_write_predict_figures_skips_uncertainty_when_not_required(tmp_path: Pat
         require_uncertainty=False,
     )
 
-    figures_dir = tmp_path / "predict_run" / "figures"
+    figures_dir = tmp_path / "predict_run" / "inference" / "figures"
     assert (figures_dir / "predict_probability_distribution.svg").exists()
     assert not (figures_dir / "predict_uncertainty.svg").exists()
 
@@ -308,18 +308,23 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
         loss_by_split_cv=_minimal_loss_by_split(),
     )
 
-    figures_dir = tmp_path / "run" / "figures"
-    assert (figures_dir / "cv_metrics_overview.svg").exists()
-    assert (figures_dir / "cv_loss_by_split.svg").exists()
-    assert (figures_dir / "feature_importance_top.svg").exists()
-    assert (figures_dir / "feature_importance_by_fold_heatmap.svg").exists()
-    assert (figures_dir / "coefficients_signed_top.svg").exists()
-    assert (figures_dir / "cv_species_probability_by_trait.svg").exists()
-    assert (figures_dir / "cv_fold_trait_probability.svg").exists()
-    assert (figures_dir / "roc_pr_curves_cv.svg").exists()
-    assert not (figures_dir / "final_refit_loss_by_split.svg").exists()
-    assert not (figures_dir / "external_species_probability_by_trait.svg").exists()
-    assert not (figures_dir / "inference_probability_distribution.svg").exists()
+    cv_figures_dir = tmp_path / "run" / "cv" / "figures"
+    external_figures_dir = tmp_path / "run" / "external_test" / "figures"
+    inference_figures_dir = tmp_path / "run" / "inference" / "figures"
+    assert cv_figures_dir.is_dir()
+    assert external_figures_dir.is_dir()
+    assert inference_figures_dir.is_dir()
+    assert (cv_figures_dir / "cv_metrics_overview.svg").exists()
+    assert (cv_figures_dir / "cv_loss_by_split.svg").exists()
+    assert (cv_figures_dir / "feature_importance_top.svg").exists()
+    assert (cv_figures_dir / "feature_importance_by_fold_heatmap.svg").exists()
+    assert (cv_figures_dir / "coefficients_signed_top.svg").exists()
+    assert (cv_figures_dir / "cv_species_probability_by_trait.svg").exists()
+    assert (cv_figures_dir / "cv_fold_trait_probability.svg").exists()
+    assert (cv_figures_dir / "roc_pr_curves_cv.svg").exists()
+    assert not (external_figures_dir / "final_refit_loss_by_split.svg").exists()
+    assert not (external_figures_dir / "external_species_probability_by_trait.svg").exists()
+    assert not (inference_figures_dir / "inference_probability_distribution.svg").exists()
     assert warnings == []
 
 
@@ -342,7 +347,7 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
         model_sparsity=_minimal_model_sparsity(),
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     assert (figures_dir / "feature_filter_funnel.svg").exists()
     funnel_svg = (figures_dir / "feature_filter_funnel.svg").read_text(encoding="utf-8")
     assert "Feature selection step" in funnel_svg
@@ -398,13 +403,15 @@ def test_write_run_figures_writes_external_trait_probability_when_available(tmp_
         ),
     )
 
-    figures_dir = tmp_path / "run" / "figures"
-    final_refit_loss_path = figures_dir / "final_refit_loss_by_split.svg"
+    external_figures_dir = tmp_path / "run" / "external_test" / "figures"
+    inference_figures_dir = tmp_path / "run" / "inference" / "figures"
+    final_refit_loss_path = external_figures_dir / "final_refit_loss_by_split.svg"
     assert final_refit_loss_path.exists()
     label_y, viewbox_height = _svg_text_y_and_viewbox_height(final_refit_loss_path, "Log Loss")
     assert label_y < viewbox_height
-    assert (figures_dir / "external_species_probability_by_trait.svg").exists()
-    assert (figures_dir / "inference_probability_distribution.svg").exists()
+    assert (external_figures_dir / "external_species_probability_by_trait.svg").exists()
+    assert (inference_figures_dir / "inference_probability_distribution.svg").exists()
+    assert not (tmp_path / "run" / "figures" / "cv_metrics_overview.svg").exists()
     assert warnings == []
 
 
@@ -495,7 +502,7 @@ def test_write_run_figures_ignores_empty_model_selection_trials_when_provided(
         ),
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     assert not (figures_dir / "model_selection_trials.svg").exists()
     assert warnings == []
 
@@ -526,7 +533,7 @@ def test_write_run_figures_writes_model_selection_trials_when_summary_provided(
         ),
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
     assert (figures_dir / "model_selection_trials.svg").exists()
     assert '1: {"C":1.0}' in svg_text
@@ -559,7 +566,7 @@ def test_write_run_figures_uses_log_loss_axis_label_for_model_selection_trials(
         ),
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
     assert "Log Loss" in svg_text
     assert warnings == []
@@ -594,7 +601,7 @@ def test_write_run_figures_hides_fixed_params_in_model_selection_labels(
         ),
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
     assert '0: {"C":1.0}' in svg_text
     assert '1: {"C":2.0}' in svg_text
@@ -658,7 +665,7 @@ def test_write_run_figures_writes_one_se_model_selection_figure(
         model_selection_selected=selected,
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     one_se_svg = (figures_dir / "model_selection_one_se_curve.svg").read_text(
         encoding="utf-8"
     )
@@ -705,7 +712,7 @@ def test_write_run_figures_limits_model_selection_sample_sets_per_fold(
         model_selection_trials_summary=summary,
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
     assert "fold=0" not in svg_text
     assert '0: {"panel_param":0}' in svg_text
@@ -731,7 +738,7 @@ def test_write_run_figures_ignores_empty_ensemble_inputs(tmp_path: Path) -> None
         model_selection_trials=None,
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     assert not (figures_dir / "ensemble_uncertainty.svg").exists()
     assert warnings == []
 
@@ -869,7 +876,7 @@ def test_write_run_figures_ignores_ensemble_model_probs_for_figure_generation(
         model_selection_trials=None,
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     assert not (figures_dir / "ensemble_uncertainty.svg").exists()
     assert warnings == []
 
@@ -896,7 +903,7 @@ def test_write_run_figures_ignores_model_selection_trials_with_all_null_metrics(
         ),
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     assert not (figures_dir / "model_selection_trials.svg").exists()
     assert warnings == []
 
