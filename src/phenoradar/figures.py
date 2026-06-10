@@ -1677,9 +1677,9 @@ def _roc_pr_curves_cv(oof_predictions: pl.DataFrame, out_path: Path) -> None:
 
     fpr, tpr, _ = roc_curve(y_true, prob)
     precision, recall, _ = precision_recall_curve(y_true, prob)
-    recall_order = np.argsort(recall)
-    recall_plot = np.asarray(recall[recall_order], dtype=float)
-    precision_plot = np.asarray(precision[recall_order], dtype=float)
+    # Keep sklearn's threshold order; sorting recall can reorder tied-recall steps.
+    recall_plot = np.asarray(recall, dtype=float)
+    precision_plot = np.asarray(precision, dtype=float)
     roc_auc = float(roc_auc_score(y_true, prob))
     pr_auc = float(average_precision_score(y_true, prob))
     prevalence = float(np.mean(y_true))
@@ -1703,7 +1703,13 @@ def _roc_pr_curves_cv(oof_predictions: pl.DataFrame, out_path: Path) -> None:
     ax_roc.set_title(f"ROC AUC={roc_auc:.6f}", fontsize=_LABEL_FONTSIZE)
 
     ax_pr.axhline(prevalence, color="#999999", linewidth=0.7, linestyle=(0, (4, 4)))
-    ax_pr.plot(recall_plot, precision_plot, color=_COLOR_ORANGE, linewidth=1.0)
+    ax_pr.plot(
+        recall_plot,
+        precision_plot,
+        color=_COLOR_ORANGE,
+        linewidth=1.0,
+        drawstyle="steps-post",
+    )
     ax_pr.set_xlim(0.0, 1.0)
     ax_pr.set_ylim(0.0, 1.0)
     ax_pr.set_xlabel("Recall", fontsize=_LABEL_FONTSIZE)

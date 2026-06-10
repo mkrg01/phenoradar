@@ -1480,6 +1480,52 @@ def test_roc_pr_curves_rejects_empty_table(tmp_path: Path) -> None:
         )
 
 
+def test_roc_pr_curves_preserves_pr_curve_threshold_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, np.ndarray | str] = {}
+    original_subplots = figures_mod.plt.subplots
+
+    def subplots_spy(*args, **kwargs):
+        fig, axes = original_subplots(*args, **kwargs)
+        ax_pr = axes[1]
+        original_plot = ax_pr.plot
+
+        def plot_spy(x, y, *plot_args, **plot_kwargs):
+            if plot_kwargs.get("color") == figures_mod._COLOR_ORANGE:
+                captured["recall"] = np.asarray(x, dtype=float)
+                captured["precision"] = np.asarray(y, dtype=float)
+                captured["drawstyle"] = plot_kwargs.get("drawstyle")
+            return original_plot(x, y, *plot_args, **plot_kwargs)
+
+        ax_pr.plot = plot_spy
+        return fig, axes
+
+    monkeypatch.setattr(figures_mod.plt, "subplots", subplots_spy)
+    oof_predictions = pl.DataFrame(
+        {
+            "fold_id": ["0"] * 6,
+            "label": [1, 1, 1, 0, 0, 0],
+            "prob": [0.02, 0.81, 0.91, 0.61, 0.73, 0.54],
+        }
+    )
+
+    figures_mod._roc_pr_curves_cv(
+        oof_predictions=oof_predictions,
+        out_path=tmp_path / "roc_pr_curves_cv.svg",
+    )
+
+    precision, recall, _ = figures_mod.precision_recall_curve(
+        np.array([1, 1, 1, 0, 0, 0]),
+        np.array([0.02, 0.81, 0.91, 0.61, 0.73, 0.54]),
+    )
+    recall_order = np.argsort(recall)
+    assert not np.array_equal(precision[recall_order], precision)
+    np.testing.assert_allclose(captured["recall"], recall)
+    np.testing.assert_allclose(captured["precision"], precision)
+    assert captured["drawstyle"] == "steps-post"
+
+
 def test_predict_probability_distribution_handles_nan_only_probabilities(tmp_path: Path) -> None:
     out_path = tmp_path / "predict_probability_distribution.svg"
     figures_mod._predict_probability_distribution(
