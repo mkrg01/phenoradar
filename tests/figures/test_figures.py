@@ -1366,6 +1366,46 @@ def test_predict_probability_distribution_rejects_missing_prob_column(tmp_path: 
         )
 
 
+def test_predict_probability_distribution_uses_contiguous_histogram_bins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+    original_subplots = figures_mod.plt.subplots
+
+    def subplots_spy(*args, **kwargs):
+        fig, ax = original_subplots(*args, **kwargs)
+        original_hist = ax.hist
+
+        def hist_spy(x, *hist_args, **hist_kwargs):
+            captured["bins"] = np.asarray(hist_kwargs["bins"], dtype=float)
+            result = original_hist(x, *hist_args, **hist_kwargs)
+            bars = list(result[2])
+            captured["bar_lefts"] = np.array([bar.get_x() for bar in bars], dtype=float)
+            captured["bar_widths"] = np.array([bar.get_width() for bar in bars], dtype=float)
+            return result
+
+        ax.hist = hist_spy
+        return fig, ax
+
+    monkeypatch.setattr(figures_mod.plt, "subplots", subplots_spy)
+    out_path = tmp_path / "predict_probability_distribution.svg"
+
+    figures_mod._predict_probability_distribution(
+        pred_predict=pl.DataFrame({"prob": [0.01, 0.11, 0.92]}),
+        out_path=out_path,
+    )
+
+    np.testing.assert_allclose(captured["bins"], np.linspace(0.0, 1.0, 11))
+    bar_lefts = np.asarray(captured["bar_lefts"], dtype=float)
+    bar_widths = np.asarray(captured["bar_widths"], dtype=float)
+    np.testing.assert_allclose(bar_widths, np.diff(np.linspace(0.0, 1.0, 11)))
+    np.testing.assert_allclose(bar_lefts[1:], bar_lefts[:-1] + bar_widths[:-1])
+
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "Predicted probability" in svg_text
+    assert "Number of species" in svg_text
+
+
 def test_predict_uncertainty_rejects_empty_table_when_required(tmp_path: Path) -> None:
     with pytest.raises(FigureError, match="prediction_inference.tsv is empty"):
         figures_mod._predict_uncertainty(

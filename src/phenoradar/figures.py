@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import matplotlib
 import numpy as np
@@ -1123,29 +1123,37 @@ def _predict_probability_distribution(
             f"prediction_inference.tsv is empty; cannot draw {figure_name}"
         )
 
-    counts, _bins = np.histogram(probs, bins=10, range=(0.0, 1.0))
-    max_count = int(counts.max()) if counts.size > 0 else 1
-    if max_count < 1:
-        max_count = 1
-
     fig, ax = plt.subplots(
         figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 320),
         dpi=_FIG_DPI,
     )
     fig.patch.set_facecolor("white")
 
-    bin_starts = np.arange(10, dtype=float) / 10.0
-    bars = ax.bar(bin_starts, counts.tolist(), width=0.08, align="edge", color=_COLOR_SKY)
+    bins = np.linspace(0.0, 1.0, 11).tolist()
+    counts_raw, _bins, bars_raw = ax.hist(
+        probs[np.isfinite(probs)],
+        bins=bins,
+        range=(0.0, 1.0),
+        color=_COLOR_SKY,
+        edgecolor=_COLOR_SKY,
+        linewidth=0.0,
+    )
+    counts = cast(np.ndarray, counts_raw)
+    bars = list(cast(Any, bars_raw))
+    max_count = int(counts.max()) if counts.size > 0 else 1
+    if max_count < 1:
+        max_count = 1
 
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, max_count * 1.15)
     ax.set_xticks(np.arange(0.0, 1.01, 0.1))
-    ax.set_xlabel("Probability", fontsize=_LABEL_FONTSIZE)
-    ax.set_ylabel("Count", fontsize=_LABEL_FONTSIZE)
+    ax.set_xlabel("Predicted probability", fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel("Number of species", fontsize=_LABEL_FONTSIZE)
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
     ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
 
-    for bar, count in zip(bars, counts.tolist(), strict=True):
+    for bar, count in zip(bars, counts.astype(int).tolist(), strict=True):
         x = bar.get_x() + bar.get_width() / 2
         y = bar.get_height()
         ax.text(
