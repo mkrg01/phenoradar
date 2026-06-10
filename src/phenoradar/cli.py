@@ -1031,6 +1031,7 @@ def run(
             pred_inference=(
                 None if final_refit_artifacts is None else final_refit_artifacts.pred_inference
             ),
+            classification_summary=classification_summary,
             trait_name=resolved.data.trait_col,
             feature_filter_counts_summary=feature_filter_counts_summary_table,
             feature_filter_funnel_stage_order=_feature_filter_funnel_stage_order(resolved),

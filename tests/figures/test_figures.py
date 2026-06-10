@@ -132,6 +132,30 @@ def _minimal_final_refit_loss_by_split() -> pl.DataFrame:
     )
 
 
+def _minimal_classification_summary() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "pool": ["validation_oof", "external_test"],
+            "fold_id": ["NA", "NA"],
+            "threshold_name": [
+                "fixed_probability_threshold",
+                "fixed_probability_threshold",
+            ],
+            "threshold_value": [0.5, 0.5],
+            "n_total": [4, 2],
+            "tp": [2, 1],
+            "fp": [0, 0],
+            "tn": [2, 1],
+            "fn": [0, 0],
+            "accuracy": [1.0, 1.0],
+            "precision": [1.0, 1.0],
+            "recall": [1.0, 1.0],
+            "f1": [1.0, 1.0],
+            "mcc": [1.0, 1.0],
+        }
+    )
+
+
 def _minimal_feature_importance() -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -378,6 +402,7 @@ def test_write_run_figures_writes_external_trait_probability_when_available(tmp_
         ensemble_model_probs=None,
         model_selection_trials=None,
         loss_by_split_final_refit=_minimal_final_refit_loss_by_split(),
+        classification_summary=_minimal_classification_summary(),
         pred_external_test=pl.DataFrame(
             {
                 "species": ["sp5", "sp6"],
@@ -405,6 +430,12 @@ def test_write_run_figures_writes_external_trait_probability_when_available(tmp_
     assert (external_figures_dir / "external_confusion_matrix.svg").exists()
     assert (external_figures_dir / "external_roc_curve.svg").exists()
     assert (external_figures_dir / "external_pr_curve.svg").exists()
+    comparison_path = external_figures_dir / "cv_external_metric_comparison.svg"
+    assert comparison_path.exists()
+    comparison_svg = comparison_path.read_text(encoding="utf-8")
+    assert "Validation OOF" in comparison_svg
+    assert "External test" in comparison_svg
+    assert "MCC" in comparison_svg
     assert (inference_figures_dir / "inference_probability_distribution.svg").exists()
     assert not (tmp_path / "run" / "figures" / "cv_metrics_overview.svg").exists()
     assert warnings == []

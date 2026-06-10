@@ -103,6 +103,13 @@ _FEATURE_FILTER_FIGURE_STAGE_LABELS = {
     "n_features_after_all": "Final",
 }
 _RUN_FIGURE_STAGES = ("cv", "external_test", "inference")
+_CV_EXTERNAL_METRIC_ORDER = (
+    ("accuracy", "Accuracy"),
+    ("precision", "Precision"),
+    ("recall", "Recall"),
+    ("f1", "F1"),
+    ("mcc", "MCC"),
+)
 
 
 def _figure_size_inches(width_px: int, height_px: int) -> tuple[float, float]:
@@ -1919,6 +1926,179 @@ def _external_confusion_matrix(pred_external_test: pl.DataFrame, out_path: Path)
     _save_svg_figure(fig, out_path)
 
 
+def _cv_external_metric_comparison(
+    classification_summary: pl.DataFrame,
+    out_path: Path,
+) -> None:
+    metric_columns = {metric for metric, _label in _CV_EXTERNAL_METRIC_ORDER}
+    required = {"pool", "fold_id", "threshold_name", *metric_columns}
+    if not required.issubset(classification_summary.columns):
+        raise FigureError(
+            "classification_summary.tsv schema is invalid for "
+            "cv_external_metric_comparison.svg"
+        )
+
+    data = classification_summary.select(
+        [
+            pl.col("pool").cast(pl.String, strict=False).alias("__pool"),
+            pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
+            pl.col("threshold_name").cast(pl.String, strict=False).alias("__threshold_name"),
+            *[
+                pl.col(metric).cast(pl.Float64, strict=False).alias(metric)
+                for metric in metric_columns
+            ],
+        ]
+    ).filter(
+        pl.col("__pool").is_in(["validation_oof", "external_test"])
+        & (pl.col("__fold_id").is_null() | (pl.col("__fold_id") == "NA"))
+    )
+    if data.height == 0:
+        raise FigureError(
+            "classification_summary.tsv has no pooled validation/external rows for "
+            "cv_external_metric_comparison.svg"
+        )
+
+    fixed_threshold = data.filter(pl.col("__threshold_name") == "fixed_probability_threshold")
+    if fixed_threshold.height > 0:
+        data = fixed_threshold
+    else:
+        threshold_names = [
+            str(value)
+            for value in data.select("__threshold_name").drop_nulls().unique().to_series().to_list()
+        ]
+        if threshold_names:
+            selected_threshold = sorted(threshold_names)[0]
+            data = data.filter(pl.col("__threshold_name") == selected_threshold)
+
+    pool_order = ["validation_oof", "external_test"]
+    pool_labels = {
+        "validation_oof": "Validation OOF",
+        "external_test": "External test",
+    }
+    pool_values: dict[str, list[float]] = {}
+    for pool in pool_order:
+        subset = data.filter(pl.col("__pool") == pool)
+        if subset.height == 0:
+            raise FigureError(
+                "classification_summary.tsv must contain pooled validation_oof and "
+                "external_test rows for cv_external_metric_comparison.svg"
+            )
+        row = subset.row(0, named=True)
+        values: list[float] = []
+        for metric, _label in _CV_EXTERNAL_METRIC_ORDER:
+            raw = row[metric]
+            values.append(np.nan if raw is None else float(raw))
+        pool_values[pool] = values
+
+    finite_values = [
+        value for values in pool_values.values() for value in values if np.isfinite(value)
+    ]
+    if not finite_values:
+        _write_message_figure(
+            title="CV External Metric Comparison",
+            message="No finite metric values are available.",
+            out_path=out_path,
+            width_px=_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX,
+            height_px=320,
+        )
+        return
+
+    has_negative = min(finite_values) < 0.0
+    if has_negative:
+        y_min = -1.12
+        y_max = 1.12
+        y_ticks = [-1.0, -0.5, 0.0, 0.5, 1.0]
+    else:
+        y_min = 0.0
+        y_max = 1.12
+        y_ticks = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+    metric_labels = [label for _metric, label in _CV_EXTERNAL_METRIC_ORDER]
+    x_positions = np.arange(len(metric_labels), dtype=float)
+    bar_width = 0.34
+    colors = {
+        "validation_oof": _COLOR_BLUE,
+        "external_test": _COLOR_ORANGE,
+    }
+    offsets = {
+        "validation_oof": -bar_width / 2,
+        "external_test": bar_width / 2,
+    }
+
+    fig, ax = plt.subplots(
+        figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 340),
+        dpi=_FIG_DPI,
+    )
+    fig.patch.set_facecolor("white")
+
+    for pool in pool_order:
+        value_array = np.array(pool_values[pool], dtype=float)
+        positions = x_positions + offsets[pool]
+        finite_mask = np.isfinite(value_array)
+        ax.bar(
+            positions[finite_mask],
+            value_array[finite_mask],
+            width=bar_width,
+            color=colors[pool],
+            label=pool_labels[pool],
+        )
+        for x_value, value in zip(positions, value_array, strict=True):
+            if np.isfinite(value):
+                if value >= 0.0:
+                    text_y = float(value) + 0.035
+                    va = "bottom"
+                else:
+                    text_y = float(value) - 0.035
+                    va = "top"
+                ax.text(
+                    x_value,
+                    text_y,
+                    f"{float(value):.3f}",
+                    ha="center",
+                    va=va,
+                    fontsize=_MONO_FONTSIZE,
+                    fontfamily="monospace",
+                    rotation=90,
+                )
+            else:
+                ax.text(
+                    x_value,
+                    0.02 if not has_negative else 0.04,
+                    "NA",
+                    ha="center",
+                    va="bottom",
+                    fontsize=_MONO_FONTSIZE,
+                    fontfamily="monospace",
+                    color=_MUTED_TEXT_COLOR,
+                    rotation=90,
+                )
+
+    ax.axhline(0.0, color=_AXIS_COLOR, linewidth=0.7)
+    ax.set_xlim(-0.55, len(metric_labels) - 0.45)
+    ax.set_ylim(y_min, y_max)
+    ax.set_yticks(y_ticks)
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(metric_labels, fontsize=_TICK_FONTSIZE)
+    ax.set_ylabel("Score", fontsize=_LABEL_FONTSIZE)
+    ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
+    ax.set_axisbelow(True)
+    ax.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.01),
+        ncol=2,
+        frameon=True,
+        framealpha=0.95,
+        facecolor="white",
+        edgecolor="#dddddd",
+        borderpad=0.25,
+        handlelength=1.2,
+        columnspacing=1.0,
+    )
+
+    fig.subplots_adjust(left=0.10, right=0.99, top=0.86, bottom=0.16)
+    _save_svg_figure(fig, out_path)
+
+
 def _report_metric_ranking(report_ranking: pl.DataFrame, out_path: Path) -> None:
     required = {"rank", "run_id", "metric_value"}
     if not required.issubset(report_ranking.columns):
@@ -3096,6 +3276,7 @@ def write_run_figures(
     loss_by_split_final_refit: pl.DataFrame | None = None,
     pred_external_test: pl.DataFrame | None = None,
     pred_inference: pl.DataFrame | None = None,
+    classification_summary: pl.DataFrame | None = None,
     trait_name: str = "trait",
     model_selection_trials_summary: pl.DataFrame | None = None,
     model_selection_selected: pl.DataFrame | None = None,
@@ -3188,6 +3369,14 @@ def write_run_figures(
             cv_dir / "non_zero_feature_count_by_fold.svg",
         )
     if pred_external_test is not None:
+        if classification_summary is not None:
+            try:
+                _cv_external_metric_comparison(
+                    classification_summary,
+                    external_test_dir / "cv_external_metric_comparison.svg",
+                )
+            except FigureError as exc:
+                warnings.append(str(exc))
         try:
             _external_confusion_matrix(
                 pred_external_test,

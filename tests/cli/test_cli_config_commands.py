@@ -578,6 +578,9 @@ data:
         run_dirs[0] / "external_test" / "figures" / "external_confusion_matrix.svg"
     ).exists()
     assert (
+        run_dirs[0] / "external_test" / "figures" / "cv_external_metric_comparison.svg"
+    ).exists()
+    assert (
         run_dirs[0] / "inference" / "figures" / "inference_probability_distribution.svg"
     ).exists()
     cv_trait_svg = (
@@ -735,6 +738,9 @@ data:
     ).exists()
     assert not (
         run_dirs[0] / "external_test" / "figures" / "external_species_probability_by_trait.svg"
+    ).exists()
+    assert not (
+        run_dirs[0] / "external_test" / "figures" / "cv_external_metric_comparison.svg"
     ).exists()
     assert (run_dirs[0] / "summary" / "tables" / "classification_summary.tsv").exists()
     assert not (run_dirs[0] / "external_test" / "tables" / "prediction_external_test.tsv").exists()

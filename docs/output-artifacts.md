@@ -144,6 +144,7 @@ Always written:
     - `external_test/figures/final_refit_loss_by_split.svg` (attempted in `full_run`)
     - `external_test/figures/external_species_probability_by_trait.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
     - `external_test/figures/external_confusion_matrix.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
+    - `external_test/figures/cv_external_metric_comparison.svg` (attempted in `full_run`; may be skipped with warning when the pooled CV or external-test summary is missing)
     - `external_test/figures/external_roc_curve.svg` (attempted in `full_run`; may be skipped with warning when external test labels are single-class)
     - `external_test/figures/external_pr_curve.svg` (attempted in `full_run`; may be skipped with warning when external test labels are single-class)
     - `inference/figures/inference_probability_distribution.svg` (attempted in `full_run`; may be skipped with warning when inference set is empty)
@@ -543,6 +544,10 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
   - Fixed-threshold external-test confusion matrix.
   - Cells show counts and the row-wise percentage within each true-label class.
   - Side annotations report accuracy, precision, recall, specificity, F1, and MCC.
+- `external_test/figures/cv_external_metric_comparison.svg` (`full_run` with external samples)
+  - Grouped-bar comparison of pooled out-of-fold CV and external-test classification metrics.
+  - Uses the fixed-threshold rows from `summary/tables/classification_summary.tsv`.
+  - Shows accuracy, precision, recall, F1, and MCC.
 - `external_test/figures/external_roc_curve.svg` / `external_test/figures/external_pr_curve.svg` (`full_run` with both external-test labels)
   - External-test ROC and precision-recall curves from `prediction_external_test.tsv`.
   - The ROC panel annotates ROC AUC. The PR panel annotates average precision and the external-test positive rate.
