@@ -586,6 +586,9 @@ data:
     assert (
         run_dirs[0] / "inference" / "figures" / "inference_probability_distribution.svg"
     ).exists()
+    assert (
+        run_dirs[0] / "inference" / "figures" / "species_probability_cv_and_inference.svg"
+    ).exists()
     assert (run_dirs[0] / "external_test" / "tables" / "group_summary_family.tsv").exists()
     assert (
         run_dirs[0] / "external_test" / "figures" / "probability_by_family.svg"

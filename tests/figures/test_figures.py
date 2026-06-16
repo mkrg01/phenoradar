@@ -340,6 +340,7 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
     assert not (external_figures_dir / "final_refit_loss_by_split.svg").exists()
     assert not (external_figures_dir / "external_species_probability_by_trait.svg").exists()
     assert not (inference_figures_dir / "inference_probability_distribution.svg").exists()
+    assert not (inference_figures_dir / "species_probability_cv_and_inference.svg").exists()
     assert warnings == []
 
 
@@ -437,6 +438,11 @@ def test_write_run_figures_writes_external_trait_probability_when_available(tmp_
     assert "External test" in comparison_svg
     assert "MCC" in comparison_svg
     assert (inference_figures_dir / "inference_probability_distribution.svg").exists()
+    cv_inference_path = inference_figures_dir / "species_probability_cv_and_inference.svg"
+    assert cv_inference_path.exists()
+    cv_inference_svg = cv_inference_path.read_text(encoding="utf-8")
+    assert "unannotated" in cv_inference_svg
+    assert "n=3" in cv_inference_svg
     assert not (tmp_path / "run" / "figures" / "cv_metrics_overview.svg").exists()
     assert warnings == []
 
@@ -1014,6 +1020,35 @@ def test_species_probability_by_trait_writes_svg(tmp_path: Path) -> None:
     svg_text = out_path.read_text(encoding="utf-8")
     assert "n=2" in svg_text
     assert "mean=" not in svg_text
+    assert "stroke-dasharray" in svg_text
+
+
+def test_species_probability_cv_and_inference_writes_svg(tmp_path: Path) -> None:
+    out_path = tmp_path / "species_probability_cv_and_inference.svg"
+    figures_mod._species_probability_cv_and_inference(
+        oof_predictions=pl.DataFrame(
+            {
+                "species": ["sp1", "sp2", "sp3", "sp4"],
+                "label": [0, 0, 1, 1],
+                "prob": [0.2, 0.4, 0.7, 0.9],
+            }
+        ),
+        pred_inference=pl.DataFrame(
+            {
+                "species": ["sp5", "sp6", "sp7"],
+                "prob": [0.1, 0.55, 0.95],
+            }
+        ),
+        trait_name="C4",
+        out_path=out_path,
+    )
+
+    assert out_path.exists()
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "C4" in svg_text
+    assert "unannotated" in svg_text
+    assert "n=3" in svg_text
+    assert "stroke-dasharray" in svg_text
 
 
 def test_group_probability_figure_writes_all_groups(tmp_path: Path) -> None:

@@ -158,6 +158,7 @@ Always written:
     - `external_test/figures/external_roc_curve.svg` (attempted in `full_run`; may be skipped with warning when external test labels are single-class)
     - `external_test/figures/external_pr_curve.svg` (attempted in `full_run`; may be skipped with warning when external test labels are single-class)
     - `inference/figures/inference_probability_distribution.svg` (attempted in `full_run`; may be skipped with warning when inference set is empty)
+    - `inference/figures/species_probability_cv_and_inference.svg` (attempted in `full_run`; may be skipped with warning when inference set is empty)
     - `<stage>/figures/probability_by_<group>.svg` (attempted for non-empty prediction stages when `summary.group_col` is present in metadata)
 
 Conditionally written:
@@ -526,6 +527,7 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - `cv/figures/cv_species_probability_by_trait.svg`
   - Out-of-fold species probabilities grouped by trait (`label`).
   - Boxplot with per-species points and trait-wise mean markers.
+  - The dashed horizontal line marks the fixed probability threshold at `0.5`.
 - `cv/figures/cv_fold_trait_probability.svg`
   - Fold-level probability distribution grouped by trait.
   - Useful for checking fold-to-fold drift or fold-specific overlap.
@@ -569,6 +571,11 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - `inference/figures/inference_probability_distribution.svg` (`full_run` with inference samples)
   - Histogram of `prediction_inference.tsv` probabilities in bins
     `[0.0, 0.1), ... , [0.9, 1.0]`.
+- `inference/figures/species_probability_cv_and_inference.svg` (`full_run` with inference samples)
+  - Three-column comparison of CV out-of-fold probabilities for trait `0` and `1`
+    plus unannotated inference probabilities.
+  - The x-axis label uses the configured trait name, and the dashed horizontal line
+    marks the fixed probability threshold at `0.5`.
 - `external_test/figures/final_refit_loss_by_split.svg` (`full_run`)
   - Final-refit `log_loss` comparison of `train` and `external_test`.
   - Useful for quick train-vs-external generalization diagnostics.

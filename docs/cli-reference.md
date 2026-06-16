@@ -98,6 +98,7 @@ Notes:
   - `external_test/figures/cv_external_metric_comparison.svg` (`full_run` when external test rows exist)
   - `external_test/figures/external_roc_curve.svg` / `external_test/figures/external_pr_curve.svg` (`full_run` when external test rows contain both labels)
   - `inference/figures/inference_probability_distribution.svg` (`full_run` when inference rows exist)
+  - `inference/figures/species_probability_cv_and_inference.svg` (`full_run` when inference rows exist)
   - `<stage>/figures/probability_by_<group>.svg` (`full_run` prediction stages when `summary.group_col` is present in metadata)
 
 Conditionally written:

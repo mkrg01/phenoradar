@@ -74,6 +74,8 @@ _COLOR_ORANGE = "#E69F00"
 _COLOR_PURPLE = "#CC79A7"
 _TRAIT_NEGATIVE_COLOR = "#d62728"
 _TRAIT_POSITIVE_COLOR = "#1f77b4"
+_UNANNOTATED_COLOR = "#6f6f6f"
+_PROBABILITY_THRESHOLD_COLOR = "#999999"
 _MODEL_SELECTION_SAMPLE_SET_LIMIT = 1
 _DEFAULT_TOP_FEATURES = 30
 _FEATURE_IMPORTANCE_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
@@ -1387,6 +1389,187 @@ def _species_probability_by_trait(
     ax.set_xticklabels(x_labels, fontsize=_TICK_FONTSIZE)
     ax.set_xlabel(trait_name, fontsize=_LABEL_FONTSIZE)
     ax.set_ylabel("Predicted probability", fontsize=_LABEL_FONTSIZE)
+    ax.axhline(
+        0.5,
+        color=_PROBABILITY_THRESHOLD_COLOR,
+        linewidth=0.8,
+        linestyle=(0, (4, 4)),
+        zorder=1,
+    )
+    ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
+    ax.set_axisbelow(True)
+
+    fig.subplots_adjust(left=0.13, right=0.98, top=0.90, bottom=0.16)
+    _save_svg_figure(fig, out_path)
+
+
+def _species_probability_cv_and_inference(
+    *,
+    oof_predictions: pl.DataFrame,
+    pred_inference: pl.DataFrame,
+    trait_name: str,
+    out_path: Path,
+    figure_name: str = "species_probability_cv_and_inference.svg",
+) -> None:
+    cv_required = {"species", "label", "prob"}
+    if not cv_required.issubset(oof_predictions.columns):
+        raise FigureError(f"prediction_cv.tsv schema is invalid for {figure_name}")
+    inference_required = {"species", "prob"}
+    if not inference_required.issubset(pred_inference.columns):
+        raise FigureError(f"prediction_inference.tsv schema is invalid for {figure_name}")
+
+    cv_data = (
+        oof_predictions.select(
+            pl.col("species").cast(pl.String, strict=False).alias("__species"),
+            pl.col("label").cast(pl.Int64, strict=False).alias("__trait"),
+            pl.col("prob").cast(pl.Float64, strict=False).alias("__prob"),
+        )
+        .filter(
+            pl.col("__species").is_not_null()
+            & (pl.col("__species") != "")
+            & pl.col("__trait").is_not_null()
+            & pl.col("__prob").is_not_null()
+            & pl.col("__prob").is_finite()
+        )
+        .sort(["__trait", "__species"])
+    )
+    if cv_data.height == 0:
+        raise FigureError(f"prediction_cv.tsv is empty; cannot draw {figure_name}")
+
+    inference_data = (
+        pred_inference.select(
+            pl.col("species").cast(pl.String, strict=False).alias("__species"),
+            pl.col("prob").cast(pl.Float64, strict=False).alias("__prob"),
+        )
+        .filter(
+            pl.col("__species").is_not_null()
+            & (pl.col("__species") != "")
+            & pl.col("__prob").is_not_null()
+            & pl.col("__prob").is_finite()
+        )
+        .sort(["__prob", "__species"])
+    )
+    if inference_data.height == 0:
+        raise FigureError(f"prediction_inference.tsv is empty; cannot draw {figure_name}")
+
+    traits = [
+        int(v) for v in cv_data.select("__trait").unique().sort("__trait").to_series().to_list()
+    ]
+    _binary_trait_color_map(
+        traits,
+        source_table_name="prediction_cv.tsv",
+        figure_name=figure_name,
+    )
+
+    groups: list[tuple[str, np.ndarray, str]] = []
+    for trait in (0, 1):
+        probs = np.array(
+            cv_data.filter(pl.col("__trait") == trait)
+            .sort(["__prob", "__species"])
+            .select("__prob")
+            .to_series()
+            .to_list(),
+            dtype=float,
+        )
+        color = _TRAIT_NEGATIVE_COLOR if trait == 0 else _TRAIT_POSITIVE_COLOR
+        groups.append((str(trait), probs, color))
+    inference_probs = np.array(
+        inference_data.select("__prob").to_series().to_list(),
+        dtype=float,
+    )
+    groups.append(("unannotated", inference_probs, _UNANNOTATED_COLOR))
+
+    positions = np.arange(1, len(groups) + 1, dtype=float)
+    box_probs: list[list[float]] = []
+    box_positions: list[float] = []
+    box_colors: list[str] = []
+    for position, (_label, probs, color) in zip(positions, groups, strict=True):
+        if probs.size == 0:
+            continue
+        box_probs.append(probs.tolist())
+        box_positions.append(float(position))
+        box_colors.append(color)
+
+    if not box_probs:
+        raise FigureError(
+            f"prediction_cv.tsv and prediction_inference.tsv are empty for {figure_name}"
+        )
+
+    fig, ax = plt.subplots(
+        figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 390),
+        dpi=_FIG_DPI,
+    )
+    fig.patch.set_facecolor("white")
+
+    box = ax.boxplot(
+        box_probs,
+        positions=box_positions,
+        widths=0.55,
+        patch_artist=True,
+        showmeans=True,
+        showfliers=False,
+        manage_ticks=False,
+        meanprops={
+            "marker": "D",
+            "markerfacecolor": _AXIS_COLOR,
+            "markeredgecolor": _AXIS_COLOR,
+            "markersize": 3.0,
+        },
+        medianprops={"linewidth": 0.9, "color": _AXIS_COLOR},
+        whiskerprops={"linewidth": 0.8, "color": _MUTED_TEXT_COLOR},
+        capprops={"linewidth": 0.8, "color": _MUTED_TEXT_COLOR},
+    )
+    for patch, color in zip(box["boxes"], box_colors, strict=True):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.30)
+        patch.set_edgecolor(color)
+        patch.set_linewidth(0.8)
+
+    for position, (_label, probs, color) in zip(positions, groups, strict=True):
+        if probs.size == 0:
+            continue
+        offsets = _deterministic_offsets(probs.size, 0.17)
+        x_values = np.full(probs.shape[0], position, dtype=float) + offsets
+        ax.scatter(
+            x_values,
+            probs,
+            s=18,
+            color=color,
+            edgecolors="white",
+            linewidths=0.4,
+            alpha=0.78,
+            zorder=3,
+        )
+
+    for position, (_label, probs, _color) in zip(positions, groups, strict=True):
+        ax.text(
+            position,
+            1.02,
+            f"n={probs.size}",
+            transform=ax.get_xaxis_transform(),
+            ha="center",
+            va="bottom",
+            fontsize=_ANNOTATION_FONTSIZE,
+            color=_MUTED_TEXT_COLOR,
+            clip_on=False,
+        )
+
+    ax.set_xlim(0.5, len(groups) + 0.5)
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_xticks(positions)
+    ax.set_xticklabels(
+        [label for label, _probs, _color in groups],
+        fontsize=_TICK_FONTSIZE,
+    )
+    ax.set_xlabel(trait_name, fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel("Predicted probability", fontsize=_LABEL_FONTSIZE)
+    ax.axhline(
+        0.5,
+        color=_PROBABILITY_THRESHOLD_COLOR,
+        linewidth=0.8,
+        linestyle=(0, (4, 4)),
+        zorder=1,
+    )
     ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
 
@@ -3578,6 +3761,15 @@ def write_run_figures(
                 pred_inference,
                 inference_dir / "inference_probability_distribution.svg",
                 figure_name="inference_probability_distribution.svg",
+            )
+        except FigureError as exc:
+            warnings.append(str(exc))
+        try:
+            _species_probability_cv_and_inference(
+                oof_predictions=oof_predictions,
+                pred_inference=pred_inference,
+                trait_name=trait_name,
+                out_path=inference_dir / "species_probability_cv_and_inference.svg",
             )
         except FigureError as exc:
             warnings.append(str(exc))
