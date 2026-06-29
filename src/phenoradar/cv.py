@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from math import comb
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Lock
 from typing import Any
 
@@ -765,6 +766,9 @@ class ExpressionMatrixBuilder:
         self._feature_col = config.data.feature_col
         self._value_col = config.data.value_col
         self._max_pivot_cells = int(config.preprocess.max_pivot_cells)
+        self._cache_tempdir: TemporaryDirectory[str] | None = None
+        self._cached_long_path: Path | None = None
+        self._cached_species: set[str] | None = None
 
         try:
             self._scan = pl.scan_csv(self._tpm_path, separator="\t")
@@ -778,7 +782,7 @@ class ExpressionMatrixBuilder:
             missing_str = ", ".join(missing)
             raise CVError(f"Missing required columns in expression data: {missing_str}")
 
-    def _long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
+    def _raw_long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
         return (
             self._scan.filter(
                 pl.col(self._species_col).cast(pl.String, strict=False).str.strip_chars().is_in(
@@ -807,6 +811,42 @@ class ExpressionMatrixBuilder:
             .group_by(["__species", "__feature"])
             .agg(pl.col("__value").sum())
         )
+
+    def _long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
+        requested_species = set(unique_species)
+        if (
+            self._cached_long_path is not None
+            and self._cached_species is not None
+            and requested_species.issubset(self._cached_species)
+        ):
+            return pl.scan_parquet(self._cached_long_path).filter(
+                pl.col("__species").is_in(unique_species)
+            )
+        return self._raw_long_scan_for_species(unique_species)
+
+    def cache_species(self, species_order: list[str]) -> None:
+        """Materialize normalized expression rows for a reusable species set."""
+
+        if not species_order:
+            raise CVError("No species were provided for matrix construction")
+        unique_species = list(dict.fromkeys(species_order))
+        requested_species = set(unique_species)
+        if (
+            self._cached_long_path is not None
+            and self._cached_species is not None
+            and requested_species.issubset(self._cached_species)
+        ):
+            return
+
+        cache_tempdir = TemporaryDirectory(prefix="phenoradar-expression-")
+        cache_path = Path(cache_tempdir.name) / "expression_long.parquet"
+        self._raw_long_scan_for_species(unique_species).sink_parquet(
+            cache_path,
+            compression="zstd",
+        )
+        self._cache_tempdir = cache_tempdir
+        self._cached_long_path = cache_path
+        self._cached_species = requested_species
 
     @staticmethod
     def _normalize_feature_order(feature_order: list[str]) -> list[str]:
@@ -2918,6 +2958,9 @@ def run_final_refit(
     target_feature_names: list[str] | None = None
 
     if prune_target_matrix:
+        _with_native_thread_limit_for_config(
+            config, matrix_builder.cache_species, train_species + target_species
+        )
         full_feature_names = _with_native_thread_limit_for_config(
             config, matrix_builder.feature_names_for_species, train_species + target_species
         )

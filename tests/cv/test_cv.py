@@ -802,8 +802,14 @@ def test_run_final_refit_prunes_target_matrix_without_changing_outputs(
     )
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     split_artifacts = build_split_artifacts(config)
+    original_cache_species = cv_mod.ExpressionMatrixBuilder.cache_species
     original_build_matrix = cv_mod.ExpressionMatrixBuilder.build_matrix
+    cache_calls: list[list[str]] = []
     build_calls: list[tuple[list[str], list[str] | None]] = []
+
+    def _counting_cache_species(self: object, species_order: list[str]) -> None:
+        cache_calls.append(list(species_order))
+        original_cache_species(self, species_order)
 
     def _counting_build_matrix(
         self: object,
@@ -815,9 +821,11 @@ def test_run_final_refit_prunes_target_matrix_without_changing_outputs(
         )
         return original_build_matrix(self, species_order, feature_order=feature_order)
 
+    monkeypatch.setattr(cv_mod.ExpressionMatrixBuilder, "cache_species", _counting_cache_species)
     monkeypatch.setattr(cv_mod.ExpressionMatrixBuilder, "build_matrix", _counting_build_matrix)
     optimized = run_final_refit(config, split_artifacts.split_manifest)
 
+    assert len(cache_calls) == 1
     target_calls = [call for call in build_calls if call[1] is not None]
     assert len(target_calls) == 1
     assert "OG_target_only" not in target_calls[0][1]
@@ -1471,6 +1479,24 @@ def test_expression_matrix_builder_build_matrix_respects_feature_order_and_zero_
 
     assert features == ["OG2", "OG_missing"]
     assert matrix.tolist() == [[0.5, 0.0], [0.3, 0.0]]
+
+
+def test_expression_matrix_builder_cache_species_reuses_cached_subset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    builder = ExpressionMatrixBuilder(config)
+    builder.cache_species(["sp1", "sp2"])
+
+    def _fail_raw_scan(_species: list[str]) -> pl.LazyFrame:
+        raise AssertionError("raw scan should not be used for cached species")
+
+    monkeypatch.setattr(builder, "_raw_long_scan_for_species", _fail_raw_scan)
+    matrix, features = builder.build_matrix(["sp2"], feature_order=["OG1"])
+
+    assert features == ["OG1"]
+    assert matrix.tolist() == [[2.0]]
 
 
 def test_preprocess_train_and_target_rejects_negative_tpm_values(tmp_path: Path) -> None:
