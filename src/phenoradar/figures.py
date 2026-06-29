@@ -58,6 +58,7 @@ _FIG_DPI = 100
 _NATURE_SINGLE_COLUMN_WIDTH_PX = 350
 _NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX = 535
 _NATURE_DOUBLE_COLUMN_WIDTH_PX = 720
+_CURVE_PANEL_SIZE_PX = _NATURE_SINGLE_COLUMN_WIDTH_PX
 _TITLE_FONTSIZE = 7
 _SUBTITLE_FONTSIZE = 6
 _LABEL_FONTSIZE = 7
@@ -1945,7 +1946,7 @@ def _roc_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     roc_auc = float(roc_auc_score(y_true, prob))
 
     fig, ax = plt.subplots(
-        figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 340),
+        figsize=_figure_size_inches(_CURVE_PANEL_SIZE_PX, _CURVE_PANEL_SIZE_PX),
         dpi=_FIG_DPI,
     )
     fig.patch.set_facecolor("white")
@@ -1954,13 +1955,14 @@ def _roc_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     ax.plot(fpr, tpr, color=_COLOR_BLUE, linewidth=1.0)
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
+    ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("False Positive Rate", fontsize=_LABEL_FONTSIZE)
     ax.set_ylabel("True Positive Rate", fontsize=_LABEL_FONTSIZE)
     ax.grid(color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
     ax.set_title(f"ROC AUC={roc_auc:.6f}", fontsize=_LABEL_FONTSIZE)
 
-    fig.subplots_adjust(left=0.12, right=0.98, top=0.92, bottom=0.14)
+    fig.subplots_adjust(left=0.16, right=0.98, top=0.92, bottom=0.14)
     _save_svg_figure(fig, out_path)
 
 
@@ -1973,7 +1975,7 @@ def _pr_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     prevalence = float(np.mean(y_true))
 
     fig, ax = plt.subplots(
-        figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 340),
+        figsize=_figure_size_inches(_CURVE_PANEL_SIZE_PX, _CURVE_PANEL_SIZE_PX),
         dpi=_FIG_DPI,
     )
     fig.patch.set_facecolor("white")
@@ -1988,6 +1990,7 @@ def _pr_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     )
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
+    ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("Recall", fontsize=_LABEL_FONTSIZE)
     ax.set_ylabel("Precision", fontsize=_LABEL_FONTSIZE)
     ax.grid(color=_GRID_COLOR, linewidth=0.5)
@@ -1997,7 +2000,7 @@ def _pr_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
         fontsize=_LABEL_FONTSIZE,
     )
 
-    fig.subplots_adjust(left=0.12, right=0.98, top=0.92, bottom=0.14)
+    fig.subplots_adjust(left=0.16, right=0.98, top=0.92, bottom=0.14)
     _save_svg_figure(fig, out_path)
 
 

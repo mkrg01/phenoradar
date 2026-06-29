@@ -35,6 +35,12 @@ def _svg_text_values(svg_path: Path) -> set[str]:
     }
 
 
+def _svg_viewbox_size(svg_path: Path) -> tuple[float, float]:
+    root = ET.parse(svg_path).getroot()
+    _, _, width, height = root.attrib["viewBox"].split()
+    return float(width), float(height)
+
+
 def _minimal_metrics_cv() -> pl.DataFrame:
     return pl.DataFrame(
         [
@@ -1592,6 +1598,27 @@ def test_roc_pr_curves_preserves_pr_curve_threshold_order(
     np.testing.assert_allclose(captured["recall"], recall)
     np.testing.assert_allclose(captured["precision"], precision)
     assert captured["drawstyle"] == "steps-post"
+
+
+def test_roc_pr_curves_cv_use_square_publication_panels(tmp_path: Path) -> None:
+    figures_mod._roc_pr_curves_cv(
+        oof_predictions=pl.DataFrame(
+            {
+                "fold_id": ["0"] * 6,
+                "label": [0, 0, 0, 1, 1, 1],
+                "prob": [0.1, 0.2, 0.3, 0.7, 0.8, 0.9],
+            }
+        ),
+        roc_out_path=tmp_path / "roc_curve_cv.svg",
+        pr_out_path=tmp_path / "pr_curve_cv.svg",
+    )
+
+    assert _svg_viewbox_size(tmp_path / "roc_curve_cv.svg") == pytest.approx(
+        (252.0, 252.0)
+    )
+    assert _svg_viewbox_size(tmp_path / "pr_curve_cv.svg") == pytest.approx(
+        (252.0, 252.0)
+    )
 
 
 def test_predict_probability_distribution_handles_nan_only_probabilities(tmp_path: Path) -> None:
