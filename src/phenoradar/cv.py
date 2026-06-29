@@ -778,12 +778,8 @@ class ExpressionMatrixBuilder:
             missing_str = ", ".join(missing)
             raise CVError(f"Missing required columns in expression data: {missing_str}")
 
-    def build_matrix(self, species_order: list[str]) -> tuple[np.ndarray, list[str]]:
-        if not species_order:
-            raise CVError("No species were provided for matrix construction")
-
-        unique_species = list(dict.fromkeys(species_order))
-        long_scan = (
+    def _long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
+        return (
             self._scan.filter(
                 pl.col(self._species_col).cast(pl.String, strict=False).str.strip_chars().is_in(
                     unique_species
@@ -812,6 +808,50 @@ class ExpressionMatrixBuilder:
             .agg(pl.col("__value").sum())
         )
 
+    @staticmethod
+    def _normalize_feature_order(feature_order: list[str]) -> list[str]:
+        feature_names = [str(value).strip() for value in feature_order]
+        if not feature_names:
+            raise CVError("No features were provided for matrix construction")
+        if any(value == "" for value in feature_names):
+            raise CVError("Feature order contains an empty feature identifier")
+        if len(set(feature_names)) != len(feature_names):
+            raise CVError("Feature order contains duplicate feature identifiers")
+        return feature_names
+
+    @staticmethod
+    def _matrix_from_long_df(
+        long_df: pl.DataFrame,
+        ordering_df: pl.DataFrame,
+        feature_names: list[str],
+    ) -> np.ndarray:
+        if long_df.height == 0:
+            return np.zeros((ordering_df.height, len(feature_names)), dtype=float)
+        pivot = long_df.pivot(
+            index="__species",
+            on="__feature",
+            values="__value",
+            aggregate_function="sum",
+        )
+        missing_features = [feature for feature in feature_names if feature not in pivot.columns]
+        if missing_features:
+            pivot = pivot.with_columns([pl.lit(0.0).alias(feature) for feature in missing_features])
+        ordered = (
+            ordering_df.join(pivot, on="__species", how="left")
+            .fill_null(0.0)
+            .sort("__row_idx")
+            .select(feature_names)
+        )
+        return ordered.to_numpy().astype(float, copy=False)
+
+    def feature_names_for_species(self, species_order: list[str]) -> list[str]:
+        """Return sorted feature names available for the selected species."""
+
+        if not species_order:
+            raise CVError("No species were provided for matrix construction")
+
+        unique_species = list(dict.fromkeys(species_order))
+        long_scan = self._long_scan_for_species(unique_species)
         present_species = {
             str(value)
             for value in long_scan.select("__species").unique().collect().to_series().to_list()
@@ -826,14 +866,48 @@ class ExpressionMatrixBuilder:
         feature_names = [
             str(value)
             for value in (
-                long_scan.select("__feature")
-                .unique()
-                .sort("__feature")
-                .collect()
-                .to_series()
-                .to_list()
+                long_scan.select("__feature").unique().sort("__feature").collect().to_series().to_list()
             )
         ]
+        if not feature_names:
+            raise CVError("No features were available after pivoting expression data")
+        return feature_names
+
+    def build_matrix(
+        self, species_order: list[str], feature_order: list[str] | None = None
+    ) -> tuple[np.ndarray, list[str]]:
+        if not species_order:
+            raise CVError("No species were provided for matrix construction")
+
+        unique_species = list(dict.fromkeys(species_order))
+        long_scan = self._long_scan_for_species(unique_species)
+
+        present_species = {
+            str(value)
+            for value in long_scan.select("__species").unique().collect().to_series().to_list()
+        }
+        if not present_species:
+            raise CVError("Expression matrix is empty for the selected species")
+        missing_species = sorted(set(unique_species) - set(str(v) for v in present_species))
+        if missing_species:
+            preview = ", ".join(missing_species[:10])
+            raise CVError(f"Expression data is missing selected species: {preview}")
+
+        if feature_order is None:
+            feature_names = [
+                str(value)
+                for value in (
+                    long_scan.select("__feature")
+                    .unique()
+                    .sort("__feature")
+                    .collect()
+                    .to_series()
+                    .to_list()
+                )
+            ]
+        else:
+            feature_names = self._normalize_feature_order(feature_order)
+            long_scan = long_scan.filter(pl.col("__feature").is_in(feature_names))
         if not feature_names:
             raise CVError("No features were available after pivoting expression data")
 
@@ -843,19 +917,7 @@ class ExpressionMatrixBuilder:
         estimated_cells = len(unique_species) * len(feature_names)
         if estimated_cells <= self._max_pivot_cells:
             long_df = long_scan.collect()
-            pivot = long_df.pivot(
-                index="__species",
-                on="__feature",
-                values="__value",
-                aggregate_function="sum",
-            )
-            ordered = (
-                ordering_df.join(pivot, on="__species", how="left")
-                .fill_null(0.0)
-                .sort("__row_idx")
-                .select(feature_names)
-            )
-            return ordered.to_numpy().astype(float, copy=False), feature_names
+            return self._matrix_from_long_df(long_df, ordering_df, feature_names), feature_names
 
         feature_chunk_size = max(1, self._max_pivot_cells // max(1, len(unique_species)))
         matrix = np.zeros((len(species_order), len(feature_names)), dtype=float)
@@ -863,19 +925,7 @@ class ExpressionMatrixBuilder:
             stop = min(start + feature_chunk_size, len(feature_names))
             chunk_features = feature_names[start:stop]
             chunk_df = long_scan.filter(pl.col("__feature").is_in(chunk_features)).collect()
-            chunk_pivot = chunk_df.pivot(
-                index="__species",
-                on="__feature",
-                values="__value",
-                aggregate_function="sum",
-            )
-            ordered_chunk = (
-                ordering_df.join(chunk_pivot, on="__species", how="left")
-                .fill_null(0.0)
-                .sort("__row_idx")
-                .select(chunk_features)
-            )
-            chunk_matrix = ordered_chunk.to_numpy().astype(float, copy=False)
+            chunk_matrix = self._matrix_from_long_df(chunk_df, ordering_df, chunk_features)
             expected_shape = (len(species_order), len(chunk_features))
             if chunk_matrix.shape != expected_shape:
                 raise CVError("Expression matrix chunking produced inconsistent chunk shape")
@@ -2420,6 +2470,109 @@ def _preprocess_train_and_target_with_counts(
     return x_train_scaled, x_target_scaled, selected_features, scaler, counts
 
 
+def _counts_with_n_features_before(
+    counts: FeatureFilterCounts, n_features_before: int | None
+) -> FeatureFilterCounts:
+    if n_features_before is None:
+        return counts
+    resolved = int(n_features_before)
+    if resolved < counts.n_features_after_sparse_feature_filter:
+        raise CVError("n_features_before override is smaller than retained feature count")
+    return FeatureFilterCounts(
+        n_features_before=resolved,
+        n_features_after_sparse_feature_filter=counts.n_features_after_sparse_feature_filter,
+        n_features_after_low_variance=counts.n_features_after_low_variance,
+        n_features_after_pair_aware=counts.n_features_after_pair_aware,
+        n_features_after_correlation=counts.n_features_after_correlation,
+        n_features_after_all=counts.n_features_after_all,
+    )
+
+
+def _preprocess_train_only_with_counts(
+    config: AppConfig,
+    x_train_raw: np.ndarray,
+    feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
+    n_features_before_override: int | None = None,
+) -> tuple[np.ndarray, list[str], FeatureScaler, FeatureFilterCounts]:
+    x_train_expr = _apply_expression_transform_for_config(config, x_train_raw)
+    selected, counts = _select_feature_indices_with_counts(
+        config,
+        x_train_expr,
+        feature_names,
+        y_train=y_train,
+        groups_train=groups_train,
+        warnings=warnings,
+    )
+    counts = _counts_with_n_features_before(counts, n_features_before_override)
+    selected_features = [feature_names[idx] for idx in selected]
+    x_train_selected = x_train_expr[:, selected]
+    empty_target = np.empty((0, len(selected_features)), dtype=float)
+    x_train_scaled, _empty_scaled, scaler = fit_feature_scaling(
+        config, x_train_selected, empty_target
+    )
+    return x_train_scaled, selected_features, scaler, counts
+
+
+def _transform_target_for_selected_features(
+    config: AppConfig,
+    x_target_raw: np.ndarray,
+    target_feature_names: list[str],
+    selected_features: list[str],
+    scaler: FeatureScaler,
+) -> np.ndarray:
+    if len(target_feature_names) != int(x_target_raw.shape[1]):
+        raise CVError("Target matrix feature names do not match target matrix columns")
+    target_index = {feature: idx for idx, feature in enumerate(target_feature_names)}
+    if len(target_index) != len(target_feature_names):
+        raise CVError("Target matrix feature names contain duplicates")
+    missing_features = [feature for feature in selected_features if feature not in target_index]
+    if missing_features:
+        preview = ", ".join(missing_features[:10])
+        raise CVError(f"Target matrix is missing selected feature(s): {preview}")
+    selected_indices = np.array([target_index[feature] for feature in selected_features], dtype=int)
+    x_target_expr = _apply_expression_transform_for_config(config, x_target_raw)
+    x_target_selected = x_target_expr[:, selected_indices]
+    return apply_feature_scaling(
+        x_target_selected,
+        scaler,
+        config.preprocess.feature_scaling.method,
+    )
+
+
+def _predict_final_refit_targets(
+    config: AppConfig,
+    fit_result: FinalSampleSetFitResult,
+    x_target_raw: np.ndarray,
+    target_feature_names: list[str],
+) -> list[np.ndarray]:
+    x_target = _transform_target_for_selected_features(
+        config,
+        x_target_raw,
+        target_feature_names,
+        fit_result.selected_features,
+        fit_result.scaler,
+    )
+    return [_predict_positive_probability(model, x_target) for model in fit_result.fitted_models]
+
+
+def _final_refit_can_prune_target_matrix(config: AppConfig) -> bool:
+    transform_method = _validate_expression_transform_method(
+        config.preprocess.expression_transform.method
+    )
+    if transform_method not in {"none", "log1p"}:
+        return False
+    sparse_filter = config.preprocess.sparse_feature_filter
+    min_fraction = sparse_filter.min_nonzero_fraction_in_at_least_one_trait
+    return bool(
+        sparse_filter.enabled
+        and min_fraction is not None
+        and float(min_fraction) > 0.0
+    )
+
+
 def _build_prediction_table(
     species: list[str],
     prob: np.ndarray,
@@ -2574,16 +2727,20 @@ def _fit_final_refit_sample_set(
     contrast_groups_train: np.ndarray | None = None,
     x_target_raw: np.ndarray | None = None,
     feature_names: list[str] | None = None,
+    target_feature_names: list[str] | None = None,
     target_count: int,
+    n_features_before_override: int | None = None,
     x_train: np.ndarray | None = None,
     x_target: np.ndarray | None = None,
 ) -> FinalSampleSetFitResult:
     resolved_x_train_raw = x_train_raw if x_train_raw is not None else x_train
     resolved_x_target_raw = x_target_raw if x_target_raw is not None else x_target
-    if resolved_x_train_raw is None or resolved_x_target_raw is None:
-        raise CVError("Final refit sample-set fit requires train/target arrays")
+    if resolved_x_train_raw is None:
+        raise CVError("Final refit sample-set fit requires train array")
     if feature_names is None:
         feature_names = [f"feature_{idx}" for idx in range(int(resolved_x_train_raw.shape[1]))]
+    if target_feature_names is None:
+        target_feature_names = feature_names
 
     x_sampled_raw = resolved_x_train_raw[sampled_idx, :]
     y_sampled = y_train[sampled_idx]
@@ -2594,21 +2751,24 @@ def _fit_final_refit_sample_set(
     warnings: list[str] = []
     if np.unique(y_sampled).size < 2:
         raise CVError("Final refit sampled training set became single-class")
-    (
-        x_sampled,
-        x_target,
-        selected_features,
-        scaler,
-        filter_counts,
-    ) = _preprocess_train_and_target_with_counts(
+    x_sampled, selected_features, scaler, filter_counts = _preprocess_train_only_with_counts(
         config,
         x_sampled_raw,
-        resolved_x_target_raw,
         feature_names,
         y_train=y_sampled,
         groups_train=contrast_groups_sampled,
         warnings=warnings,
+        n_features_before_override=n_features_before_override,
     )
+    x_target_scaled: np.ndarray | None = None
+    if target_count > 0 and resolved_x_target_raw is not None:
+        x_target_scaled = _transform_target_for_selected_features(
+            config,
+            resolved_x_target_raw,
+            target_feature_names,
+            selected_features,
+            scaler,
+        )
     sample_weight = _fit_sample_weights(config, y_sampled, groups_sampled)
 
     selected_count = len(source_result.selected_candidates)
@@ -2639,10 +2799,10 @@ def _fit_final_refit_sample_set(
                 model_params=selected.candidate.params,
             )
             _fit_estimator(estimator, x_sampled, y_sampled, sample_weight)
-            if target_count == 0:
+            if target_count == 0 or x_target_scaled is None:
                 model_prob = np.array([], dtype=float)
             else:
-                model_prob = _predict_positive_probability(estimator, x_target)
+                model_prob = _predict_positive_probability(estimator, x_target_scaled)
             train_model_prob = _predict_positive_probability(estimator, x_sampled)
             return selected_offset, estimator, model_prob, train_model_prob
 
@@ -2750,19 +2910,33 @@ def run_final_refit(
     inference_species = [str(v) for v in inference_pool.select("species").to_series().to_list()]
     target_species = external_species + inference_species
 
-    x_all_raw, feature_names = _with_native_thread_limit_for_config(
-        config, matrix_builder.build_matrix, train_species + target_species
-    )
     train_count = len(train_species)
     target_count = len(target_species)
     external_count = len(external_species)
+    prune_target_matrix = target_count > 0 and _final_refit_can_prune_target_matrix(config)
+    n_features_before_override: int | None = None
+    target_feature_names: list[str] | None = None
 
-    x_train_raw = x_all_raw[:train_count, :]
-    x_target_raw = (
-        x_all_raw[train_count:, :]
-        if target_count > 0
-        else np.empty((0, x_all_raw.shape[1]), dtype=float)
-    )
+    if prune_target_matrix:
+        full_feature_names = _with_native_thread_limit_for_config(
+            config, matrix_builder.feature_names_for_species, train_species + target_species
+        )
+        n_features_before_override = len(full_feature_names)
+        x_train_raw, feature_names = _with_native_thread_limit_for_config(
+            config, matrix_builder.build_matrix, train_species
+        )
+        x_target_raw: np.ndarray | None = None
+    else:
+        x_all_raw, feature_names = _with_native_thread_limit_for_config(
+            config, matrix_builder.build_matrix, train_species + target_species
+        )
+        x_train_raw = x_all_raw[:train_count, :]
+        x_target_raw = (
+            x_all_raw[train_count:, :]
+            if target_count > 0
+            else np.empty((0, x_all_raw.shape[1]), dtype=float)
+        )
+        target_feature_names = feature_names
 
     y_train = np.array(train_pool.select("label").to_series().to_list(), dtype=int)
     groups_train = np.array(train_pool.select("group_id").to_series().to_list(), dtype=str)
@@ -2892,7 +3066,9 @@ def run_final_refit(
             contrast_groups_train=contrast_groups_train,
             x_target_raw=x_target_raw,
             feature_names=feature_names,
+            target_feature_names=target_feature_names,
             target_count=target_count,
+            n_features_before_override=n_features_before_override,
         )
         return sample_set_id, fit_result
 
@@ -2916,6 +3092,38 @@ def run_final_refit(
         raise CVError("Final refit produced zero sampled-set fit results")
     selected_features = first_sample_result.selected_features
     scaler = first_sample_result.scaler
+
+    target_model_probs_by_sample: dict[int, list[np.ndarray]] = {}
+    if prune_target_matrix:
+        if target_count > 0:
+            target_feature_union = list(
+                dict.fromkeys(
+                    feature
+                    for sample_set_id in range(len(sampled_sets))
+                    for feature in sample_results[sample_set_id].selected_features
+                )
+            )
+            x_target_pruned, target_feature_names = _with_native_thread_limit_for_config(
+                config,
+                matrix_builder.build_matrix,
+                target_species,
+                feature_order=target_feature_union,
+            )
+            for sample_set_id in range(len(sampled_sets)):
+                target_model_probs_by_sample[sample_set_id] = _predict_final_refit_targets(
+                    config,
+                    sample_results[sample_set_id],
+                    x_target_pruned,
+                    target_feature_names,
+                )
+        else:
+            for sample_set_id in range(len(sampled_sets)):
+                target_model_probs_by_sample[sample_set_id] = sample_results[
+                    sample_set_id
+                ].model_probs
+    else:
+        for sample_set_id in range(len(sampled_sets)):
+            target_model_probs_by_sample[sample_set_id] = sample_results[sample_set_id].model_probs
 
     model_entries: list[FinalModelEntry] = []
     feature_filter_count_rows: list[dict[str, Any]] = []
@@ -2944,7 +3152,8 @@ def run_final_refit(
         warnings.extend(fit_result.warnings)
         model_sparsity_rows.extend(fit_result.model_sparsity_rows)
         fitted_models.extend(fit_result.fitted_models)
-        model_probs.extend(fit_result.model_probs)
+        sample_model_probs = target_model_probs_by_sample[sample_set_id]
+        model_probs.extend(sample_model_probs)
         sampled_idx = sampled_sets[sample_set_id]
         y_sampled = y_train[sampled_idx]
         sampled_train_prob = _aggregate_probabilities(
@@ -2954,7 +3163,7 @@ def run_final_refit(
         sampled_train_loss_values.append(_binary_log_loss(y_sampled, sampled_train_prob))
         if external_count > 0:
             sampled_target_prob = _aggregate_probabilities(
-                probs=fit_result.model_probs,
+                probs=sample_model_probs,
                 aggregation=config.ensemble.probability_aggregation,
             )
             sampled_external_prob = sampled_target_prob[:external_count]

@@ -759,6 +759,85 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
     assert refit_artifacts.model_sparsity_summary.height > 0
 
 
+def test_run_final_refit_prunes_target_matrix_without_changing_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
+                "sp3\t1\tg2\tno",
+                "sp4\t0\tg2\tno",
+                "sp5\t1\t\tyes",
+                "sp6\t\t\tno",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp1\tOG2\t0.5",
+                "sp2\tOG1\t2.0",
+                "sp2\tOG2\t0.3",
+                "sp3\tOG1\t3.0",
+                "sp3\tOG2\t2.0",
+                "sp4\tOG1\t4.0",
+                "sp4\tOG2\t0.1",
+                "sp5\tOG1\t5.0",
+                "sp5\tOG2\t0.9",
+                "sp5\tOG_target_only\t7.0",
+                "sp6\tOG1\t6.0",
+                "sp6\tOG2\t0.2",
+                "sp6\tOG_target_only\t8.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    split_artifacts = build_split_artifacts(config)
+    original_build_matrix = cv_mod.ExpressionMatrixBuilder.build_matrix
+    build_calls: list[tuple[list[str], list[str] | None]] = []
+
+    def _counting_build_matrix(
+        self: object,
+        species_order: list[str],
+        feature_order: list[str] | None = None,
+    ) -> tuple[np.ndarray, list[str]]:
+        build_calls.append(
+            (list(species_order), None if feature_order is None else list(feature_order))
+        )
+        return original_build_matrix(self, species_order, feature_order=feature_order)
+
+    monkeypatch.setattr(cv_mod.ExpressionMatrixBuilder, "build_matrix", _counting_build_matrix)
+    optimized = run_final_refit(config, split_artifacts.split_manifest)
+
+    target_calls = [call for call in build_calls if call[1] is not None]
+    assert len(target_calls) == 1
+    assert "OG_target_only" not in target_calls[0][1]
+
+    monkeypatch.setattr(cv_mod.ExpressionMatrixBuilder, "build_matrix", original_build_matrix)
+    monkeypatch.setattr(cv_mod, "_final_refit_can_prune_target_matrix", lambda _config: False)
+    full_matrix = run_final_refit(config, split_artifacts.split_manifest)
+
+    assert optimized.pred_external_test.to_dicts() == full_matrix.pred_external_test.to_dicts()
+    assert optimized.pred_inference.to_dicts() == full_matrix.pred_inference.to_dicts()
+    assert (
+        optimized.loss_by_split_final_refit.to_dicts()
+        == full_matrix.loss_by_split_final_refit.to_dicts()
+    )
+    assert (
+        optimized.feature_filter_counts.to_dicts()
+        == full_matrix.feature_filter_counts.to_dicts()
+    )
+
+
 def test_summarize_retained_features_aggregates_count_and_rate() -> None:
     retained_features = cv_mod._build_retained_features(
         [
@@ -1379,6 +1458,19 @@ def test_expression_matrix_builder_build_matrix_rejects_missing_selected_species
 
     with pytest.raises(CVError, match="Expression data is missing selected species"):
         builder.build_matrix(["sp1", "sp_missing"])
+
+
+def test_expression_matrix_builder_build_matrix_respects_feature_order_and_zero_fills(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    builder = ExpressionMatrixBuilder(config)
+
+    matrix, features = builder.build_matrix(["sp1", "sp2"], feature_order=["OG2", "OG_missing"])
+
+    assert features == ["OG2", "OG_missing"]
+    assert matrix.tolist() == [[0.5, 0.0], [0.3, 0.0]]
 
 
 def test_preprocess_train_and_target_rejects_negative_tpm_values(tmp_path: Path) -> None:
