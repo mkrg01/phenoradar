@@ -812,6 +812,8 @@ def test_write_run_figures_writes_one_se_model_selection_figure(
     assert "one-SE threshold" in one_se_svg
     assert "Selected candidate" in one_se_svg
     assert "log10(C)" in one_se_svg
+    assert "Log loss mean" in one_se_svg
+    assert "Log Loss mean" not in one_se_svg
     assert not (figures_dir / "selected_hyperparameter_stability.svg").exists()
     assert warnings == []
 

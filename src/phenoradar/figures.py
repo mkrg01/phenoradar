@@ -3242,6 +3242,8 @@ def _model_selection_one_se_curve(
     metric_axis_label = _model_selection_metric_axis_label(
         [panel["metric_name"] for panel in panels]
     )
+    if metric_axis_label == "Log Loss":
+        metric_axis_label = "Log loss"
     x_min, x_max = _padded_domain(all_x, include_zero=False)
     y_min, y_max = _padded_domain(all_y, include_zero=False)
 
