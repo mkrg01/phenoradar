@@ -141,11 +141,6 @@ def _label_left_margin(labels: list[str], *, width_px: int, fontsize_px: int) ->
     return min(0.34, max(0.16, label_px / width_px))
 
 
-def _feature_label_left_margin(labels: list[str], *, width_px: int, fontsize_px: int) -> float:
-    label_px = _label_text_width_px(labels, fontsize_px=fontsize_px)
-    return min(0.66, max(0.16, label_px / width_px))
-
-
 def _feature_label_row_height_px(labels: list[str]) -> int:
     max_lines = max((len(label.splitlines()) for label in labels), default=1)
     return max(18, 10 + max_lines * 9)
@@ -200,19 +195,22 @@ def _feature_axis_labels(
     return labels
 
 
-def _feature_axis_width_px(labels: list[str], *, base_width_px: int) -> int:
-    label_width = int(_label_text_width_px(labels, fontsize_px=_MONO_FONTSIZE))
-    if label_width <= base_width_px * 0.32:
-        return base_width_px
-    return min(3200, max(base_width_px, label_width + 520))
-
-
-def _feature_heatmap_width_px(*, fold_count: int, labels: list[str]) -> int:
-    base_width = _fold_axis_width_px(fold_count, base_px=260, per_fold_px=44)
-    label_width = int(_label_text_width_px(labels, fontsize_px=_MONO_FONTSIZE))
-    if label_width <= base_width * 0.32:
-        return base_width
-    return min(3200, max(base_width, 440 + label_width + fold_count * 44))
+def _feature_axis_layout(
+    labels: list[str],
+    *,
+    base_width_px: int,
+    base_left: float,
+    base_right: float,
+    fontsize_px: int,
+) -> tuple[int, float, float]:
+    base_left_px = base_left * base_width_px
+    base_right_px = base_right * base_width_px
+    label_width_px = _label_text_width_px(labels, fontsize_px=fontsize_px, padding=84)
+    extra_left_px = max(0, int(np.ceil(label_width_px - base_left_px)))
+    width_px = base_width_px + extra_left_px
+    left = (base_left_px + extra_left_px) / width_px
+    right = (base_right_px + extra_left_px) / width_px
+    return width_px, left, right
 
 
 def _compact_bottom_margin(height_px: int) -> float:
@@ -677,9 +675,11 @@ def _feature_importance_top(
     feature_labels = _feature_axis_labels(features, orthogroup_annotations)
     feature_axis_title = _feature_label_axis_title(feature_labels)
     row_height_px = _feature_label_row_height_px(feature_labels)
-    width_px = _feature_axis_width_px(
-        feature_labels,
-        base_width_px=_FEATURE_IMPORTANCE_TOP_WIDTH_PX,
+    base_width_px = _FEATURE_IMPORTANCE_TOP_WIDTH_PX
+    base_left = _label_left_margin(
+        features,
+        width_px=base_width_px,
+        fontsize_px=_MONO_FONTSIZE,
     )
     values = [float(v) for v in top.select("importance_mean").to_series().to_list()]
     if feature_importance_by_fold is not None:
@@ -724,6 +724,13 @@ def _feature_importance_top(
                 max_value = 1.0
 
             height_px = max(240, 70 + len(features) * row_height_px)
+            width_px, left_margin, right_margin = _feature_axis_layout(
+                feature_labels,
+                base_width_px=base_width_px,
+                base_left=base_left,
+                base_right=0.985,
+                fontsize_px=_MONO_FONTSIZE,
+            )
             fig, ax = plt.subplots(
                 figsize=_figure_size_inches(width_px, height_px),
                 dpi=_FIG_DPI,
@@ -787,12 +794,8 @@ def _feature_importance_top(
             ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
             ax.set_axisbelow(True)
             fig.subplots_adjust(
-                left=_feature_label_left_margin(
-                    feature_labels,
-                    width_px=width_px,
-                    fontsize_px=_MONO_FONTSIZE,
-                ),
-                right=0.985,
+                left=left_margin,
+                right=right_margin,
                 top=0.985,
                 bottom=_compact_bottom_margin(height_px),
             )
@@ -804,6 +807,13 @@ def _feature_importance_top(
         max_value = 1.0
 
     height_px = max(220, 60 + len(features) * row_height_px)
+    width_px, left_margin, right_margin = _feature_axis_layout(
+        feature_labels,
+        base_width_px=base_width_px,
+        base_left=base_left,
+        base_right=0.98,
+        fontsize_px=_MONO_FONTSIZE,
+    )
     fig, ax = plt.subplots(
         figsize=_figure_size_inches(width_px, height_px),
         dpi=_FIG_DPI,
@@ -840,12 +850,8 @@ def _feature_importance_top(
         )
 
     fig.subplots_adjust(
-        left=_feature_label_left_margin(
-            feature_labels,
-            width_px=width_px,
-            fontsize_px=_MONO_FONTSIZE,
-        ),
-        right=0.98,
+        left=left_margin,
+        right=right_margin,
         top=0.985,
         bottom=_compact_bottom_margin(height_px),
     )
@@ -945,7 +951,19 @@ def _feature_importance_by_fold_heatmap(
 
     row_height_px = _feature_label_row_height_px(feature_labels)
     height_px = max(260, 95 + len(features) * row_height_px)
-    width_px = _feature_heatmap_width_px(fold_count=len(fold_ids), labels=feature_labels)
+    base_width_px = _fold_axis_width_px(len(fold_ids), base_px=260, per_fold_px=44)
+    base_left = _label_left_margin(
+        features,
+        width_px=base_width_px,
+        fontsize_px=_MONO_FONTSIZE,
+    )
+    width_px, left_margin, right_margin = _feature_axis_layout(
+        feature_labels,
+        base_width_px=base_width_px,
+        base_left=base_left,
+        base_right=0.94,
+        fontsize_px=_MONO_FONTSIZE,
+    )
     fig, ax = plt.subplots(figsize=_figure_size_inches(width_px, height_px), dpi=_FIG_DPI)
     fig.patch.set_facecolor("white")
 
@@ -996,12 +1014,8 @@ def _feature_importance_by_fold_heatmap(
     )
     colorbar.ax.tick_params(labelsize=_TICK_FONTSIZE)
     fig.subplots_adjust(
-        left=_feature_label_left_margin(
-            feature_labels,
-            width_px=width_px,
-            fontsize_px=_MONO_FONTSIZE,
-        ),
-        right=0.94,
+        left=left_margin,
+        right=right_margin,
         top=0.98,
         bottom=_compact_bottom_margin(height_px),
     )
@@ -1033,11 +1047,13 @@ def _coefficients_signed_top(
     features = [str(v) for v in top.select("feature").to_series().to_list()]
     feature_labels = _feature_axis_labels(features, orthogroup_annotations)
     feature_axis_title = _feature_label_axis_title(feature_labels)
-    width_px = _feature_axis_width_px(
-        feature_labels,
-        base_width_px=_COEFFICIENTS_TOP_WIDTH_PX,
-    )
     row_height_px = _feature_label_row_height_px(feature_labels)
+    base_width_px = _COEFFICIENTS_TOP_WIDTH_PX
+    base_left = _label_left_margin(
+        features,
+        width_px=base_width_px,
+        fontsize_px=_MONO_FONTSIZE,
+    )
     values = [float(v) for v in top.select("coef_mean").to_series().to_list()]
     if coefficients_by_fold is not None:
         fold_required = {"fold_id", "feature", "coef_mean", "method"}
@@ -1082,6 +1098,13 @@ def _coefficients_signed_top(
                 max_abs = 1.0
 
             height_px = max(240, 70 + len(features) * row_height_px)
+            width_px, left_margin, right_margin = _feature_axis_layout(
+                feature_labels,
+                base_width_px=base_width_px,
+                base_left=base_left,
+                base_right=0.985,
+                fontsize_px=_MONO_FONTSIZE,
+            )
             fig, ax = plt.subplots(
                 figsize=_figure_size_inches(width_px, height_px),
                 dpi=_FIG_DPI,
@@ -1144,12 +1167,8 @@ def _coefficients_signed_top(
             ax.set_axisbelow(True)
             ax.axvline(0.0, color=_MUTED_TEXT_COLOR, linewidth=0.8)
             fig.subplots_adjust(
-                left=_feature_label_left_margin(
-                    feature_labels,
-                    width_px=width_px,
-                    fontsize_px=_MONO_FONTSIZE,
-                ),
-                right=0.985,
+                left=left_margin,
+                right=right_margin,
                 top=0.985,
                 bottom=_compact_bottom_margin(height_px),
             )
@@ -1161,6 +1180,13 @@ def _coefficients_signed_top(
         max_abs = 1.0
 
     height_px = max(220, 60 + len(features) * row_height_px)
+    width_px, left_margin, right_margin = _feature_axis_layout(
+        feature_labels,
+        base_width_px=base_width_px,
+        base_left=base_left,
+        base_right=0.98,
+        fontsize_px=_MONO_FONTSIZE,
+    )
     fig, ax = plt.subplots(
         figsize=_figure_size_inches(width_px, height_px),
         dpi=_FIG_DPI,
@@ -1203,12 +1229,8 @@ def _coefficients_signed_top(
         )
 
     fig.subplots_adjust(
-        left=_feature_label_left_margin(
-            feature_labels,
-            width_px=width_px,
-            fontsize_px=_MONO_FONTSIZE,
-        ),
-        right=0.98,
+        left=left_margin,
+        right=right_margin,
         top=0.985,
         bottom=_compact_bottom_margin(height_px),
     )
