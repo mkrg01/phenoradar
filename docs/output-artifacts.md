@@ -619,7 +619,7 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
   - Written when both `data.tree_path` and `data.orthogroup_annotation_path` are
     set and Toytree is available.
   - Same tree heatmaps, with feature labels rendered as
-    `full annotation (orthogroup ID)`.
+    `orthogroup ID: full annotation`.
     and missing-value color.
   - The z-score figure emphasizes relative per-feature expression patterns; the
     log2-TPM figure preserves absolute expression scale after `log2(TPM + 1)`.

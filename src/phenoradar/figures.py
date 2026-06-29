@@ -81,6 +81,7 @@ _MODEL_SELECTION_SAMPLE_SET_LIMIT = 1
 _DEFAULT_TOP_FEATURES = 30
 _FEATURE_IMPORTANCE_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
 _FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE = _LABEL_FONTSIZE
+_FEATURE_ANNOTATION_LABEL_PADDING_PX = 180
 _FEATURE_IMPORTANCE_HEATMAP_CMAP = LinearSegmentedColormap.from_list(
     "phenoradar_feature_importance_blues",
     ["#ffffff", "#deebf7", "#9ecae1", "#3182bd", "#08519c"],
@@ -205,7 +206,11 @@ def _feature_axis_layout(
 ) -> tuple[int, float, float]:
     base_left_px = base_left * base_width_px
     base_right_px = base_right * base_width_px
-    label_width_px = _label_text_width_px(labels, fontsize_px=fontsize_px, padding=84)
+    label_width_px = _label_text_width_px(
+        labels,
+        fontsize_px=fontsize_px,
+        padding=_FEATURE_ANNOTATION_LABEL_PADDING_PX,
+    )
     extra_left_px = max(0, int(np.ceil(label_width_px - base_left_px)))
     width_px = base_width_px + extra_left_px
     left = (base_left_px + extra_left_px) / width_px
