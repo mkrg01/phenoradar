@@ -402,6 +402,37 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
     assert warnings == []
 
 
+def test_write_run_figures_writes_annotation_variants_without_changing_id_only_figures(
+    tmp_path: Path,
+) -> None:
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_minimal_oof(),
+        feature_importance=_minimal_feature_importance(),
+        feature_importance_by_fold=_minimal_feature_importance_by_fold(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        orthogroup_annotations=_minimal_orthogroup_annotations(),
+    )
+
+    cv_figures_dir = tmp_path / "run" / "cv" / "figures"
+    id_only_svg = (cv_figures_dir / "feature_importance_top.svg").read_text(
+        encoding="utf-8"
+    )
+    annotated_svg = (cv_figures_dir / "feature_importance_top_annotated.svg").read_text(
+        encoding="utf-8"
+    )
+    assert "carbonic" not in id_only_svg
+    assert "OG1: beta carbonic" in annotated_svg
+    assert (cv_figures_dir / "feature_importance_by_fold_heatmap.svg").exists()
+    assert (cv_figures_dir / "feature_importance_by_fold_heatmap_annotated.svg").exists()
+    assert (cv_figures_dir / "coefficients_signed_top.svg").exists()
+    assert (cv_figures_dir / "coefficients_signed_top_annotated.svg").exists()
+    assert warnings == []
+
+
 def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: Path) -> None:
     warnings = write_run_figures(
         run_dir=tmp_path / "run",
@@ -1314,7 +1345,7 @@ def test_feature_importance_top_fold_points_use_neutral_styling(tmp_path: Path) 
     assert "#666666" in svg_text
 
 
-def test_feature_importance_top_writes_wrapped_annotations(tmp_path: Path) -> None:
+def test_feature_importance_top_writes_annotation_labels(tmp_path: Path) -> None:
     out_path = tmp_path / "feature_importance_top.svg"
     figures_mod._feature_importance_top(
         feature_importance=_minimal_feature_importance(),
@@ -1324,7 +1355,7 @@ def test_feature_importance_top_writes_wrapped_annotations(tmp_path: Path) -> No
 
     svg_text = out_path.read_text(encoding="utf-8")
     assert "Orthogroup / annotation" in svg_text
-    assert "OG1" in svg_text
+    assert "OG1: beta carbonic" in svg_text
     assert "carbonic" in svg_text
     assert "photosynthetic" in svg_text
     assert "annotation" in svg_text
@@ -1356,7 +1387,7 @@ def test_feature_importance_by_fold_heatmap_writes_svg(tmp_path: Path) -> None:
     assert "OG2" in svg_text
 
 
-def test_feature_importance_by_fold_heatmap_writes_wrapped_annotations(
+def test_feature_importance_by_fold_heatmap_writes_annotation_labels(
     tmp_path: Path,
 ) -> None:
     out_path = tmp_path / "feature_importance_by_fold_heatmap.svg"
@@ -1369,7 +1400,7 @@ def test_feature_importance_by_fold_heatmap_writes_wrapped_annotations(
 
     svg_text = out_path.read_text(encoding="utf-8")
     assert "Orthogroup / annotation" in svg_text
-    assert "OG1" in svg_text
+    assert "OG1: beta carbonic" in svg_text
     assert "carbonic" in svg_text
     assert "photosynthetic" in svg_text
 
@@ -1504,7 +1535,7 @@ def test_coefficients_signed_top_fold_points_use_neutral_styling(tmp_path: Path)
     assert "#666666" in svg_text
 
 
-def test_coefficients_signed_top_writes_wrapped_annotations(tmp_path: Path) -> None:
+def test_coefficients_signed_top_writes_annotation_labels(tmp_path: Path) -> None:
     out_path = tmp_path / "coefficients_signed_top.svg"
     figures_mod._coefficients_signed_top(
         coefficients=_minimal_coefficients(),
@@ -1514,7 +1545,7 @@ def test_coefficients_signed_top_writes_wrapped_annotations(tmp_path: Path) -> N
 
     svg_text = out_path.read_text(encoding="utf-8")
     assert "Orthogroup / annotation" in svg_text
-    assert "OG1" in svg_text
+    assert "OG1: beta carbonic" in svg_text
     assert "carbonic" in svg_text
     assert "photosynthetic" in svg_text
 

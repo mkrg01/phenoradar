@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import textwrap
 from collections.abc import Iterable
 from contextlib import suppress
 from pathlib import Path
@@ -22,7 +21,6 @@ class TreePredictionError(ValueError):
 _MISSING_COLOR = "#eeeeee"
 _TEXT_COLOR = "#000000"
 _FEATURE_HEATMAP_LIMIT = 30
-_FEATURE_LABEL_WRAP_CHARS = 48
 _SVG_NS = "http://www.w3.org/2000/svg"
 _SVG_BACKGROUND_ID = "phenoradar-svg-background"
 _SVG_BACKGROUND_FILL = "#ffffff"
@@ -127,6 +125,18 @@ def write_run_tree_prediction_artifacts(
                 cmap_name="coolwarm",
             )
         )
+        if orthogroup_annotations is not None:
+            warnings.extend(
+                _write_tree_feature_heatmap_svg(
+                    tree_path=tree_path,
+                    annotation=feature_annotation,
+                    value_col="z_score_log2_tpm",
+                    out_path=cv_figures_dir / "tree_feature_heatmap_zscore_annotated.svg",
+                    title="",
+                    cmap_name="coolwarm",
+                    annotate_features=True,
+                )
+            )
         warnings.extend(
             _write_tree_feature_heatmap_svg(
                 tree_path=tree_path,
@@ -137,6 +147,18 @@ def write_run_tree_prediction_artifacts(
                 cmap_name="viridis",
             )
         )
+        if orthogroup_annotations is not None:
+            warnings.extend(
+                _write_tree_feature_heatmap_svg(
+                    tree_path=tree_path,
+                    annotation=feature_annotation,
+                    value_col="log2_tpm_plus1",
+                    out_path=cv_figures_dir / "tree_feature_heatmap_log2_tpm_annotated.svg",
+                    title="",
+                    cmap_name="viridis",
+                    annotate_features=True,
+                )
+            )
     else:
         warnings.append("Skipped tree_feature_heatmap.svg: no top features were available.")
 
@@ -822,6 +844,7 @@ def _write_tree_feature_heatmap_svg(
     out_path: Path,
     title: str,
     cmap_name: str,
+    annotate_features: bool = False,
 ) -> list[str]:
     if annotation.height == 0:
         return [f"Skipped {out_path.name}: annotation table is empty."]
@@ -873,6 +896,7 @@ def _write_tree_feature_heatmap_svg(
         out_path=out_path,
         title=title,
         cmap_name=cmap_name,
+        annotate_features=annotate_features,
         toytree_module=toytree,
     )
     return warnings
@@ -970,26 +994,14 @@ def _feature_heatmap_label(feature: object, annotation: object) -> str:
     feature_text = str(feature)
     if not _has_text(annotation):
         return feature_text
-    return "\n".join([feature_text, *_wrap_feature_annotation(str(annotation))])
+    return f"{feature_text}: {' '.join(str(annotation).split())}"
 
 
 def _feature_heatmap_title(feature: object, annotation: object) -> str:
     feature_text = str(feature)
     if not _has_text(annotation):
         return feature_text
-    return f"{feature_text} {str(annotation).strip()}"
-
-
-def _wrap_feature_annotation(annotation: str) -> list[str]:
-    text = " ".join(annotation.split())
-    if not text:
-        return []
-    return textwrap.wrap(
-        text,
-        width=_FEATURE_LABEL_WRAP_CHARS,
-        break_long_words=True,
-        break_on_hyphens=True,
-    ) or [text]
+    return f"{feature_text}: {' '.join(str(annotation).split())}"
 
 
 def _feature_label_depth_px(labels: list[str]) -> int:
@@ -1008,6 +1020,7 @@ def _draw_toytree_feature_heatmap(
     out_path: Path,
     title: str,
     cmap_name: str,
+    annotate_features: bool,
     toytree_module: Any,
 ) -> None:
     tip_labels = [str(v) for v in tree.get_tip_labels()]
@@ -1019,14 +1032,18 @@ def _draw_toytree_feature_heatmap(
     )
     feature_records = list(feature_rows)
     features = [str(row["feature"]) for row in feature_records]
-    feature_labels = [
-        _feature_heatmap_label(row["feature"], row.get("orthogroup_annotation"))
-        for row in feature_records
-    ]
-    feature_titles = [
-        _feature_heatmap_title(row["feature"], row.get("orthogroup_annotation"))
-        for row in feature_records
-    ]
+    if annotate_features:
+        feature_labels = [
+            _feature_heatmap_label(row["feature"], row.get("orthogroup_annotation"))
+            for row in feature_records
+        ]
+        feature_titles = [
+            _feature_heatmap_title(row["feature"], row.get("orthogroup_annotation"))
+            for row in feature_records
+        ]
+    else:
+        feature_labels = features
+        feature_titles = features
     feature_step = 0.48
     trait_x = 0.45
     prob_x = trait_x + feature_step

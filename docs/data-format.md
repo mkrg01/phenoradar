@@ -157,8 +157,9 @@ Optional path/key:
 
 `data.orthogroup_annotation_path` points to a headerless TSV or TSV.GZ with
 three columns: orthogroup ID, annotation taxid, and annotation text. When set,
-feature interpretation figures and tree feature heatmaps display wrapped
-orthogroup ID plus full annotation labels.
+PhenoRadar writes additional annotated variants of feature interpretation figures
+and tree feature heatmaps. Annotated labels are rendered as
+`orthogroup ID: full annotation`; the original ID-only figures are still written.
 
 ## Tree Newick
 

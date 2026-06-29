@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import textwrap
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -82,7 +81,6 @@ _MODEL_SELECTION_SAMPLE_SET_LIMIT = 1
 _DEFAULT_TOP_FEATURES = 30
 _FEATURE_IMPORTANCE_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
 _FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE = _LABEL_FONTSIZE
-_FEATURE_LABEL_WRAP_CHARS = 48
 _FEATURE_IMPORTANCE_HEATMAP_CMAP = LinearSegmentedColormap.from_list(
     "phenoradar_feature_importance_blues",
     ["#ffffff", "#deebf7", "#9ecae1", "#3182bd", "#08519c"],
@@ -145,7 +143,7 @@ def _label_left_margin(labels: list[str], *, width_px: int, fontsize_px: int) ->
 
 def _feature_label_left_margin(labels: list[str], *, width_px: int, fontsize_px: int) -> float:
     label_px = _label_text_width_px(labels, fontsize_px=fontsize_px)
-    return min(0.52, max(0.16, label_px / width_px))
+    return min(0.66, max(0.16, label_px / width_px))
 
 
 def _feature_label_row_height_px(labels: list[str]) -> int:
@@ -154,7 +152,7 @@ def _feature_label_row_height_px(labels: list[str]) -> int:
 
 
 def _feature_label_axis_title(labels: list[str]) -> str:
-    if any("\n" in label for label in labels):
+    if any(": " in label for label in labels):
         return "Orthogroup / annotation"
     return "Orthogroup ID"
 
@@ -187,18 +185,6 @@ def _orthogroup_annotation_lookup(
     return lookup
 
 
-def _wrap_feature_annotation(annotation: str) -> list[str]:
-    text = " ".join(annotation.split())
-    if not text:
-        return []
-    return textwrap.wrap(
-        text,
-        width=_FEATURE_LABEL_WRAP_CHARS,
-        break_long_words=True,
-        break_on_hyphens=True,
-    ) or [text]
-
-
 def _feature_axis_labels(
     features: list[str],
     orthogroup_annotations: pl.DataFrame | None,
@@ -210,16 +196,23 @@ def _feature_axis_labels(
         if annotation is None:
             labels.append(feature)
             continue
-        labels.append("\n".join([feature, *_wrap_feature_annotation(annotation)]))
+        labels.append(f"{feature}: {' '.join(annotation.split())}")
     return labels
+
+
+def _feature_axis_width_px(labels: list[str], *, base_width_px: int) -> int:
+    label_width = int(_label_text_width_px(labels, fontsize_px=_MONO_FONTSIZE))
+    if label_width <= base_width_px * 0.32:
+        return base_width_px
+    return min(3200, max(base_width_px, label_width + 520))
 
 
 def _feature_heatmap_width_px(*, fold_count: int, labels: list[str]) -> int:
     base_width = _fold_axis_width_px(fold_count, base_px=260, per_fold_px=44)
-    if not any("\n" in label for label in labels):
-        return base_width
     label_width = int(_label_text_width_px(labels, fontsize_px=_MONO_FONTSIZE))
-    return min(1400, max(base_width, 360 + label_width + fold_count * 44))
+    if label_width <= base_width * 0.32:
+        return base_width
+    return min(3200, max(base_width, 440 + label_width + fold_count * 44))
 
 
 def _compact_bottom_margin(height_px: int) -> float:
@@ -684,6 +677,10 @@ def _feature_importance_top(
     feature_labels = _feature_axis_labels(features, orthogroup_annotations)
     feature_axis_title = _feature_label_axis_title(feature_labels)
     row_height_px = _feature_label_row_height_px(feature_labels)
+    width_px = _feature_axis_width_px(
+        feature_labels,
+        base_width_px=_FEATURE_IMPORTANCE_TOP_WIDTH_PX,
+    )
     values = [float(v) for v in top.select("importance_mean").to_series().to_list()]
     if feature_importance_by_fold is not None:
         fold_required = {"fold_id", "feature", "importance_mean"}
@@ -728,7 +725,7 @@ def _feature_importance_top(
 
             height_px = max(240, 70 + len(features) * row_height_px)
             fig, ax = plt.subplots(
-                figsize=_figure_size_inches(_FEATURE_IMPORTANCE_TOP_WIDTH_PX, height_px),
+                figsize=_figure_size_inches(width_px, height_px),
                 dpi=_FIG_DPI,
             )
             fig.patch.set_facecolor("white")
@@ -792,7 +789,7 @@ def _feature_importance_top(
             fig.subplots_adjust(
                 left=_feature_label_left_margin(
                     feature_labels,
-                    width_px=_FEATURE_IMPORTANCE_TOP_WIDTH_PX,
+                    width_px=width_px,
                     fontsize_px=_MONO_FONTSIZE,
                 ),
                 right=0.985,
@@ -808,7 +805,7 @@ def _feature_importance_top(
 
     height_px = max(220, 60 + len(features) * row_height_px)
     fig, ax = plt.subplots(
-        figsize=_figure_size_inches(_FEATURE_IMPORTANCE_TOP_WIDTH_PX, height_px),
+        figsize=_figure_size_inches(width_px, height_px),
         dpi=_FIG_DPI,
     )
     fig.patch.set_facecolor("white")
@@ -845,7 +842,7 @@ def _feature_importance_top(
     fig.subplots_adjust(
         left=_feature_label_left_margin(
             feature_labels,
-            width_px=_FEATURE_IMPORTANCE_TOP_WIDTH_PX,
+            width_px=width_px,
             fontsize_px=_MONO_FONTSIZE,
         ),
         right=0.98,
@@ -1036,6 +1033,10 @@ def _coefficients_signed_top(
     features = [str(v) for v in top.select("feature").to_series().to_list()]
     feature_labels = _feature_axis_labels(features, orthogroup_annotations)
     feature_axis_title = _feature_label_axis_title(feature_labels)
+    width_px = _feature_axis_width_px(
+        feature_labels,
+        base_width_px=_COEFFICIENTS_TOP_WIDTH_PX,
+    )
     row_height_px = _feature_label_row_height_px(feature_labels)
     values = [float(v) for v in top.select("coef_mean").to_series().to_list()]
     if coefficients_by_fold is not None:
@@ -1082,7 +1083,7 @@ def _coefficients_signed_top(
 
             height_px = max(240, 70 + len(features) * row_height_px)
             fig, ax = plt.subplots(
-                figsize=_figure_size_inches(_COEFFICIENTS_TOP_WIDTH_PX, height_px),
+                figsize=_figure_size_inches(width_px, height_px),
                 dpi=_FIG_DPI,
             )
             fig.patch.set_facecolor("white")
@@ -1145,7 +1146,7 @@ def _coefficients_signed_top(
             fig.subplots_adjust(
                 left=_feature_label_left_margin(
                     feature_labels,
-                    width_px=_COEFFICIENTS_TOP_WIDTH_PX,
+                    width_px=width_px,
                     fontsize_px=_MONO_FONTSIZE,
                 ),
                 right=0.985,
@@ -1161,7 +1162,7 @@ def _coefficients_signed_top(
 
     height_px = max(220, 60 + len(features) * row_height_px)
     fig, ax = plt.subplots(
-        figsize=_figure_size_inches(_COEFFICIENTS_TOP_WIDTH_PX, height_px),
+        figsize=_figure_size_inches(width_px, height_px),
         dpi=_FIG_DPI,
     )
     fig.patch.set_facecolor("white")
@@ -1204,7 +1205,7 @@ def _coefficients_signed_top(
     fig.subplots_adjust(
         left=_feature_label_left_margin(
             feature_labels,
-            width_px=_COEFFICIENTS_TOP_WIDTH_PX,
+            width_px=width_px,
             fontsize_px=_MONO_FONTSIZE,
         ),
         right=0.98,
@@ -3768,23 +3769,44 @@ def write_run_figures(
         cv_dir / "feature_importance_top.svg",
         feature_importance_by_fold=feature_importance_by_fold,
         top_features=top_features,
-        orthogroup_annotations=orthogroup_annotations,
     )
+    if orthogroup_annotations is not None:
+        _feature_importance_top(
+            feature_importance,
+            cv_dir / "feature_importance_top_annotated.svg",
+            feature_importance_by_fold=feature_importance_by_fold,
+            top_features=top_features,
+            orthogroup_annotations=orthogroup_annotations,
+        )
     if feature_importance_by_fold is not None:
         _feature_importance_by_fold_heatmap(
             feature_importance,
             feature_importance_by_fold,
             cv_dir / "feature_importance_by_fold_heatmap.svg",
             top_features=top_features,
-            orthogroup_annotations=orthogroup_annotations,
         )
+        if orthogroup_annotations is not None:
+            _feature_importance_by_fold_heatmap(
+                feature_importance,
+                feature_importance_by_fold,
+                cv_dir / "feature_importance_by_fold_heatmap_annotated.svg",
+                top_features=top_features,
+                orthogroup_annotations=orthogroup_annotations,
+            )
     _coefficients_signed_top(
         coefficients,
         cv_dir / "coefficients_signed_top.svg",
         coefficients_by_fold=coefficients_by_fold,
         top_features=top_features,
-        orthogroup_annotations=orthogroup_annotations,
     )
+    if orthogroup_annotations is not None:
+        _coefficients_signed_top(
+            coefficients,
+            cv_dir / "coefficients_signed_top_annotated.svg",
+            coefficients_by_fold=coefficients_by_fold,
+            top_features=top_features,
+            orthogroup_annotations=orthogroup_annotations,
+        )
     _species_probability_by_trait(
         predictions=oof_predictions,
         trait_col="label",

@@ -150,8 +150,8 @@ runtime:
   - default: `null`
   - optional headerless TSV/TSV.GZ with orthogroup ID, annotation taxid, and
     annotation text columns. When set, run-level feature interpretation figures
-    and tree feature heatmaps display wrapped `orthogroup ID + annotation`
-    labels.
+    and tree feature heatmaps keep their ID-only outputs and additionally write
+    annotated variants with `orthogroup ID: full annotation` labels.
 - `data.species_col`
   - type: `str`
   - default: `species`
