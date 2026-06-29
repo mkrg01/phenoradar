@@ -123,20 +123,9 @@ def write_run_tree_prediction_artifacts(
                 out_path=cv_figures_dir / "tree_feature_heatmap_zscore.svg",
                 title="",
                 cmap_name="coolwarm",
+                annotate_features=orthogroup_annotations is not None,
             )
         )
-        if orthogroup_annotations is not None:
-            warnings.extend(
-                _write_tree_feature_heatmap_svg(
-                    tree_path=tree_path,
-                    annotation=feature_annotation,
-                    value_col="z_score_log2_tpm",
-                    out_path=cv_figures_dir / "tree_feature_heatmap_zscore_annotated.svg",
-                    title="",
-                    cmap_name="coolwarm",
-                    annotate_features=True,
-                )
-            )
         warnings.extend(
             _write_tree_feature_heatmap_svg(
                 tree_path=tree_path,
@@ -145,20 +134,9 @@ def write_run_tree_prediction_artifacts(
                 out_path=cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg",
                 title="",
                 cmap_name="viridis",
+                annotate_features=orthogroup_annotations is not None,
             )
         )
-        if orthogroup_annotations is not None:
-            warnings.extend(
-                _write_tree_feature_heatmap_svg(
-                    tree_path=tree_path,
-                    annotation=feature_annotation,
-                    value_col="log2_tpm_plus1",
-                    out_path=cv_figures_dir / "tree_feature_heatmap_log2_tpm_annotated.svg",
-                    title="",
-                    cmap_name="viridis",
-                    annotate_features=True,
-                )
-            )
     else:
         warnings.append("Skipped tree_feature_heatmap.svg: no top features were available.")
 

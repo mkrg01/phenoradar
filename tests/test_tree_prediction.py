@@ -433,7 +433,7 @@ def test_write_run_tree_prediction_artifacts_uses_requested_feature_limit(
     assert annotation.select("feature").unique().to_series().to_list() == ["OG2"]
 
 
-def test_write_run_tree_prediction_artifacts_writes_annotated_heatmap_variants(
+def test_write_run_tree_prediction_artifacts_uses_annotations_in_standard_heatmaps(
     tmp_path: Path,
 ) -> None:
     metadata_path = tmp_path / "metadata.tsv"
@@ -469,13 +469,12 @@ def test_write_run_tree_prediction_artifacts_writes_annotated_heatmap_variants(
     )
 
     cv_figures_dir = tmp_path / "run" / "cv" / "figures"
-    id_only_svg = cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg"
-    annotated_svg = cv_figures_dir / "tree_feature_heatmap_log2_tpm_annotated.svg"
-    if annotated_svg.exists():
-        assert id_only_svg.exists()
-        assert "carbonic" not in id_only_svg.read_text(encoding="utf-8")
-        annotated_text = annotated_svg.read_text(encoding="utf-8")
-        assert "OG1: beta carbonic" in annotated_text
-        assert (cv_figures_dir / "tree_feature_heatmap_zscore_annotated.svg").exists()
+    log2_svg = cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg"
+    if log2_svg.exists():
+        svg_text = log2_svg.read_text(encoding="utf-8")
+        assert "OG1: beta carbonic" in svg_text
+        assert (cv_figures_dir / "tree_feature_heatmap_zscore.svg").exists()
+        assert not (cv_figures_dir / "tree_feature_heatmap_log2_tpm_annotated.svg").exists()
+        assert not (cv_figures_dir / "tree_feature_heatmap_zscore_annotated.svg").exists()
     else:
         assert any("Toytree is unavailable" in warning for warning in warnings)

@@ -3798,44 +3798,23 @@ def write_run_figures(
         cv_dir / "feature_importance_top.svg",
         feature_importance_by_fold=feature_importance_by_fold,
         top_features=top_features,
+        orthogroup_annotations=orthogroup_annotations,
     )
-    if orthogroup_annotations is not None:
-        _feature_importance_top(
-            feature_importance,
-            cv_dir / "feature_importance_top_annotated.svg",
-            feature_importance_by_fold=feature_importance_by_fold,
-            top_features=top_features,
-            orthogroup_annotations=orthogroup_annotations,
-        )
     if feature_importance_by_fold is not None:
         _feature_importance_by_fold_heatmap(
             feature_importance,
             feature_importance_by_fold,
             cv_dir / "feature_importance_by_fold_heatmap.svg",
             top_features=top_features,
+            orthogroup_annotations=orthogroup_annotations,
         )
-        if orthogroup_annotations is not None:
-            _feature_importance_by_fold_heatmap(
-                feature_importance,
-                feature_importance_by_fold,
-                cv_dir / "feature_importance_by_fold_heatmap_annotated.svg",
-                top_features=top_features,
-                orthogroup_annotations=orthogroup_annotations,
-            )
     _coefficients_signed_top(
         coefficients,
         cv_dir / "coefficients_signed_top.svg",
         coefficients_by_fold=coefficients_by_fold,
         top_features=top_features,
+        orthogroup_annotations=orthogroup_annotations,
     )
-    if orthogroup_annotations is not None:
-        _coefficients_signed_top(
-            coefficients,
-            cv_dir / "coefficients_signed_top_annotated.svg",
-            coefficients_by_fold=coefficients_by_fold,
-            top_features=top_features,
-            orthogroup_annotations=orthogroup_annotations,
-        )
     _species_probability_by_trait(
         predictions=oof_predictions,
         trait_col="label",

@@ -402,7 +402,7 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
     assert warnings == []
 
 
-def test_write_run_figures_writes_annotation_variants_without_changing_id_only_figures(
+def test_write_run_figures_uses_annotations_in_standard_feature_figures(
     tmp_path: Path,
 ) -> None:
     warnings = write_run_figures(
@@ -418,19 +418,22 @@ def test_write_run_figures_writes_annotation_variants_without_changing_id_only_f
     )
 
     cv_figures_dir = tmp_path / "run" / "cv" / "figures"
-    id_only_svg = (cv_figures_dir / "feature_importance_top.svg").read_text(
+    feature_importance_svg = (cv_figures_dir / "feature_importance_top.svg").read_text(
         encoding="utf-8"
     )
-    annotated_svg = (cv_figures_dir / "feature_importance_top_annotated.svg").read_text(
+    heatmap_svg = (cv_figures_dir / "feature_importance_by_fold_heatmap.svg").read_text(
         encoding="utf-8"
     )
-    assert "carbonic" not in id_only_svg
-    assert "beta carbonic anhydrase" in annotated_svg
-    assert "(OG1)" in annotated_svg
-    assert (cv_figures_dir / "feature_importance_by_fold_heatmap.svg").exists()
-    assert (cv_figures_dir / "feature_importance_by_fold_heatmap_annotated.svg").exists()
-    assert (cv_figures_dir / "coefficients_signed_top.svg").exists()
-    assert (cv_figures_dir / "coefficients_signed_top_annotated.svg").exists()
+    coefficients_svg = (cv_figures_dir / "coefficients_signed_top.svg").read_text(
+        encoding="utf-8"
+    )
+    assert "beta carbonic anhydrase" in feature_importance_svg
+    assert "(OG1)" in feature_importance_svg
+    assert "beta carbonic anhydrase" in heatmap_svg
+    assert "beta carbonic anhydrase" in coefficients_svg
+    assert not (cv_figures_dir / "feature_importance_top_annotated.svg").exists()
+    assert not (cv_figures_dir / "feature_importance_by_fold_heatmap_annotated.svg").exists()
+    assert not (cv_figures_dir / "coefficients_signed_top_annotated.svg").exists()
     assert warnings == []
 
 

@@ -140,11 +140,8 @@ Always written:
     - `cv/figures/cv_metrics_overview.svg`
     - `cv/figures/cv_loss_by_split.svg`
     - `cv/figures/feature_importance_top.svg`
-    - `cv/figures/feature_importance_top_annotated.svg` (when `data.orthogroup_annotation_path` is set)
     - `cv/figures/feature_importance_by_fold_heatmap.svg`
-    - `cv/figures/feature_importance_by_fold_heatmap_annotated.svg` (when `data.orthogroup_annotation_path` is set)
     - `cv/figures/coefficients_signed_top.svg`
-    - `cv/figures/coefficients_signed_top_annotated.svg` (when `data.orthogroup_annotation_path` is set)
     - `cv/figures/cv_species_probability_by_trait.svg`
     - `cv/figures/cv_fold_trait_probability.svg`
     - `cv/figures/feature_filter_funnel.svg`
@@ -521,27 +518,21 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - `cv/figures/feature_importance_top.svg`
   - Top `figures.top_features` features by mean fold-level `importance_mean`.
   - Horizontal boxplot plus fold-level points.
-- `cv/figures/feature_importance_top_annotated.svg`
-  - Written when `data.orthogroup_annotation_path` is set.
-  - Same plot as `feature_importance_top.svg`, with labels rendered as
-    `full annotation (orthogroup ID)`.
+  - When `data.orthogroup_annotation_path` is set, labels are rendered as
+    `full annotation (orthogroup ID)` instead of ID-only labels.
 - `cv/figures/feature_importance_by_fold_heatmap.svg`
   - Top `figures.top_features` features by mean fold-level `importance_mean`.
   - Rows are features, columns are CV folds, and color is fold-level
     `importance_mean` from `feature_importance_by_fold.tsv`.
   - The continuous white-to-blue scale starts at zero, so unimportant fold-feature
     cells remain white and larger importances become darker blue.
-- `cv/figures/feature_importance_by_fold_heatmap_annotated.svg`
-  - Written when `data.orthogroup_annotation_path` is set.
-  - Same heatmap as `feature_importance_by_fold_heatmap.svg`, with row labels
-    rendered as `full annotation (orthogroup ID)`.
+  - When `data.orthogroup_annotation_path` is set, row labels are rendered as
+    `full annotation (orthogroup ID)` instead of ID-only labels.
 - `cv/figures/coefficients_signed_top.svg`
   - Top `figures.top_features` by absolute mean fold-level coefficient magnitude.
   - Horizontal boxplot plus fold-level points; right is positive and left is negative.
-- `cv/figures/coefficients_signed_top_annotated.svg`
-  - Written when `data.orthogroup_annotation_path` is set.
-  - Same plot as `coefficients_signed_top.svg`, with labels rendered as
-    `full annotation (orthogroup ID)`.
+  - When `data.orthogroup_annotation_path` is set, labels are rendered as
+    `full annotation (orthogroup ID)` instead of ID-only labels.
 - `cv/figures/cv_species_probability_by_trait.svg`
   - Out-of-fold species probabilities grouped by trait (`label`).
   - Boxplot with per-species points and trait-wise mean markers.
@@ -614,13 +605,9 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
   - Show the numeric trait label and predicted probability immediately before the
     feature heatmap.
   - Include an inline continuous color-bar legend showing the plotted value scale
-- `cv/figures/tree_feature_heatmap_zscore_annotated.svg` /
-  `cv/figures/tree_feature_heatmap_log2_tpm_annotated.svg` (optional)
-  - Written when both `data.tree_path` and `data.orthogroup_annotation_path` are
-    set and Toytree is available.
-  - Same tree heatmaps, with feature labels rendered as
-    `orthogroup ID: full annotation`.
     and missing-value color.
+  - When `data.orthogroup_annotation_path` is set, feature labels are rendered as
+    `orthogroup ID: full annotation` instead of ID-only labels.
   - The z-score figure emphasizes relative per-feature expression patterns; the
     log2-TPM figure preserves absolute expression scale after `log2(TPM + 1)`.
 
