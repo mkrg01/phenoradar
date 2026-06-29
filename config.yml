@@ -4,6 +4,7 @@ data:
   metadata_path: c4_dataset/species_metadata.tsv
   tpm_path: c4_dataset/tpm.tsv
   tree_path: c4_dataset/ncbi_tree.nwk
+  orthogroup_annotation_path: c4_dataset/odb12v2_OGs.tab.gz
   species_col: species
   feature_col: orthogroup
   value_col: tpm

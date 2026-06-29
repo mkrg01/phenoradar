@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import textwrap
 from collections.abc import Iterable
 from contextlib import suppress
 from pathlib import Path
@@ -21,6 +22,7 @@ class TreePredictionError(ValueError):
 _MISSING_COLOR = "#eeeeee"
 _TEXT_COLOR = "#000000"
 _FEATURE_HEATMAP_LIMIT = 30
+_FEATURE_LABEL_WRAP_CHARS = 48
 _SVG_NS = "http://www.w3.org/2000/svg"
 _SVG_BACKGROUND_ID = "phenoradar-svg-background"
 _SVG_BACKGROUND_FILL = "#ffffff"
@@ -55,6 +57,7 @@ def write_run_tree_prediction_artifacts(
     coefficients: pl.DataFrame,
     pred_external_test: pl.DataFrame | None,
     feature_limit: int = _FEATURE_HEATMAP_LIMIT,
+    orthogroup_annotations: pl.DataFrame | None = None,
 ) -> list[str]:
     """Write run-level tree annotation TSVs and optional Toytree SVG figures."""
     if tree_path is None:
@@ -103,6 +106,7 @@ def write_run_tree_prediction_artifacts(
         feature_importance=feature_importance,
         coefficients=coefficients,
         feature_limit=feature_limit,
+        orthogroup_annotations=orthogroup_annotations,
     )
     if feature_annotation.height > 0:
         cv_figures_dir = _stage_figures_dir(run_dir, "cv")
@@ -284,6 +288,7 @@ def build_tree_feature_heatmap_annotation(
     coefficients: pl.DataFrame,
     oof_predictions: pl.DataFrame | None = None,
     feature_limit: int = _FEATURE_HEATMAP_LIMIT,
+    orthogroup_annotations: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Build long-form feature heatmap values for grouped species and top features."""
     _require_columns(metadata, {"species", "true_label", group_col}, "metadata TSV")
@@ -337,6 +342,10 @@ def build_tree_feature_heatmap_annotation(
     )
     if top_features.height == 0:
         return _empty_feature_heatmap_annotation()
+    top_features = _join_orthogroup_annotations(
+        top_features,
+        orthogroup_annotations=orthogroup_annotations,
+    )
 
     coef_lookup = _coefficient_lookup(coefficients)
     grid = species_meta.join(top_features, how="cross")
@@ -380,6 +389,8 @@ def build_tree_feature_heatmap_annotation(
                 "group_name",
                 "feature_rank",
                 "feature",
+                "orthogroup_annotation_taxid",
+                "orthogroup_annotation",
                 "importance_mean",
                 "coef_mean",
                 "tpm",
@@ -672,6 +683,8 @@ def _empty_feature_heatmap_annotation() -> pl.DataFrame:
             "group_name": pl.String,
             "feature_rank": pl.UInt32,
             "feature": pl.String,
+            "orthogroup_annotation_taxid": pl.String,
+            "orthogroup_annotation": pl.String,
             "importance_mean": pl.Float64,
             "coef_mean": pl.Float64,
             "tpm": pl.Float64,
@@ -679,6 +692,41 @@ def _empty_feature_heatmap_annotation() -> pl.DataFrame:
             "z_score_log2_tpm": pl.Float64,
         }
     )
+
+
+def _join_orthogroup_annotations(
+    top_features: pl.DataFrame,
+    *,
+    orthogroup_annotations: pl.DataFrame | None,
+) -> pl.DataFrame:
+    if orthogroup_annotations is None:
+        return top_features.with_columns(
+            [
+                pl.lit(None, dtype=pl.String).alias("orthogroup_annotation_taxid"),
+                pl.lit(None, dtype=pl.String).alias("orthogroup_annotation"),
+            ]
+        )
+    required = {"feature", "orthogroup_annotation_taxid", "orthogroup_annotation"}
+    if not required.issubset(orthogroup_annotations.columns):
+        raise TreePredictionError("orthogroup annotation table schema is invalid")
+    annotations = (
+        orthogroup_annotations.select(
+            [
+                pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("feature"),
+                pl.col("orthogroup_annotation_taxid")
+                .cast(pl.String, strict=False)
+                .str.strip_chars()
+                .alias("orthogroup_annotation_taxid"),
+                pl.col("orthogroup_annotation")
+                .cast(pl.String, strict=False)
+                .str.strip_chars()
+                .alias("orthogroup_annotation"),
+            ]
+        )
+        .filter(pl.col("feature").is_not_null() & (pl.col("feature") != ""))
+        .unique("feature")
+    )
+    return top_features.join(annotations, on="feature", how="left")
 
 
 def _require_tree(tree_path: Path) -> None:
@@ -918,6 +966,40 @@ def _draw_toytree_heatmap(
     _save_toytree_svg(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
 
 
+def _feature_heatmap_label(feature: object, annotation: object) -> str:
+    feature_text = str(feature)
+    if not _has_text(annotation):
+        return feature_text
+    return "\n".join([feature_text, *_wrap_feature_annotation(str(annotation))])
+
+
+def _feature_heatmap_title(feature: object, annotation: object) -> str:
+    feature_text = str(feature)
+    if not _has_text(annotation):
+        return feature_text
+    return f"{feature_text} {str(annotation).strip()}"
+
+
+def _wrap_feature_annotation(annotation: str) -> list[str]:
+    text = " ".join(annotation.split())
+    if not text:
+        return []
+    return textwrap.wrap(
+        text,
+        width=_FEATURE_LABEL_WRAP_CHARS,
+        break_long_words=True,
+        break_on_hyphens=True,
+    ) or [text]
+
+
+def _feature_label_depth_px(labels: list[str]) -> int:
+    longest_line = max(
+        (len(line) for label in labels for line in label.splitlines()),
+        default=0,
+    )
+    return max(0, 7 * longest_line + 10)
+
+
 def _draw_toytree_feature_heatmap(
     *,
     tree: Any,
@@ -929,15 +1011,22 @@ def _draw_toytree_feature_heatmap(
     toytree_module: Any,
 ) -> None:
     tip_labels = [str(v) for v in tree.get_tip_labels()]
-    features = (
-        annotation.select(["feature_rank", "feature"])
+    feature_rows = (
+        annotation.select(["feature_rank", "feature", "orthogroup_annotation"])
         .unique("feature")
         .sort("feature_rank")
-        .select("feature")
-        .to_series()
-        .to_list()
+        .iter_rows(named=True)
     )
-    feature_labels = [str(v) for v in features]
+    feature_records = list(feature_rows)
+    features = [str(row["feature"]) for row in feature_records]
+    feature_labels = [
+        _feature_heatmap_label(row["feature"], row.get("orthogroup_annotation"))
+        for row in feature_records
+    ]
+    feature_titles = [
+        _feature_heatmap_title(row["feature"], row.get("orthogroup_annotation"))
+        for row in feature_records
+    ]
     feature_step = 0.48
     trait_x = 0.45
     prob_x = trait_x + feature_step
@@ -948,7 +1037,8 @@ def _draw_toytree_feature_heatmap(
     ]
     heatmap_end_x = feature_xs[-1] + feature_step / 2.0
     species_x = heatmap_end_x + 0.28
-    height = max(420, 88 + 18 * len(tip_labels))
+    feature_label_depth_px = _feature_label_depth_px(feature_labels)
+    height = max(420, 88 + feature_label_depth_px + 18 * len(tip_labels))
     width = max(1040, 620 + 28 * len(feature_labels))
     canvas, axes, _mark = tree.draw(
         width=width,
@@ -1011,13 +1101,19 @@ def _draw_toytree_feature_heatmap(
         color=_TEXT_COLOR,
         style={"font-size": "7px", "text-anchor": "start"},
     )
-    for x, feature in zip(feature_xs, feature_labels, strict=True):
+    for x, feature, feature_label, feature_title in zip(
+        feature_xs,
+        features,
+        feature_labels,
+        feature_titles,
+        strict=True,
+    ):
         colors: list[str] = []
         titles: list[str] = []
         for species in tip_labels:
             value = value_lookup.get((species, feature))
             colors.append(_continuous_color(value, vmin=vmin, vmax=vmax, cmap_name=cmap_name))
-            titles.append(f"{species} {feature} {value_col}={_format_value(value)}")
+            titles.append(f"{species} {feature_title} {value_col}={_format_value(value)}")
         axes.scatterplot(
             [x] * len(tip_labels),
             list(range(len(tip_labels))),
@@ -1029,7 +1125,7 @@ def _draw_toytree_feature_heatmap(
         axes.text(
             x,
             len(tip_labels) + 0.35,
-            feature,
+            feature_label,
             angle=90,
             color=_TEXT_COLOR,
             style={"font-size": "7px", "text-anchor": "start"},

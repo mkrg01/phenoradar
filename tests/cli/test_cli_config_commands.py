@@ -324,6 +324,7 @@ def test_config_without_config_writes_default_yaml(
     assert payload["data"]["metadata_path"] == "testdata/c4_tiny/species_metadata.tsv"
     assert payload["data"]["tpm_path"] == "testdata/c4_tiny/tpm.tsv"
     assert payload["data"]["tree_path"] is None
+    assert payload["data"]["orthogroup_annotation_path"] is None
     assert payload["figures"]["top_features"] == 30
 
 

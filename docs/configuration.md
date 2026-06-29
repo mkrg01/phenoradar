@@ -42,6 +42,7 @@ data:
   metadata_path: testdata/c4_tiny/species_metadata.tsv
   tpm_path: testdata/c4_tiny/tpm.tsv
   tree_path: null
+  orthogroup_annotation_path: null
   species_col: species
   feature_col: orthogroup
   value_col: tpm
@@ -144,6 +145,13 @@ runtime:
   - default: `null`
   - optional Newick tree used to write tree prediction annotation TSVs and, when
     Toytree is available, Toytree SVG figures.
+- `data.orthogroup_annotation_path`
+  - type: `str | null`
+  - default: `null`
+  - optional headerless TSV/TSV.GZ with orthogroup ID, annotation taxid, and
+    annotation text columns. When set, run-level feature interpretation figures
+    and tree feature heatmaps display wrapped `orthogroup ID + annotation`
+    labels.
 - `data.species_col`
   - type: `str`
   - default: `species`

@@ -60,6 +60,19 @@ def _coefficients() -> pl.DataFrame:
     )
 
 
+def _orthogroup_annotations() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "feature": ["OG1", "OG2"],
+            "orthogroup_annotation_taxid": ["3193", "3193"],
+            "orthogroup_annotation": [
+                "beta carbonic anhydrase with a deliberately long wrapped annotation",
+                "hypothetical protein",
+            ],
+        }
+    )
+
+
 def _write_tpm(path: Path) -> None:
     pl.DataFrame(
         {
@@ -148,6 +161,31 @@ def test_build_tree_feature_heatmap_annotation_outputs_log2_and_zscore(tmp_path:
         annotation.filter(pl.col("feature") == "OG2").select("z_score_log2_tpm").sum().item()
     )
     assert zscore_sum == 0.0
+
+
+def test_build_tree_feature_heatmap_annotation_joins_orthogroup_annotations(
+    tmp_path: Path,
+) -> None:
+    tpm_path = tmp_path / "tpm.tsv"
+    _write_tpm(tpm_path)
+    metadata = _metadata().with_columns(pl.col("C4").alias("true_label"))
+
+    annotation = build_tree_feature_heatmap_annotation(
+        metadata=metadata,
+        tpm_path=tpm_path,
+        species_col="species",
+        feature_col="orthogroup",
+        value_col="tpm",
+        group_col="contrast_pair_id",
+        feature_importance=_feature_importance(),
+        coefficients=_coefficients(),
+        feature_limit=2,
+        orthogroup_annotations=_orthogroup_annotations(),
+    )
+
+    first = annotation.filter((pl.col("species") == "sp1") & (pl.col("feature") == "OG1"))
+    assert first.select("orthogroup_annotation_taxid").item() == "3193"
+    assert "carbonic anhydrase" in first.select("orthogroup_annotation").item()
 
 
 def test_build_cv_tree_prediction_annotation_filters_to_groups() -> None:

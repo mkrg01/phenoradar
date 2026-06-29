@@ -149,6 +149,17 @@ split.exclude_col)`:
 - `trait` missing -> `discovery_inference`
 - `trait` present, test holdout false, and split group missing -> error
 
+## Orthogroup annotations
+
+Optional path/key:
+
+- `data.orthogroup_annotation_path` (default: `null`)
+
+`data.orthogroup_annotation_path` points to a headerless TSV or TSV.GZ with
+three columns: orthogroup ID, annotation taxid, and annotation text. When set,
+feature interpretation figures and tree feature heatmaps display wrapped
+orthogroup ID plus full annotation labels.
+
 ## Tree Newick
 
 Optional path/key:

@@ -45,6 +45,10 @@ from phenoradar.metadata import (
     build_species_taxid_tsv,
     fetch_ncbi_tree,
 )
+from phenoradar.orthogroup_annotation import (
+    OrthogroupAnnotationError,
+    load_orthogroup_annotations,
+)
 from phenoradar.provenance import (
     ProvenanceError,
     bundle_payload_sha256,
@@ -1094,6 +1098,13 @@ def run(
     warnings.extend(group_summary_warnings)
 
     figure_warnings: list[str] = []
+    orthogroup_annotation_path = getattr(resolved.data, "orthogroup_annotation_path", None)
+    try:
+        orthogroup_annotations = load_orthogroup_annotations(
+            None if orthogroup_annotation_path is None else Path(orthogroup_annotation_path)
+        )
+    except OrthogroupAnnotationError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     _log("Generate run figures.")
     tree_path = getattr(resolved.data, "tree_path", None)
     try:
@@ -1128,6 +1139,7 @@ def run(
             model_sparsity=model_sparsity_table,
             model_sparsity_summary=model_sparsity_summary_table,
             top_features=resolved.figures.top_features,
+            orthogroup_annotations=orthogroup_annotations,
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -1154,6 +1166,7 @@ def run(
                     else final_refit_artifacts.pred_external_test
                 ),
                 feature_limit=resolved.figures.top_features,
+                orthogroup_annotations=orthogroup_annotations,
             )
         except TreePredictionError as exc:
             raise typer.BadParameter(str(exc)) from exc
@@ -1174,6 +1187,11 @@ def run(
                 Path(resolved.data.metadata_path),
                 Path(resolved.data.tpm_path),
                 *([] if tree_path is None else [Path(tree_path)]),
+                *(
+                    []
+                    if orthogroup_annotation_path is None
+                    else [Path(orthogroup_annotation_path)]
+                ),
             ]
         )
     except ProvenanceError as exc:

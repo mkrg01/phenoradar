@@ -56,6 +56,7 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
 
     assert resolved.runtime.seed == 42
     assert resolved.data.species_col == "species"
+    assert resolved.data.orthogroup_annotation_path is None
     assert resolved.sampling.strategy == "group_balanced"
     assert resolved.sampling.max_samples_per_label_per_group == 1
     assert resolved.sampling.sampled_set_count == 10
@@ -80,6 +81,7 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
 
     assert resolved.runtime.seed == 42
     assert resolved.data.species_col == "species"
+    assert resolved.data.orthogroup_annotation_path is None
     assert resolved.sampling.strategy == "group_balanced"
     assert resolved.sampling.max_samples_per_label_per_group == 1
     assert resolved.sampling.sampled_set_count == 10

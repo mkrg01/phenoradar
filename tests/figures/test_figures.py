@@ -183,6 +183,20 @@ def _minimal_feature_importance() -> pl.DataFrame:
     )
 
 
+def _minimal_orthogroup_annotations() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "feature": ["OG1", "OG2"],
+            "orthogroup_annotation_taxid": ["3193", "3193"],
+            "orthogroup_annotation": [
+                "beta carbonic anhydrase with a deliberately long wrapped "
+                "photosynthetic annotation",
+                "hypothetical protein",
+            ],
+        }
+    )
+
+
 def _minimal_feature_importance_by_fold() -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -1300,6 +1314,22 @@ def test_feature_importance_top_fold_points_use_neutral_styling(tmp_path: Path) 
     assert "#666666" in svg_text
 
 
+def test_feature_importance_top_writes_wrapped_annotations(tmp_path: Path) -> None:
+    out_path = tmp_path / "feature_importance_top.svg"
+    figures_mod._feature_importance_top(
+        feature_importance=_minimal_feature_importance(),
+        out_path=out_path,
+        orthogroup_annotations=_minimal_orthogroup_annotations(),
+    )
+
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "Orthogroup / annotation" in svg_text
+    assert "OG1" in svg_text
+    assert "carbonic" in svg_text
+    assert "photosynthetic" in svg_text
+    assert "annotation" in svg_text
+
+
 def test_feature_importance_by_fold_heatmap_rejects_invalid_schema(tmp_path: Path) -> None:
     with pytest.raises(FigureError, match="feature_importance_by_fold.tsv schema is invalid"):
         figures_mod._feature_importance_by_fold_heatmap(
@@ -1324,6 +1354,24 @@ def test_feature_importance_by_fold_heatmap_writes_svg(tmp_path: Path) -> None:
     assert "Mean feature importance per fold" in svg_text
     assert "OG1" in svg_text
     assert "OG2" in svg_text
+
+
+def test_feature_importance_by_fold_heatmap_writes_wrapped_annotations(
+    tmp_path: Path,
+) -> None:
+    out_path = tmp_path / "feature_importance_by_fold_heatmap.svg"
+    figures_mod._feature_importance_by_fold_heatmap(
+        feature_importance=_minimal_feature_importance(),
+        feature_importance_by_fold=_minimal_feature_importance_by_fold(),
+        out_path=out_path,
+        orthogroup_annotations=_minimal_orthogroup_annotations(),
+    )
+
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "Orthogroup / annotation" in svg_text
+    assert "OG1" in svg_text
+    assert "carbonic" in svg_text
+    assert "photosynthetic" in svg_text
 
 
 def test_feature_importance_by_fold_heatmap_colormap_starts_at_white() -> None:
@@ -1454,6 +1502,21 @@ def test_coefficients_signed_top_fold_points_use_neutral_styling(tmp_path: Path)
     assert "#d62728" not in svg_text
     assert "#eeeeee" in svg_text
     assert "#666666" in svg_text
+
+
+def test_coefficients_signed_top_writes_wrapped_annotations(tmp_path: Path) -> None:
+    out_path = tmp_path / "coefficients_signed_top.svg"
+    figures_mod._coefficients_signed_top(
+        coefficients=_minimal_coefficients(),
+        out_path=out_path,
+        orthogroup_annotations=_minimal_orthogroup_annotations(),
+    )
+
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "Orthogroup / annotation" in svg_text
+    assert "OG1" in svg_text
+    assert "carbonic" in svg_text
+    assert "photosynthetic" in svg_text
 
 
 def test_predict_probability_distribution_rejects_missing_prob_column(tmp_path: Path) -> None:

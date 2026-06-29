@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import textwrap
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -81,6 +82,7 @@ _MODEL_SELECTION_SAMPLE_SET_LIMIT = 1
 _DEFAULT_TOP_FEATURES = 30
 _FEATURE_IMPORTANCE_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
 _FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE = _LABEL_FONTSIZE
+_FEATURE_LABEL_WRAP_CHARS = 48
 _FEATURE_IMPORTANCE_HEATMAP_CMAP = LinearSegmentedColormap.from_list(
     "phenoradar_feature_importance_blues",
     ["#ffffff", "#deebf7", "#9ecae1", "#3182bd", "#08519c"],
@@ -128,9 +130,96 @@ def _fold_axis_width_px(fold_count: int, *, base_px: int = 140, per_fold_px: int
     )
 
 
+def _label_text_width_px(labels: list[str], *, fontsize_px: int, padding: int = 32) -> float:
+    max_chars = max(
+        (len(line) for label in labels for line in str(label).splitlines()),
+        default=0,
+    )
+    return max_chars * fontsize_px * 0.62 + padding
+
+
 def _label_left_margin(labels: list[str], *, width_px: int, fontsize_px: int) -> float:
-    label_px = max((len(label) for label in labels), default=0) * fontsize_px * 0.62 + 32
+    label_px = _label_text_width_px(labels, fontsize_px=fontsize_px)
     return min(0.34, max(0.16, label_px / width_px))
+
+
+def _feature_label_left_margin(labels: list[str], *, width_px: int, fontsize_px: int) -> float:
+    label_px = _label_text_width_px(labels, fontsize_px=fontsize_px)
+    return min(0.52, max(0.16, label_px / width_px))
+
+
+def _feature_label_row_height_px(labels: list[str]) -> int:
+    max_lines = max((len(label.splitlines()) for label in labels), default=1)
+    return max(18, 10 + max_lines * 9)
+
+
+def _feature_label_axis_title(labels: list[str]) -> str:
+    if any("\n" in label for label in labels):
+        return "Orthogroup / annotation"
+    return "Orthogroup ID"
+
+
+def _orthogroup_annotation_lookup(
+    orthogroup_annotations: pl.DataFrame | None,
+) -> dict[str, str]:
+    if orthogroup_annotations is None:
+        return {}
+    required = {"feature", "orthogroup_annotation"}
+    if not required.issubset(orthogroup_annotations.columns):
+        raise FigureError("orthogroup annotation table schema is invalid for feature labels")
+    lookup: dict[str, str] = {}
+    for row in orthogroup_annotations.select(
+        [
+            pl.col("feature").cast(pl.String, strict=False).alias("feature"),
+            pl.col("orthogroup_annotation")
+            .cast(pl.String, strict=False)
+            .alias("orthogroup_annotation"),
+        ]
+    ).iter_rows(named=True):
+        feature = row["feature"]
+        annotation = row["orthogroup_annotation"]
+        if feature is None or annotation is None:
+            continue
+        feature_text = str(feature).strip()
+        annotation_text = str(annotation).strip()
+        if feature_text and annotation_text:
+            lookup[feature_text] = annotation_text
+    return lookup
+
+
+def _wrap_feature_annotation(annotation: str) -> list[str]:
+    text = " ".join(annotation.split())
+    if not text:
+        return []
+    return textwrap.wrap(
+        text,
+        width=_FEATURE_LABEL_WRAP_CHARS,
+        break_long_words=True,
+        break_on_hyphens=True,
+    ) or [text]
+
+
+def _feature_axis_labels(
+    features: list[str],
+    orthogroup_annotations: pl.DataFrame | None,
+) -> list[str]:
+    annotation_lookup = _orthogroup_annotation_lookup(orthogroup_annotations)
+    labels: list[str] = []
+    for feature in features:
+        annotation = annotation_lookup.get(feature)
+        if annotation is None:
+            labels.append(feature)
+            continue
+        labels.append("\n".join([feature, *_wrap_feature_annotation(annotation)]))
+    return labels
+
+
+def _feature_heatmap_width_px(*, fold_count: int, labels: list[str]) -> int:
+    base_width = _fold_axis_width_px(fold_count, base_px=260, per_fold_px=44)
+    if not any("\n" in label for label in labels):
+        return base_width
+    label_width = int(_label_text_width_px(labels, fontsize_px=_MONO_FONTSIZE))
+    return min(1400, max(base_width, 360 + label_width + fold_count * 44))
 
 
 def _compact_bottom_margin(height_px: int) -> float:
@@ -576,6 +665,7 @@ def _feature_importance_top(
     out_path: Path,
     feature_importance_by_fold: pl.DataFrame | None = None,
     top_features: int = _DEFAULT_TOP_FEATURES,
+    orthogroup_annotations: pl.DataFrame | None = None,
 ) -> None:
     required = {"feature", "importance_mean"}
     if not required.issubset(feature_importance.columns):
@@ -591,6 +681,9 @@ def _feature_importance_top(
         raise FigureError("feature_importance.tsv is empty; cannot draw feature_importance_top.svg")
 
     features = [str(v) for v in top.select("feature").to_series().to_list()]
+    feature_labels = _feature_axis_labels(features, orthogroup_annotations)
+    feature_axis_title = _feature_label_axis_title(feature_labels)
+    row_height_px = _feature_label_row_height_px(feature_labels)
     values = [float(v) for v in top.select("importance_mean").to_series().to_list()]
     if feature_importance_by_fold is not None:
         fold_required = {"fold_id", "feature", "importance_mean"}
@@ -633,7 +726,7 @@ def _feature_importance_top(
             if np.isclose(max_value, 0.0):
                 max_value = 1.0
 
-            height_px = max(240, 70 + len(features) * 18)
+            height_px = max(240, 70 + len(features) * row_height_px)
             fig, ax = plt.subplots(
                 figsize=_figure_size_inches(_FEATURE_IMPORTANCE_TOP_WIDTH_PX, height_px),
                 dpi=_FIG_DPI,
@@ -683,9 +776,9 @@ def _feature_importance_top(
                     zorder=4,
             )
             ax.set_yticks(y_pos)
-            ax.set_yticklabels(features, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
+            ax.set_yticklabels(feature_labels, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
             ax.set_ylabel(
-                "Orthogroup ID",
+                feature_axis_title,
                 fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE,
             )
             ax.invert_yaxis()
@@ -697,8 +790,8 @@ def _feature_importance_top(
             ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
             ax.set_axisbelow(True)
             fig.subplots_adjust(
-                left=_label_left_margin(
-                    features,
+                left=_feature_label_left_margin(
+                    feature_labels,
                     width_px=_FEATURE_IMPORTANCE_TOP_WIDTH_PX,
                     fontsize_px=_MONO_FONTSIZE,
                 ),
@@ -713,7 +806,7 @@ def _feature_importance_top(
     if np.isclose(max_value, 0.0):
         max_value = 1.0
 
-    height_px = max(220, 60 + len(features) * 18)
+    height_px = max(220, 60 + len(features) * row_height_px)
     fig, ax = plt.subplots(
         figsize=_figure_size_inches(_FEATURE_IMPORTANCE_TOP_WIDTH_PX, height_px),
         dpi=_FIG_DPI,
@@ -723,8 +816,8 @@ def _feature_importance_top(
     y_pos = np.arange(len(features), dtype=float)
     bars = ax.barh(y_pos, values, color=_MUTED_TEXT_COLOR, height=0.65)
     ax.set_yticks(y_pos)
-    ax.set_yticklabels(features, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
-    ax.set_ylabel("Orthogroup ID", fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE)
+    ax.set_yticklabels(feature_labels, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
+    ax.set_ylabel(feature_axis_title, fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE)
     ax.invert_yaxis()
 
     right_limit = max_value * 1.15
@@ -750,8 +843,8 @@ def _feature_importance_top(
         )
 
     fig.subplots_adjust(
-        left=_label_left_margin(
-            features,
+        left=_feature_label_left_margin(
+            feature_labels,
             width_px=_FEATURE_IMPORTANCE_TOP_WIDTH_PX,
             fontsize_px=_MONO_FONTSIZE,
         ),
@@ -767,6 +860,7 @@ def _feature_importance_by_fold_heatmap(
     feature_importance_by_fold: pl.DataFrame,
     out_path: Path,
     top_features: int = _DEFAULT_TOP_FEATURES,
+    orthogroup_annotations: pl.DataFrame | None = None,
 ) -> None:
     required = {"feature", "importance_mean"}
     if not required.issubset(feature_importance.columns):
@@ -792,6 +886,8 @@ def _feature_importance_by_fold_heatmap(
         )
 
     features = [str(v) for v in top.select("feature").to_series().to_list()]
+    feature_labels = _feature_axis_labels(features, orthogroup_annotations)
+    feature_axis_title = _feature_label_axis_title(feature_labels)
     data = (
         feature_importance_by_fold.select(
             pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
@@ -850,8 +946,9 @@ def _feature_importance_by_fold_heatmap(
     if np.isclose(max_value, 0.0):
         max_value = 1.0
 
-    height_px = max(260, 95 + len(features) * 18)
-    width_px = _fold_axis_width_px(len(fold_ids), base_px=260, per_fold_px=44)
+    row_height_px = _feature_label_row_height_px(feature_labels)
+    height_px = max(260, 95 + len(features) * row_height_px)
+    width_px = _feature_heatmap_width_px(fold_count=len(fold_ids), labels=feature_labels)
     fig, ax = plt.subplots(figsize=_figure_size_inches(width_px, height_px), dpi=_FIG_DPI)
     fig.patch.set_facecolor("white")
 
@@ -868,9 +965,9 @@ def _feature_importance_by_fold_heatmap(
     ax.set_xticks(np.arange(len(fold_ids), dtype=float))
     ax.set_xticklabels([str(fold_id) for fold_id in fold_ids], fontsize=_TICK_FONTSIZE)
     ax.set_yticks(np.arange(len(features), dtype=float))
-    ax.set_yticklabels(features, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
+    ax.set_yticklabels(feature_labels, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
     ax.set_xlabel("CV fold", fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE)
-    ax.set_ylabel("Orthogroup ID", fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE)
+    ax.set_ylabel(feature_axis_title, fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE)
     ax.set_xticks(np.arange(-0.5, len(fold_ids), 1.0), minor=True)
     ax.set_yticks(np.arange(-0.5, len(features), 1.0), minor=True)
     ax.grid(which="minor", color="#ffffff", linewidth=0.5)
@@ -902,7 +999,11 @@ def _feature_importance_by_fold_heatmap(
     )
     colorbar.ax.tick_params(labelsize=_TICK_FONTSIZE)
     fig.subplots_adjust(
-        left=_label_left_margin(features, width_px=width_px, fontsize_px=_MONO_FONTSIZE),
+        left=_feature_label_left_margin(
+            feature_labels,
+            width_px=width_px,
+            fontsize_px=_MONO_FONTSIZE,
+        ),
         right=0.94,
         top=0.98,
         bottom=_compact_bottom_margin(height_px),
@@ -915,6 +1016,7 @@ def _coefficients_signed_top(
     out_path: Path,
     coefficients_by_fold: pl.DataFrame | None = None,
     top_features: int = _DEFAULT_TOP_FEATURES,
+    orthogroup_annotations: pl.DataFrame | None = None,
 ) -> None:
     required = {"feature", "coef_mean", "method"}
     if not required.issubset(coefficients.columns):
@@ -932,6 +1034,9 @@ def _coefficients_signed_top(
     ).head(top_features)
 
     features = [str(v) for v in top.select("feature").to_series().to_list()]
+    feature_labels = _feature_axis_labels(features, orthogroup_annotations)
+    feature_axis_title = _feature_label_axis_title(feature_labels)
+    row_height_px = _feature_label_row_height_px(feature_labels)
     values = [float(v) for v in top.select("coef_mean").to_series().to_list()]
     if coefficients_by_fold is not None:
         fold_required = {"fold_id", "feature", "coef_mean", "method"}
@@ -975,7 +1080,7 @@ def _coefficients_signed_top(
             if np.isclose(max_abs, 0.0):
                 max_abs = 1.0
 
-            height_px = max(240, 70 + len(features) * 18)
+            height_px = max(240, 70 + len(features) * row_height_px)
             fig, ax = plt.subplots(
                 figsize=_figure_size_inches(_COEFFICIENTS_TOP_WIDTH_PX, height_px),
                 dpi=_FIG_DPI,
@@ -1025,8 +1130,8 @@ def _coefficients_signed_top(
                     zorder=4,
             )
             ax.set_yticks(y_pos)
-            ax.set_yticklabels(features, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
-            ax.set_ylabel("Orthogroup ID", fontsize=_COEFFICIENTS_AXIS_LABEL_FONTSIZE)
+            ax.set_yticklabels(feature_labels, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
+            ax.set_ylabel(feature_axis_title, fontsize=_COEFFICIENTS_AXIS_LABEL_FONTSIZE)
             ax.invert_yaxis()
             limit = max_abs * 1.15
             ax.set_xlim(-limit, limit)
@@ -1038,8 +1143,8 @@ def _coefficients_signed_top(
             ax.set_axisbelow(True)
             ax.axvline(0.0, color=_MUTED_TEXT_COLOR, linewidth=0.8)
             fig.subplots_adjust(
-                left=_label_left_margin(
-                    features,
+                left=_feature_label_left_margin(
+                    feature_labels,
                     width_px=_COEFFICIENTS_TOP_WIDTH_PX,
                     fontsize_px=_MONO_FONTSIZE,
                 ),
@@ -1054,7 +1159,7 @@ def _coefficients_signed_top(
     if np.isclose(max_abs, 0.0):
         max_abs = 1.0
 
-    height_px = max(220, 60 + len(features) * 18)
+    height_px = max(220, 60 + len(features) * row_height_px)
     fig, ax = plt.subplots(
         figsize=_figure_size_inches(_COEFFICIENTS_TOP_WIDTH_PX, height_px),
         dpi=_FIG_DPI,
@@ -1064,8 +1169,8 @@ def _coefficients_signed_top(
     y_pos = np.arange(len(features), dtype=float)
     bars = ax.barh(y_pos, values, color=_MUTED_TEXT_COLOR, height=0.65)
     ax.set_yticks(y_pos)
-    ax.set_yticklabels(features, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
-    ax.set_ylabel("Orthogroup ID", fontsize=_COEFFICIENTS_AXIS_LABEL_FONTSIZE)
+    ax.set_yticklabels(feature_labels, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
+    ax.set_ylabel(feature_axis_title, fontsize=_COEFFICIENTS_AXIS_LABEL_FONTSIZE)
     ax.invert_yaxis()
 
     limit = max_abs * 1.15
@@ -1097,8 +1202,8 @@ def _coefficients_signed_top(
         )
 
     fig.subplots_adjust(
-        left=_label_left_margin(
-            features,
+        left=_feature_label_left_margin(
+            feature_labels,
             width_px=_COEFFICIENTS_TOP_WIDTH_PX,
             fontsize_px=_MONO_FONTSIZE,
         ),
@@ -3642,6 +3747,7 @@ def write_run_figures(
     model_sparsity_summary: pl.DataFrame | None = None,
     feature_filter_funnel_stage_order: Sequence[str] | None = None,
     top_features: int = _DEFAULT_TOP_FEATURES,
+    orthogroup_annotations: pl.DataFrame | None = None,
 ) -> list[str]:
     """Write run-level SVG figures under <run_dir>/<stage>/figures."""
     warnings: list[str] = []
@@ -3662,6 +3768,7 @@ def write_run_figures(
         cv_dir / "feature_importance_top.svg",
         feature_importance_by_fold=feature_importance_by_fold,
         top_features=top_features,
+        orthogroup_annotations=orthogroup_annotations,
     )
     if feature_importance_by_fold is not None:
         _feature_importance_by_fold_heatmap(
@@ -3669,12 +3776,14 @@ def write_run_figures(
             feature_importance_by_fold,
             cv_dir / "feature_importance_by_fold_heatmap.svg",
             top_features=top_features,
+            orthogroup_annotations=orthogroup_annotations,
         )
     _coefficients_signed_top(
         coefficients,
         cv_dir / "coefficients_signed_top.svg",
         coefficients_by_fold=coefficients_by_fold,
         top_features=top_features,
+        orthogroup_annotations=orthogroup_annotations,
     )
     _species_probability_by_trait(
         predictions=oof_predictions,

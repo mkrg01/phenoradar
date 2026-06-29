@@ -516,15 +516,21 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - `cv/figures/feature_importance_top.svg`
   - Top `figures.top_features` features by mean fold-level `importance_mean`.
   - Horizontal boxplot plus fold-level points.
+  - When `data.orthogroup_annotation_path` is set, feature labels include the
+    orthogroup ID and wrapped full annotation text.
 - `cv/figures/feature_importance_by_fold_heatmap.svg`
   - Top `figures.top_features` features by mean fold-level `importance_mean`.
   - Rows are features, columns are CV folds, and color is fold-level
     `importance_mean` from `feature_importance_by_fold.tsv`.
   - The continuous white-to-blue scale starts at zero, so unimportant fold-feature
     cells remain white and larger importances become darker blue.
+  - When `data.orthogroup_annotation_path` is set, row labels include the
+    orthogroup ID and wrapped full annotation text.
 - `cv/figures/coefficients_signed_top.svg`
   - Top `figures.top_features` by absolute mean fold-level coefficient magnitude.
   - Horizontal boxplot plus fold-level points; right is positive and left is negative.
+  - When `data.orthogroup_annotation_path` is set, feature labels include the
+    orthogroup ID and wrapped full annotation text.
 - `cv/figures/cv_species_probability_by_trait.svg`
   - Out-of-fold species probabilities grouped by trait (`label`).
   - Boxplot with per-species points and trait-wise mean markers.
