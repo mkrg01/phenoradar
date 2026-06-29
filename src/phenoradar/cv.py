@@ -873,7 +873,8 @@ class ExpressionMatrixBuilder:
             values="__value",
             aggregate_function="sum",
         )
-        missing_features = [feature for feature in feature_names if feature not in pivot.columns]
+        pivot_columns = set(pivot.columns)
+        missing_features = [feature for feature in feature_names if feature not in pivot_columns]
         if missing_features:
             pivot = pivot.with_columns([pl.lit(0.0).alias(feature) for feature in missing_features])
         ordered = (
