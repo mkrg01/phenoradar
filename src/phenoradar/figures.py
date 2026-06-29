@@ -3296,6 +3296,7 @@ def _feature_filter_funnel(
     out_path: Path,
     *,
     stage_order: Sequence[str] | None = None,
+    scopes: Sequence[str] | None = None,
 ) -> None:
     required = {
         "scope",
@@ -3313,6 +3314,9 @@ def _feature_filter_funnel(
         )
     stage_order = _feature_filter_figure_stage_order(stage_order)
     data = feature_filter_counts_summary.filter(pl.col("stage").is_in(stage_order))
+    if scopes is not None:
+        scope_values = [str(scope) for scope in scopes]
+        data = data.filter(pl.col("scope").is_in(scope_values))
     if data.height == 0:
         _write_message_figure(
             title="Feature Filter Funnel",
@@ -3712,7 +3716,18 @@ def write_run_figures(
             feature_filter_counts_summary,
             cv_dir / "feature_filter_funnel.svg",
             stage_order=feature_filter_funnel_stage_order,
+            scopes=("outer_fold",),
         )
+        final_refit_feature_filter = feature_filter_counts_summary.filter(
+            pl.col("scope") == "final_refit"
+        )
+        if final_refit_feature_filter.height > 0:
+            _feature_filter_funnel(
+                feature_filter_counts_summary,
+                external_test_dir / "feature_filter_funnel.svg",
+                stage_order=feature_filter_funnel_stage_order,
+                scopes=("final_refit",),
+            )
     if model_sparsity is not None:
         _non_zero_feature_count_by_fold(
             model_sparsity,

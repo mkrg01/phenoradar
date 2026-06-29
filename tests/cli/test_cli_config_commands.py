@@ -574,6 +574,7 @@ data:
     assert not (run_dirs[0] / "cv" / "figures" / "selected_feature_count_by_fold.svg").exists()
     assert not (run_dirs[0] / "cv" / "figures" / "model_sparsity_scatter.svg").exists()
     assert (run_dirs[0] / "external_test" / "figures" / "final_refit_loss_by_split.svg").exists()
+    assert (run_dirs[0] / "external_test" / "figures" / "feature_filter_funnel.svg").exists()
     assert (
         run_dirs[0] / "external_test" / "figures" / "external_species_probability_by_trait.svg"
     ).exists()
@@ -749,6 +750,9 @@ data:
     assert not (run_dirs[0] / "cv" / "figures" / "model_sparsity_scatter.svg").exists()
     assert not (
         run_dirs[0] / "external_test" / "figures" / "final_refit_loss_by_split.svg"
+    ).exists()
+    assert not (
+        run_dirs[0] / "external_test" / "figures" / "feature_filter_funnel.svg"
     ).exists()
     assert not (
         run_dirs[0] / "external_test" / "figures" / "external_species_probability_by_trait.svg"

@@ -26,6 +26,15 @@ def _svg_text_y_and_viewbox_height(svg_path: Path, text: str) -> tuple[float, fl
     raise AssertionError(f"{text!r} not found in {svg_path}")
 
 
+def _svg_text_values(svg_path: Path) -> set[str]:
+    root = ET.parse(svg_path).getroot()
+    return {
+        "".join(element.itertext())
+        for element in root.iter()
+        if element.tag.endswith("text")
+    }
+
+
 def _minimal_metrics_cv() -> pl.DataFrame:
     return pl.DataFrame(
         [
@@ -224,6 +233,35 @@ def _minimal_feature_filter_counts_summary() -> pl.DataFrame:
     )
 
 
+def _minimal_final_refit_feature_filter_counts_summary() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "scope": ["final_refit"] * 6,
+            "stage": [
+                "n_features_before",
+                "n_features_after_sparse_feature_filter",
+                "n_features_after_low_variance",
+                "n_features_after_pair_aware",
+                "n_features_after_correlation",
+                "n_features_after_all",
+            ],
+            "n_records": [2, 2, 2, 2, 2, 2],
+            "n_features_min": [120, 90, 70, 52, 48, 48],
+            "n_features_q1": [122.0, 94.0, 73.0, 53.0, 49.0, 49.0],
+            "n_features_median": [123.4, 98.7, 75.5, 54.3, 50.5, 50.5],
+            "n_features_mean": [123.4, 98.7, 75.5, 54.3, 50.5, 50.5],
+            "n_features_q3": [125.0, 101.0, 78.0, 55.0, 52.0, 52.0],
+            "n_features_max": [127, 104, 81, 56, 53, 53],
+            "retained_ratio_min": [1.0, 0.75, 0.58, 0.43, 0.40, 0.40],
+            "retained_ratio_q1": [1.0, 0.77, 0.60, 0.44, 0.41, 0.41],
+            "retained_ratio_median": [1.0, 0.80, 0.61, 0.44, 0.41, 0.41],
+            "retained_ratio_mean": [1.0, 0.80, 0.61, 0.44, 0.41, 0.41],
+            "retained_ratio_q3": [1.0, 0.82, 0.63, 0.45, 0.42, 0.42],
+            "retained_ratio_max": [1.0, 0.84, 0.65, 0.46, 0.43, 0.43],
+        }
+    )
+
+
 def _minimal_model_sparsity() -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -353,7 +391,13 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
         model_selection_trials=None,
-        feature_filter_counts_summary=_minimal_feature_filter_counts_summary(),
+        feature_filter_counts_summary=pl.concat(
+            [
+                _minimal_feature_filter_counts_summary(),
+                _minimal_final_refit_feature_filter_counts_summary(),
+            ],
+            how="vertical_relaxed",
+        ),
         feature_filter_funnel_stage_order=[
             "n_features_before",
             "n_features_after_sparse_feature_filter",
@@ -363,8 +407,17 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
     )
 
     figures_dir = tmp_path / "run" / "cv" / "figures"
+    external_figures_dir = tmp_path / "run" / "external_test" / "figures"
     assert (figures_dir / "feature_filter_funnel.svg").exists()
     funnel_svg = (figures_dir / "feature_filter_funnel.svg").read_text(encoding="utf-8")
+    assert (external_figures_dir / "feature_filter_funnel.svg").exists()
+    final_refit_funnel_svg = (external_figures_dir / "feature_filter_funnel.svg").read_text(
+        encoding="utf-8"
+    )
+    funnel_text = _svg_text_values(figures_dir / "feature_filter_funnel.svg")
+    final_refit_funnel_text = _svg_text_values(
+        external_figures_dir / "feature_filter_funnel.svg"
+    )
     assert "Feature selection step" in funnel_svg
     assert "Number of selected features" in funnel_svg
     assert "Number of features" not in funnel_svg
@@ -381,7 +434,11 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
     assert "Low variance" not in funnel_svg
     assert "Correlation" not in funnel_svg
     assert "Final" not in funnel_svg
-    assert "79.5" in funnel_svg
+    assert "123.4" in final_refit_funnel_svg
+    assert "79.5" in funnel_text
+    assert "123.4" not in funnel_text
+    assert "123.4" in final_refit_funnel_text
+    assert "79.5" not in final_refit_funnel_text
     assert not (figures_dir / "selected_features_by_fold_after_preprocessing.svg").exists()
     assert not (figures_dir / "selected_features_after_preprocessing.svg").exists()
     assert not (figures_dir / "selected_features_by_fold.svg").exists()

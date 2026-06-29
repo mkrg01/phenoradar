@@ -152,6 +152,7 @@ Always written:
     - `cv/figures/roc_curve_cv.svg` (may be skipped with warning for degenerate folds)
     - `cv/figures/pr_curve_cv.svg` (may be skipped with warning for degenerate folds)
     - `external_test/figures/final_refit_loss_by_split.svg` (attempted in `full_run`)
+    - `external_test/figures/feature_filter_funnel.svg` (attempted in `full_run`)
     - `external_test/figures/external_species_probability_by_trait.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
     - `external_test/figures/external_confusion_matrix.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
     - `external_test/figures/cv_external_metric_comparison.svg` (attempted in `full_run`; may be skipped with warning when the pooled CV or external-test summary is missing)
@@ -532,9 +533,9 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
   - Fold-level probability distribution grouped by trait.
   - Useful for checking fold-to-fold drift or fold-specific overlap.
 - `cv/figures/feature_filter_funnel.svg`
-  - Feature-count trend by scope through the enabled `preprocess.*_filter` steps.
+  - Outer-CV feature-count trend through the enabled `preprocess.*_filter` steps.
   - Line is median count; shaded band is IQR; dashed lines are min-max.
-  - Legend identifies median/IQR/min-max; the figure annotates the `n_records` count.
+  - Legend identifies median/IQR/min-max.
 - `cv/figures/non_zero_feature_count_by_fold.svg`
   - Fold-wise distribution of `n_nonzero_features` from `model_sparsity.tsv`.
   - Boxplots are shown when a fold has multiple models; points show individual models.
@@ -564,6 +565,9 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - `external_test/figures/external_roc_curve.svg` / `external_test/figures/external_pr_curve.svg` (`full_run` with both external-test labels)
   - External-test ROC and precision-recall curves from `prediction_external_test.tsv`.
   - The ROC panel annotates ROC AUC. The PR panel annotates average precision and the external-test positive rate.
+- `external_test/figures/feature_filter_funnel.svg` (`full_run`)
+  - Final-refit feature-count trend through the enabled `preprocess.*_filter` steps.
+  - Uses the model fit on the full training/validation pool rather than outer-CV folds.
 - `<stage>/figures/probability_by_<group>.svg` (when `summary.group_col` is present in metadata)
   - Group-wise predicted probability distributions for the configured summary group.
   - Uses `summary.group_name_col` for y-axis labels when available.
