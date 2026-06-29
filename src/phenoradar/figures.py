@@ -147,7 +147,7 @@ def _feature_label_row_height_px(labels: list[str]) -> int:
 
 
 def _feature_label_axis_title(labels: list[str]) -> str:
-    if any(": " in label for label in labels):
+    if any(label.endswith(")") and " (" in label for label in labels):
         return "Orthogroup / annotation"
     return "Orthogroup ID"
 
@@ -191,7 +191,7 @@ def _feature_axis_labels(
         if annotation is None:
             labels.append(feature)
             continue
-        labels.append(f"{feature}: {' '.join(annotation.split())}")
+        labels.append(f"{' '.join(annotation.split())} ({feature})")
     return labels
 
 

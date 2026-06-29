@@ -475,7 +475,8 @@ def test_write_run_tree_prediction_artifacts_writes_annotated_heatmap_variants(
         assert id_only_svg.exists()
         assert "carbonic" not in id_only_svg.read_text(encoding="utf-8")
         annotated_text = annotated_svg.read_text(encoding="utf-8")
-        assert "OG1: beta carbonic" in annotated_text
+        assert "beta carbonic anhydrase" in annotated_text
+        assert "(OG1)" in annotated_text
         assert (cv_figures_dir / "tree_feature_heatmap_zscore_annotated.svg").exists()
     else:
         assert any("Toytree is unavailable" in warning for warning in warnings)

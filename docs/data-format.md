@@ -159,7 +159,7 @@ Optional path/key:
 three columns: orthogroup ID, annotation taxid, and annotation text. When set,
 PhenoRadar writes additional annotated variants of feature interpretation figures
 and tree feature heatmaps. Annotated labels are rendered as
-`orthogroup ID: full annotation`; the original ID-only figures are still written.
+`full annotation (orthogroup ID)`; the original ID-only figures are still written.
 
 ## Tree Newick
 

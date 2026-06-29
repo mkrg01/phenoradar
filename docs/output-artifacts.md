@@ -524,7 +524,7 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - `cv/figures/feature_importance_top_annotated.svg`
   - Written when `data.orthogroup_annotation_path` is set.
   - Same plot as `feature_importance_top.svg`, with labels rendered as
-    `orthogroup ID: full annotation`.
+    `full annotation (orthogroup ID)`.
 - `cv/figures/feature_importance_by_fold_heatmap.svg`
   - Top `figures.top_features` features by mean fold-level `importance_mean`.
   - Rows are features, columns are CV folds, and color is fold-level
@@ -534,14 +534,14 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - `cv/figures/feature_importance_by_fold_heatmap_annotated.svg`
   - Written when `data.orthogroup_annotation_path` is set.
   - Same heatmap as `feature_importance_by_fold_heatmap.svg`, with row labels
-    rendered as `orthogroup ID: full annotation`.
+    rendered as `full annotation (orthogroup ID)`.
 - `cv/figures/coefficients_signed_top.svg`
   - Top `figures.top_features` by absolute mean fold-level coefficient magnitude.
   - Horizontal boxplot plus fold-level points; right is positive and left is negative.
 - `cv/figures/coefficients_signed_top_annotated.svg`
   - Written when `data.orthogroup_annotation_path` is set.
   - Same plot as `coefficients_signed_top.svg`, with labels rendered as
-    `orthogroup ID: full annotation`.
+    `full annotation (orthogroup ID)`.
 - `cv/figures/cv_species_probability_by_trait.svg`
   - Out-of-fold species probabilities grouped by trait (`label`).
   - Boxplot with per-species points and trait-wise mean markers.
@@ -619,7 +619,7 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
   - Written when both `data.tree_path` and `data.orthogroup_annotation_path` are
     set and Toytree is available.
   - Same tree heatmaps, with feature labels rendered as
-    `orthogroup ID: full annotation`.
+    `full annotation (orthogroup ID)`.
     and missing-value color.
   - The z-score figure emphasizes relative per-feature expression patterns; the
     log2-TPM figure preserves absolute expression scale after `log2(TPM + 1)`.

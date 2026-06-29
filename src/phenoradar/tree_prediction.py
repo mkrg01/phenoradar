@@ -994,14 +994,14 @@ def _feature_heatmap_label(feature: object, annotation: object) -> str:
     feature_text = str(feature)
     if not _has_text(annotation):
         return feature_text
-    return f"{feature_text}: {' '.join(str(annotation).split())}"
+    return f"{' '.join(str(annotation).split())} ({feature_text})"
 
 
 def _feature_heatmap_title(feature: object, annotation: object) -> str:
     feature_text = str(feature)
     if not _has_text(annotation):
         return feature_text
-    return f"{feature_text}: {' '.join(str(annotation).split())}"
+    return f"{' '.join(str(annotation).split())} ({feature_text})"
 
 
 def _feature_label_depth_px(labels: list[str]) -> int:
