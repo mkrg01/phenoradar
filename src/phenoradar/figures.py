@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Sequence
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Any, cast
 
@@ -116,6 +118,13 @@ _CV_EXTERNAL_METRIC_ORDER = (
     ("f1", "F1"),
     ("mcc", "MCC"),
 )
+type _FigureJob = tuple[
+    str,
+    Callable[..., None],
+    tuple[Any, ...],
+    dict[str, Any],
+    bool,
+]
 
 
 def _figure_size_inches(width_px: int, height_px: int) -> tuple[float, float]:
@@ -235,6 +244,146 @@ def _stage_figure_dirs(run_dir: Path) -> dict[str, Path]:
     for figures_dir in figure_dirs.values():
         figures_dir.mkdir(parents=True, exist_ok=True)
     return figure_dirs
+
+
+def _top_feature_importance_features(
+    feature_importance: pl.DataFrame,
+    *,
+    top_features: int,
+) -> list[str]:
+    required = {"feature", "importance_mean"}
+    if top_features < 1 or not required.issubset(feature_importance.columns):
+        return []
+    top = feature_importance.sort(
+        by=["importance_mean", "feature"],
+        descending=[True, False],
+    ).head(top_features)
+    return [str(value) for value in top.select("feature").to_series().to_list()]
+
+
+def _top_coefficient_features(
+    coefficients: pl.DataFrame,
+    *,
+    top_features: int,
+) -> list[str]:
+    required = {"feature", "coef_mean", "method"}
+    if top_features < 1 or not required.issubset(coefficients.columns):
+        return []
+    linear = coefficients.filter(pl.col("method") == "coef_signed").drop_nulls("coef_mean")
+    if linear.height == 0:
+        return []
+    top = (
+        linear.with_columns(pl.col("coef_mean").abs().alias("__abs_coef"))
+        .sort(
+            by=["__abs_coef", "feature"],
+            descending=[True, False],
+        )
+        .head(top_features)
+    )
+    return [str(value) for value in top.select("feature").to_series().to_list()]
+
+
+def _feature_label_annotations_subset(
+    orthogroup_annotations: pl.DataFrame | None,
+    *,
+    feature_importance: pl.DataFrame,
+    coefficients: pl.DataFrame,
+    top_features: int,
+) -> pl.DataFrame | None:
+    if orthogroup_annotations is None:
+        return None
+    required = {"feature", "orthogroup_annotation"}
+    if not required.issubset(orthogroup_annotations.columns):
+        return orthogroup_annotations
+
+    features = {
+        *[
+            feature.strip()
+            for feature in _top_feature_importance_features(
+                feature_importance,
+                top_features=top_features,
+            )
+            if feature.strip()
+        ],
+        *[
+            feature.strip()
+            for feature in _top_coefficient_features(
+                coefficients,
+                top_features=top_features,
+            )
+            if feature.strip()
+        ],
+    }
+    if not features:
+        return orthogroup_annotations
+    return orthogroup_annotations.select(
+        [
+            pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("feature"),
+            pl.col("orthogroup_annotation")
+            .cast(pl.String, strict=False)
+            .alias("orthogroup_annotation"),
+        ]
+    ).filter(pl.col("feature").is_in(sorted(features)))
+
+
+def _execute_figure_job(
+    name: str,
+    func: Callable[..., None],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    catch_figure_error: bool,
+) -> tuple[str, list[str]]:
+    try:
+        func(*args, **kwargs)
+    except FigureError as exc:
+        if catch_figure_error:
+            return name, [str(exc)]
+        raise
+    return name, []
+
+
+def _run_figure_jobs(jobs: list[_FigureJob], *, parallel_workers: int) -> list[str]:
+    if not jobs:
+        return []
+    worker_count = max(1, min(int(parallel_workers), len(jobs)))
+    if worker_count == 1:
+        sequential_warnings: list[str] = []
+        for name, func, args, kwargs, catch_figure_error in jobs:
+            _job_name, job_warnings = _execute_figure_job(
+                name,
+                func,
+                args,
+                kwargs,
+                catch_figure_error,
+            )
+            sequential_warnings.extend(job_warnings)
+        return sequential_warnings
+
+    warnings_by_index: dict[int, list[str]] = {}
+    with ProcessPoolExecutor(
+        max_workers=worker_count,
+        mp_context=get_context("spawn"),
+    ) as executor:
+        future_to_index = {
+            executor.submit(
+                _execute_figure_job,
+                name,
+                func,
+                args,
+                kwargs,
+                catch_figure_error,
+            ): index
+            for index, (name, func, args, kwargs, catch_figure_error) in enumerate(jobs)
+        }
+        for future in as_completed(future_to_index):
+            index = future_to_index[future]
+            _job_name, job_warnings = future.result()
+            warnings_by_index[index] = job_warnings
+
+    ordered_warnings: list[str] = []
+    for index in range(len(jobs)):
+        ordered_warnings.extend(warnings_by_index.get(index, []))
+    return ordered_warnings
 
 
 def _write_message_figure(
@@ -3776,159 +3925,220 @@ def write_run_figures(
     feature_filter_funnel_stage_order: Sequence[str] | None = None,
     top_features: int = _DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
+    parallel_workers: int = 1,
 ) -> list[str]:
     """Write run-level SVG figures under <run_dir>/<stage>/figures."""
-    warnings: list[str] = []
     stage_dirs = _stage_figure_dirs(run_dir)
     cv_dir = stage_dirs["cv"]
     external_test_dir = stage_dirs["external_test"]
     inference_dir = stage_dirs["inference"]
-
-    _cv_metrics_overview(metrics_cv, cv_dir / "cv_metrics_overview.svg")
-    if loss_by_split_cv is not None:
-        _cv_loss_by_split(loss_by_split_cv, cv_dir / "cv_loss_by_split.svg")
-    if loss_by_split_final_refit is not None:
-        _final_refit_loss_by_split(
-            loss_by_split_final_refit, external_test_dir / "final_refit_loss_by_split.svg"
-        )
-    _feature_importance_top(
-        feature_importance,
-        cv_dir / "feature_importance_top.svg",
-        feature_importance_by_fold=feature_importance_by_fold,
+    feature_label_annotations = _feature_label_annotations_subset(
+        orthogroup_annotations,
+        feature_importance=feature_importance,
+        coefficients=coefficients,
         top_features=top_features,
-        orthogroup_annotations=orthogroup_annotations,
+    )
+    jobs: list[_FigureJob] = []
+
+    def add_job(
+        name: str,
+        func: Callable[..., None],
+        args: tuple[Any, ...] = (),
+        kwargs: dict[str, Any] | None = None,
+        *,
+        catch_figure_error: bool = False,
+    ) -> None:
+        jobs.append((name, func, args, {} if kwargs is None else kwargs, catch_figure_error))
+
+    add_job(
+        "cv_metrics_overview",
+        _cv_metrics_overview,
+        (metrics_cv, cv_dir / "cv_metrics_overview.svg"),
+    )
+    if loss_by_split_cv is not None:
+        add_job(
+            "cv_loss_by_split",
+            _cv_loss_by_split,
+            (loss_by_split_cv, cv_dir / "cv_loss_by_split.svg"),
+        )
+    if loss_by_split_final_refit is not None:
+        add_job(
+            "final_refit_loss_by_split",
+            _final_refit_loss_by_split,
+            (loss_by_split_final_refit, external_test_dir / "final_refit_loss_by_split.svg"),
+        )
+    add_job(
+        "feature_importance_top",
+        _feature_importance_top,
+        (feature_importance, cv_dir / "feature_importance_top.svg"),
+        {
+            "feature_importance_by_fold": feature_importance_by_fold,
+            "top_features": top_features,
+            "orthogroup_annotations": feature_label_annotations,
+        },
     )
     if feature_importance_by_fold is not None:
-        _feature_importance_by_fold_heatmap(
-            feature_importance,
-            feature_importance_by_fold,
-            cv_dir / "feature_importance_by_fold_heatmap.svg",
-            top_features=top_features,
-            orthogroup_annotations=orthogroup_annotations,
+        add_job(
+            "feature_importance_by_fold_heatmap",
+            _feature_importance_by_fold_heatmap,
+            (
+                feature_importance,
+                feature_importance_by_fold,
+                cv_dir / "feature_importance_by_fold_heatmap.svg",
+            ),
+            {
+                "top_features": top_features,
+                "orthogroup_annotations": feature_label_annotations,
+            },
         )
-    _coefficients_signed_top(
-        coefficients,
-        cv_dir / "coefficients_signed_top.svg",
-        coefficients_by_fold=coefficients_by_fold,
-        top_features=top_features,
-        orthogroup_annotations=orthogroup_annotations,
+    add_job(
+        "coefficients_signed_top",
+        _coefficients_signed_top,
+        (coefficients, cv_dir / "coefficients_signed_top.svg"),
+        {
+            "coefficients_by_fold": coefficients_by_fold,
+            "top_features": top_features,
+            "orthogroup_annotations": feature_label_annotations,
+        },
     )
-    _species_probability_by_trait(
-        predictions=oof_predictions,
-        trait_col="label",
-        trait_name=trait_name,
-        out_path=cv_dir / "cv_species_probability_by_trait.svg",
-        title="CV Species Probability by Trait",
-        subtitle="Out-of-fold probabilities grouped by observed trait labels",
-        source_table_name="prediction_cv.tsv",
-        figure_name="cv_species_probability_by_trait.svg",
+    add_job(
+        "cv_species_probability_by_trait",
+        _species_probability_by_trait,
+        kwargs={
+            "predictions": oof_predictions,
+            "trait_col": "label",
+            "trait_name": trait_name,
+            "out_path": cv_dir / "cv_species_probability_by_trait.svg",
+            "title": "CV Species Probability by Trait",
+            "subtitle": "Out-of-fold probabilities grouped by observed trait labels",
+            "source_table_name": "prediction_cv.tsv",
+            "figure_name": "cv_species_probability_by_trait.svg",
+        },
     )
-    _cv_fold_trait_probability(
-        oof_predictions,
-        cv_dir / "cv_fold_trait_probability.svg",
-        trait_name=trait_name,
+    add_job(
+        "cv_fold_trait_probability",
+        _cv_fold_trait_probability,
+        (oof_predictions, cv_dir / "cv_fold_trait_probability.svg"),
+        {"trait_name": trait_name},
     )
-    try:
-        _roc_pr_curves_cv(
-            oof_predictions,
-            roc_out_path=cv_dir / "roc_curve_cv.svg",
-            pr_out_path=cv_dir / "pr_curve_cv.svg",
-        )
-    except FigureError as exc:
-        warnings.append(str(exc))
+    add_job(
+        "roc_pr_curves_cv",
+        _roc_pr_curves_cv,
+        (oof_predictions,),
+        {
+            "roc_out_path": cv_dir / "roc_curve_cv.svg",
+            "pr_out_path": cv_dir / "pr_curve_cv.svg",
+        },
+        catch_figure_error=True,
+    )
     selection_summary = model_selection_trials_summary
     if selection_summary is None and model_selection_trials is not None:
         selection_summary = _summarize_model_selection_trials_for_figure(model_selection_trials)
     if selection_summary is not None:
-        _model_selection_trials_summary_panels(
-            selection_summary,
-            cv_dir / "model_selection_trials.svg",
-            max_sample_sets_per_fold=_MODEL_SELECTION_SAMPLE_SET_LIMIT,
+        add_job(
+            "model_selection_trials",
+            _model_selection_trials_summary_panels,
+            (selection_summary, cv_dir / "model_selection_trials.svg"),
+            {"max_sample_sets_per_fold": _MODEL_SELECTION_SAMPLE_SET_LIMIT},
         )
-        _model_selection_one_se_curve(
-            selection_summary,
-            model_selection_selected,
-            cv_dir / "model_selection_one_se_curve.svg",
-            max_sample_sets_per_fold=_MODEL_SELECTION_SAMPLE_SET_LIMIT,
+        add_job(
+            "model_selection_one_se_curve",
+            _model_selection_one_se_curve,
+            (
+                selection_summary,
+                model_selection_selected,
+                cv_dir / "model_selection_one_se_curve.svg",
+            ),
+            {"max_sample_sets_per_fold": _MODEL_SELECTION_SAMPLE_SET_LIMIT},
         )
     if feature_filter_counts_summary is not None:
-        _feature_filter_funnel(
-            feature_filter_counts_summary,
-            cv_dir / "feature_filter_funnel.svg",
-            stage_order=feature_filter_funnel_stage_order,
-            scopes=("outer_fold",),
+        add_job(
+            "cv_feature_filter_funnel",
+            _feature_filter_funnel,
+            (feature_filter_counts_summary, cv_dir / "feature_filter_funnel.svg"),
+            {
+                "stage_order": feature_filter_funnel_stage_order,
+                "scopes": ("outer_fold",),
+            },
         )
         final_refit_feature_filter = feature_filter_counts_summary.filter(
             pl.col("scope") == "final_refit"
         )
         if final_refit_feature_filter.height > 0:
-            _feature_filter_funnel(
-                feature_filter_counts_summary,
-                external_test_dir / "feature_filter_funnel.svg",
-                stage_order=feature_filter_funnel_stage_order,
-                scopes=("final_refit",),
+            add_job(
+                "final_refit_feature_filter_funnel",
+                _feature_filter_funnel,
+                (feature_filter_counts_summary, external_test_dir / "feature_filter_funnel.svg"),
+                {
+                    "stage_order": feature_filter_funnel_stage_order,
+                    "scopes": ("final_refit",),
+                },
             )
     if model_sparsity is not None:
-        _non_zero_feature_count_by_fold(
-            model_sparsity,
-            cv_dir / "non_zero_feature_count_by_fold.svg",
+        add_job(
+            "non_zero_feature_count_by_fold",
+            _non_zero_feature_count_by_fold,
+            (model_sparsity, cv_dir / "non_zero_feature_count_by_fold.svg"),
         )
     if pred_external_test is not None:
         if classification_summary is not None:
-            try:
-                _cv_external_metric_comparison(
-                    classification_summary,
-                    external_test_dir / "cv_external_metric_comparison.svg",
-                )
-            except FigureError as exc:
-                warnings.append(str(exc))
-        try:
-            _external_confusion_matrix(
-                pred_external_test,
-                external_test_dir / "external_confusion_matrix.svg",
+            add_job(
+                "cv_external_metric_comparison",
+                _cv_external_metric_comparison,
+                (classification_summary, external_test_dir / "cv_external_metric_comparison.svg"),
+                catch_figure_error=True,
             )
-        except FigureError as exc:
-            warnings.append(str(exc))
-        try:
-            _species_probability_by_trait(
-                predictions=pred_external_test,
-                trait_col="true_label",
-                trait_name=trait_name,
-                out_path=external_test_dir / "external_species_probability_by_trait.svg",
-                title="External Test Species Probability by Trait",
-                subtitle="Final-refit probabilities grouped by external-test true labels",
-                source_table_name="prediction_external_test.tsv",
-                figure_name="external_species_probability_by_trait.svg",
-            )
-        except FigureError as exc:
-            warnings.append(str(exc))
-        try:
-            _external_roc_pr_curves(
-                pred_external_test,
-                roc_out_path=external_test_dir / "external_roc_curve.svg",
-                pr_out_path=external_test_dir / "external_pr_curve.svg",
-            )
-        except FigureError as exc:
-            warnings.append(str(exc))
+        add_job(
+            "external_confusion_matrix",
+            _external_confusion_matrix,
+            (pred_external_test, external_test_dir / "external_confusion_matrix.svg"),
+            catch_figure_error=True,
+        )
+        add_job(
+            "external_species_probability_by_trait",
+            _species_probability_by_trait,
+            kwargs={
+                "predictions": pred_external_test,
+                "trait_col": "true_label",
+                "trait_name": trait_name,
+                "out_path": external_test_dir / "external_species_probability_by_trait.svg",
+                "title": "External Test Species Probability by Trait",
+                "subtitle": "Final-refit probabilities grouped by external-test true labels",
+                "source_table_name": "prediction_external_test.tsv",
+                "figure_name": "external_species_probability_by_trait.svg",
+            },
+            catch_figure_error=True,
+        )
+        add_job(
+            "external_roc_pr_curves",
+            _external_roc_pr_curves,
+            (pred_external_test,),
+            {
+                "roc_out_path": external_test_dir / "external_roc_curve.svg",
+                "pr_out_path": external_test_dir / "external_pr_curve.svg",
+            },
+            catch_figure_error=True,
+        )
     if pred_inference is not None:
-        try:
-            _predict_probability_distribution(
-                pred_inference,
-                inference_dir / "inference_probability_distribution.svg",
-                figure_name="inference_probability_distribution.svg",
-            )
-        except FigureError as exc:
-            warnings.append(str(exc))
-        try:
-            _species_probability_cv_and_inference(
-                oof_predictions=oof_predictions,
-                pred_inference=pred_inference,
-                trait_name=trait_name,
-                out_path=inference_dir / "species_probability_cv_and_inference.svg",
-            )
-        except FigureError as exc:
-            warnings.append(str(exc))
-    return warnings
+        add_job(
+            "inference_probability_distribution",
+            _predict_probability_distribution,
+            (pred_inference, inference_dir / "inference_probability_distribution.svg"),
+            {"figure_name": "inference_probability_distribution.svg"},
+            catch_figure_error=True,
+        )
+        add_job(
+            "species_probability_cv_and_inference",
+            _species_probability_cv_and_inference,
+            kwargs={
+                "oof_predictions": oof_predictions,
+                "pred_inference": pred_inference,
+                "trait_name": trait_name,
+                "out_path": inference_dir / "species_probability_cv_and_inference.svg",
+            },
+            catch_figure_error=True,
+        )
+    return _run_figure_jobs(jobs, parallel_workers=parallel_workers)
 
 
 def write_predict_figures(

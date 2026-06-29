@@ -388,6 +388,54 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
         assert any("Toytree is unavailable" in warning for warning in warnings)
 
 
+def test_write_run_tree_prediction_artifacts_parallel_workers_write_outputs(
+    tmp_path: Path,
+) -> None:
+    metadata_path = tmp_path / "metadata.tsv"
+    tpm_path = tmp_path / "tpm.tsv"
+    tree_path = tmp_path / "tree.nwk"
+    _metadata().write_csv(metadata_path, separator="\t")
+    _write_tpm(tpm_path)
+    tree_path.write_text("(sp1,sp2,sp3);\n", encoding="utf-8")
+
+    warnings = write_run_tree_prediction_artifacts(
+        run_dir=tmp_path / "run",
+        tree_path=tree_path,
+        metadata_path=metadata_path,
+        tpm_path=tpm_path,
+        species_col="species",
+        feature_col="orthogroup",
+        value_col="tpm",
+        trait_col="C4",
+        group_col="contrast_pair_id",
+        oof_predictions=pl.DataFrame(
+            {
+                "fold_id": ["0", "0", "1"],
+                "species": ["sp1", "sp2", "sp3"],
+                "label": [0, 1, 0],
+                "prob": [0.2, 0.8, 0.9],
+            }
+        ),
+        thresholds=_thresholds(),
+        feature_importance=_feature_importance(),
+        coefficients=_coefficients(),
+        pred_external_test=None,
+        parallel_workers=2,
+    )
+
+    cv_tables_dir = tmp_path / "run" / "cv" / "tables"
+    cv_figures_dir = tmp_path / "run" / "cv" / "figures"
+    assert (cv_tables_dir / "tree_contrast_pairs_annotation.tsv").exists()
+    assert (cv_tables_dir / "tree_feature_heatmap_annotation.tsv").exists()
+    assert (cv_tables_dir / "tree_prediction_cv_annotation.tsv").exists()
+    if (cv_figures_dir / "tree_prediction_cv.svg").exists():
+        assert (cv_figures_dir / "tree_group.svg").exists()
+        assert (cv_figures_dir / "tree_feature_heatmap_zscore.svg").exists()
+        assert (cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg").exists()
+    else:
+        assert any("Toytree is unavailable" in warning for warning in warnings)
+
+
 def test_write_run_tree_prediction_artifacts_uses_requested_feature_limit(
     tmp_path: Path,
 ) -> None:

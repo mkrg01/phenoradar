@@ -84,6 +84,12 @@ app = typer.Typer(
 
 
 LogVerbosity = Literal["quiet", "normal", "verbose"]
+_ARTIFACT_PARALLEL_WORKER_CAP = 4
+
+
+def _artifact_parallel_workers(config: AppConfig) -> int:
+    runtime_n_jobs = int(getattr(config.runtime, "n_jobs", 1))
+    return max(1, min(runtime_n_jobs, _ARTIFACT_PARALLEL_WORKER_CAP))
 
 
 def _feature_filter_funnel_stage_order(config: AppConfig) -> list[str]:
@@ -1140,6 +1146,7 @@ def run(
             model_sparsity_summary=model_sparsity_summary_table,
             top_features=resolved.figures.top_features,
             orthogroup_annotations=orthogroup_annotations,
+            parallel_workers=_artifact_parallel_workers(resolved),
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -1167,6 +1174,7 @@ def run(
                 ),
                 feature_limit=resolved.figures.top_features,
                 orthogroup_annotations=orthogroup_annotations,
+                parallel_workers=_artifact_parallel_workers(resolved),
             )
         except TreePredictionError as exc:
             raise typer.BadParameter(str(exc)) from exc

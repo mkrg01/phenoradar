@@ -402,6 +402,30 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
     assert warnings == []
 
 
+def test_write_run_figures_parallel_workers_write_required_artifacts(tmp_path: Path) -> None:
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_minimal_oof(),
+        feature_importance=_minimal_feature_importance(),
+        feature_importance_by_fold=_minimal_feature_importance_by_fold(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        loss_by_split_cv=_minimal_loss_by_split(),
+        parallel_workers=2,
+    )
+
+    cv_figures_dir = tmp_path / "run" / "cv" / "figures"
+    assert (cv_figures_dir / "cv_metrics_overview.svg").exists()
+    assert (cv_figures_dir / "feature_importance_top.svg").exists()
+    assert (cv_figures_dir / "feature_importance_by_fold_heatmap.svg").exists()
+    assert (cv_figures_dir / "coefficients_signed_top.svg").exists()
+    assert (cv_figures_dir / "roc_curve_cv.svg").exists()
+    assert (cv_figures_dir / "pr_curve_cv.svg").exists()
+    assert warnings == []
+
+
 def test_write_run_figures_uses_annotations_in_standard_feature_figures(
     tmp_path: Path,
 ) -> None:

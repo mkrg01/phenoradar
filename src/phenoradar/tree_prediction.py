@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import suppress
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -24,6 +26,7 @@ _FEATURE_HEATMAP_LIMIT = 30
 _SVG_NS = "http://www.w3.org/2000/svg"
 _SVG_BACKGROUND_ID = "phenoradar-svg-background"
 _SVG_BACKGROUND_FILL = "#ffffff"
+type _TreeSvgJob = tuple[str, Callable[..., list[str]], dict[str, Any]]
 
 
 def _stage_figures_dir(run_dir: Path, stage: str) -> Path:
@@ -36,6 +39,41 @@ def _stage_tables_dir(run_dir: Path, stage: str) -> Path:
     tables_dir = run_dir / stage / "tables"
     tables_dir.mkdir(parents=True, exist_ok=True)
     return tables_dir
+
+
+def _execute_tree_svg_job(
+    name: str,
+    func: Callable[..., list[str]],
+    kwargs: dict[str, Any],
+) -> tuple[str, list[str]]:
+    return name, func(**kwargs)
+
+
+def _run_tree_svg_jobs(
+    jobs: list[_TreeSvgJob],
+    *,
+    parallel_workers: int,
+) -> list[list[str]]:
+    if not jobs:
+        return []
+    worker_count = max(1, min(int(parallel_workers), len(jobs)))
+    if worker_count == 1:
+        return [_execute_tree_svg_job(name, func, kwargs)[1] for name, func, kwargs in jobs]
+
+    warnings_by_index: dict[int, list[str]] = {}
+    with ProcessPoolExecutor(
+        max_workers=worker_count,
+        mp_context=get_context("spawn"),
+    ) as executor:
+        future_to_index = {
+            executor.submit(_execute_tree_svg_job, name, func, kwargs): index
+            for index, (name, func, kwargs) in enumerate(jobs)
+        }
+        for future in as_completed(future_to_index):
+            index = future_to_index[future]
+            _job_name, job_warnings = future.result()
+            warnings_by_index[index] = job_warnings
+    return [warnings_by_index.get(index, []) for index in range(len(jobs))]
 
 
 def write_run_tree_prediction_artifacts(
@@ -56,6 +94,7 @@ def write_run_tree_prediction_artifacts(
     pred_external_test: pl.DataFrame | None,
     feature_limit: int = _FEATURE_HEATMAP_LIMIT,
     orthogroup_annotations: pl.DataFrame | None = None,
+    parallel_workers: int = 1,
 ) -> list[str]:
     """Write run-level tree annotation TSVs and optional Toytree SVG figures."""
     if tree_path is None:
@@ -67,7 +106,22 @@ def write_run_tree_prediction_artifacts(
         trait_col=trait_col,
         group_col=group_col,
     )
-    warnings: list[str] = []
+    ordered_steps: list[tuple[str, int]] = []
+    warning_steps: list[list[str]] = []
+    svg_jobs: list[_TreeSvgJob] = []
+
+    def add_warning(message: str) -> None:
+        warning_steps.append([message])
+        ordered_steps.append(("warning", len(warning_steps) - 1))
+
+    def add_svg_job(
+        name: str,
+        func: Callable[..., list[str]],
+        kwargs: dict[str, Any],
+    ) -> None:
+        svg_jobs.append((name, func, kwargs))
+        ordered_steps.append(("job", len(svg_jobs) - 1))
+
     contrast_annotation = build_contrast_pair_tree_annotation(
         metadata=metadata,
         group_col=group_col,
@@ -81,17 +135,19 @@ def write_run_tree_prediction_artifacts(
             float_precision=8,
             null_value="NA",
         )
-        warnings.extend(
-            _write_tree_prediction_svg(
-                tree_path=tree_path,
-                annotation=contrast_annotation,
-                out_path=cv_figures_dir / "tree_group.svg",
-                title="",
-                tracks=["true_label", "group_id"],
-            )
+        add_svg_job(
+            "tree_group",
+            _write_tree_prediction_svg,
+            {
+                "tree_path": tree_path,
+                "annotation": contrast_annotation,
+                "out_path": cv_figures_dir / "tree_group.svg",
+                "title": "",
+                "tracks": ["true_label", "group_id"],
+            },
         )
     else:
-        warnings.append("Skipped tree_group.svg: metadata contains no non-empty split group.")
+        add_warning("Skipped tree_group.svg: metadata contains no non-empty split group.")
 
     feature_annotation = build_tree_feature_heatmap_annotation(
         metadata=metadata,
@@ -115,30 +171,34 @@ def write_run_tree_prediction_artifacts(
             float_precision=8,
             null_value="NA",
         )
-        warnings.extend(
-            _write_tree_feature_heatmap_svg(
-                tree_path=tree_path,
-                annotation=feature_annotation,
-                value_col="z_score_log2_tpm",
-                out_path=cv_figures_dir / "tree_feature_heatmap_zscore.svg",
-                title="",
-                cmap_name="coolwarm",
-                annotate_features=orthogroup_annotations is not None,
-            )
+        add_svg_job(
+            "tree_feature_heatmap_zscore",
+            _write_tree_feature_heatmap_svg,
+            {
+                "tree_path": tree_path,
+                "annotation": feature_annotation,
+                "value_col": "z_score_log2_tpm",
+                "out_path": cv_figures_dir / "tree_feature_heatmap_zscore.svg",
+                "title": "",
+                "cmap_name": "coolwarm",
+                "annotate_features": orthogroup_annotations is not None,
+            },
         )
-        warnings.extend(
-            _write_tree_feature_heatmap_svg(
-                tree_path=tree_path,
-                annotation=feature_annotation,
-                value_col="log2_tpm_plus1",
-                out_path=cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg",
-                title="",
-                cmap_name="viridis",
-                annotate_features=orthogroup_annotations is not None,
-            )
+        add_svg_job(
+            "tree_feature_heatmap_log2_tpm",
+            _write_tree_feature_heatmap_svg,
+            {
+                "tree_path": tree_path,
+                "annotation": feature_annotation,
+                "value_col": "log2_tpm_plus1",
+                "out_path": cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg",
+                "title": "",
+                "cmap_name": "viridis",
+                "annotate_features": orthogroup_annotations is not None,
+            },
         )
     else:
-        warnings.append("Skipped tree_feature_heatmap.svg: no top features were available.")
+        add_warning("Skipped tree_feature_heatmap.svg: no top features were available.")
 
     cv_annotation = build_cv_tree_prediction_annotation(
         metadata=metadata,
@@ -155,13 +215,15 @@ def write_run_tree_prediction_artifacts(
             float_precision=8,
             null_value="NA",
         )
-        warnings.extend(
-            _write_tree_prediction_svg(
-                tree_path=tree_path,
-                annotation=cv_annotation,
-                out_path=cv_figures_dir / "tree_prediction_cv.svg",
-                title="",
-                tracks=[
+        add_svg_job(
+            "tree_prediction_cv",
+            _write_tree_prediction_svg,
+            {
+                "tree_path": tree_path,
+                "annotation": cv_annotation,
+                "out_path": cv_figures_dir / "tree_prediction_cv.svg",
+                "title": "",
+                "tracks": [
                     "true_label",
                     "prob",
                     "pred_label",
@@ -169,12 +231,10 @@ def write_run_tree_prediction_artifacts(
                     "group_id",
                     "fold_id",
                 ],
-            )
+            },
         )
     else:
-        warnings.append(
-            "Skipped tree_prediction_cv.svg: no CV predictions with non-empty split group."
-        )
+        add_warning("Skipped tree_prediction_cv.svg: no CV predictions with non-empty split group.")
 
     if pred_external_test is not None and pred_external_test.height > 0:
         external_test_figures_dir = _stage_figures_dir(run_dir, "external_test")
@@ -190,21 +250,30 @@ def write_run_tree_prediction_artifacts(
             float_precision=8,
             null_value="NA",
         )
-        warnings.extend(
-            _write_tree_prediction_svg(
-                tree_path=tree_path,
-                annotation=external_annotation,
-                out_path=external_test_figures_dir / "tree_prediction_external.svg",
-                title="External Test Tree Prediction",
-                tracks=[
+        add_svg_job(
+            "tree_prediction_external",
+            _write_tree_prediction_svg,
+            {
+                "tree_path": tree_path,
+                "annotation": external_annotation,
+                "out_path": external_test_figures_dir / "tree_prediction_external.svg",
+                "title": "External Test Tree Prediction",
+                "tracks": [
                     "true_label",
                     "prob",
                     "pred_label",
                     "uncertainty_std",
                     "group_id",
                 ],
-            )
+            },
         )
+    svg_warnings = _run_tree_svg_jobs(svg_jobs, parallel_workers=parallel_workers)
+    warnings: list[str] = []
+    for step_type, index in ordered_steps:
+        if step_type == "warning":
+            warnings.extend(warning_steps[index])
+        else:
+            warnings.extend(svg_warnings[index])
     return warnings
 
 
