@@ -1296,7 +1296,7 @@ def test_feature_importance_top_handles_zero_importances(tmp_path: Path) -> None
     svg_text = out_path.read_text()
     assert "Feature Importance Top" not in svg_text
     assert "importance_mean" not in svg_text
-    assert "Orthogroup ID" in svg_text
+    assert "Orthogroup" in svg_text
     assert "Mean feature importance per fold" in svg_text
     assert "#009e73" not in svg_text
     assert "#666666" in svg_text
@@ -1343,7 +1343,7 @@ def test_feature_importance_top_fold_points_use_neutral_styling(tmp_path: Path) 
     svg_text = out_path.read_text()
     assert "Feature Importance Top" not in svg_text
     assert "fold-level importance_mean" not in svg_text
-    assert "Orthogroup ID" in svg_text
+    assert "Orthogroup" in svg_text
     assert "Mean feature importance per fold" in svg_text
     assert "#009e73" not in svg_text
     assert "#d9f0e6" not in svg_text
@@ -1360,7 +1360,7 @@ def test_feature_importance_top_writes_annotation_labels(tmp_path: Path) -> None
     )
 
     svg_text = out_path.read_text(encoding="utf-8")
-    assert "Orthogroup / annotation" in svg_text
+    assert "Orthogroup" in svg_text
     assert "beta carbonic anhydrase" in svg_text
     assert "(OG1)" in svg_text
     assert "carbonic" in svg_text
@@ -1388,7 +1388,7 @@ def test_feature_importance_by_fold_heatmap_writes_svg(tmp_path: Path) -> None:
     assert out_path.exists()
     svg_text = out_path.read_text(encoding="utf-8")
     assert "CV fold" in svg_text
-    assert "Orthogroup ID" in svg_text
+    assert "Orthogroup" in svg_text
     assert "Mean feature importance per fold" in svg_text
     assert "OG1" in svg_text
     assert "OG2" in svg_text
@@ -1406,7 +1406,7 @@ def test_feature_importance_by_fold_heatmap_writes_annotation_labels(
     )
 
     svg_text = out_path.read_text(encoding="utf-8")
-    assert "Orthogroup / annotation" in svg_text
+    assert "Orthogroup" in svg_text
     assert "beta carbonic anhydrase" in svg_text
     assert "(OG1)" in svg_text
     assert "carbonic" in svg_text
@@ -1487,7 +1487,7 @@ def test_coefficients_signed_top_handles_zero_coefficients(tmp_path: Path) -> No
     svg_text = out_path.read_text()
     assert "Coefficients Signed Top" not in svg_text
     assert "Top 30 by |coef_mean|" not in svg_text
-    assert "Orthogroup ID" in svg_text
+    assert "Orthogroup" in svg_text
     assert "#1f77b4" not in svg_text
     assert "#d62728" not in svg_text
 
@@ -1536,7 +1536,7 @@ def test_coefficients_signed_top_fold_points_use_neutral_styling(tmp_path: Path)
     svg_text = out_path.read_text()
     assert "Coefficients Signed Top" not in svg_text
     assert "Top 30 by |mean fold-level coef|" not in svg_text
-    assert "Orthogroup ID" in svg_text
+    assert "Orthogroup" in svg_text
     assert "#1f77b4" not in svg_text
     assert "#d62728" not in svg_text
     assert "#eeeeee" in svg_text
@@ -1552,7 +1552,7 @@ def test_coefficients_signed_top_writes_annotation_labels(tmp_path: Path) -> Non
     )
 
     svg_text = out_path.read_text(encoding="utf-8")
-    assert "Orthogroup / annotation" in svg_text
+    assert "Orthogroup" in svg_text
     assert "beta carbonic anhydrase" in svg_text
     assert "(OG1)" in svg_text
     assert "carbonic" in svg_text

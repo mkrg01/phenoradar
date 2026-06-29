@@ -147,10 +147,8 @@ def _feature_label_row_height_px(labels: list[str]) -> int:
     return max(18, 10 + max_lines * 9)
 
 
-def _feature_label_axis_title(labels: list[str]) -> str:
-    if any(label.endswith(")") and " (" in label for label in labels):
-        return "Orthogroup / annotation"
-    return "Orthogroup ID"
+def _feature_label_axis_title(_labels: list[str]) -> str:
+    return "Orthogroup"
 
 
 def _orthogroup_annotation_lookup(
