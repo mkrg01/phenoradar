@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pytest
+from sklearn import config_context
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss
@@ -1452,6 +1453,17 @@ def test_expression_matrix_builder_rejects_missing_expression_file(tmp_path: Pat
         cv_mod.pl.scan_csv = original_scan_csv  # type: ignore[assignment]
 
 
+def test_expression_matrix_builder_rejects_missing_expression_file_without_mock(
+    tmp_path: Path,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    missing_tpm = tmp_path / "missing_tpm.tsv"
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, missing_tpm)])
+
+    with pytest.raises(CVError, match="Input file not found"):
+        ExpressionMatrixBuilder(config)
+
+
 def test_expression_matrix_builder_rejects_missing_required_columns(tmp_path: Path) -> None:
     metadata = _write(
         tmp_path / "species_metadata.tsv",
@@ -1479,6 +1491,25 @@ def test_expression_matrix_builder_rejects_missing_required_columns(tmp_path: Pa
 
     with pytest.raises(CVError, match="Missing required columns"):
         ExpressionMatrixBuilder(config)
+
+
+def test_expression_matrix_builder_wraps_ragged_expression_row(tmp_path: Path) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "ragged_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0\textra",
+                "sp2\tOG1\t2.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    with pytest.raises(CVError, match="Failed to read expression data"):
+        ExpressionMatrixBuilder(config).build_matrix(["sp1", "sp2"])
 
 
 def test_expression_matrix_builder_build_matrix_rejects_empty_species(tmp_path: Path) -> None:
@@ -1512,6 +1543,260 @@ def test_expression_matrix_builder_build_matrix_respects_feature_order_and_zero_
 
     assert features == ["OG2", "OG_missing"]
     assert matrix.tolist() == [[0.5, 0.0], [0.3, 0.0]]
+
+
+@pytest.mark.parametrize(
+    "feature",
+    ["__species", "__row_idx", "__phenoradar_missing_feature__"],
+)
+def test_expression_matrix_builder_handles_feature_names_that_match_internal_names(
+    tmp_path: Path,
+    feature: str,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "internal_name_feature_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                f"sp1\t{feature}\t1.5",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    matrix, features = ExpressionMatrixBuilder(config).build_matrix(["sp1"])
+
+    assert features == [feature]
+    assert matrix.tolist() == [[1.5]]
+
+
+def test_expression_matrix_builder_validates_features_outside_requested_order(
+    tmp_path: Path,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "invalid_extra_feature_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp1\tOG_extra\tbad",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    with pytest.raises(CVError, match=r"OG_extra.*\(non-numeric\)"):
+        ExpressionMatrixBuilder(config).build_matrix(["sp1"], feature_order=["OG1"])
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "reasons"),
+    [
+        ("1.0", "missing-feature"),
+        ("bad", "non-numeric,missing-feature"),
+    ],
+)
+def test_expression_matrix_builder_rejects_missing_feature_identifier(
+    tmp_path: Path,
+    raw_value: str,
+    reasons: str,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "missing_feature_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                f"sp1\t\t{raw_value}",
+                "sp1\tOG1\t1.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    with pytest.raises(CVError, match=rf"feature=<missing>.*\({reasons}\)"):
+        ExpressionMatrixBuilder(config).build_matrix(["sp1"])
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "reason"),
+    [
+        ("", "missing"),
+        (" ", "missing"),
+        ("NA", "non-numeric"),
+        ("bad", "non-numeric"),
+        ("NaN", "non-finite"),
+        ("inf", "non-finite"),
+        ("-inf", "non-finite"),
+        ("-0.1", "negative"),
+    ],
+)
+def test_expression_matrix_builder_rejects_invalid_tpm_rows_before_pivot(
+    tmp_path: Path,
+    raw_value: str,
+    reason: str,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "invalid_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                f"sp1\tOG1\t{raw_value}",
+                "sp1\tOG2\t1.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    builder = ExpressionMatrixBuilder(config)
+
+    with pytest.raises(CVError) as exc_info:
+        builder.build_matrix(["sp1"])
+
+    message = str(exc_info.value)
+    assert "TPM values must be non-negative finite numbers" in message
+    assert "first_invalid_line=2" in message
+    assert "species='sp1'" in message
+    assert "feature='OG1'" in message
+    assert f"({reason})" in message
+
+
+def test_expression_matrix_builder_rejects_negative_duplicate_before_sum(
+    tmp_path: Path,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "negative_duplicate_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t-1.0",
+                "sp1\tOG1\t2.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    with pytest.raises(CVError, match=r"first_invalid_line=2.*\(negative\)"):
+        ExpressionMatrixBuilder(config).build_matrix(["sp1"])
+
+
+def test_expression_matrix_builder_sums_valid_duplicate_rows(tmp_path: Path) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "duplicate_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp1\tOG1\t2.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    matrix, features = ExpressionMatrixBuilder(config).build_matrix(["sp1"])
+
+    assert features == ["OG1"]
+    assert matrix.tolist() == [[3.0]]
+
+
+def test_expression_matrix_builder_rejects_non_finite_duplicate_sum(tmp_path: Path) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "overflow_duplicate_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1e308",
+                "sp1\tOG1\t1e308",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    with pytest.raises(CVError, match=r"first_invalid_line=2.*\(non-finite-after-sum\)"):
+        ExpressionMatrixBuilder(config).build_matrix(["sp1"])
+
+
+def test_expression_matrix_builder_rejects_invalid_tpm_beyond_inference_window(
+    tmp_path: Path,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    rows = ["species\torthogroup\ttpm"]
+    rows.extend(f"sp1\tOG{index:03d}\t1.0" for index in range(101))
+    rows.append("sp1\tOG_bad\tbad")
+    tpm = _write(tmp_path / "late_invalid_tpm.tsv", "\n".join(rows) + "\n")
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    with pytest.raises(CVError, match=r"first_invalid_line=103.*\(non-numeric\)"):
+        ExpressionMatrixBuilder(config).build_matrix(["sp1"])
+
+
+def test_expression_matrix_builder_chunking_rejects_invalid_tpm(tmp_path: Path) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "chunked_invalid_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp1\tOG2\tNaN",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  max_pivot_cells: 1
+""".strip(),
+            )
+        ]
+    )
+
+    with pytest.raises(CVError, match=r"first_invalid_line=3.*\(non-finite\)"):
+        ExpressionMatrixBuilder(config).build_matrix(["sp1"])
+
+
+def test_expression_matrix_builder_cache_species_rejects_invalid_tpm(
+    tmp_path: Path,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "cached_invalid_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\tbad",
+                "sp2\tOG1\t1.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    builder = ExpressionMatrixBuilder(config)
+
+    with pytest.raises(CVError, match=r"first_invalid_line=2.*\(non-numeric\)"):
+        builder.cache_species(["sp1", "sp2"])
+
+    assert builder._cache_tempdir is None
+    assert builder._cached_long_path is None
+    assert builder._cached_species is None
 
 
 def test_expression_matrix_builder_cache_species_reuses_cached_subset(
@@ -1704,26 +1989,107 @@ def test_build_prediction_table_can_include_empty_true_label_column() -> None:
     assert table.get_column("true_label").null_count() == 2
 
 
-def test_fit_estimator_falls_back_when_sample_weight_not_supported() -> None:
+def test_fit_estimator_rejects_unsupported_sample_weight_before_fit() -> None:
     class _NoWeightEstimator:
         def __init__(self) -> None:
-            self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+            self.call_count = 0
 
-        def fit(self, *args: object, **kwargs: object) -> None:
-            self.calls.append((args, kwargs))
-            if "sample_weight" in kwargs:
-                raise TypeError("sample_weight is unsupported")
+        def fit(self, _x: np.ndarray, _y: np.ndarray) -> None:
+            self.call_count += 1
 
     estimator = _NoWeightEstimator()
     x = np.array([[0.0], [1.0]], dtype=float)
     y = np.array([0, 1], dtype=int)
     sample_weight = np.array([1.0, 1.0], dtype=float)
 
-    _fit_estimator(estimator, x, y, sample_weight)
+    with pytest.raises(CVError, match="does not support sample_weight"):
+        _fit_estimator(estimator, x, y, sample_weight)  # type: ignore[arg-type]
 
-    assert len(estimator.calls) == 2
-    assert "sample_weight" in estimator.calls[0][1]
-    assert estimator.calls[1][1] == {}
+    assert estimator.call_count == 0
+
+
+def test_fit_estimator_does_not_hide_internal_type_error_or_retry() -> None:
+    class _BrokenWeightEstimator:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def fit(
+            self,
+            _x: np.ndarray,
+            _y: np.ndarray,
+            sample_weight: np.ndarray | None = None,
+        ) -> None:
+            self.call_count += 1
+            assert sample_weight is not None
+            raise TypeError("internal fit failure")
+
+    estimator = _BrokenWeightEstimator()
+    x = np.array([[0.0], [1.0]], dtype=float)
+    y = np.array([0, 1], dtype=int)
+    sample_weight = np.array([1.0, 1.0], dtype=float)
+
+    with pytest.raises(
+        CVError,
+        match="fit failed while applying sample_weight: internal fit failure",
+    ) as exc_info:
+        _fit_estimator(estimator, x, y, sample_weight)  # type: ignore[arg-type]
+
+    assert estimator.call_count == 1
+    assert isinstance(exc_info.value.__cause__, TypeError)
+
+
+def test_fit_estimator_passes_sample_weight_once_without_modification() -> None:
+    class _WeightEstimator:
+        def __init__(self) -> None:
+            self.call_count = 0
+            self.received_sample_weight: np.ndarray | None = None
+
+        def fit(
+            self,
+            _x: np.ndarray,
+            _y: np.ndarray,
+            sample_weight: np.ndarray | None = None,
+        ) -> None:
+            self.call_count += 1
+            self.received_sample_weight = sample_weight
+
+    estimator = _WeightEstimator()
+    x = np.array([[0.0], [1.0]], dtype=float)
+    y = np.array([0, 1], dtype=int)
+    sample_weight = np.array([0.5, 1.5], dtype=float)
+
+    _fit_estimator(estimator, x, y, sample_weight)  # type: ignore[arg-type]
+
+    assert estimator.call_count == 1
+    assert estimator.received_sample_weight is sample_weight
+
+
+def test_linear_svm_accepts_sample_weight_with_metadata_routing_enabled(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+model:
+  name: linear_svm
+""".strip(),
+            )
+        ]
+    )
+    x = np.arange(12, dtype=float).reshape(6, 2)
+    y = np.array([0, 0, 0, 1, 1, 1], dtype=int)
+    sample_weight = np.array([1.0, 1.5, 0.5, 1.0, 1.5, 0.5], dtype=float)
+    estimator = _build_estimator(config, model_seed=42, y_train=y)
+
+    with config_context(enable_metadata_routing=True):
+        _fit_estimator(estimator, x, y, sample_weight)
+
+    assert hasattr(estimator, "calibrated_classifiers_")
 
 
 def test_predict_positive_probability_rejects_invalid_shape() -> None:
@@ -3119,7 +3485,7 @@ def test_expression_matrix_builder_rejects_empty_matrix_for_selected_species(
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     builder = ExpressionMatrixBuilder(config)
 
-    with pytest.raises(CVError, match="Expression matrix is empty for the selected species"):
+    with pytest.raises(CVError, match="missing-feature"):
         builder.build_matrix(["sp1"])
 
 

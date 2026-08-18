@@ -4,9 +4,12 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 import polars as pl
+import pytest
 
 from phenoradar.tree_prediction import (
+    TreePredictionError,
     _ensure_svg_white_background,
+    _load_expression_for_heatmap,
     build_contrast_pair_tree_annotation,
     build_cv_tree_prediction_annotation,
     build_external_tree_prediction_annotation,
@@ -81,6 +84,121 @@ def _write_tpm(path: Path) -> None:
             "tpm": [0.0, 3.0, 3.0, 15.0, 7.0, 0.0],
         }
     ).write_csv(path, separator="\t")
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "reason"),
+    [
+        ("", "missing"),
+        ("bad", "non-numeric"),
+        ("NaN", "non-finite"),
+        ("-0.1", "negative"),
+    ],
+)
+def test_load_expression_for_heatmap_rejects_invalid_tpm(
+    tmp_path: Path,
+    raw_value: str,
+    reason: str,
+) -> None:
+    tpm_path = tmp_path / "invalid_tpm.tsv"
+    tpm_path.write_text(
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                f"sp1\tOG1\t{raw_value}",
+                "sp2\tOG1\t1.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        TreePredictionError,
+        match=rf"first_invalid_line=2.*\({reason}\)",
+    ):
+        _load_expression_for_heatmap(
+            tpm_path=tpm_path,
+            species=["sp1"],
+            features=["OG1"],
+            species_col="species",
+            feature_col="orthogroup",
+            value_col="tpm",
+        )
+
+
+def test_load_expression_for_heatmap_sums_valid_duplicate_rows(tmp_path: Path) -> None:
+    tpm_path = tmp_path / "duplicate_tpm.tsv"
+    tpm_path.write_text(
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp1\tOG1\t2.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = _load_expression_for_heatmap(
+        tpm_path=tpm_path,
+        species=["sp1"],
+        features=["OG1"],
+        species_col="species",
+        feature_col="orthogroup",
+        value_col="tpm",
+    )
+
+    assert data.select("tpm").item() == 3.0
+
+
+def test_load_expression_for_heatmap_rejects_non_finite_duplicate_sum(
+    tmp_path: Path,
+) -> None:
+    tpm_path = tmp_path / "overflow_duplicate_tpm.tsv"
+    tpm_path.write_text(
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1e308",
+                "sp1\tOG1\t1e308",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        TreePredictionError,
+        match=r"first_invalid_line=2.*\(non-finite-after-sum\)",
+    ):
+        _load_expression_for_heatmap(
+            tpm_path=tpm_path,
+            species=["sp1"],
+            features=["OG1"],
+            species_col="species",
+            feature_col="orthogroup",
+            value_col="tpm",
+        )
+
+
+def test_load_expression_for_heatmap_wraps_ragged_expression_row(tmp_path: Path) -> None:
+    tpm_path = tmp_path / "ragged_tpm.tsv"
+    tpm_path.write_text(
+        "species\torthogroup\ttpm\nsp1\tOG1\t1.0\textra\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TreePredictionError, match="Failed to read expression TSV"):
+        _load_expression_for_heatmap(
+            tpm_path=tpm_path,
+            species=["sp1"],
+            features=["OG1"],
+            species_col="species",
+            feature_col="orthogroup",
+            value_col="tpm",
+        )
 
 
 def test_ensure_svg_white_background_inserts_single_root_rect(tmp_path: Path) -> None:

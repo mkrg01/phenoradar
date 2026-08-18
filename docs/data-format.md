@@ -215,8 +215,12 @@ Required columns (default names):
 Rules:
 
 - all metadata species must exist in expression data
-- `tpm` values must be non-negative before log transform
-- duplicate `(species, feature)` rows are summed
+- every expression row actually consumed after a command's species/feature selection must have a
+  non-empty `orthogroup`; its `tpm` must be present, numeric, finite, and non-negative
+- invalid consumed rows are reported with source-line examples; invalid values are never
+  interpreted as zero
+- duplicate `(species, feature)` rows are summed after every contributing value is validated
+- an absent `(species, feature)` coordinate is represented as zero in the constructed matrix
 
 Example:
 

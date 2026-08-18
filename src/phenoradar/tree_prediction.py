@@ -26,6 +26,14 @@ _FEATURE_HEATMAP_LIMIT = 30
 _SVG_NS = "http://www.w3.org/2000/svg"
 _SVG_BACKGROUND_ID = "phenoradar-svg-background"
 _SVG_BACKGROUND_FILL = "#ffffff"
+_EXPRESSION_SOURCE_LINE_COL = "__phenoradar_tree_source_line"
+_INVALID_TPM_REASON_LABELS = (
+    (1, "missing"),
+    (2, "non-numeric"),
+    (4, "non-finite"),
+    (8, "negative"),
+    (16, "non-finite-after-sum"),
+)
 type _TreeSvgJob = tuple[str, Callable[..., list[str]], dict[str, Any]]
 
 
@@ -696,12 +704,11 @@ def _load_expression_for_heatmap(
     value_col: str,
 ) -> pl.DataFrame:
     try:
-        expression = pl.scan_csv(tpm_path, separator="\t")
+        schema_scan = pl.scan_csv(tpm_path, separator="\t")
+        schema_columns = set(schema_scan.collect_schema().names())
     except FileNotFoundError as exc:
         raise TreePredictionError(f"Expression file not found: {tpm_path}") from exc
-    try:
-        schema_columns = set(expression.collect_schema().names())
-    except Exception as exc:
+    except (OSError, pl.exceptions.PolarsError) as exc:
         raise TreePredictionError(f"Failed to read expression TSV: {tpm_path}") from exc
     required = {species_col, feature_col, value_col}
     missing = sorted(required - schema_columns)
@@ -709,21 +716,108 @@ def _load_expression_for_heatmap(
         raise TreePredictionError(
             f"Missing required columns in expression TSV: {', '.join(missing)}"
         )
+    if _EXPRESSION_SOURCE_LINE_COL in schema_columns:
+        raise TreePredictionError(
+            "Expression TSV uses a reserved internal column name: "
+            f"{_EXPRESSION_SOURCE_LINE_COL}"
+        )
 
-    data = (
+    try:
+        expression = pl.scan_csv(
+            tpm_path,
+            separator="\t",
+            schema_overrides={value_col: pl.String},
+            row_index_name=_EXPRESSION_SOURCE_LINE_COL,
+            row_index_offset=2,
+        )
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise TreePredictionError(f"Failed to read expression TSV: {tpm_path}") from exc
+
+    species_value = pl.col(species_col).cast(pl.String, strict=False).str.strip_chars()
+    feature_value = pl.col(feature_col).cast(pl.String, strict=False).str.strip_chars()
+    raw_value = pl.col(value_col).cast(pl.String, strict=False).str.strip_chars()
+    parsed_value = raw_value.cast(pl.Float64, strict=False)
+    invalid_reason_mask = (
+        pl.when(raw_value.is_null() | (raw_value == ""))
+        .then(pl.lit(1, dtype=pl.UInt8))
+        .when(parsed_value.is_null())
+        .then(pl.lit(2, dtype=pl.UInt8))
+        .when(~parsed_value.is_finite())
+        .then(pl.lit(4, dtype=pl.UInt8))
+        .when(parsed_value < 0.0)
+        .then(pl.lit(8, dtype=pl.UInt8))
+        .otherwise(pl.lit(0, dtype=pl.UInt8))
+    )
+    normalized = (
         expression.select(
-            pl.col(species_col).cast(pl.String, strict=False).str.strip_chars().alias("species"),
-            pl.col(feature_col).cast(pl.String, strict=False).str.strip_chars().alias("feature"),
-            pl.col(value_col).cast(pl.Float64, strict=False).fill_null(0.0).alias("tpm"),
+            species_value.alias("species"),
+            feature_value.alias("feature"),
+            parsed_value.alias("__parsed_value"),
+            invalid_reason_mask.alias("__invalid_reason_mask"),
+            pl.col(_EXPRESSION_SOURCE_LINE_COL).alias("__source_line"),
         )
         .filter(pl.col("species").is_in(species) & pl.col("feature").is_in(features))
-        .group_by(["species", "feature"])
-        .agg(pl.col("tpm").sum())
-        .collect()
+        .with_columns(
+            pl.when(pl.col("__invalid_reason_mask") == 0)
+            .then(pl.col("__parsed_value"))
+            .otherwise(pl.lit(float("nan")))
+            .alias("tpm")
+        )
     )
-    if data.filter(pl.col("tpm") < 0.0).height > 0:
-        raise TreePredictionError("Expression TSV contains negative TPM values")
-    return data
+    invalid = pl.col("__invalid_reason_mask") != 0
+    data_scan = (
+        normalized
+        .group_by(["species", "feature"])
+        .agg(
+            pl.col("tpm").sum(),
+            invalid.sum().alias("__invalid_count"),
+            pl.col("__source_line").min().alias("__group_first_line"),
+            pl.col("__source_line").filter(invalid).min().alias("__invalid_line"),
+            pl.col("__invalid_reason_mask").max().alias("__invalid_reason_mask"),
+        )
+    )
+    aggregate_overflow = (pl.col("__invalid_count") == 0) & ~pl.col("tpm").is_finite()
+    data_scan = (
+        data_scan.with_columns(
+            pl.when(aggregate_overflow)
+            .then(pl.lit(1, dtype=pl.UInt32))
+            .otherwise(pl.col("__invalid_count"))
+            .alias("__invalid_count"),
+            pl.when(aggregate_overflow)
+            .then(pl.col("__group_first_line"))
+            .otherwise(pl.col("__invalid_line"))
+            .alias("__invalid_line"),
+            pl.when(aggregate_overflow)
+            .then(pl.lit(16, dtype=pl.UInt8))
+            .otherwise(pl.col("__invalid_reason_mask"))
+            .alias("__invalid_reason_mask"),
+        ).drop("__group_first_line")
+    )
+    try:
+        data = data_scan.collect()
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise TreePredictionError(f"Failed to read expression TSV: {tpm_path}: {exc}") from exc
+
+    invalid_rows = (
+        data.filter(pl.col("__invalid_count") > 0).sort("__invalid_line").head(10)
+    )
+    if invalid_rows.height > 0:
+        total = int(data.select(pl.col("__invalid_count").sum()).item())
+        examples: list[str] = []
+        for row in invalid_rows.iter_rows(named=True):
+            reason_mask = int(row["__invalid_reason_mask"])
+            reasons = ",".join(
+                label for flag, label in _INVALID_TPM_REASON_LABELS if reason_mask & flag
+            )
+            examples.append(
+                f"first_invalid_line={row['__invalid_line']}: species={row['species']!r}, "
+                f"feature={row['feature']!r}, example_reasons_in_coordinate=({reasons})"
+            )
+        raise TreePredictionError(
+            "Invalid expression TSV: consumed TPM values must be non-negative finite numbers; "
+            f"invalid_rows={total}; examples: {'; '.join(examples)}"
+        )
+    return data.select(["species", "feature", "tpm"])
 
 
 def _coefficient_lookup(coefficients: pl.DataFrame) -> pl.DataFrame:

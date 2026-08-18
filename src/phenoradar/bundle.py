@@ -589,9 +589,9 @@ def predict_with_bundle(
     if not species_list:
         raise BundleError("Predict metadata produced zero valid species")
 
-    matrix_builder = ExpressionMatrixBuilder(config)
-    x_raw, input_features = matrix_builder.build_matrix(species_list)
     try:
+        matrix_builder = ExpressionMatrixBuilder(config)
+        x_raw, input_features = matrix_builder.build_matrix(species_list)
         x_transformed = apply_expression_transform(x_raw, bundle.expression_transform)
     except CVError as exc:
         raise BundleError(str(exc)) from exc

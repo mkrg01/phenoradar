@@ -360,16 +360,29 @@ def test_predict_with_bundle_fails_when_feature_overlap_is_zero(tmp_path: Path) 
         predict_with_bundle(predict_config, bundle)
 
 
-def test_predict_with_bundle_rejects_negative_tpm_values(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("raw_value", "reason"),
+    [
+        ("", "missing"),
+        ("bad", "non-numeric"),
+        ("NaN", "non-finite"),
+        ("-0.1", "negative"),
+    ],
+)
+def test_predict_with_bundle_rejects_invalid_tpm_values(
+    tmp_path: Path,
+    raw_value: str,
+    reason: str,
+) -> None:
     metadata, tpm = _fixture_data(tmp_path)
     _, bundle = _export_and_load_bundle(tmp_path, metadata, tpm)
 
     predict_tpm = _write(
-        tmp_path / "predict_tpm_negative.tsv",
+        tmp_path / "predict_tpm_invalid.tsv",
         "\n".join(
             [
                 "species\torthogroup\ttpm",
-                "sp1\tOG1\t-0.1",
+                f"sp1\tOG1\t{raw_value}",
                 "sp2\tOG1\t2.0",
                 "sp3\tOG1\t3.0",
                 "sp4\tOG1\t4.0",
@@ -381,7 +394,55 @@ def test_predict_with_bundle_rejects_negative_tpm_values(tmp_path: Path) -> None
     )
     predict_config = load_and_resolve_config([_config(tmp_path, metadata, predict_tpm)])
 
-    with pytest.raises(BundleError, match="TPM values must be non-negative"):
+    with pytest.raises(BundleError, match=rf"TPM values must be non-negative.*\({reason}\)"):
+        predict_with_bundle(predict_config, bundle)
+
+
+def test_predict_with_bundle_wraps_expression_schema_error(tmp_path: Path) -> None:
+    metadata, tpm = _fixture_data(tmp_path)
+    _, bundle = _export_and_load_bundle(tmp_path, metadata, tpm)
+    predict_tpm = _write(
+        tmp_path / "predict_tpm_missing_value_column.tsv",
+        "\n".join(
+            [
+                "species\torthogroup",
+                "sp1\tOG1",
+                "sp2\tOG1",
+                "sp3\tOG1",
+                "sp4\tOG1",
+                "sp5\tOG1",
+                "sp6\tOG1",
+            ]
+        )
+        + "\n",
+    )
+    predict_config = load_and_resolve_config([_config(tmp_path, metadata, predict_tpm)])
+
+    with pytest.raises(BundleError, match="Missing required columns in expression data: tpm"):
+        predict_with_bundle(predict_config, bundle)
+
+
+def test_predict_with_bundle_wraps_ragged_expression_row(tmp_path: Path) -> None:
+    metadata, tpm = _fixture_data(tmp_path)
+    _, bundle = _export_and_load_bundle(tmp_path, metadata, tpm)
+    predict_tpm = _write(
+        tmp_path / "predict_tpm_ragged.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0\textra",
+                "sp2\tOG1\t2.0",
+                "sp3\tOG1\t3.0",
+                "sp4\tOG1\t4.0",
+                "sp5\tOG1\t5.0",
+                "sp6\tOG1\t6.0",
+            ]
+        )
+        + "\n",
+    )
+    predict_config = load_and_resolve_config([_config(tmp_path, metadata, predict_tpm)])
+
+    with pytest.raises(BundleError, match="Failed to read expression data"):
         predict_with_bundle(predict_config, bundle)
 
 

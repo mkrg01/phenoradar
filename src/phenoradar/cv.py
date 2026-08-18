@@ -19,6 +19,7 @@ import optuna
 import polars as pl
 from optuna.samplers import TPESampler
 from scipy.stats import rankdata
+from sklearn import get_config
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
@@ -33,6 +34,7 @@ from sklearn.metrics import (
 from sklearn.model_selection import GroupKFold, LeaveOneGroupOut
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
+from sklearn.utils.validation import has_fit_parameter
 
 from phenoradar.config import AppConfig
 from phenoradar.interpret import (
@@ -760,6 +762,18 @@ def fit_feature_scaling(
 class ExpressionMatrixBuilder:
     """Build species x orthogroup matrix from long-format expression data."""
 
+    _SOURCE_LINE_COL = "__phenoradar_source_line"
+    _INVALID_TPM_PREVIEW_LIMIT = 10
+    _INVALID_TPM_REASON_LABELS = (
+        (1, "missing"),
+        (2, "non-numeric"),
+        (4, "non-finite"),
+        (8, "negative"),
+        (16, "non-finite-after-sum"),
+        (32, "missing-feature"),
+    )
+    _MISSING_FEATURE_SENTINEL = "__phenoradar_missing_feature__"
+
     def __init__(self, config: AppConfig) -> None:
         self._tpm_path = Path(config.data.tpm_path)
         self._species_col = config.data.species_col
@@ -771,19 +785,71 @@ class ExpressionMatrixBuilder:
         self._cached_species: set[str] | None = None
 
         try:
-            self._scan = pl.scan_csv(self._tpm_path, separator="\t")
+            schema_scan = pl.scan_csv(self._tpm_path, separator="\t")
+            schema_columns = set(schema_scan.collect_schema().names())
         except FileNotFoundError as exc:
             raise CVError(f"Input file not found: {self._tpm_path}") from exc
+        except (OSError, pl.exceptions.PolarsError) as exc:
+            raise CVError(f"Failed to read expression data schema: {self._tpm_path}") from exc
 
-        schema_columns = set(self._scan.collect_schema().names())
         required = {self._species_col, self._feature_col, self._value_col}
         missing = sorted(required - schema_columns)
         if missing:
             missing_str = ", ".join(missing)
             raise CVError(f"Missing required columns in expression data: {missing_str}")
+        if self._SOURCE_LINE_COL in schema_columns:
+            raise CVError(
+                "Expression data uses a reserved internal column name: "
+                f"{self._SOURCE_LINE_COL}"
+            )
+
+        # Read the value column as text so validation does not depend on the CSV
+        # schema-inference window.  Row indices start at the first physical data
+        # line (the header is line 1) and are retained for actionable errors.
+        try:
+            self._scan = pl.scan_csv(
+                self._tpm_path,
+                separator="\t",
+                schema_overrides={self._value_col: pl.String},
+                row_index_name=self._SOURCE_LINE_COL,
+                row_index_offset=2,
+            )
+        except (OSError, pl.exceptions.PolarsError) as exc:
+            raise CVError(f"Failed to read expression data: {self._tpm_path}") from exc
+
+    def _collect_expression(self, scan: pl.LazyFrame) -> pl.DataFrame:
+        try:
+            return scan.collect()
+        except (OSError, pl.exceptions.PolarsError) as exc:
+            raise CVError(f"Failed to read expression data: {self._tpm_path}: {exc}") from exc
 
     def _raw_long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
-        return (
+        raw_value = (
+            pl.col(self._value_col).cast(pl.String, strict=False).str.strip_chars()
+        )
+        feature_value = (
+            pl.col(self._feature_col).cast(pl.String, strict=False).str.strip_chars()
+        )
+        parsed_value = raw_value.cast(pl.Float64, strict=False)
+        invalid_value_reason_mask = (
+            pl.when(raw_value.is_null() | (raw_value == ""))
+            .then(pl.lit(1, dtype=pl.UInt8))
+            .when(parsed_value.is_null())
+            .then(pl.lit(2, dtype=pl.UInt8))
+            .when(~parsed_value.is_finite())
+            .then(pl.lit(4, dtype=pl.UInt8))
+            .when(parsed_value < 0.0)
+            .then(pl.lit(8, dtype=pl.UInt8))
+            .otherwise(pl.lit(0, dtype=pl.UInt8))
+        )
+        missing_feature_reason_mask = (
+            pl.when(feature_value.is_null() | (feature_value == ""))
+            .then(pl.lit(32, dtype=pl.UInt8))
+            .otherwise(pl.lit(0, dtype=pl.UInt8))
+        )
+        invalid_reason_mask = invalid_value_reason_mask + missing_feature_reason_mask
+
+        normalized = (
             self._scan.filter(
                 pl.col(self._species_col).cast(pl.String, strict=False).str.strip_chars().is_in(
                     unique_species
@@ -794,23 +860,106 @@ class ExpressionMatrixBuilder:
                 .cast(pl.String, strict=False)
                 .str.strip_chars()
                 .alias("__species"),
-                pl.col(self._feature_col)
-                .cast(pl.String, strict=False)
-                .str.strip_chars()
+                feature_value.fill_null(self._MISSING_FEATURE_SENTINEL)
+                .replace("", self._MISSING_FEATURE_SENTINEL)
                 .alias("__feature"),
-                pl.col(self._value_col).cast(pl.Float64, strict=False).fill_null(0.0).alias(
-                    "__value"
-                ),
+                parsed_value.alias("__parsed_value"),
+                invalid_reason_mask.alias("__invalid_reason_mask"),
+                pl.col(self._SOURCE_LINE_COL).alias("__source_line"),
             )
             .filter(
                 pl.col("__species").is_not_null()
                 & (pl.col("__species") != "")
-                & pl.col("__feature").is_not_null()
-                & (pl.col("__feature") != "")
             )
-            .group_by(["__species", "__feature"])
-            .agg(pl.col("__value").sum())
+            .with_columns(
+                pl.when(pl.col("__invalid_reason_mask") == 0)
+                .then(pl.col("__parsed_value"))
+                .otherwise(pl.lit(float("nan")))
+                .alias("__value"),
+            )
         )
+        invalid = pl.col("__invalid_reason_mask") != 0
+        aggregated = (
+            normalized
+            .group_by(["__species", "__feature"])
+            .agg(
+                pl.col("__value").sum(),
+                invalid.sum().alias("__invalid_count"),
+                pl.col("__source_line").min().alias("__group_first_line"),
+                pl.col("__source_line").filter(invalid).min().alias("__invalid_line"),
+                pl.col("__invalid_reason_mask").max().alias("__invalid_reason_mask"),
+            )
+        )
+        aggregate_overflow = (pl.col("__invalid_count") == 0) & ~pl.col(
+            "__value"
+        ).is_finite()
+        return (
+            aggregated.with_columns(
+                pl.when(aggregate_overflow)
+                .then(pl.lit(1, dtype=pl.UInt32))
+                .otherwise(pl.col("__invalid_count"))
+                .alias("__invalid_count"),
+                pl.when(aggregate_overflow)
+                .then(pl.col("__group_first_line"))
+                .otherwise(pl.col("__invalid_line"))
+                .alias("__invalid_line"),
+                pl.when(aggregate_overflow)
+                .then(pl.lit(16, dtype=pl.UInt8))
+                .otherwise(pl.col("__invalid_reason_mask"))
+                .alias("__invalid_reason_mask"),
+            ).drop("__group_first_line")
+        )
+
+    @classmethod
+    def _raise_invalid_tpm_values(cls, invalid_rows: pl.DataFrame, total: int) -> None:
+        examples: list[str] = []
+        for row in invalid_rows.iter_rows(named=True):
+            reason_mask = int(row["__invalid_reason_mask"])
+            reasons = ",".join(
+                label for flag, label in cls._INVALID_TPM_REASON_LABELS if reason_mask & flag
+            )
+            feature = row["__feature"]
+            feature_repr = (
+                "<missing>"
+                if feature == cls._MISSING_FEATURE_SENTINEL and reason_mask & 32
+                else repr(feature)
+            )
+            examples.append(
+                f"first_invalid_line={row['__invalid_line']}: species={row['__species']!r}, "
+                f"feature={feature_repr}, example_reasons_in_coordinate=({reasons})"
+            )
+        raise CVError(
+            "Invalid expression data: selected rows require a feature identifier and TPM values "
+            "must be non-negative finite numbers; "
+            f"invalid_rows={total}; examples: {'; '.join(examples)}"
+        )
+
+    @classmethod
+    def _validate_tpm_frame(cls, long_df: pl.DataFrame) -> None:
+        invalid_rows = (
+            long_df.filter(pl.col("__invalid_count") > 0)
+            .sort("__invalid_line")
+            .head(cls._INVALID_TPM_PREVIEW_LIMIT)
+        )
+        if invalid_rows.height == 0:
+            return
+        total = int(long_df.select(pl.col("__invalid_count").sum()).item())
+        cls._raise_invalid_tpm_values(invalid_rows, total)
+
+    def _validate_tpm_scan(self, long_scan: pl.LazyFrame) -> None:
+        invalid_scan = long_scan.filter(pl.col("__invalid_count") > 0)
+        invalid_rows = self._collect_expression(
+            invalid_scan.sort("__invalid_line")
+            .head(self._INVALID_TPM_PREVIEW_LIMIT)
+        )
+        if invalid_rows.height == 0:
+            return
+        total = int(
+            self._collect_expression(
+                invalid_scan.select(pl.col("__invalid_count").sum())
+            ).item()
+        )
+        self._raise_invalid_tpm_values(invalid_rows, total)
 
     def _long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
         requested_species = set(unique_species)
@@ -840,10 +989,20 @@ class ExpressionMatrixBuilder:
 
         cache_tempdir = TemporaryDirectory(prefix="phenoradar-expression-")
         cache_path = Path(cache_tempdir.name) / "expression_long.parquet"
-        self._raw_long_scan_for_species(unique_species).sink_parquet(
-            cache_path,
-            compression="zstd",
-        )
+        try:
+            self._raw_long_scan_for_species(unique_species).sink_parquet(
+                cache_path,
+                compression="zstd",
+            )
+        except (OSError, pl.exceptions.PolarsError) as exc:
+            cache_tempdir.cleanup()
+            raise CVError(f"Failed to read expression data: {self._tpm_path}: {exc}") from exc
+        cached_scan = pl.scan_parquet(cache_path)
+        try:
+            self._validate_tpm_scan(cached_scan)
+        except CVError:
+            cache_tempdir.cleanup()
+            raise
         self._cache_tempdir = cache_tempdir
         self._cached_long_path = cache_path
         self._cached_species = requested_species
@@ -867,8 +1026,20 @@ class ExpressionMatrixBuilder:
     ) -> np.ndarray:
         if long_df.height == 0:
             return np.zeros((ordering_df.height, len(feature_names)), dtype=float)
-        pivot = long_df.pivot(
-            index="__species",
+        used_names = set(feature_names)
+        species_key = "__phenoradar_matrix_species"
+        while species_key in used_names:
+            species_key = f"_{species_key}"
+        row_key = "__phenoradar_matrix_row"
+        while row_key in used_names or row_key == species_key:
+            row_key = f"_{row_key}"
+
+        pivot = long_df.select(
+            pl.col("__species").alias(species_key),
+            "__feature",
+            "__value",
+        ).pivot(
+            index=species_key,
             on="__feature",
             values="__value",
             aggregate_function="sum",
@@ -877,10 +1048,14 @@ class ExpressionMatrixBuilder:
         missing_features = [feature for feature in feature_names if feature not in pivot_columns]
         if missing_features:
             pivot = pivot.with_columns([pl.lit(0.0).alias(feature) for feature in missing_features])
+        internal_ordering = ordering_df.select(
+            pl.col("__species").alias(species_key),
+            pl.col("__row_idx").alias(row_key),
+        )
         ordered = (
-            ordering_df.join(pivot, on="__species", how="left")
+            internal_ordering.join(pivot, on=species_key, how="left")
             .fill_null(0.0)
-            .sort("__row_idx")
+            .sort(row_key)
             .select(feature_names)
         )
         return ordered.to_numpy().astype(float, copy=False)
@@ -895,7 +1070,9 @@ class ExpressionMatrixBuilder:
         long_scan = self._long_scan_for_species(unique_species)
         present_species = {
             str(value)
-            for value in long_scan.select("__species").unique().collect().to_series().to_list()
+            for value in self._collect_expression(
+                long_scan.select("__species").unique()
+            ).to_series().to_list()
         }
         if not present_species:
             raise CVError("Expression matrix is empty for the selected species")
@@ -907,7 +1084,11 @@ class ExpressionMatrixBuilder:
         feature_names = [
             str(value)
             for value in (
-                long_scan.select("__feature").unique().sort("__feature").collect().to_series().to_list()
+                self._collect_expression(
+                    long_scan.select("__feature").unique().sort("__feature")
+                )
+                .to_series()
+                .to_list()
             )
         ]
         if not feature_names:
@@ -921,11 +1102,18 @@ class ExpressionMatrixBuilder:
             raise CVError("No species were provided for matrix construction")
 
         unique_species = list(dict.fromkeys(species_order))
+        uses_validated_cache = (
+            self._cached_long_path is not None
+            and self._cached_species is not None
+            and set(unique_species).issubset(self._cached_species)
+        )
         long_scan = self._long_scan_for_species(unique_species)
 
         present_species = {
             str(value)
-            for value in long_scan.select("__species").unique().collect().to_series().to_list()
+            for value in self._collect_expression(
+                long_scan.select("__species").unique()
+            ).to_series().to_list()
         }
         if not present_species:
             raise CVError("Expression matrix is empty for the selected species")
@@ -938,16 +1126,19 @@ class ExpressionMatrixBuilder:
             feature_names = [
                 str(value)
                 for value in (
-                    long_scan.select("__feature")
-                    .unique()
-                    .sort("__feature")
-                    .collect()
+                    self._collect_expression(
+                        long_scan.select("__feature").unique().sort("__feature")
+                    )
                     .to_series()
                     .to_list()
                 )
             ]
         else:
             feature_names = self._normalize_feature_order(feature_order)
+            # Validate every consumed row for the requested species, including
+            # features that will subsequently be ignored by schema alignment.
+            if not uses_validated_cache:
+                self._validate_tpm_scan(long_scan)
             long_scan = long_scan.filter(pl.col("__feature").is_in(feature_names))
         if not feature_names:
             raise CVError("No features were available after pivoting expression data")
@@ -957,7 +1148,9 @@ class ExpressionMatrixBuilder:
         )
         estimated_cells = len(unique_species) * len(feature_names)
         if estimated_cells <= self._max_pivot_cells:
-            long_df = long_scan.collect()
+            long_df = self._collect_expression(long_scan)
+            self._validate_tpm_frame(long_df)
+            long_df = long_df.select(["__species", "__feature", "__value"])
             return self._matrix_from_long_df(long_df, ordering_df, feature_names), feature_names
 
         feature_chunk_size = max(1, self._max_pivot_cells // max(1, len(unique_species)))
@@ -965,7 +1158,11 @@ class ExpressionMatrixBuilder:
         for start in range(0, len(feature_names), feature_chunk_size):
             stop = min(start + feature_chunk_size, len(feature_names))
             chunk_features = feature_names[start:stop]
-            chunk_df = long_scan.filter(pl.col("__feature").is_in(chunk_features)).collect()
+            chunk_df = self._collect_expression(
+                long_scan.filter(pl.col("__feature").is_in(chunk_features))
+            )
+            self._validate_tpm_frame(chunk_df)
+            chunk_df = chunk_df.select(["__species", "__feature", "__value"])
             chunk_matrix = self._matrix_from_long_df(chunk_df, ordering_df, chunk_features)
             expected_shape = (len(species_order), len(chunk_features))
             if chunk_matrix.shape != expected_shape:
@@ -1441,8 +1638,9 @@ def _build_estimator(
                 "samples per class in train fold"
             )
         calibrate_cv = 3 if min_class_count >= 3 else 2
+        base_estimator = LinearSVC(C=c_value, max_iter=max_iter, random_state=model_seed)
         return CalibratedClassifierCV(
-            estimator=LinearSVC(C=c_value, max_iter=max_iter, random_state=model_seed),
+            estimator=base_estimator,
             method="sigmoid",
             cv=calibrate_cv,
         )
@@ -1474,10 +1672,23 @@ def _fit_estimator(
     if sample_weight is None:
         estimator.fit(x_train, y_train)
         return
+    if not has_fit_parameter(estimator, "sample_weight"):
+        raise CVError(
+            f"{type(estimator).__name__}.fit does not support sample_weight; "
+            "refusing to ignore configured sample weighting"
+        )
+    if (
+        isinstance(estimator, CalibratedClassifierCV)
+        and isinstance(estimator.estimator, LinearSVC)
+        and bool(get_config().get("enable_metadata_routing", False))
+    ):
+        estimator.estimator.set_fit_request(sample_weight=True)
     try:
         estimator.fit(x_train, y_train, sample_weight=sample_weight)
-    except TypeError:
-        estimator.fit(x_train, y_train)
+    except TypeError as exc:
+        raise CVError(
+            f"{type(estimator).__name__}.fit failed while applying sample_weight: {exc}"
+        ) from exc
 
 
 def _predict_positive_probability(
