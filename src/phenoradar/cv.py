@@ -2457,6 +2457,15 @@ def _metric_rows(
     return rows
 
 
+def _metrics_dataframe(
+    metric_rows: list[dict[str, float | int | str | None]],
+) -> pl.DataFrame:
+    return pl.DataFrame(
+        metric_rows,
+        schema_overrides={"n_valid_folds": pl.Int64},
+    ).sort(["aggregate_scope", "fold_id", "metric"])
+
+
 def _preprocess_train_and_target(
     config: AppConfig,
     x_train_raw: np.ndarray,
@@ -3921,7 +3930,7 @@ def run_outer_cv(
         )
     )
 
-    metrics_df = pl.DataFrame(metric_rows).sort(["aggregate_scope", "fold_id", "metric"])
+    metrics_df = _metrics_dataframe(metric_rows)
     loss_by_split_df = pl.DataFrame(loss_rows).sort(["fold_id", "split"])
     thresholds_df = pl.DataFrame(
         [

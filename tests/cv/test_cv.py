@@ -229,6 +229,39 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
     }.issubset(cv_artifacts.model_sparsity_summary.columns)
 
 
+def test_metrics_dataframe_handles_valid_fold_counts_after_schema_inference_limit() -> None:
+    fold_metrics = {f"metric_{index}": float(index) for index in range(5)}
+    metric_rows = [
+        row
+        for fold_index in range(21)
+        for row in cv_mod._metric_rows(
+            fold_id=f"fold_{fold_index}",
+            aggregate_scope="NA",
+            metrics=fold_metrics,
+            n_pos=1,
+            n_neg=1,
+            n_valid_folds=None,
+        )
+    ]
+    metric_rows.extend(
+        cv_mod._metric_rows(
+            fold_id=None,
+            aggregate_scope="macro",
+            metrics=fold_metrics,
+            n_pos=21,
+            n_neg=21,
+            n_valid_folds={metric: 21 for metric in fold_metrics},
+        )
+    )
+
+    metrics_df = cv_mod._metrics_dataframe(metric_rows)
+
+    assert metrics_df.schema["n_valid_folds"] == pl.Int64
+    assert metrics_df.filter(pl.col("aggregate_scope") == "macro").get_column(
+        "n_valid_folds"
+    ).to_list() == [21] * len(fold_metrics)
+
+
 def test_run_outer_cv_oof_species_and_fold_match_validation_manifest(tmp_path: Path) -> None:
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
