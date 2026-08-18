@@ -263,6 +263,8 @@ Selection options:
 Ranking options:
 
 - `--primary-metric`: `mcc|balanced_accuracy|roc_auc|pr_auc|brier`
+  - ranking is descending for `mcc`, `balanced_accuracy`, `roc_auc`, and `pr_auc`, and
+    ascending for `brier`
 - `--aggregate-scope`: `macro|micro`
 - `--include-stage`: `cv_only|full_run|predict|all`
 - `--strict`: fail instead of non-strict warn-and-continue behavior

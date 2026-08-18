@@ -25,6 +25,7 @@ from sklearn.metrics import (
 )
 
 from phenoradar.group_summary import GroupSummaryError, finite_group_probabilities
+from phenoradar.metrics import metric_direction, metric_higher_is_better
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
@@ -2732,8 +2733,34 @@ def _cv_external_metric_comparison(
     _save_svg_figure(fig, out_path)
 
 
+def _single_report_metric_name(
+    data: pl.DataFrame,
+    *,
+    column: str,
+    artifact_name: str,
+) -> str:
+    metric_names = [
+        str(value)
+        for value in data.select(column).drop_nulls().unique().to_series().to_list()
+    ]
+    if len(metric_names) != 1:
+        raise FigureError(f"{artifact_name} must contain exactly one metric name")
+    metric_name = metric_names[0]
+    try:
+        metric_direction(metric_name)
+    except ValueError as exc:
+        raise FigureError(str(exc)) from exc
+    return metric_name
+
+
+def _report_metric_axis_label(metric_name: str) -> str:
+    direction = metric_direction(metric_name)
+    direction_label = "higher is better" if direction == "maximize" else "lower is better"
+    return f"{metric_name} ({direction_label})"
+
+
 def _report_metric_ranking(report_ranking: pl.DataFrame, out_path: Path) -> None:
-    required = {"rank", "run_id", "metric_value"}
+    required = {"rank", "run_id", "metric_name", "metric_value"}
     if not required.issubset(report_ranking.columns):
         raise FigureError("report_ranking.tsv schema is invalid for report_metric_ranking.svg")
 
@@ -2748,6 +2775,11 @@ def _report_metric_ranking(report_ranking: pl.DataFrame, out_path: Path) -> None
         return
 
     top = report_ranking.sort("rank").head(30)
+    metric_name = _single_report_metric_name(
+        top,
+        column="metric_name",
+        artifact_name="report_ranking.tsv",
+    )
     run_ids = [str(v) for v in top.select("run_id").to_series().to_list()]
     values = [float(v) for v in top.select("metric_value").to_series().to_list()]
 
@@ -2768,20 +2800,32 @@ def _report_metric_ranking(report_ranking: pl.DataFrame, out_path: Path) -> None
             fontsize_px=_MONO_FONTSIZE,
         ),
         right_margin=0.96,
-        x_label="metric_value",
+        x_label=_report_metric_axis_label(metric_name),
         y_tick_fontsize=_MONO_FONTSIZE,
     )
 
 
-def _report_metric_comparison(report_runs: pl.DataFrame, out_path: Path) -> None:
-    required = {"run_id", "metric_value", "start_time"}
+def _sorted_report_metric_rows(report_runs: pl.DataFrame) -> pl.DataFrame:
+    required = {"run_id", "metric_value", "start_time", "primary_metric"}
     if not required.issubset(report_runs.columns):
         raise FigureError("report_runs.tsv schema is invalid for report_metric_comparison.svg")
 
-    comparable = report_runs.drop_nulls("metric_value").sort(
+    comparable = report_runs.drop_nulls("metric_value")
+    if comparable.height == 0:
+        return comparable
+    metric_name = _single_report_metric_name(
+        comparable,
+        column="primary_metric",
+        artifact_name="report_runs.tsv",
+    )
+    return comparable.sort(
         by=["metric_value", "start_time", "run_id"],
-        descending=[True, False, False],
+        descending=[metric_higher_is_better(metric_name), False, False],
     ).head(30)
+
+
+def _report_metric_comparison(report_runs: pl.DataFrame, out_path: Path) -> None:
+    comparable = _sorted_report_metric_rows(report_runs)
     if comparable.height == 0:
         _write_message_figure(
             title="Report Metric Comparison",
@@ -2792,6 +2836,11 @@ def _report_metric_comparison(report_runs: pl.DataFrame, out_path: Path) -> None
         )
         return
 
+    metric_name = _single_report_metric_name(
+        comparable,
+        column="primary_metric",
+        artifact_name="report_runs.tsv",
+    )
     run_ids = [str(v) for v in comparable.select("run_id").to_series().to_list()]
     values = [float(v) for v in comparable.select("metric_value").to_series().to_list()]
 
@@ -2812,7 +2861,7 @@ def _report_metric_comparison(report_runs: pl.DataFrame, out_path: Path) -> None
             fontsize_px=_MONO_FONTSIZE,
         ),
         right_margin=0.96,
-        x_label="metric_value",
+        x_label=_report_metric_axis_label(metric_name),
         y_tick_fontsize=_MONO_FONTSIZE,
     )
 
@@ -2983,7 +3032,7 @@ def _model_selection_metric_axis_label(metric_names: Sequence[str]) -> str:
 
 
 def _model_selection_higher_is_better(metric_name: str) -> bool:
-    return metric_name != "log_loss"
+    return metric_higher_is_better(metric_name)
 
 
 def _numeric_param_from_json(params_json: str | None, key: str) -> float | None:

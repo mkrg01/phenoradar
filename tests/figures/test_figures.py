@@ -591,6 +591,7 @@ def test_write_report_figures_stage_breakdown_is_conditional(tmp_path: Path) -> 
             {
                 "run_id": ["r1"],
                 "metric_value": [0.9],
+                "primary_metric": ["mcc"],
                 "start_time": ["2026-01-01T00:00:00+00:00"],
                 "execution_stage": ["full_run"],
             }
@@ -599,6 +600,7 @@ def test_write_report_figures_stage_breakdown_is_conditional(tmp_path: Path) -> 
             {
                 "rank": [1],
                 "run_id": ["r1"],
+                "metric_name": ["mcc"],
                 "metric_value": [0.9],
             }
         ),
@@ -612,6 +614,7 @@ def test_write_report_figures_stage_breakdown_is_conditional(tmp_path: Path) -> 
             {
                 "run_id": ["r1", "r2"],
                 "metric_value": [0.9, 0.8],
+                "primary_metric": ["mcc", "mcc"],
                 "start_time": ["2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"],
                 "execution_stage": ["full_run", "predict"],
             }
@@ -620,11 +623,37 @@ def test_write_report_figures_stage_breakdown_is_conditional(tmp_path: Path) -> 
             {
                 "rank": [1, 2],
                 "run_id": ["r1", "r2"],
+                "metric_name": ["mcc", "mcc"],
                 "metric_value": [0.9, 0.8],
             }
         ),
     )
     assert (report_dir_multi / "figures" / "report_stage_breakdown.svg").exists()
+
+
+def test_report_metric_comparison_sorts_brier_lower_values_first() -> None:
+    report_runs = pl.DataFrame(
+        {
+            "run_id": ["run_mid", "run_worst", "run_best"],
+            "metric_value": [0.20, 0.40, 0.05],
+            "primary_metric": ["brier", "brier", "brier"],
+            "start_time": [
+                "2026-01-02T00:00:00+00:00",
+                "2026-01-03T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ],
+        }
+    )
+
+    comparable = figures_mod._sorted_report_metric_rows(report_runs)
+
+    assert comparable.select("run_id").to_series().to_list() == [
+        "run_best",
+        "run_mid",
+        "run_worst",
+    ]
+    assert comparable.select("metric_value").to_series().to_list() == [0.05, 0.20, 0.40]
+    assert figures_mod._report_metric_axis_label("brier") == "brier (lower is better)"
 
 
 def test_write_report_figures_rejects_invalid_ranking_schema(tmp_path: Path) -> None:
@@ -635,6 +664,7 @@ def test_write_report_figures_rejects_invalid_ranking_schema(tmp_path: Path) -> 
                 {
                     "run_id": ["r1"],
                     "metric_value": [0.9],
+                    "primary_metric": ["mcc"],
                     "start_time": ["2026-01-01T00:00:00+00:00"],
                     "execution_stage": ["full_run"],
                 }
@@ -1028,6 +1058,7 @@ def test_write_report_figures_rejects_invalid_run_schema_for_metric_comparison(
                 {
                     "rank": [1],
                     "run_id": ["r1"],
+                    "metric_name": ["mcc"],
                     "metric_value": [0.9],
                 }
             ),
@@ -1042,6 +1073,7 @@ def test_write_report_figures_rejects_missing_execution_stage_column(tmp_path: P
                 {
                     "run_id": ["r1"],
                     "metric_value": [0.9],
+                    "primary_metric": ["mcc"],
                     "start_time": ["2026-01-01T00:00:00+00:00"],
                 }
             ),
@@ -1049,6 +1081,7 @@ def test_write_report_figures_rejects_missing_execution_stage_column(tmp_path: P
                 {
                     "rank": [1],
                     "run_id": ["r1"],
+                    "metric_name": ["mcc"],
                     "metric_value": [0.9],
                 }
             ),

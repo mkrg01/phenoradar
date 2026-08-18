@@ -8,7 +8,7 @@ import pytest
 
 import phenoradar.reporting as reporting_mod
 from phenoradar.figures import FigureError
-from phenoradar.reporting import ReportError, ReportOptions, generate_report
+from phenoradar.reporting import PrimaryMetric, ReportError, ReportOptions, generate_report
 
 
 def _write(path: Path, text: str) -> Path:
@@ -24,6 +24,7 @@ def _write_run_dir(
     stage: str,
     start_time: str,
     metric_value: float | None,
+    metric_name: PrimaryMetric = "mcc",
     include_metrics: bool = True,
     metrics_valid_schema: bool = True,
 ) -> Path:
@@ -57,7 +58,7 @@ def _write_run_dir(
                 {
                     "aggregate_scope": ["macro"],
                     "fold_id": ["NA"],
-                    "metric": ["mcc"],
+                    "metric": [metric_name],
                     "metric_value": [metric_value if metric_value is not None else float("nan")],
                 }
             ).write_csv(run_dir / "metrics_cv.tsv", separator="\t")
@@ -74,11 +75,12 @@ def _write_run_dir(
 
 def _options(
     *,
+    primary_metric: PrimaryMetric = "mcc",
     include_stage: str = "all",
     strict: bool = True,
 ) -> ReportOptions:
     return ReportOptions(
-        primary_metric="mcc",
+        primary_metric=primary_metric,
         aggregate_scope="macro",
         include_stage=include_stage,
         output_format="tsv",
@@ -137,14 +139,18 @@ def test_load_metric_value_returns_none_when_multiple_rows_match(tmp_path: Path)
     assert value is None
 
 
-def test_load_metric_value_returns_none_for_nan_metric(tmp_path: Path) -> None:
+@pytest.mark.parametrize("invalid_metric", [float("nan"), float("inf"), float("-inf")])
+def test_load_metric_value_returns_none_for_non_finite_metric(
+    tmp_path: Path,
+    invalid_metric: float,
+) -> None:
     metrics_path = tmp_path / "metrics_cv.tsv"
     pl.DataFrame(
         {
             "aggregate_scope": ["macro"],
             "fold_id": ["NA"],
             "metric": ["mcc"],
-            "metric_value": [float("nan")],
+            "metric_value": [invalid_metric],
         }
     ).write_csv(metrics_path, separator="\t")
 
@@ -157,7 +163,90 @@ def test_load_metric_value_returns_none_for_nan_metric(tmp_path: Path) -> None:
     assert value is None
 
 
-def test_generate_report_ranking_tie_breaks_by_start_time_then_run_id(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    (
+        "primary_metric",
+        "metric_values",
+        "expected_run_ids",
+        "expected_values",
+        "expected_direction",
+    ),
+    [
+        (
+            "mcc",
+            (-0.2, 0.1, 0.8),
+            ["20260101T000003Z_run_c", "20260101T000002Z_run_b", "20260101T000001Z_run_a"],
+            [0.8, 0.1, -0.2],
+            "maximize",
+        ),
+        (
+            "brier",
+            (0.20, 0.40, 0.05),
+            ["20260101T000003Z_run_c", "20260101T000001Z_run_a", "20260101T000002Z_run_b"],
+            [0.05, 0.20, 0.40],
+            "minimize",
+        ),
+    ],
+)
+def test_generate_report_ranks_metrics_in_their_better_direction(
+    tmp_path: Path,
+    primary_metric: PrimaryMetric,
+    metric_values: tuple[float, float, float],
+    expected_run_ids: list[str],
+    expected_values: list[float],
+    expected_direction: str,
+) -> None:
+    runs_root = tmp_path / "runs"
+    for run_id, start_time, metric_value in zip(
+        [
+            "20260101T000001Z_run_a",
+            "20260101T000002Z_run_b",
+            "20260101T000003Z_run_c",
+        ],
+        [
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-02T00:00:00+00:00",
+            "2026-01-03T00:00:00+00:00",
+        ],
+        metric_values,
+        strict=True,
+    ):
+        _write_run_dir(
+            runs_root,
+            run_id=run_id,
+            stage="full_run",
+            start_time=start_time,
+            metric_value=metric_value,
+            metric_name=primary_metric,
+        )
+
+    out_dir = tmp_path / "report_out"
+    generate_report(
+        run_dirs=[],
+        runs_root=runs_root,
+        run_glob="*",
+        latest=None,
+        options=_options(primary_metric=primary_metric),
+        output_dir=out_dir,
+    )
+
+    ranking = pl.read_csv(out_dir / "report_ranking.tsv", separator="\t")
+    assert ranking.select("run_id").to_series().to_list() == expected_run_ids
+    assert ranking.select("metric_value").to_series().to_list() == expected_values
+    assert ranking.select("rank").to_series().to_list() == [1, 2, 3]
+    manifest = json.loads((out_dir / "report_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["report_options"]["metric_direction"] == expected_direction
+    direction_label = "higher is better" if expected_direction == "maximize" else "lower is better"
+    for figure_name in ["report_metric_ranking.svg", "report_metric_comparison.svg"]:
+        figure_text = (out_dir / "figures" / figure_name).read_text(encoding="utf-8")
+        assert direction_label in figure_text
+
+
+@pytest.mark.parametrize("primary_metric", ["mcc", "brier"])
+def test_generate_report_ranking_tie_breaks_by_start_time_then_run_id(
+    tmp_path: Path,
+    primary_metric: PrimaryMetric,
+) -> None:
     runs_root = tmp_path / "runs"
     _write_run_dir(
         runs_root,
@@ -165,6 +254,7 @@ def test_generate_report_ranking_tie_breaks_by_start_time_then_run_id(tmp_path: 
         stage="full_run",
         start_time="2026-01-02T00:00:00+00:00",
         metric_value=0.8,
+        metric_name=primary_metric,
     )
     _write_run_dir(
         runs_root,
@@ -172,6 +262,7 @@ def test_generate_report_ranking_tie_breaks_by_start_time_then_run_id(tmp_path: 
         stage="full_run",
         start_time="2026-01-01T00:00:00+00:00",
         metric_value=0.8,
+        metric_name=primary_metric,
     )
     _write_run_dir(
         runs_root,
@@ -179,6 +270,7 @@ def test_generate_report_ranking_tie_breaks_by_start_time_then_run_id(tmp_path: 
         stage="full_run",
         start_time="2026-01-01T00:00:00+00:00",
         metric_value=0.8,
+        metric_name=primary_metric,
     )
     out_dir = tmp_path / "report_out"
 
@@ -187,7 +279,7 @@ def test_generate_report_ranking_tie_breaks_by_start_time_then_run_id(tmp_path: 
         runs_root=runs_root,
         run_glob="*",
         latest=None,
-        options=_options(include_stage="all", strict=True),
+        options=_options(primary_metric=primary_metric, include_stage="all", strict=True),
         output_dir=out_dir,
     )
 

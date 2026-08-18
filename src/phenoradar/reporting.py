@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from typing import Any, Literal
 
@@ -11,6 +12,7 @@ import polars as pl
 import yaml
 
 from phenoradar.figures import FigureError, write_report_figures
+from phenoradar.metrics import metric_direction, metric_sort_value
 
 PrimaryMetric = Literal["mcc", "balanced_accuracy", "roc_auc", "pr_auc", "brier"]
 AggregateScope = Literal["macro", "micro"]
@@ -120,7 +122,7 @@ def _load_metric_value(
     if len(values) != 1:
         return None
     metric = _float_or_none(values[0])
-    if metric is None or metric != metric:
+    if metric is None or not isfinite(metric):
         return None
     return metric
 
@@ -151,10 +153,16 @@ def _write_narrative(
     selected_run_count: int,
     ranked_run_count: int,
 ) -> None:
+    direction_label = (
+        "higher is better"
+        if metric_direction(options.primary_metric) == "maximize"
+        else "lower is better"
+    )
     if output_format == "md":
         text = (
             "# PhenoRadar Report\n\n"
             f"- Primary metric: `{options.primary_metric}` ({options.aggregate_scope})\n"
+            f"- Metric direction: `{direction_label}`\n"
             f"- Selected runs: `{selected_run_count}`\n"
             f"- Ranked runs: `{ranked_run_count}`\n"
         )
@@ -166,6 +174,7 @@ def _write_narrative(
             "<h1>PhenoRadar Report</h1>\n"
             f"<p>Primary metric: <code>{options.primary_metric}</code> "
             f"({options.aggregate_scope})</p>\n"
+            f"<p>Metric direction: <code>{direction_label}</code></p>\n"
             f"<p>Selected runs: <code>{selected_run_count}</code></p>\n"
             f"<p>Ranked runs: <code>{ranked_run_count}</code></p>\n"
             "</body></html>\n"
@@ -367,7 +376,7 @@ def generate_report(
     ranking_sorted = sorted(
         ranking_rows,
         key=lambda row: (
-            -float(row["metric_value"]),
+            metric_sort_value(options.primary_metric, float(row["metric_value"])),
             str(row["start_time"]),
             str(row["run_id"]),
         ),
@@ -430,6 +439,7 @@ def generate_report(
     manifest = {
         "report_options": {
             "primary_metric": options.primary_metric,
+            "metric_direction": metric_direction(options.primary_metric),
             "aggregate_scope": options.aggregate_scope,
             "include_stage": options.include_stage,
             "output_format": options.output_format,

@@ -647,6 +647,7 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 
 - `report_manifest.json`
   - selected runs, options, skipped runs, ranked count
+  - `report_options.metric_direction` is `maximize` or `minimize`
 - `report_runs.tsv`
   - one row per included run after selection/filtering
   - columns: `run_id`, `run_dir`, `command`, `execution_stage`, `status`, `start_time`, `end_time`, `duration_sec`, `primary_metric`, `aggregate_scope`, `metric_value`
@@ -654,7 +655,9 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - `report_ranking.tsv`
   - ranked runs with non-null metric
   - columns: `run_id`, `run_dir`, `execution_stage`, `start_time`, `metric_name`, `aggregate_scope`, `metric_value`, `rank`
-  - `rank` order follows selected metric/scope, then tie-break by `start_time`, then `run_id`
+  - `rank` follows the selected metric's documented better direction: descending for
+    `mcc`, `balanced_accuracy`, `roc_auc`, and `pr_auc`; ascending for `brier`
+  - ties are ordered by `start_time`, then `run_id`, both ascending
 - `report_warnings.tsv`
   - columns: `run_id`, `run_dir`, `warning_type`, `message`
   - aggregated ingestion warnings across runs; prioritize recurring `warning_type`
@@ -668,9 +671,10 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 ### Report figures
 
 - `report_metric_ranking.svg`
-  - Top ranked runs from `report_ranking.tsv`.
+  - Top ranked runs from `report_ranking.tsv`; the axis states whether higher or lower is better.
 - `report_metric_comparison.svg`
-  - Comparable runs with non-null metric from `report_runs.tsv`.
+  - Comparable runs with non-null metric from `report_runs.tsv`, ordered in the same better
+    direction as `report_ranking.tsv`.
 - `report_stage_breakdown.svg`
   - Count of runs by `execution_stage` (shown only when more than one stage exists).
 

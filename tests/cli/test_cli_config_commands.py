@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -1154,6 +1155,62 @@ data:
     if report_ranking.height > 0:
         ranking_stages = set(report_ranking.select("execution_stage").to_series().to_list())
         assert "predict" not in ranking_stages
+
+
+def test_report_cli_ranks_brier_in_ascending_order(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    for run_id, start_time, brier in [
+        ("20260101T000001Z_run_worst", "2026-01-01T00:00:00+00:00", 0.40),
+        ("20260101T000002Z_run_best", "2026-01-02T00:00:00+00:00", 0.05),
+    ]:
+        run_dir = runs_root / run_id
+        run_dir.mkdir(parents=True)
+        _write(
+            run_dir / "run_metadata.json",
+            json.dumps(
+                {
+                    "command": "run",
+                    "execution_stage": "full_run",
+                    "status": "ok",
+                    "start_time": start_time,
+                    "end_time": start_time,
+                    "duration_sec": 1.0,
+                    "warnings": [],
+                }
+            )
+            + "\n",
+        )
+        _write(run_dir / "resolved_config.yml", "runtime:\n  seed: 42\n")
+        pl.DataFrame(
+            {
+                "aggregate_scope": ["macro"],
+                "fold_id": ["NA"],
+                "metric": ["brier"],
+                "metric_value": [brier],
+            }
+        ).write_csv(run_dir / "metrics_cv.tsv", separator="\t")
+
+    report_dir = tmp_path / "report"
+    result = CliRunner().invoke(
+        app,
+        [
+            "report",
+            "--runs-root",
+            str(runs_root),
+            "--primary-metric",
+            "brier",
+            "--out",
+            str(report_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    ranking = pl.read_csv(report_dir / "report_ranking.tsv", separator="\t")
+    assert ranking.select("run_id").to_series().to_list() == [
+        "20260101T000002Z_run_best",
+        "20260101T000001Z_run_worst",
+    ]
+    assert ranking.select("metric_value").to_series().to_list() == [0.05, 0.40]
 
 
 def test_report_strict_fails_on_missing_required_artifacts(

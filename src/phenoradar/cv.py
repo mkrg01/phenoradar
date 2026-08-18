@@ -42,6 +42,7 @@ from phenoradar.interpret import (
     ModelFeatureEntry,
     build_interpretation_tables,
 )
+from phenoradar.metrics import metric_higher_is_better
 from phenoradar.model_selection import (
     Candidate,
     ContinuousSpec,
@@ -1763,7 +1764,7 @@ def _selection_metric_from_probability(
 
 
 def _selection_metric_higher_is_better(metric_name: str) -> bool:
-    return metric_name != "log_loss"
+    return metric_higher_is_better(metric_name)
 
 
 def _selection_metric_optuna_direction(metric_name: str) -> str:
