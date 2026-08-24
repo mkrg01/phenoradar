@@ -166,6 +166,22 @@ def test_load_metric_value_returns_none_when_multiple_rows_match(tmp_path: Path)
     assert value is None
 
 
+def test_load_metric_value_reads_na_fold_after_many_numeric_folds(tmp_path: Path) -> None:
+    metrics_path = tmp_path / "metrics_cv.tsv"
+    rows = ["aggregate_scope\tfold_id\tmetric\tmetric_value"]
+    rows.extend(f"NA\t{fold_id}\tmcc\t0.5" for fold_id in range(1, 102))
+    rows.append("micro\tNA\tmcc\t0.8")
+    _write(metrics_path, "\n".join(rows) + "\n")
+
+    value = reporting_mod._load_metric_value(
+        metrics_path=metrics_path,
+        aggregate_scope="micro",
+        primary_metric="mcc",
+    )
+
+    assert value == pytest.approx(0.8)
+
+
 @pytest.mark.parametrize("invalid_metric", [float("nan"), float("inf"), float("-inf")])
 def test_load_metric_value_returns_none_for_non_finite_metric(
     tmp_path: Path,

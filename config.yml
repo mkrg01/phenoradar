@@ -71,6 +71,12 @@ model_selection:
 ensemble:
   probability_aggregation: mean  # choices: mean, median
 
+evaluation:
+  group_bootstrap:
+    enabled: true
+    n_resamples: 2000
+    confidence_level: 0.95
+
 figures:
   top_features: 30
 

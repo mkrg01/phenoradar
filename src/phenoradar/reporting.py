@@ -108,7 +108,11 @@ def _load_metric_value(
     aggregate_scope: AggregateScope,
     primary_metric: PrimaryMetric,
 ) -> float | None:
-    metrics = pl.read_csv(metrics_path, separator="\t")
+    metrics = pl.read_csv(
+        metrics_path,
+        separator="\t",
+        schema_overrides={"fold_id": pl.String},
+    )
     if not {"aggregate_scope", "fold_id", "metric", "metric_value"}.issubset(metrics.columns):
         raise ReportError(f"metrics_cv.tsv has invalid schema: {metrics_path}")
     values = (
