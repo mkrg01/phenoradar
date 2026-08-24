@@ -281,6 +281,75 @@ def test_build_tree_feature_heatmap_annotation_outputs_log2_and_zscore(tmp_path:
     assert zscore_sum == 0.0
 
 
+def test_build_tree_feature_heatmap_annotation_reuses_complete_expression_cache(
+    tmp_path: Path,
+) -> None:
+    tpm_path = tmp_path / "tpm.tsv"
+    _write_tpm(tpm_path)
+    metadata = _metadata().with_columns(pl.col("C4").alias("true_label"))
+    expected = build_tree_feature_heatmap_annotation(
+        metadata=metadata,
+        tpm_path=tpm_path,
+        species_col="species",
+        feature_col="orthogroup",
+        value_col="tpm",
+        group_col="contrast_pair_id",
+        feature_importance=_feature_importance(),
+        coefficients=_coefficients(),
+        feature_limit=2,
+    )
+    cached_expression = pl.DataFrame(
+        {
+            "species": ["sp1", "sp1", "sp2", "sp2"],
+            "feature": ["OG1", "OG2", "OG1", "OG2"],
+            "tpm": [0.0, 3.0, 3.0, 15.0],
+        }
+    )
+
+    cached = build_tree_feature_heatmap_annotation(
+        metadata=metadata,
+        tpm_path=tmp_path / "not_read.tsv",
+        species_col="species",
+        feature_col="orthogroup",
+        value_col="tpm",
+        group_col="contrast_pair_id",
+        feature_importance=_feature_importance(),
+        coefficients=_coefficients(),
+        feature_limit=2,
+        top_feature_expression=cached_expression,
+    )
+
+    assert cached.to_dicts() == expected.to_dicts()
+
+
+def test_build_tree_feature_heatmap_annotation_falls_back_for_incomplete_cache(
+    tmp_path: Path,
+) -> None:
+    tpm_path = tmp_path / "tpm.tsv"
+    _write_tpm(tpm_path)
+    metadata = _metadata().with_columns(pl.col("C4").alias("true_label"))
+
+    annotation = build_tree_feature_heatmap_annotation(
+        metadata=metadata,
+        tpm_path=tpm_path,
+        species_col="species",
+        feature_col="orthogroup",
+        value_col="tpm",
+        group_col="contrast_pair_id",
+        feature_importance=_feature_importance(),
+        coefficients=_coefficients(),
+        feature_limit=2,
+        top_feature_expression=pl.DataFrame(
+            {"species": ["sp1"], "feature": ["OG1"], "tpm": [0.0]}
+        ),
+    )
+
+    assert annotation.height == 4
+    assert annotation.filter(
+        (pl.col("species") == "sp2") & (pl.col("feature") == "OG2")
+    ).get_column("tpm").item() == 15.0
+
+
 def test_build_tree_feature_heatmap_annotation_joins_orthogroup_annotations(
     tmp_path: Path,
 ) -> None:

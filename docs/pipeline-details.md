@@ -98,6 +98,8 @@ Before fold execution:
   species once into a temporary Parquet cache;
 - build one shared species x feature matrix by mapping the cached long rows to
   integer coordinates and accumulating values into a zero-filled NumPy array;
+- retain a small raw-expression table for only the top interpreted features so
+  tree heatmaps do not rescan the full TPM input when species coverage matches;
 - retain `preprocess.max_pivot_cells` as the dense-cell limit used to split
   oversized matrices into feature chunks.
 
@@ -179,6 +181,10 @@ After all folds:
   sampled source matrix is therefore transformed once before its inner-CV rows
   are sliced; train-fitted feature filtering and scaling still run separately
   inside every inner fold to prevent leakage.
+- Sparse-feature filtering computes the nonzero mask once per inner fold and
+  reuses it for trait-specific retention fractions.
+- Orthogroup annotation loading is restricted to the union of top features
+  that can appear in importance, coefficient, or tree-heatmap figures.
 - Start/end offsets make concurrent intervals explicit. Nested or parallel
   durations are diagnostic measurements and are not expected to sum to the
   top-level wall-clock duration.

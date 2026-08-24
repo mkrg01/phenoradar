@@ -98,6 +98,7 @@ class CVArtifacts:
     retained_features_summary: pl.DataFrame
     model_sparsity: pl.DataFrame
     model_sparsity_summary: pl.DataFrame
+    top_feature_expression: pl.DataFrame
     timing: pl.DataFrame
     warnings: list[str]
 
@@ -1317,13 +1318,14 @@ def _select_feature_indices_with_counts(
 
         y_train_arr = np.asarray(y_train)
         max_nonzero_fraction = np.zeros(selected.size, dtype=float)
+        nonzero_mask = x_train_expr > _NONZERO_TOLERANCE
         for trait_value in np.unique(y_train_arr):
             trait_mask = y_train_arr == trait_value
             trait_count = int(np.count_nonzero(trait_mask))
             if trait_count == 0:
                 continue
             trait_nonzero_fraction = np.count_nonzero(
-                x_train_expr[trait_mask][:, selected] > _NONZERO_TOLERANCE,
+                nonzero_mask[trait_mask, :],
                 axis=0,
             ) / trait_count
             max_nonzero_fraction = np.maximum(max_nonzero_fraction, trait_nonzero_fraction)
@@ -2710,6 +2712,52 @@ def _slice_outer_cv_matrix(
         ) from exc
 
     return cache.matrix[train_row_idx, :], cache.matrix[valid_row_idx, :]
+
+
+def _build_top_feature_expression(
+    cache: OuterCvMatrixCache,
+    feature_importance: pl.DataFrame,
+    *,
+    feature_limit: int,
+) -> pl.DataFrame:
+    """Build a small validated raw-expression cache for downstream figures."""
+    schema = {"species": pl.String, "feature": pl.String, "tpm": pl.Float64}
+    if feature_limit < 1 or feature_importance.height == 0:
+        return pl.DataFrame(schema=schema)
+    top_features = (
+        feature_importance.drop_nulls(["feature", "importance_mean"])
+        .with_columns(
+            pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("feature"),
+            pl.col("importance_mean").cast(pl.Float64, strict=False).alias("importance_mean"),
+        )
+        .filter(pl.col("feature").is_not_null() & (pl.col("feature") != ""))
+        .sort(["importance_mean", "feature"], descending=[True, False])
+        .head(feature_limit)
+        .get_column("feature")
+        .to_list()
+    )
+    if not top_features:
+        return pl.DataFrame(schema=schema)
+    feature_to_index = {feature: index for index, feature in enumerate(cache.feature_names)}
+    selected_features = [feature for feature in top_features if feature in feature_to_index]
+    if not selected_features:
+        return pl.DataFrame(schema=schema)
+    species_order = [
+        species
+        for species, _index in sorted(
+            cache.species_to_index.items(), key=lambda row: row[1]
+        )
+    ]
+    feature_indices = [feature_to_index[feature] for feature in selected_features]
+    values = cache.matrix[:, feature_indices]
+    return pl.DataFrame(
+        {
+            "species": np.repeat(np.asarray(species_order, dtype=str), len(selected_features)),
+            "feature": np.tile(np.asarray(selected_features, dtype=str), len(species_order)),
+            "tpm": values.reshape(-1),
+        },
+        schema=schema,
+    )
 
 
 def _metric_rows(
@@ -4453,6 +4501,11 @@ def run_outer_cv(
     retained_features_summary = _summarize_retained_features(retained_features)
     model_sparsity = _build_model_sparsity(model_sparsity_rows)
     model_sparsity_summary = _summarize_model_sparsity(model_sparsity)
+    top_feature_expression = _build_top_feature_expression(
+        outer_matrix_cache,
+        interpretation_artifacts.feature_importance,
+        feature_limit=config.figures.top_features,
+    )
     recorder.record_since(
         postprocess_started,
         scope="outer_cv",
@@ -4480,6 +4533,7 @@ def run_outer_cv(
         retained_features_summary=retained_features_summary,
         model_sparsity=model_sparsity,
         model_sparsity_summary=model_sparsity_summary,
+        top_feature_expression=top_feature_expression,
         timing=timing,
         warnings=warnings,
     )

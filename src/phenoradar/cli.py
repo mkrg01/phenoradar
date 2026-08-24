@@ -30,6 +30,7 @@ from phenoradar.config import (
 from phenoradar.cv import CVError, run_final_refit, run_outer_cv
 from phenoradar.figures import (
     FigureError,
+    figure_annotation_features,
     write_group_probability_figure,
     write_predict_figures,
     write_run_figures,
@@ -1303,8 +1304,14 @@ def run(
     figure_generation_started = timing_recorder.start()
     figure_warnings: list[str] = []
     try:
+        annotation_features = figure_annotation_features(
+            feature_importance=cv_artifacts.feature_importance,
+            coefficients=cv_artifacts.coefficients,
+            top_features=resolved.figures.top_features,
+        )
         orthogroup_annotations = load_orthogroup_annotations(
-            None if orthogroup_annotation_path is None else Path(orthogroup_annotation_path)
+            None if orthogroup_annotation_path is None else Path(orthogroup_annotation_path),
+            feature_names=annotation_features,
         )
     except OrthogroupAnnotationError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -1372,6 +1379,9 @@ def run(
                     None
                     if final_refit_artifacts is None
                     else final_refit_artifacts.pred_external_test
+                ),
+                top_feature_expression=getattr(
+                    cv_artifacts, "top_feature_expression", None
                 ),
                 feature_limit=resolved.figures.top_features,
                 orthogroup_annotations=orthogroup_annotations,

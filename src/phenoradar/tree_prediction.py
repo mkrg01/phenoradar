@@ -102,6 +102,7 @@ def write_run_tree_prediction_artifacts(
     feature_importance: pl.DataFrame,
     coefficients: pl.DataFrame,
     pred_external_test: pl.DataFrame | None,
+    top_feature_expression: pl.DataFrame | None = None,
     feature_limit: int = _FEATURE_HEATMAP_LIMIT,
     orthogroup_annotations: pl.DataFrame | None = None,
     parallel_workers: int = 1,
@@ -171,6 +172,7 @@ def write_run_tree_prediction_artifacts(
         coefficients=coefficients,
         feature_limit=feature_limit,
         orthogroup_annotations=orthogroup_annotations,
+        top_feature_expression=top_feature_expression,
     )
     if feature_annotation.height > 0:
         cv_figures_dir = _stage_figures_dir(run_dir, "cv")
@@ -368,6 +370,7 @@ def build_tree_feature_heatmap_annotation(
     oof_predictions: pl.DataFrame | None = None,
     feature_limit: int = _FEATURE_HEATMAP_LIMIT,
     orthogroup_annotations: pl.DataFrame | None = None,
+    top_feature_expression: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Build long-form feature heatmap values for grouped species and top features."""
     _require_columns(metadata, {"species", "true_label", group_col}, "metadata TSV")
@@ -428,14 +431,22 @@ def build_tree_feature_heatmap_annotation(
 
     coef_lookup = _coefficient_lookup(coefficients)
     grid = species_meta.join(top_features, how="cross")
-    expression = _load_expression_for_heatmap(
-        tpm_path=tpm_path,
-        species=list(species_meta.select("species").to_series().to_list()),
-        features=list(top_features.select("feature").to_series().to_list()),
-        species_col=species_col,
-        feature_col=feature_col,
-        value_col=value_col,
+    requested_species = list(species_meta.select("species").to_series().to_list())
+    requested_features = list(top_features.select("feature").to_series().to_list())
+    expression = _cached_expression_for_heatmap(
+        top_feature_expression,
+        species=requested_species,
+        features=requested_features,
     )
+    if expression is None:
+        expression = _load_expression_for_heatmap(
+            tpm_path=tpm_path,
+            species=requested_species,
+            features=requested_features,
+            species_col=species_col,
+            feature_col=feature_col,
+            value_col=value_col,
+        )
     annotated = (
         grid.join(expression, on=["species", "feature"], how="left")
         .with_columns(pl.col("tpm").fill_null(0.0))
@@ -694,6 +705,45 @@ def _group_name_column(group_col: str, columns: Iterable[str]) -> str | None:
         if candidate in column_set:
             return candidate
     return None
+
+
+def _cached_expression_for_heatmap(
+    expression: pl.DataFrame | None,
+    *,
+    species: list[str],
+    features: list[str],
+) -> pl.DataFrame | None:
+    if expression is None:
+        return None
+    required = {"species", "feature", "tpm"}
+    if not required.issubset(expression.columns):
+        raise TreePredictionError("Cached feature expression table schema is invalid")
+    requested_species = set(species)
+    requested_features = set(features)
+    normalized = (
+        expression.select(
+            pl.col("species").cast(pl.String, strict=False).str.strip_chars().alias("species"),
+            pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("feature"),
+            pl.col("tpm").cast(pl.Float64, strict=False).alias("tpm"),
+        )
+        .filter(
+            pl.col("species").is_in(species)
+            & pl.col("feature").is_in(features)
+        )
+    )
+    cached_species = set(normalized.get_column("species").drop_nulls().to_list())
+    cached_features = set(normalized.get_column("feature").drop_nulls().to_list())
+    if not requested_species.issubset(cached_species) or not requested_features.issubset(
+        cached_features
+    ):
+        return None
+    if normalized.filter(
+        pl.col("tpm").is_null() | ~pl.col("tpm").is_finite() | (pl.col("tpm") < 0.0)
+    ).height:
+        raise TreePredictionError(
+            "Cached feature expression table contains invalid TPM values"
+        )
+    return normalized.group_by(["species", "feature"]).agg(pl.col("tpm").sum())
 
 
 def _load_expression_for_heatmap(

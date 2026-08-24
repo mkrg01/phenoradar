@@ -239,6 +239,19 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "n_models",
         "n_models_with_nonzero_count",
     }.issubset(cv_artifacts.model_sparsity_summary.columns)
+    assert set(cv_artifacts.top_feature_expression.columns) == {"species", "feature", "tpm"}
+    assert set(cv_artifacts.top_feature_expression.get_column("species")) == {
+        "sp1",
+        "sp2",
+        "sp3",
+        "sp4",
+    }
+    assert (
+        cv_artifacts.top_feature_expression.filter(
+            (pl.col("species") == "sp1") & (pl.col("feature") == "OG1")
+        ).get_column("tpm").item()
+        == 1.0
+    )
     assert {
         "scope",
         "stage",

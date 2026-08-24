@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 import polars as pl
@@ -18,34 +19,30 @@ ORTHOGROUP_ANNOTATION_COLUMNS = [
 ]
 
 
-def load_orthogroup_annotations(path: Path | None) -> pl.DataFrame | None:
+def load_orthogroup_annotations(
+    path: Path | None,
+    *,
+    feature_names: Iterable[str] | None = None,
+) -> pl.DataFrame | None:
     """Load an optional headerless OrthoDB orthogroup annotation TSV."""
     if path is None:
         return None
     try:
-        annotations = pl.read_csv(
+        annotations_scan = pl.scan_csv(
             path,
             separator="\t",
             has_header=False,
             new_columns=ORTHOGROUP_ANNOTATION_COLUMNS,
         )
-    except FileNotFoundError as exc:
-        raise OrthogroupAnnotationError(f"Orthogroup annotation file not found: {path}") from exc
-    except Exception as exc:
-        raise OrthogroupAnnotationError(
-            f"Failed to read orthogroup annotation TSV: {path}"
-        ) from exc
+        required = set(ORTHOGROUP_ANNOTATION_COLUMNS)
+        missing = sorted(required - set(annotations_scan.collect_schema().names()))
+        if missing:
+            raise OrthogroupAnnotationError(
+                "Missing required columns in orthogroup annotation TSV: "
+                + ", ".join(missing)
+            )
 
-    required = set(ORTHOGROUP_ANNOTATION_COLUMNS)
-    missing = sorted(required - set(annotations.columns))
-    if missing:
-        raise OrthogroupAnnotationError(
-            "Missing required columns in orthogroup annotation TSV: "
-            + ", ".join(missing)
-        )
-
-    return (
-        annotations.select(
+        normalized = annotations_scan.select(
             [
                 pl.col("feature")
                 .cast(pl.String, strict=False)
@@ -61,6 +58,23 @@ def load_orthogroup_annotations(path: Path | None) -> pl.DataFrame | None:
                 .alias("orthogroup_annotation"),
             ]
         )
+        if feature_names is not None:
+            requested_features = sorted(
+                {str(feature).strip() for feature in feature_names if str(feature).strip()}
+            )
+            normalized = normalized.filter(pl.col("feature").is_in(requested_features))
+        annotations = normalized.collect()
+    except FileNotFoundError as exc:
+        raise OrthogroupAnnotationError(f"Orthogroup annotation file not found: {path}") from exc
+    except OrthogroupAnnotationError:
+        raise
+    except Exception as exc:
+        raise OrthogroupAnnotationError(
+            f"Failed to read orthogroup annotation TSV: {path}"
+        ) from exc
+
+    return (
+        annotations
         .filter(pl.col("feature").is_not_null() & (pl.col("feature") != ""))
         .group_by("feature")
         .agg(

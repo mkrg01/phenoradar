@@ -302,24 +302,11 @@ def _feature_label_annotations_subset(
     if not required.issubset(orthogroup_annotations.columns):
         return orthogroup_annotations
 
-    features = {
-        *[
-            feature.strip()
-            for feature in _top_feature_importance_features(
-                feature_importance,
-                top_features=top_features,
-            )
-            if feature.strip()
-        ],
-        *[
-            feature.strip()
-            for feature in _top_coefficient_features(
-                coefficients,
-                top_features=top_features,
-            )
-            if feature.strip()
-        ],
-    }
+    features = figure_annotation_features(
+        feature_importance=feature_importance,
+        coefficients=coefficients,
+        top_features=top_features,
+    )
     if not features:
         return orthogroup_annotations
     return orthogroup_annotations.select(
@@ -329,7 +316,36 @@ def _feature_label_annotations_subset(
             .cast(pl.String, strict=False)
             .alias("orthogroup_annotation"),
         ]
-    ).filter(pl.col("feature").is_in(sorted(features)))
+    ).filter(pl.col("feature").is_in(features))
+
+
+def figure_annotation_features(
+    *,
+    feature_importance: pl.DataFrame,
+    coefficients: pl.DataFrame,
+    top_features: int,
+) -> list[str]:
+    """Return sorted feature names whose labels can appear in run figures."""
+    return sorted(
+        {
+            *[
+                feature.strip()
+                for feature in _top_feature_importance_features(
+                    feature_importance,
+                    top_features=top_features,
+                )
+                if feature.strip()
+            ],
+            *[
+                feature.strip()
+                for feature in _top_coefficient_features(
+                    coefficients,
+                    top_features=top_features,
+                )
+                if feature.strip()
+            ],
+        }
+    )
 
 
 def _execute_figure_job(
