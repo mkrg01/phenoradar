@@ -398,7 +398,14 @@ def test_run_outer_cv_builds_expression_matrix_once_across_folds(
     split_artifacts = build_split_artifacts(config)
 
     build_calls = 0
+    cache_calls = 0
     original_build_matrix = cv_mod.ExpressionMatrixBuilder.build_matrix
+    original_cache_species = cv_mod.ExpressionMatrixBuilder.cache_species
+
+    def _counting_cache_species(self: object, species_order: list[str]) -> None:
+        nonlocal cache_calls
+        cache_calls += 1
+        original_cache_species(self, species_order)
 
     def _counting_build_matrix(
         self: object, species_order: list[str]
@@ -407,12 +414,42 @@ def test_run_outer_cv_builds_expression_matrix_once_across_folds(
         build_calls += 1
         return original_build_matrix(self, species_order)
 
+    monkeypatch.setattr(cv_mod.ExpressionMatrixBuilder, "cache_species", _counting_cache_species)
     monkeypatch.setattr(cv_mod.ExpressionMatrixBuilder, "build_matrix", _counting_build_matrix)
 
     cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
 
     assert cv_artifacts.oof_predictions.height == 4
+    assert cache_calls == 1
     assert build_calls == 1
+
+
+def test_expression_matrix_builder_coordinate_fill_preserves_pivot_semantics() -> None:
+    long_df = pl.DataFrame(
+        {
+            "__species": ["sp2", "sp1", "sp1", "sp1"],
+            "__feature": ["OG2", "OG1", "OG1", "OG_extra"],
+            "__value": [2.0, 1.0, 3.0, 9.0],
+        }
+    )
+    ordering_df = pl.DataFrame(
+        {
+            "__species": ["sp2", "sp1", "sp2"],
+            "__row_idx": [0, 1, 2],
+        }
+    )
+
+    matrix = ExpressionMatrixBuilder._matrix_from_long_df(
+        long_df,
+        ordering_df,
+        ["OG2", "OG_missing", "OG1"],
+    )
+
+    assert matrix.tolist() == [
+        [2.0, 0.0, 0.0],
+        [0.0, 0.0, 4.0],
+        [2.0, 0.0, 0.0],
+    ]
 
 
 def test_run_outer_cv_with_small_max_pivot_cells_uses_feature_chunking(tmp_path: Path) -> None:
@@ -1168,6 +1205,11 @@ model_selection:
     assert set(candidate_timings.get_column("sample_set_id")) == {0, 1}
     assert set(candidate_timings.get_column("candidate_index")) == {0, 1}
     assert candidate_timings.get_column("fold_id").null_count() == 0
+    inner_preprocessing_timings = cv_artifacts.timing.filter(
+        pl.col("stage") == "inner_cv_preprocessing"
+    )
+    assert inner_preprocessing_timings.height > 0
+    assert set(inner_preprocessing_timings.get_column("sample_set_id")) == {0, 1}
 
 
 def test_outer_cv_selection_can_reuse_first_sample_set(
@@ -2415,6 +2457,81 @@ def test_inner_cv_splits_wraps_value_error_from_splitter(
         )
 
 
+@pytest.mark.parametrize(
+    "method", ["none", "log1p", "sample_rank", "sample_percentile_rank"]
+)
+def test_inner_cv_preprocessing_applies_row_local_expression_transform_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra=f"""
+preprocess:
+  expression_transform:
+    method: {method}
+  sparse_feature_filter:
+    enabled: false
+model_selection:
+  selected_candidate_count: 1
+  inner_cv_strategy: logo
+""".strip(),
+            )
+        ]
+    )
+    original_transform = cv_mod._apply_expression_transform_for_config
+    call_count = 0
+    x_source_raw = np.array(
+        [[0.0, 3.0], [2.0, 1.0], [1.0, 4.0], [3.0, 2.0]],
+        dtype=float,
+    )
+    y_source = np.array([0, 1, 0, 1], dtype=int)
+    groups_source = np.array(["g1", "g1", "g2", "g2"], dtype=str)
+    expected = []
+    for train_idx, valid_idx, _inner_fold_id in cv_mod._inner_cv_splits(
+        config, y_source, groups_source
+    ):
+        expected.append(
+            cv_mod._preprocess_fold(
+                config,
+                x_source_raw[train_idx, :],
+                x_source_raw[valid_idx, :],
+                ["OG1", "OG2"],
+                y_train=y_source[train_idx],
+                groups_train=None,
+            )
+        )
+
+    def _counted_transform(config_arg: object, matrix: np.ndarray) -> np.ndarray:
+        nonlocal call_count
+        call_count += 1
+        return original_transform(config_arg, matrix)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cv_mod, "_apply_expression_transform_for_config", _counted_transform)
+    folds = cv_mod._build_inner_cv_preprocessed_folds(
+        config=config,
+        x_source_raw=x_source_raw,
+        y_source=y_source,
+        groups_source=groups_source,
+        contrast_groups_source=None,
+        feature_names=["OG1", "OG2"],
+    )
+
+    assert len(folds) == 2
+    assert call_count == 1
+    for fold, (expected_train, expected_valid, _expected_features) in zip(
+        folds, expected, strict=True
+    ):
+        np.testing.assert_array_equal(fold.x_train, expected_train)
+        np.testing.assert_array_equal(fold.x_valid, expected_valid)
+
+
 def test_prepare_source_selection_wraps_candidate_generation_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2489,17 +2606,21 @@ model_selection:
         ],
     )
 
-    original_preprocess_fold = cv_mod._preprocess_fold
+    original_preprocess_fold = cv_mod._preprocess_transformed_fold_with_counts
     preprocess_call_count = 0
 
     def _counting_preprocess_fold(
         *args: object, **kwargs: object
-    ) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    ) -> tuple[np.ndarray, np.ndarray, list[str], cv_mod.FeatureFilterCounts]:
         nonlocal preprocess_call_count
         preprocess_call_count += 1
         return original_preprocess_fold(*args, **kwargs)
 
-    monkeypatch.setattr(cv_mod, "_preprocess_fold", _counting_preprocess_fold)
+    monkeypatch.setattr(
+        cv_mod,
+        "_preprocess_transformed_fold_with_counts",
+        _counting_preprocess_fold,
+    )
 
     seen_cache_ids: list[int] = []
 
@@ -3850,6 +3971,40 @@ preprocess:
 
     assert selected.tolist() == [0]
     assert warnings == []
+
+
+def test_pair_aware_filter_breaks_score_ties_by_feature_name(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  pair_aware_filter:
+    enabled: true
+    max_features: 2
+""".strip(),
+            )
+        ]
+    )
+
+    selected = _select_feature_indices(
+        config,
+        np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], dtype=float),
+        ["OG_z", "OG_a", "OG_m"],
+        y_train=np.array([0, 1], dtype=int),
+        groups_train=np.array(["g1", "g1"], dtype=str),
+        warnings=[],
+    )
+
+    assert selected.tolist() == [1, 2]
 
 
 def test_select_feature_indices_pair_aware_filter_uses_available_valid_contrast_pairs(

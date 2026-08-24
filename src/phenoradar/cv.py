@@ -1034,39 +1034,35 @@ class ExpressionMatrixBuilder:
     ) -> np.ndarray:
         if long_df.height == 0:
             return np.zeros((ordering_df.height, len(feature_names)), dtype=float)
-        used_names = set(feature_names)
-        species_key = "__phenoradar_matrix_species"
-        while species_key in used_names:
-            species_key = f"_{species_key}"
-        row_key = "__phenoradar_matrix_row"
-        while row_key in used_names or row_key == species_key:
-            row_key = f"_{row_key}"
-
-        pivot = long_df.select(
-            pl.col("__species").alias(species_key),
-            "__feature",
-            "__value",
-        ).pivot(
-            index=species_key,
-            on="__feature",
-            values="__value",
-            aggregate_function="sum",
+        species_index = (
+            ordering_df.select("__species")
+            .unique(maintain_order=True)
+            .with_row_index("__matrix_row")
         )
-        pivot_columns = set(pivot.columns)
-        missing_features = [feature for feature in feature_names if feature not in pivot_columns]
-        if missing_features:
-            pivot = pivot.with_columns([pl.lit(0.0).alias(feature) for feature in missing_features])
-        internal_ordering = ordering_df.select(
-            pl.col("__species").alias(species_key),
-            pl.col("__row_idx").alias(row_key),
+        feature_index = pl.DataFrame({"__feature": feature_names}).with_row_index(
+            "__matrix_col"
         )
-        ordered = (
-            internal_ordering.join(pivot, on=species_key, how="left")
-            .fill_null(0.0)
-            .sort(row_key)
-            .select(feature_names)
+        coordinates = (
+            long_df.select("__species", "__feature", "__value")
+            .join(species_index, on="__species", how="inner")
+            .join(feature_index, on="__feature", how="inner")
         )
-        return ordered.to_numpy().astype(float, copy=False)
+        matrix = np.zeros((species_index.height, len(feature_names)), dtype=float)
+        np.add.at(
+            matrix,
+            (
+                coordinates.get_column("__matrix_row").to_numpy(),
+                coordinates.get_column("__matrix_col").to_numpy(),
+            ),
+            coordinates.get_column("__value").to_numpy(),
+        )
+        ordered_rows = (
+            ordering_df.join(species_index, on="__species", how="left", validate="m:1")
+            .sort("__row_idx")
+            .get_column("__matrix_row")
+            .to_numpy()
+        )
+        return matrix[ordered_rows, :]
 
     def feature_names_for_species(self, species_order: list[str]) -> list[str]:
         """Return sorted feature names available for the selected species."""
@@ -1279,11 +1275,12 @@ def _apply_pair_aware_filter(
         return selected, None
 
     keep_count = min(int(max_features), int(selected.size))
-    order = sorted(
-        range(selected.size),
-        key=lambda idx: (-score[idx], -abs(effect[idx]), feature_names[selected[idx]]),
+    feature_keys = np.asarray(
+        [feature_names[feature_index] for feature_index in selected],
+        dtype=str,
     )
-    kept_local = np.array(order[:keep_count], dtype=int)
+    order = np.lexsort((feature_keys, -np.abs(effect), -score))
+    kept_local = np.asarray(order[:keep_count], dtype=int)
     kept_global = selected[kept_local]
     kept_priority = score[kept_local]
 
@@ -1457,6 +1454,28 @@ def _preprocess_fold_with_counts(
 ) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts]:
     x_train_expr = _apply_expression_transform_for_config(config, x_train_raw)
     x_valid_expr = _apply_expression_transform_for_config(config, x_valid_raw)
+
+    return _preprocess_transformed_fold_with_counts(
+        config,
+        x_train_expr,
+        x_valid_expr,
+        feature_names,
+        y_train=y_train,
+        groups_train=groups_train,
+        warnings=warnings,
+    )
+
+
+def _preprocess_transformed_fold_with_counts(
+    config: AppConfig,
+    x_train_expr: np.ndarray,
+    x_valid_expr: np.ndarray,
+    feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts]:
+    """Preprocess a fold whose row-local expression transform is already applied."""
 
     selected, counts = _select_feature_indices_with_counts(
         config,
@@ -2041,11 +2060,12 @@ def _build_inner_cv_preprocessed_folds(
 ) -> list[InnerCvPreprocessedFold]:
     def _build() -> list[InnerCvPreprocessedFold]:
         preprocessed_folds: list[InnerCvPreprocessedFold] = []
+        x_source_expr = _apply_expression_transform_for_config(config, x_source_raw)
         for train_idx, valid_idx, inner_fold_id in _inner_cv_splits(
             config, y_source, groups_source
         ):
-            x_train_raw = x_source_raw[train_idx, :]
-            x_valid_raw = x_source_raw[valid_idx, :]
+            x_train_expr = x_source_expr[train_idx, :]
+            x_valid_expr = x_source_expr[valid_idx, :]
             y_train = y_source[train_idx]
             y_valid = y_source[valid_idx]
             groups_train = groups_source[train_idx]
@@ -2053,10 +2073,10 @@ def _build_inner_cv_preprocessed_folds(
                 None if contrast_groups_source is None else contrast_groups_source[train_idx]
             )
 
-            x_train, x_valid, _selected = _preprocess_fold(
+            x_train, x_valid, _selected, _counts = _preprocess_transformed_fold_with_counts(
                 config,
-                x_train_raw,
-                x_valid_raw,
+                x_train_expr,
+                x_valid_expr,
                 feature_names,
                 y_train=y_train,
                 groups_train=contrast_groups_train,
@@ -2232,6 +2252,7 @@ def _prepare_source_selection_tpe(
             f"source_sample_set_id={source_sample_set_id}"
         )
 
+    inner_preprocess_started = None if timing_recorder is None else timing_recorder.start()
     preprocessed_folds = _build_inner_cv_preprocessed_folds(
         config=config,
         x_source_raw=x_source_raw,
@@ -2241,6 +2262,15 @@ def _prepare_source_selection_tpe(
         feature_names=feature_names,
         warnings=warnings,
     )
+    if timing_recorder is not None and inner_preprocess_started is not None:
+        timing_scope, timing_fold_id = _selection_timing_location(training_scope_id)
+        timing_recorder.record_since(
+            inner_preprocess_started,
+            scope=timing_scope,
+            stage="inner_cv_preprocessing",
+            fold_id=timing_fold_id,
+            sample_set_id=source_sample_set_id,
+        )
 
     trial_count = int(config.model_selection.trial_count)
     discrete_values, continuous_values = expanded_search_space(config.model_selection.search_space)
@@ -2432,6 +2462,7 @@ def _prepare_source_selection(
             f"source_sample_set_id={source_sample_set_id}"
         )
 
+    inner_preprocess_started = None if timing_recorder is None else timing_recorder.start()
     preprocessed_folds = _build_inner_cv_preprocessed_folds(
         config=config,
         x_source_raw=x_source_raw,
@@ -2441,6 +2472,15 @@ def _prepare_source_selection(
         feature_names=feature_names,
         warnings=warnings,
     )
+    if timing_recorder is not None and inner_preprocess_started is not None:
+        timing_scope, timing_fold_id = _selection_timing_location(training_scope_id)
+        timing_recorder.record_since(
+            inner_preprocess_started,
+            scope=timing_scope,
+            stage="inner_cv_preprocessing",
+            fold_id=timing_fold_id,
+            sample_set_id=source_sample_set_id,
+        )
 
     worker_count, estimator_n_jobs = _selection_parallel_plan(config, available)
     scored: list[SelectedCandidate] = []
@@ -2626,6 +2666,11 @@ def _build_outer_cv_matrix_cache(
         raise CVError("No species available for outer CV train/validation pool")
 
     matrix_builder = ExpressionMatrixBuilder(config)
+    _with_native_thread_limit_for_config(
+        config,
+        matrix_builder.cache_species,
+        species_order,
+    )
     matrix, feature_names = _with_native_thread_limit_for_config(
         config,
         matrix_builder.build_matrix,

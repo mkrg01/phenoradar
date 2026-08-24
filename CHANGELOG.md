@@ -17,6 +17,13 @@
 * preserve the complete pre-transform feature schema in model bundles so sample-rank predictions
   are invariant to unrelated input features
 
+### Performance
+
+* reuse row-local expression transforms across inner-CV folds and vectorize pair-aware feature
+  ordering; expose inner-CV preprocessing as a dedicated timing stage
+* scan and normalize outer-CV expression rows once through a temporary Parquet cache, then build
+  dense matrices by integer-coordinate accumulation instead of a wide dataframe pivot
+
 ## [0.4.0](https://github.com/mkrg01/phenoradar/compare/v0.3.0...v0.4.0) (2026-05-19)
 
 

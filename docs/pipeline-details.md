@@ -94,7 +94,12 @@ Outer folds can execute in parallel (up to `runtime.n_jobs`) with per-fold CPU b
 
 Before fold execution:
 
-- build one shared species x feature matrix from long TPM table for all outer-CV train/validation species.
+- scan and normalize the long TPM rows for all outer-CV train/validation
+  species once into a temporary Parquet cache;
+- build one shared species x feature matrix by mapping the cached long rows to
+  integer coordinates and accumulating values into a zero-filled NumPy array;
+- retain `preprocess.max_pivot_cells` as the dense-cell limit used to split
+  oversized matrices into feature chunks.
 
 For each outer fold:
 
@@ -167,8 +172,13 @@ After all folds:
 - Top-level rows cover config, provenance, split construction, outer CV,
   optional group bootstrap/final refit, artifact writing, and figures.
 - Nested rows cover outer-CV matrix construction, individual folds,
-  sample-set preprocessing, selected-model fitting/prediction, and inner-CV
-  candidate scoring. Final refit uses the same sample/candidate identifiers.
+  sample-set preprocessing, inner-CV preprocessing, selected-model
+  fitting/prediction, and inner-CV candidate scoring. Final refit uses the same
+  sample/candidate identifiers.
+- Supported expression transforms are row-local. During model selection, each
+  sampled source matrix is therefore transformed once before its inner-CV rows
+  are sliced; train-fitted feature filtering and scaling still run separately
+  inside every inner fold to prevent leakage.
 - Start/end offsets make concurrent intervals explicit. Nested or parallel
   durations are diagnostic measurements and are not expected to sum to the
   top-level wall-clock duration.

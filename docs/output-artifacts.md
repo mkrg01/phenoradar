@@ -298,6 +298,9 @@ when individual folds are single-label.
 - Use `stage=total` rows for outer-CV, final-refit, and per-fold wall-clock
   comparisons. Use the finer rows to locate the expensive preprocessing,
   candidate scoring, fitting, or prediction path.
+- `stage=inner_cv_preprocessing` measures creation of the train-only
+  preprocessed inner-fold cache before candidate scoring. It appears once per
+  outer fold and source sample set when model selection is active.
 
 ### Core run artifact interpretation
 
