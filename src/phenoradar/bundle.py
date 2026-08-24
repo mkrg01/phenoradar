@@ -26,6 +26,11 @@ from phenoradar.cv import (
     apply_expression_transform,
     apply_feature_scaling,
 )
+from phenoradar.metrics import (
+    FIXED_PROBABILITY_THRESHOLD_DERIVED_FROM_CV,
+    FIXED_PROBABILITY_THRESHOLD_NAME,
+    FIXED_PROBABILITY_THRESHOLD_POLICY,
+)
 
 BUNDLE_FORMAT_VERSION = "1"
 _BUNDLE_DIRNAME = "model_bundle"
@@ -327,7 +332,7 @@ def export_model_bundle(
             continue
         files_info[filename] = _file_info(bundle_dir / filename)
 
-    threshold_fixed = _threshold_value(thresholds, "fixed_probability_threshold")
+    threshold_fixed = _threshold_value(thresholds, FIXED_PROBABILITY_THRESHOLD_NAME)
     manifest_base = {
         "bundle_format_version": BUNDLE_FORMAT_VERSION,
         "source_run_dir": str(run_dir),
@@ -340,6 +345,9 @@ def export_model_bundle(
         "ensemble_size": final_refit_artifacts.ensemble_size,
         "ensemble_probability_aggregation": config.ensemble.probability_aggregation,
         "threshold_fixed": threshold_fixed,
+        "threshold_name": FIXED_PROBABILITY_THRESHOLD_NAME,
+        "threshold_policy": FIXED_PROBABILITY_THRESHOLD_POLICY,
+        "threshold_derived_from_cv": FIXED_PROBABILITY_THRESHOLD_DERIVED_FROM_CV,
         "python_version": platform.python_version(),
         "library_versions": {
             "polars": package_version("polars"),
@@ -526,7 +534,7 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
             )
 
     thresholds = pl.read_csv(bundle_dir / "thresholds.tsv", separator="\t")
-    threshold_fixed = _threshold_value(thresholds, "fixed_probability_threshold")
+    threshold_fixed = _threshold_value(thresholds, FIXED_PROBABILITY_THRESHOLD_NAME)
 
     source_run_id_raw = manifest.get("source_run_id")
     source_run_id = str(source_run_id_raw) if source_run_id_raw is not None else "unknown"

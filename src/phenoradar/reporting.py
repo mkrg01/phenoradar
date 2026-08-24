@@ -12,7 +12,7 @@ import polars as pl
 import yaml
 
 from phenoradar.figures import FigureError, write_report_figures
-from phenoradar.metrics import metric_direction, metric_sort_value
+from phenoradar.metrics import metric_contract, metric_direction, metric_sort_value
 
 PrimaryMetric = Literal["mcc", "balanced_accuracy", "roc_auc", "pr_auc", "brier"]
 AggregateScope = Literal["macro", "micro"]
@@ -163,6 +163,48 @@ def _fingerprint_schema_version_or_none(value: Any) -> int | None:
     return int(value)
 
 
+def _run_metric_contract_or_none(
+    metadata: dict[str, Any], metric_name: str
+) -> dict[str, Any] | None:
+    evaluation_contract = metadata.get("evaluation_contract")
+    if not isinstance(evaluation_contract, dict):
+        return None
+    metric_registry = evaluation_contract.get("metric_contract")
+    if not isinstance(metric_registry, dict):
+        return None
+    version = metric_registry.get("metric_contract_version")
+    metrics = metric_registry.get("metrics")
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version < 1
+        or not isinstance(metrics, dict)
+    ):
+        return None
+    contract = metrics.get(metric_name)
+    if not isinstance(contract, dict):
+        return None
+    display_name = contract.get("display_name")
+    implementation = contract.get("implementation")
+    threshold_name = contract.get("threshold_name")
+    threshold_value = contract.get("threshold_value")
+    if not isinstance(display_name, str) or not isinstance(implementation, str):
+        return None
+    if threshold_name is not None and not isinstance(threshold_name, str):
+        return None
+    if isinstance(threshold_value, bool) or (
+        threshold_value is not None and not isinstance(threshold_value, (int, float))
+    ):
+        return None
+    return {
+        "metric_contract_version": version,
+        "display_name": display_name,
+        "implementation": implementation,
+        "threshold_name": threshold_name,
+        "threshold_value": None if threshold_value is None else float(threshold_value),
+    }
+
+
 def _validate_experiment_compatibility(
     *,
     run_rows: list[dict[str, Any]],
@@ -251,6 +293,7 @@ def _write_narrative(
     selected_run_count: int,
     ranked_run_count: int,
 ) -> None:
+    primary_contract = metric_contract(options.primary_metric)
     direction_label = (
         "higher is better"
         if metric_direction(options.primary_metric) == "maximize"
@@ -260,6 +303,8 @@ def _write_narrative(
         text = (
             "# PhenoRadar Report\n\n"
             f"- Primary metric: `{options.primary_metric}` ({options.aggregate_scope})\n"
+            f"- Metric definition: `{primary_contract['display_name']}` via "
+            f"`{primary_contract['implementation']}`\n"
             f"- Metric direction: `{direction_label}`\n"
             f"- Selected runs: `{selected_run_count}`\n"
             f"- Ranked runs: `{ranked_run_count}`\n"
@@ -272,6 +317,8 @@ def _write_narrative(
             "<h1>PhenoRadar Report</h1>\n"
             f"<p>Primary metric: <code>{options.primary_metric}</code> "
             f"({options.aggregate_scope})</p>\n"
+            f"<p>Metric definition: <code>{primary_contract['display_name']}</code> via "
+            f"<code>{primary_contract['implementation']}</code></p>\n"
             f"<p>Metric direction: <code>{direction_label}</code></p>\n"
             f"<p>Selected runs: <code>{selected_run_count}</code></p>\n"
             f"<p>Ranked runs: <code>{ranked_run_count}</code></p>\n"
@@ -296,6 +343,7 @@ def generate_report(
         run_glob=run_glob,
         latest=latest,
     )
+    primary_contract = metric_contract(options.primary_metric)
 
     output_dir.mkdir(parents=True, exist_ok=False)
 
@@ -400,6 +448,7 @@ def generate_report(
         dataset_sha256 = _fingerprint_or_none(metadata.get("dataset_fingerprint"))
         split_sha256 = _fingerprint_or_none(metadata.get("split_fingerprint"))
         experiment_sha256 = _fingerprint_or_none(metadata.get("experiment_fingerprint"))
+        run_primary_contract = _run_metric_contract_or_none(metadata, options.primary_metric)
 
         metric_value: float | None = None
         metrics_path = _run_metrics_path(run_dir)
@@ -432,6 +481,20 @@ def generate_report(
                 message=message,
             )
 
+        if metric_value is not None and run_primary_contract is None:
+            message = (
+                f"Missing or invalid evaluation contract for metric {options.primary_metric}"
+            )
+            if options.strict:
+                raise ReportError(f"{run_id}: {message}")
+            _record_warning(
+                warning_rows,
+                run_id=run_id,
+                run_dir=run_dir,
+                warning_type="missing_metric_contract",
+                message=message,
+            )
+
         raw_warnings = metadata.get("warnings")
         if isinstance(raw_warnings, list):
             for item in raw_warnings:
@@ -454,6 +517,29 @@ def generate_report(
                 "end_time": end_time,
                 "duration_sec": duration_sec,
                 "primary_metric": options.primary_metric,
+                "metric_contract_version": (
+                    None
+                    if run_primary_contract is None
+                    else run_primary_contract["metric_contract_version"]
+                ),
+                "metric_display_name": (
+                    None if run_primary_contract is None else run_primary_contract["display_name"]
+                ),
+                "metric_implementation": (
+                    None
+                    if run_primary_contract is None
+                    else run_primary_contract["implementation"]
+                ),
+                "metric_threshold_name": (
+                    None
+                    if run_primary_contract is None
+                    else run_primary_contract["threshold_name"]
+                ),
+                "metric_threshold_value": (
+                    None
+                    if run_primary_contract is None
+                    else run_primary_contract["threshold_value"]
+                ),
                 "aggregate_scope": options.aggregate_scope,
                 "metric_value": metric_value,
                 "fingerprint_schema_version": fingerprint_schema_version,
@@ -470,6 +556,31 @@ def generate_report(
                     "execution_stage": stage,
                     "start_time": start_time,
                     "metric_name": options.primary_metric,
+                    "metric_contract_version": (
+                        None
+                        if run_primary_contract is None
+                        else run_primary_contract["metric_contract_version"]
+                    ),
+                    "metric_display_name": (
+                        None
+                        if run_primary_contract is None
+                        else run_primary_contract["display_name"]
+                    ),
+                    "metric_implementation": (
+                        None
+                        if run_primary_contract is None
+                        else run_primary_contract["implementation"]
+                    ),
+                    "metric_threshold_name": (
+                        None
+                        if run_primary_contract is None
+                        else run_primary_contract["threshold_name"]
+                    ),
+                    "metric_threshold_value": (
+                        None
+                        if run_primary_contract is None
+                        else run_primary_contract["threshold_value"]
+                    ),
                     "aggregate_scope": options.aggregate_scope,
                     "metric_value": metric_value,
                     "fingerprint_schema_version": fingerprint_schema_version,
@@ -516,6 +627,11 @@ def generate_report(
                 "end_time": pl.String,
                 "duration_sec": pl.Float64,
                 "primary_metric": pl.String,
+                "metric_contract_version": pl.Int64,
+                "metric_display_name": pl.String,
+                "metric_implementation": pl.String,
+                "metric_threshold_name": pl.String,
+                "metric_threshold_value": pl.Float64,
                 "aggregate_scope": pl.String,
                 "metric_value": pl.Float64,
                 "fingerprint_schema_version": pl.Int64,
@@ -536,6 +652,11 @@ def generate_report(
                 "execution_stage": pl.String,
                 "start_time": pl.String,
                 "metric_name": pl.String,
+                "metric_contract_version": pl.Int64,
+                "metric_display_name": pl.String,
+                "metric_implementation": pl.String,
+                "metric_threshold_name": pl.String,
+                "metric_threshold_value": pl.Float64,
                 "aggregate_scope": pl.String,
                 "metric_value": pl.Float64,
                 "fingerprint_schema_version": pl.Int64,
@@ -565,6 +686,10 @@ def generate_report(
     manifest = {
         "report_options": {
             "primary_metric": options.primary_metric,
+            "metric_display_name": primary_contract["display_name"],
+            "metric_implementation": primary_contract["implementation"],
+            "metric_threshold_name": primary_contract["threshold_name"],
+            "metric_threshold_value": primary_contract["threshold_value"],
             "metric_direction": metric_direction(options.primary_metric),
             "aggregate_scope": options.aggregate_scope,
             "include_stage": options.include_stage,

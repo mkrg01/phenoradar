@@ -9,7 +9,8 @@ For one `run` result directory, a practical order is:
 
 1. `run_metadata.json` (status, warnings, pool counts, timing)
 2. `cv/tables/metrics_cv.tsv`, `cv/tables/loss_by_split_cv.tsv`,
-   `model/tables/thresholds.tsv`, and `summary/tables/classification_summary.tsv`
+   `model/tables/evaluation_contract.tsv`, `model/tables/thresholds.tsv`, and
+   `summary/tables/classification_summary.tsv`
    (overall quality, train/validation loss gap, thresholds, and threshold-wise classification tradeoffs)
 3. `cv/tables/prediction_cv.tsv`, `cv/figures/roc_curve_cv.svg`, and
    `cv/figures/pr_curve_cv.svg`
@@ -62,8 +63,13 @@ Always written:
   - current `split` values: `train`, `validation`
   - current `metric` value: `log_loss`
 - `model/tables/thresholds.tsv`
-  - columns: `threshold_name`, `threshold_value`, `source`, `selection_metric`, `selection_scope`
+  - columns: `threshold_name`, `threshold_value`, `source`, `policy`,
+    `derived_from_cv`, `selection_metric`, `selection_scope`
   - threshold names: `fixed_probability_threshold`
+- `model/tables/evaluation_contract.tsv`
+  - one row per metric key with its display name, exact implementation, optimization
+    direction, input type, threshold dependency, and compatibility note
+  - `pr_auc` is explicitly mapped to `sklearn.metrics.average_precision_score`
 - `cv/tables/feature_importance.tsv`
   - columns: `feature`, `importance_mean`, `importance_std`, `n_models`, `n_folds`, `method`
 - `cv/tables/feature_importance_by_fold.tsv`
@@ -136,6 +142,8 @@ Always written:
   - provenance and execution metadata (`status`, timings, seed policy, git/runtime snapshot, warnings)
   - comparison identity: `fingerprint_schema_version`, `dataset_fingerprint`,
     `split_fingerprint`, `experiment_fingerprint`, and `evaluation_contract`
+  - `evaluation_contract.metric_contract` records exact metric implementations and the
+    fixed, non-CV-derived classification threshold policy
   - `dataset_fingerprint` hashes metadata/TPM contents by semantic role (not their paths)
   - `split_fingerprint` hashes realized species pool/fold/group/label assignments
 - stage-specific `figures/` directories
@@ -213,7 +221,7 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 | metric | better direction | threshold dependent | interpretation note |
 | --- | --- | --- | --- |
 | `roc_auc` | higher | no | Ranking quality across all thresholds. |
-| `pr_auc` | higher | no | Useful under class imbalance; focuses on positive class retrieval. |
+| `pr_auc` | higher | no | Compatibility key for Average Precision (`sklearn.metrics.average_precision_score`), not trapezoidal PR-curve area. |
 | `balanced_accuracy` | higher | yes | Mean of sensitivity and specificity at fixed threshold. |
 | `mcc` | higher | yes | Correlation-like binary metric; robust under imbalance. |
 | `brier` | lower | no | Probability calibration error (squared). |
@@ -255,11 +263,21 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - In `logo`, this is the held-out group for each fold.
 - In `group_kfold`, multiple validation groups can map to the same fold.
 
+#### `evaluation_contract.tsv`
+
+- Machine-readable registry for every metric emitted or used for model selection.
+- `implementation` names the exact scikit-learn function used.
+- `input_type=predicted_label` metrics use the named fixed threshold; probability metrics
+  are threshold-independent.
+- The legacy-compatible key `pr_auc` has `display_name=Average Precision` and
+  `implementation=sklearn.metrics.average_precision_score`.
+
 #### `thresholds.tsv`
 
 - `fixed_probability_threshold`:
   - Constant probability threshold `0.5`.
   - Used for `pred_label_fixed_threshold` and threshold-dependent metrics in CV.
+- `policy` is `fixed_constant` and `derived_from_cv` is `false`.
 - `selection_scope` is `NA` because the threshold is fixed rather than selected from CV.
 
 #### `loss_by_split_cv.tsv`
@@ -303,7 +321,7 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
   `group_id`, `group_name`, `fold_id`.
 - `group_id` is the `split.group_col` value. `group_name` is populated when a matching
   name column is available, such as `family_name` for `family_id`.
-- `pred_label` uses the CV-derived threshold when available.
+- `pred_label` uses the fixed threshold recorded in `thresholds.tsv` (currently `0.5`).
 
 #### `tree_contrast_pairs_annotation.tsv` (optional)
 
@@ -519,6 +537,8 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - `cv/figures/pr_curve_cv.svg`
   - Pooled OOF precision-recall curve.
   - Curve summarizes all folds together (not per-fold overlays).
+  - The title reports Average Precision, matching the implementation behind the
+    compatibility metric key `pr_auc`.
 - `cv/figures/feature_importance_top.svg`
   - Top `figures.top_features` features by mean fold-level `importance_mean`.
   - Horizontal boxplot plus fold-level points.
@@ -645,26 +665,33 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - `inference/figures/tree_prediction_predict.svg` (optional)
   - Written when `data.tree_path` is set and Toytree is available.
   - Tree view with aligned tracks for true label when known, probability,
-    CV-threshold prediction, uncertainty, and group when available.
+    fixed-threshold prediction, uncertainty, and group when available.
 
 ## `report` artifacts (schemas and interpretation)
 
 - `report_manifest.json`
   - selected runs, options, skipped runs, ranked count
   - `report_options.metric_direction` is `maximize` or `minimize`
+  - `report_options` also records the metric display name, implementation, and any
+    fixed-threshold dependency
   - `experiment_compatibility` records verification status, fingerprints, unknown legacy
     runs, and whether mixed comparison was explicitly enabled
 - `report_runs.tsv`
   - one row per included run after selection/filtering
   - columns: `run_id`, `run_dir`, `command`, `execution_stage`, `status`, `start_time`,
-    `end_time`, `duration_sec`, `primary_metric`, `aggregate_scope`, `metric_value`,
+    `end_time`, `duration_sec`, `primary_metric`, `metric_contract_version`,
+    `metric_display_name`,
+    `metric_implementation`, `metric_threshold_name`, `metric_threshold_value`,
+    `aggregate_scope`, `metric_value`,
     `fingerprint_schema_version`, `dataset_fingerprint`, `split_fingerprint`,
     `experiment_fingerprint`
   - `metric_value` can be `NA` (for example missing/invalid metrics in non-strict mode)
+  - metric-definition columns are `NA` for legacy runs whose calculation contract cannot
+    be verified; they are never inferred from the currently installed version
 - `report_ranking.tsv`
   - ranked runs with non-null metric
   - columns: `run_id`, `run_dir`, `execution_stage`, `start_time`, `metric_name`,
-    `aggregate_scope`, `metric_value`, fingerprint columns, `rank`
+    metric-definition columns, `aggregate_scope`, `metric_value`, fingerprint columns, `rank`
   - `rank` follows the selected metric's documented better direction: descending for
     `mcc`, `balanced_accuracy`, `roc_auc`, and `pr_auc`; ascending for `brier`
   - ties are ordered by `start_time`, then `run_id`, both ascending
@@ -693,6 +720,8 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 Files:
 
 - `bundle_manifest.json`
+  - records `threshold_name`, `threshold_fixed`, `threshold_policy`, and
+    `threshold_derived_from_cv=false`
 - `feature_schema.tsv`
 - `preprocess_state.joblib`
   - contains bundle feature schema plus preprocessing method metadata

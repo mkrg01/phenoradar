@@ -8,6 +8,7 @@ import pytest
 
 import phenoradar.reporting as reporting_mod
 from phenoradar.figures import FigureError
+from phenoradar.metrics import evaluation_metric_contract
 from phenoradar.reporting import PrimaryMetric, ReportError, ReportOptions, generate_report
 
 
@@ -39,6 +40,9 @@ def _write_run_dir(
         "end_time": start_time,
         "duration_sec": 1.0,
         "warnings": [],
+        "evaluation_contract": {
+            "metric_contract": evaluation_metric_contract(),
+        },
     }
     if experiment_fingerprint_value is not None:
         metadata.update(
@@ -305,6 +309,46 @@ def test_generate_report_ranking_tie_breaks_by_start_time_then_run_id(
     assert ranking.select("rank").to_series().to_list() == [1, 2, 3]
 
 
+def test_generate_report_records_average_precision_definition_for_pr_auc(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    _write_run_dir(
+        runs_root,
+        run_id="20260101T000001Z_run_pr",
+        stage="full_run",
+        start_time="2026-01-01T00:00:00+00:00",
+        metric_value=0.7,
+        metric_name="pr_auc",
+    )
+    out_dir = tmp_path / "report_out"
+
+    generate_report(
+        run_dirs=[],
+        runs_root=runs_root,
+        run_glob="*",
+        latest=None,
+        options=_options(primary_metric="pr_auc"),
+        output_dir=out_dir,
+    )
+
+    ranking = pl.read_csv(out_dir / "report_ranking.tsv", separator="\t")
+    row = ranking.row(0, named=True)
+    assert row["metric_display_name"] == "Average Precision"
+    assert row["metric_implementation"] == "sklearn.metrics.average_precision_score"
+    assert row["metric_threshold_name"] is None
+    manifest = json.loads((out_dir / "report_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["report_options"]["metric_display_name"] == "Average Precision"
+    assert (
+        manifest["report_options"]["metric_implementation"]
+        == "sklearn.metrics.average_precision_score"
+    )
+    figure_text = (out_dir / "figures" / "report_metric_ranking.svg").read_text(
+        encoding="utf-8"
+    )
+    assert "Average Precision [pr_auc]" in figure_text
+
+
 def test_generate_report_rejects_mixed_experiment_fingerprints_by_default(
     tmp_path: Path,
 ) -> None:
@@ -412,6 +456,48 @@ def test_generate_report_legacy_fingerprint_policy_depends_on_strict_mode(
     assert manifest["experiment_compatibility"]["status"] == "legacy_unverified"
 
     with pytest.raises(ReportError, match="missing or invalid experiment fingerprint"):
+        generate_report(
+            run_dirs=[],
+            runs_root=runs_root,
+            run_glob="*",
+            latest=None,
+            options=_options(strict=True),
+            output_dir=tmp_path / "report_strict",
+        )
+
+
+def test_generate_report_does_not_infer_missing_run_metric_contract(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = _write_run_dir(
+        runs_root,
+        run_id="20260101T000001Z_run_old_contract",
+        stage="full_run",
+        start_time="2026-01-01T00:00:00+00:00",
+        metric_value=0.7,
+    )
+    metadata_path = run_dir / "run_metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.pop("evaluation_contract")
+    _write(metadata_path, json.dumps(metadata, sort_keys=True, indent=2) + "\n")
+    non_strict_out = tmp_path / "report_non_strict"
+
+    generate_report(
+        run_dirs=[],
+        runs_root=runs_root,
+        run_glob="*",
+        latest=None,
+        options=_options(strict=False),
+        output_dir=non_strict_out,
+    )
+
+    warnings = pl.read_csv(non_strict_out / "report_warnings.tsv", separator="\t")
+    assert warnings.filter(pl.col("warning_type") == "missing_metric_contract").height == 1
+    report_runs = pl.read_csv(non_strict_out / "report_runs.tsv", separator="\t")
+    assert report_runs.row(0, named=True)["metric_implementation"] is None
+
+    with pytest.raises(ReportError, match="Missing or invalid evaluation contract"):
         generate_report(
             run_dirs=[],
             runs_root=runs_root,
@@ -884,6 +970,9 @@ def test_generate_report_collects_run_warning_entries_from_metadata(tmp_path: Pa
                 "dataset_fingerprint": "a" * 64,
                 "split_fingerprint": "b" * 64,
                 "experiment_fingerprint": "c" * 64,
+                "evaluation_contract": {
+                    "metric_contract": evaluation_metric_contract(),
+                },
             },
             ensure_ascii=True,
         )

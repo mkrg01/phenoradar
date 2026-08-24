@@ -15,6 +15,8 @@ import matplotlib
 import matplotlib.colors
 import polars as pl
 
+from phenoradar.metrics import FIXED_PROBABILITY_THRESHOLD_NAME
+
 
 class TreePredictionError(ValueError):
     """Raised when tree prediction artifacts cannot be generated."""
@@ -907,9 +909,13 @@ def _require_columns(frame: pl.DataFrame, required: set[str], context: str) -> N
 
 def _fixed_probability_threshold(thresholds: pl.DataFrame) -> float:
     _require_columns(thresholds, {"threshold_name", "threshold_value"}, "thresholds.tsv")
-    row = thresholds.filter(pl.col("threshold_name") == "fixed_probability_threshold")
+    row = thresholds.filter(
+        pl.col("threshold_name") == FIXED_PROBABILITY_THRESHOLD_NAME
+    )
     if row.height == 0:
-        raise TreePredictionError("thresholds.tsv must contain fixed_probability_threshold")
+        raise TreePredictionError(
+            f"thresholds.tsv must contain {FIXED_PROBABILITY_THRESHOLD_NAME}"
+        )
     raw = row.select("threshold_value").to_series().to_list()[0]
     if raw is None:
         raise TreePredictionError("Selected threshold_value is null")

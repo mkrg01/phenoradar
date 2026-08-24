@@ -9,7 +9,7 @@ This page explains execution flow for `run`, `predict`, and `report`.
 1. Resolve and validate config.
 2. Build split manifest from metadata + expression coverage.
 3. Run outer CV (training + validation predictions + metrics).
-4. Derive CV threshold from OOF predictions.
+4. Record the fixed probability-threshold contract (`0.5`); it is not derived from OOF data.
 5. If `full_run`, refit on train+validation and predict external/inference.
 6. Write artifacts, figures, metadata, and optional model bundle.
 
@@ -216,7 +216,10 @@ Per-run ingestion:
 - in non-strict mode, missing/invalid `cv/tables/metrics_cv.tsv` records warnings and can leave runs included but unranked.
 - applies stage filter (`--include-stage`).
 - verifies that metric-bearing runs share one experiment fingerprint.
-- legacy runs without fingerprints are warned in non-strict mode and rejected in `--strict`.
+- reads each run's persisted metric contract rather than inferring its implementation from
+  the currently installed version.
+- legacy runs without fingerprints or metric contracts are warned in non-strict mode and
+  rejected in `--strict`.
 
 Ranking:
 

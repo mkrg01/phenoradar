@@ -209,6 +209,10 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
     assert "bundle_manifest.json" in manifest["files"]
     assert isinstance(manifest["files"]["bundle_manifest.json"]["sha256"], str)
     assert isinstance(manifest["files"]["bundle_manifest.json"]["size"], int)
+    assert manifest["threshold_name"] == "fixed_probability_threshold"
+    assert manifest["threshold_fixed"] == pytest.approx(0.5)
+    assert manifest["threshold_policy"] == "fixed_constant"
+    assert manifest["threshold_derived_from_cv"] is False
 
     assert pred_df.get_column("species").to_list() == refit_pred_df.get_column("species").to_list()
     np.testing.assert_allclose(

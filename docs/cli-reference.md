@@ -65,6 +65,7 @@ Always written:
 - `cv/tables/coefficients_by_fold.tsv`
 - `cv/tables/prediction_cv.tsv`
 - `model/tables/thresholds.tsv`
+- `model/tables/evaluation_contract.tsv`
 - `model/tables/feature_filter_counts.tsv`
 - `model/tables/feature_filter_counts_summary.tsv`
 - `model/tables/retained_features.tsv`
@@ -268,6 +269,8 @@ Selection options:
 Ranking options:
 
 - `--primary-metric`: `mcc|balanced_accuracy|roc_auc|pr_auc|brier`
+  - `pr_auc` is the compatibility key for Average Precision computed by
+    `sklearn.metrics.average_precision_score`
   - ranking is descending for `mcc`, `balanced_accuracy`, `roc_auc`, and `pr_auc`, and
     ascending for `brier`
 - `--aggregate-scope`: `macro|micro`
@@ -293,4 +296,6 @@ Outputs:
 By default, ranked runs must share one experiment fingerprint. The fingerprint is based on
 the metadata/TPM file contents, the realized split manifest, and the evaluation contract;
 file paths and model hyperparameters are excluded. Legacy runs without fingerprints remain
-reportable in non-strict mode with warnings, while `--strict` rejects them.
+reportable in non-strict mode with warnings, while `--strict` rejects them. Report metric
+definitions are read from each run's persisted contract, so missing legacy definitions are
+left unknown rather than inferred from the installed version.

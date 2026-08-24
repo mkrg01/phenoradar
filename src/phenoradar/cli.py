@@ -44,6 +44,11 @@ from phenoradar.metadata import (
     build_species_taxid_tsv,
     fetch_ncbi_tree,
 )
+from phenoradar.metrics import (
+    FIXED_PROBABILITY_THRESHOLD_NAME,
+    evaluation_metric_contract,
+    evaluation_metric_contract_rows,
+)
 from phenoradar.orthogroup_annotation import (
     OrthogroupAnnotationError,
     load_orthogroup_annotations,
@@ -112,9 +117,9 @@ def _build_run_fingerprint_metadata(
     evaluation_contract = {
         "evaluation_contract_version": _EVALUATION_CONTRACT_VERSION,
         "label_unit": "species",
-        "classification_threshold_policy": "fixed_probability_threshold=0.5",
         "trait_col": config.data.trait_col,
         "group_col": config.split.group_col,
+        "metric_contract": evaluation_metric_contract(),
     }
     experiment_sha256 = experiment_fingerprint(
         dataset_sha256=dataset_sha256,
@@ -602,7 +607,7 @@ def _threshold_lookup(thresholds: pl.DataFrame) -> dict[str, float]:
         if raw_value is None:
             continue
         values[name] = float(raw_value)
-    for required_name in ("fixed_probability_threshold",):
+    for required_name in (FIXED_PROBABILITY_THRESHOLD_NAME,):
         if required_name not in values:
             raise typer.BadParameter(f"{required_name} was not found in thresholds table")
     return values
@@ -894,6 +899,12 @@ def run(
     )
     cv_artifacts.thresholds.write_csv(
         model_tables_dir / "thresholds.tsv", separator="\t", float_precision=8, null_value="NA"
+    )
+    pl.DataFrame(evaluation_metric_contract_rows()).sort("metric_name").write_csv(
+        model_tables_dir / "evaluation_contract.tsv",
+        separator="\t",
+        float_precision=8,
+        null_value="NA",
     )
     cv_artifacts.feature_importance.write_csv(
         cv_tables_dir / "feature_importance.tsv", separator="\t", float_precision=8, null_value="NA"

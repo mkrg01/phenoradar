@@ -131,6 +131,7 @@ Core outputs include:
 - `cv/tables/coefficients_by_fold.tsv`
 - `cv/tables/prediction_cv.tsv`
 - `model/tables/thresholds.tsv`
+- `model/tables/evaluation_contract.tsv`
 - `summary/tables/classification_summary.tsv`
 - `run_metadata.json`
 - `cv/figures/`

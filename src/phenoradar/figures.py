@@ -25,7 +25,11 @@ from sklearn.metrics import (
 )
 
 from phenoradar.group_summary import GroupSummaryError, finite_group_probabilities
-from phenoradar.metrics import metric_direction, metric_higher_is_better
+from phenoradar.metrics import (
+    FIXED_PROBABILITY_THRESHOLD_NAME,
+    metric_direction,
+    metric_higher_is_better,
+)
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
@@ -2252,7 +2256,7 @@ def _pr_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     # Keep sklearn's threshold order; sorting recall can reorder tied-recall steps.
     recall_plot = np.asarray(recall, dtype=float)
     precision_plot = np.asarray(precision, dtype=float)
-    pr_auc = float(average_precision_score(y_true, prob))
+    average_precision = float(average_precision_score(y_true, prob))
     prevalence = float(np.mean(y_true))
 
     fig, ax = plt.subplots(
@@ -2277,7 +2281,7 @@ def _pr_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     ax.grid(color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
     ax.set_title(
-        f"PR AUC={pr_auc:.6f}, positive_rate={prevalence:.6f}",
+        f"Average Precision={average_precision:.6f}, positive_rate={prevalence:.6f}",
         fontsize=_LABEL_FONTSIZE,
     )
 
@@ -2592,7 +2596,9 @@ def _cv_external_metric_comparison(
             "cv_external_metric_comparison.svg"
         )
 
-    fixed_threshold = data.filter(pl.col("__threshold_name") == "fixed_probability_threshold")
+    fixed_threshold = data.filter(
+        pl.col("__threshold_name") == FIXED_PROBABILITY_THRESHOLD_NAME
+    )
     if fixed_threshold.height > 0:
         data = fixed_threshold
     else:
@@ -2753,10 +2759,26 @@ def _single_report_metric_name(
     return metric_name
 
 
-def _report_metric_axis_label(metric_name: str) -> str:
+def _report_metric_axis_label(
+    metric_name: str, metric_display_name: str | None = None
+) -> str:
     direction = metric_direction(metric_name)
     direction_label = "higher is better" if direction == "maximize" else "lower is better"
-    return f"{metric_name} ({direction_label})"
+    metric_label = (
+        metric_name
+        if metric_display_name is None
+        else f"{metric_display_name} [{metric_name}]"
+    )
+    return f"{metric_label} ({direction_label})"
+
+
+def _report_metric_display_name(frame: pl.DataFrame) -> str | None:
+    if "metric_display_name" not in frame.columns:
+        return None
+    values = frame.select("metric_display_name").drop_nulls().unique().to_series().to_list()
+    if len(values) != 1:
+        return None
+    return str(values[0])
 
 
 def _report_metric_ranking(report_ranking: pl.DataFrame, out_path: Path) -> None:
@@ -2800,7 +2822,7 @@ def _report_metric_ranking(report_ranking: pl.DataFrame, out_path: Path) -> None
             fontsize_px=_MONO_FONTSIZE,
         ),
         right_margin=0.96,
-        x_label=_report_metric_axis_label(metric_name),
+        x_label=_report_metric_axis_label(metric_name, _report_metric_display_name(top)),
         y_tick_fontsize=_MONO_FONTSIZE,
     )
 
@@ -2861,7 +2883,9 @@ def _report_metric_comparison(report_runs: pl.DataFrame, out_path: Path) -> None
             fontsize_px=_MONO_FONTSIZE,
         ),
         right_margin=0.96,
-        x_label=_report_metric_axis_label(metric_name),
+        x_label=_report_metric_axis_label(
+            metric_name, _report_metric_display_name(comparable)
+        ),
         y_tick_fontsize=_MONO_FONTSIZE,
     )
 

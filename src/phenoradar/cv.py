@@ -42,7 +42,13 @@ from phenoradar.interpret import (
     ModelFeatureEntry,
     build_interpretation_tables,
 )
-from phenoradar.metrics import metric_higher_is_better
+from phenoradar.metrics import (
+    FIXED_PROBABILITY_THRESHOLD_DERIVED_FROM_CV,
+    FIXED_PROBABILITY_THRESHOLD_NAME,
+    FIXED_PROBABILITY_THRESHOLD_POLICY,
+    FIXED_PROBABILITY_THRESHOLD_VALUE,
+    metric_higher_is_better,
+)
 from phenoradar.model_selection import (
     Candidate,
     ContinuousSpec,
@@ -65,7 +71,6 @@ except ImportError:  # pragma: no cover - available via scikit-learn dependency.
 
 _THREADPOOL_CONTROLLER: ThreadpoolController | None = None
 _THREADPOOL_CONTROLLER_LOCK = Lock()
-_FIXED_PROBABILITY_THRESHOLD = 0.5
 
 
 class CVError(ValueError):
@@ -1754,7 +1759,7 @@ def _selection_metric_from_probability(
     if metric_name == "log_loss":
         return _binary_log_loss(y_true, prob)
 
-    threshold = _FIXED_PROBABILITY_THRESHOLD
+    threshold = FIXED_PROBABILITY_THRESHOLD_VALUE
     pred = (prob >= threshold).astype(int)
     if metric_name == "mcc":
         return float(matthews_corrcoef(y_true, pred))
@@ -3490,7 +3495,7 @@ def run_final_refit(
         None if uncertainty_std is None else uncertainty_std[external_count:]
     )
 
-    fixed_threshold = _FIXED_PROBABILITY_THRESHOLD
+    fixed_threshold = FIXED_PROBABILITY_THRESHOLD_VALUE
     pred_external = _build_prediction_table(
         species=external_species,
         prob=external_prob,
@@ -4006,7 +4011,7 @@ def run_outer_cv(
     polars_warning = _polars_thread_pool_warning(config)
     if polars_warning is not None:
         warnings.append(polars_warning)
-    fixed_threshold = _FIXED_PROBABILITY_THRESHOLD
+    fixed_threshold = FIXED_PROBABILITY_THRESHOLD_VALUE
     selection_active = _selection_is_active(config)
 
     fold_metric_list: list[dict[str, float]] = []
@@ -4147,9 +4152,11 @@ def run_outer_cv(
     thresholds_df = pl.DataFrame(
         [
             {
-                "threshold_name": "fixed_probability_threshold",
+                "threshold_name": FIXED_PROBABILITY_THRESHOLD_NAME,
                 "threshold_value": fixed_threshold,
                 "source": "constant",
+                "policy": FIXED_PROBABILITY_THRESHOLD_POLICY,
+                "derived_from_cv": FIXED_PROBABILITY_THRESHOLD_DERIVED_FROM_CV,
                 "selection_metric": "NA",
                 "selection_scope": "NA",
             },

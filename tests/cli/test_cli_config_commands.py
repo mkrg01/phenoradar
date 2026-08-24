@@ -556,6 +556,7 @@ data:
     assert (run_dirs[0] / "cv" / "tables" / "metrics_cv.tsv").exists()
     assert (run_dirs[0] / "cv" / "tables" / "loss_by_split_cv.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "thresholds.tsv").exists()
+    assert (run_dirs[0] / "model" / "tables" / "evaluation_contract.tsv").exists()
     assert (run_dirs[0] / "cv" / "tables" / "feature_importance.tsv").exists()
     assert (run_dirs[0] / "cv" / "tables" / "feature_importance_by_fold.tsv").exists()
     assert (run_dirs[0] / "cv" / "tables" / "coefficients.tsv").exists()
@@ -632,6 +633,11 @@ data:
     assert "C4" in cv_trait_svg
     assert "C4=0" not in cv_trait_svg
     assert "C4=1" not in cv_trait_svg
+    pr_curve_svg = (run_dirs[0] / "cv" / "figures" / "pr_curve_cv.svg").read_text(
+        encoding="utf-8"
+    )
+    assert "Average Precision=" in pr_curve_svg
+    assert "PR AUC=" not in pr_curve_svg
 
     metrics = pl.read_csv(run_dirs[0] / "cv" / "tables" / "metrics_cv.tsv", separator="\t")
     assert {"aggregate_scope", "fold_id", "metric", "metric_value"}.issubset(metrics.columns)
@@ -650,6 +656,19 @@ data:
     assert set(thresholds.select("threshold_name").to_series().to_list()) == {
         "fixed_probability_threshold",
     }
+    assert thresholds.row(0, named=True)["policy"] == "fixed_constant"
+    assert thresholds.row(0, named=True)["derived_from_cv"] is False
+    evaluation_contract = pl.read_csv(
+        run_dirs[0] / "model" / "tables" / "evaluation_contract.tsv",
+        separator="\t",
+        null_values="NA",
+    )
+    pr_auc_contract = evaluation_contract.filter(pl.col("metric_name") == "pr_auc").row(
+        0, named=True
+    )
+    assert pr_auc_contract["display_name"] == "Average Precision"
+    assert pr_auc_contract["implementation"] == "sklearn.metrics.average_precision_score"
+    assert pr_auc_contract["threshold_name"] is None
     pred_external = pl.read_csv(
         run_dirs[0] / "external_test" / "tables" / "prediction_external_test.tsv",
         separator="\t",
@@ -718,6 +737,10 @@ data:
     assert len(run_metadata["split_fingerprint"]) == 64
     assert len(run_metadata["experiment_fingerprint"]) == 64
     assert run_metadata["evaluation_contract"]["trait_col"] == "C4"
+    metric_contract = run_metadata["evaluation_contract"]["metric_contract"]
+    assert metric_contract["classification_threshold"]["threshold_value"] == 0.5
+    assert metric_contract["classification_threshold"]["derived_from_cv"] is False
+    assert metric_contract["metrics"]["pr_auc"]["display_name"] == "Average Precision"
 
 
 def test_run_cv_only_does_not_emit_final_prediction_tables(

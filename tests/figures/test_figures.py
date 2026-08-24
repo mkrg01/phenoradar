@@ -654,6 +654,10 @@ def test_report_metric_comparison_sorts_brier_lower_values_first() -> None:
     ]
     assert comparable.select("metric_value").to_series().to_list() == [0.05, 0.20, 0.40]
     assert figures_mod._report_metric_axis_label("brier") == "brier (lower is better)"
+    assert (
+        figures_mod._report_metric_axis_label("brier", "Brier score loss")
+        == "Brier score loss [brier] (lower is better)"
+    )
 
 
 def test_write_report_figures_rejects_invalid_ranking_schema(tmp_path: Path) -> None:

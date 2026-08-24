@@ -8,7 +8,7 @@ import pytest
 from sklearn import config_context
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import log_loss
+from sklearn.metrics import auc, average_precision_score, log_loss, precision_recall_curve
 
 import phenoradar.cv as cv_mod
 from phenoradar.config import load_and_resolve_config
@@ -130,6 +130,11 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
     }
     threshold_names = set(cv_artifacts.thresholds.select("threshold_name").to_series().to_list())
     assert threshold_names == {"fixed_probability_threshold"}
+    threshold_row = cv_artifacts.thresholds.row(0, named=True)
+    assert threshold_row["threshold_value"] == pytest.approx(0.5)
+    assert threshold_row["source"] == "constant"
+    assert threshold_row["policy"] == "fixed_constant"
+    assert threshold_row["derived_from_cv"] is False
     assert {
         "feature",
         "importance_mean",
@@ -1268,6 +1273,18 @@ def test_compute_fold_metrics_returns_nan_when_metrics_are_undefined() -> None:
     assert np.isnan(metrics["balanced_accuracy"])
     assert np.isnan(metrics["mcc"])
     assert np.isnan(metrics["brier"])
+
+
+def test_compute_fold_metrics_pr_auc_key_is_average_precision_not_trapezoidal_auc() -> None:
+    y_true = np.array([1, 0, 1, 0], dtype=int)
+    prob = np.array([0.9, 0.8, 0.7, 0.1], dtype=float)
+
+    metrics = _compute_fold_metrics(y_true, prob, threshold=0.5)
+    precision, recall, _ = precision_recall_curve(y_true, prob)
+    trapezoidal_pr_auc = auc(recall, precision)
+
+    assert metrics["pr_auc"] == pytest.approx(average_precision_score(y_true, prob))
+    assert metrics["pr_auc"] != pytest.approx(trapezoidal_pr_auc)
 
 
 def test_apply_correlation_filter_drops_highly_correlated_feature_pearson(
