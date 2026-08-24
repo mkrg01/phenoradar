@@ -49,11 +49,16 @@ from phenoradar.orthogroup_annotation import (
     load_orthogroup_annotations,
 )
 from phenoradar.provenance import (
+    FINGERPRINT_SCHEMA_VERSION,
     ProvenanceError,
     bundle_payload_sha256,
     collect_input_files,
+    dataset_fingerprint,
+    experiment_fingerprint,
     git_snapshot,
+    input_hashes_by_role,
     runtime_environment_snapshot,
+    split_fingerprint,
 )
 from phenoradar.reporting import (
     AggregateScope,
@@ -85,6 +90,44 @@ app = typer.Typer(
 
 LogVerbosity = Literal["quiet", "normal", "verbose"]
 _ARTIFACT_PARALLEL_WORKER_CAP = 4
+_EVALUATION_CONTRACT_VERSION = 1
+
+
+def _build_run_fingerprint_metadata(
+    *,
+    config: AppConfig,
+    split_manifest: pl.DataFrame,
+    input_files: list[dict[str, Any]],
+) -> dict[str, Any]:
+    dataset_sha256 = dataset_fingerprint(
+        input_hashes_by_role(
+            input_files,
+            {
+                "metadata": Path(config.data.metadata_path),
+                "tpm": Path(config.data.tpm_path),
+            },
+        )
+    )
+    split_sha256 = split_fingerprint(split_manifest)
+    evaluation_contract = {
+        "evaluation_contract_version": _EVALUATION_CONTRACT_VERSION,
+        "label_unit": "species",
+        "classification_threshold_policy": "fixed_probability_threshold=0.5",
+        "trait_col": config.data.trait_col,
+        "group_col": config.split.group_col,
+    }
+    experiment_sha256 = experiment_fingerprint(
+        dataset_sha256=dataset_sha256,
+        split_sha256=split_sha256,
+        evaluation_contract=evaluation_contract,
+    )
+    return {
+        "fingerprint_schema_version": FINGERPRINT_SCHEMA_VERSION,
+        "dataset_fingerprint": dataset_sha256,
+        "split_fingerprint": split_sha256,
+        "experiment_fingerprint": experiment_sha256,
+        "evaluation_contract": evaluation_contract,
+    }
 
 
 def _artifact_parallel_workers(config: AppConfig) -> int:
@@ -748,6 +791,26 @@ def run(
         raise typer.BadParameter(str(exc)) from exc
     _log(f"Configuration resolved (execution_stage={resolved.runtime.execution_stage}).")
 
+    tree_path = getattr(resolved.data, "tree_path", None)
+    orthogroup_annotation_path = getattr(resolved.data, "orthogroup_annotation_path", None)
+    _log("Collect input file identities.")
+    try:
+        input_files = collect_input_files(
+            [
+                *config_paths,
+                Path(resolved.data.metadata_path),
+                Path(resolved.data.tpm_path),
+                *([] if tree_path is None else [Path(tree_path)]),
+                *(
+                    []
+                    if orthogroup_annotation_path is None
+                    else [Path(orthogroup_annotation_path)]
+                ),
+            ]
+        )
+    except ProvenanceError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
     _log("Build split artifacts.")
     try:
         split_artifacts = build_split_artifacts(resolved)
@@ -759,6 +822,14 @@ def run(
         "Split artifacts ready "
         f"(fold_count={fold_count}, excluded_expression_rows={excluded_rows})."
     )
+    try:
+        fingerprint_metadata = _build_run_fingerprint_metadata(
+            config=resolved,
+            split_manifest=split_artifacts.split_manifest,
+            input_files=input_files,
+        )
+    except ProvenanceError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
     _log("Run outer cross-validation.")
 
@@ -1104,7 +1175,6 @@ def run(
     warnings.extend(group_summary_warnings)
 
     figure_warnings: list[str] = []
-    orthogroup_annotation_path = getattr(resolved.data, "orthogroup_annotation_path", None)
     try:
         orthogroup_annotations = load_orthogroup_annotations(
             None if orthogroup_annotation_path is None else Path(orthogroup_annotation_path)
@@ -1112,7 +1182,6 @@ def run(
     except OrthogroupAnnotationError as exc:
         raise typer.BadParameter(str(exc)) from exc
     _log("Generate run figures.")
-    tree_path = getattr(resolved.data, "tree_path", None)
     try:
         figure_warnings = write_run_figures(
             run_dir=run_dir,
@@ -1187,23 +1256,7 @@ def run(
     _log(f"Run figures generated (figure_warnings={len(figure_warnings)}).")
 
     end_time = datetime.now(UTC)
-    _log("Collect provenance metadata.")
-    try:
-        input_files = collect_input_files(
-            [
-                *config_paths,
-                Path(resolved.data.metadata_path),
-                Path(resolved.data.tpm_path),
-                *([] if tree_path is None else [Path(tree_path)]),
-                *(
-                    []
-                    if orthogroup_annotation_path is None
-                    else [Path(orthogroup_annotation_path)]
-                ),
-            ]
-        )
-    except ProvenanceError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+    _log("Collect runtime provenance metadata.")
     git_meta = git_snapshot(Path.cwd())
     environment = runtime_environment_snapshot()
     metadata_payload: dict[str, Any] = {
@@ -1225,6 +1278,7 @@ def run(
         "input_files": input_files,
         "environment": environment,
         "warnings": warnings,
+        **fingerprint_metadata,
         **git_meta,
     }
     if final_refit_artifacts is not None:
@@ -1884,6 +1938,13 @@ def report(
             help="Fail on missing/invalid run artifacts instead of warn-and-skip.",
         ),
     ] = False,
+    allow_mixed_experiments: Annotated[
+        bool,
+        typer.Option(
+            "--allow-mixed-experiments",
+            help="Allow ranking runs with different or unknown experiment fingerprints.",
+        ),
+    ] = False,
     out: Annotated[
         Path | None,
         typer.Option(
@@ -1927,6 +1988,7 @@ def report(
                 strict=strict,
                 run_glob=glob_pattern,
                 latest=latest,
+                allow_mixed_experiments=allow_mixed_experiments,
             ),
             output_dir=output_dir,
         )

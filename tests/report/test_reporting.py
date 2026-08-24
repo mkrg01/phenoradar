@@ -27,21 +27,32 @@ def _write_run_dir(
     metric_name: PrimaryMetric = "mcc",
     include_metrics: bool = True,
     metrics_valid_schema: bool = True,
+    experiment_fingerprint_value: str | None = "c" * 64,
 ) -> Path:
     run_dir = runs_root / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
+    metadata = {
+        "command": "predict" if stage == "predict" else "run",
+        "execution_stage": stage,
+        "status": "ok",
+        "start_time": start_time,
+        "end_time": start_time,
+        "duration_sec": 1.0,
+        "warnings": [],
+    }
+    if experiment_fingerprint_value is not None:
+        metadata.update(
+            {
+                "fingerprint_schema_version": 1,
+                "dataset_fingerprint": "a" * 64,
+                "split_fingerprint": "b" * 64,
+                "experiment_fingerprint": experiment_fingerprint_value,
+            }
+        )
     _write(
         run_dir / "run_metadata.json",
         json.dumps(
-            {
-                "command": "predict" if stage == "predict" else "run",
-                "execution_stage": stage,
-                "status": "ok",
-                "start_time": start_time,
-                "end_time": start_time,
-                "duration_sec": 1.0,
-                "warnings": [],
-            },
+            metadata,
             ensure_ascii=True,
             sort_keys=True,
             indent=2,
@@ -78,6 +89,7 @@ def _options(
     primary_metric: PrimaryMetric = "mcc",
     include_stage: str = "all",
     strict: bool = True,
+    allow_mixed_experiments: bool = False,
 ) -> ReportOptions:
     return ReportOptions(
         primary_metric=primary_metric,
@@ -87,6 +99,7 @@ def _options(
         strict=strict,
         run_glob="*",
         latest=None,
+        allow_mixed_experiments=allow_mixed_experiments,
     )
 
 
@@ -290,6 +303,123 @@ def test_generate_report_ranking_tie_breaks_by_start_time_then_run_id(
         "20260101T000003Z_run_z",
     ]
     assert ranking.select("rank").to_series().to_list() == [1, 2, 3]
+
+
+def test_generate_report_rejects_mixed_experiment_fingerprints_by_default(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    _write_run_dir(
+        runs_root,
+        run_id="20260101T000001Z_run_a",
+        stage="full_run",
+        start_time="2026-01-01T00:00:00+00:00",
+        metric_value=0.7,
+        experiment_fingerprint_value="c" * 64,
+    )
+    _write_run_dir(
+        runs_root,
+        run_id="20260101T000002Z_run_b",
+        stage="full_run",
+        start_time="2026-01-02T00:00:00+00:00",
+        metric_value=0.8,
+        experiment_fingerprint_value="d" * 64,
+    )
+
+    with pytest.raises(ReportError, match="--allow-mixed-experiments"):
+        generate_report(
+            run_dirs=[],
+            runs_root=runs_root,
+            run_glob="*",
+            latest=None,
+            options=_options(),
+            output_dir=tmp_path / "report_out",
+        )
+
+
+def test_generate_report_allows_mixed_experiments_only_with_explicit_override(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    for run_id, fingerprint in [
+        ("20260101T000001Z_run_a", "c" * 64),
+        ("20260101T000002Z_run_b", "d" * 64),
+    ]:
+        _write_run_dir(
+            runs_root,
+            run_id=run_id,
+            stage="full_run",
+            start_time="2026-01-01T00:00:00+00:00",
+            metric_value=0.8,
+            experiment_fingerprint_value=fingerprint,
+        )
+    out_dir = tmp_path / "report_out"
+
+    generate_report(
+        run_dirs=[],
+        runs_root=runs_root,
+        run_glob="*",
+        latest=None,
+        options=_options(allow_mixed_experiments=True),
+        output_dir=out_dir,
+    )
+
+    report_runs = pl.read_csv(out_dir / "report_runs.tsv", separator="\t")
+    assert {
+        "fingerprint_schema_version",
+        "dataset_fingerprint",
+        "split_fingerprint",
+        "experiment_fingerprint",
+    }.issubset(report_runs.columns)
+    warnings = pl.read_csv(out_dir / "report_warnings.tsv", separator="\t")
+    assert warnings.filter(pl.col("warning_type") == "mixed_experiments").height == 2
+    manifest = json.loads((out_dir / "report_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["experiment_compatibility"]["status"] == "mixed_override"
+    assert manifest["experiment_compatibility"]["mixed"] is True
+    assert manifest["report_options"]["allow_mixed_experiments"] is True
+
+
+def test_generate_report_legacy_fingerprint_policy_depends_on_strict_mode(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    _write_run_dir(
+        runs_root,
+        run_id="20260101T000001Z_run_legacy",
+        stage="full_run",
+        start_time="2026-01-01T00:00:00+00:00",
+        metric_value=0.7,
+        experiment_fingerprint_value=None,
+    )
+    non_strict_out = tmp_path / "report_non_strict"
+
+    generate_report(
+        run_dirs=[],
+        runs_root=runs_root,
+        run_glob="*",
+        latest=None,
+        options=_options(strict=False),
+        output_dir=non_strict_out,
+    )
+
+    warnings = pl.read_csv(non_strict_out / "report_warnings.tsv", separator="\t")
+    assert warnings.filter(
+        pl.col("warning_type") == "missing_experiment_fingerprint"
+    ).height == 1
+    manifest = json.loads(
+        (non_strict_out / "report_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["experiment_compatibility"]["status"] == "legacy_unverified"
+
+    with pytest.raises(ReportError, match="missing or invalid experiment fingerprint"):
+        generate_report(
+            run_dirs=[],
+            runs_root=runs_root,
+            run_glob="*",
+            latest=None,
+            options=_options(strict=True),
+            output_dir=tmp_path / "report_strict",
+        )
 
 
 def test_generate_report_include_stage_predict_filters_and_leaves_empty_ranking(
@@ -750,6 +880,10 @@ def test_generate_report_collects_run_warning_entries_from_metadata(tmp_path: Pa
                 "end_time": "2026-01-01T00:00:00+00:00",
                 "duration_sec": 1.0,
                 "warnings": ["warning-a", "warning-b"],
+                "fingerprint_schema_version": 1,
+                "dataset_fingerprint": "a" * 64,
+                "split_fingerprint": "b" * 64,
+                "experiment_fingerprint": "c" * 64,
             },
             ensure_ascii=True,
         )

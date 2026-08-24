@@ -125,6 +125,24 @@ def _stub_split_artifacts() -> SimpleNamespace:
     )
 
 
+def _stub_fingerprint_metadata() -> dict[str, object]:
+    return {
+        "fingerprint_schema_version": 1,
+        "dataset_fingerprint": "a" * 64,
+        "split_fingerprint": "b" * 64,
+        "experiment_fingerprint": "c" * 64,
+        "evaluation_contract": {"evaluation_contract_version": 1},
+    }
+
+
+def _stub_run_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("phenoradar.cli.collect_input_files", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "phenoradar.cli._build_run_fingerprint_metadata",
+        lambda **_kwargs: _stub_fingerprint_metadata(),
+    )
+
+
 def _stub_cv_artifacts(
     *,
     ensemble_model_probs: pl.DataFrame | None = None,
@@ -376,6 +394,10 @@ def test_run_passes_top_features_to_run_and_tree_figures(
         _capture_tree_figures,
     )
     monkeypatch.setattr("phenoradar.cli.collect_input_files", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "phenoradar.cli._build_run_fingerprint_metadata",
+        lambda **_kwargs: _stub_fingerprint_metadata(),
+    )
     monkeypatch.setattr("phenoradar.cli.git_snapshot", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         "phenoradar.cli.runtime_environment_snapshot",
@@ -691,6 +713,11 @@ data:
     assert "environment" in run_metadata
     assert "input_files" in run_metadata
     assert isinstance(run_metadata["input_files"], list)
+    assert run_metadata["fingerprint_schema_version"] == 1
+    assert len(run_metadata["dataset_fingerprint"]) == 64
+    assert len(run_metadata["split_fingerprint"]) == 64
+    assert len(run_metadata["experiment_fingerprint"]) == 64
+    assert run_metadata["evaluation_contract"]["trait_col"] == "C4"
 
 
 def test_run_cv_only_does_not_emit_final_prediction_tables(
@@ -962,6 +989,10 @@ def test_run_emits_warning_summary_and_quiet_mode_suppresses_progress(
         lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr("phenoradar.cli.collect_input_files", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "phenoradar.cli._build_run_fingerprint_metadata",
+        lambda **_kwargs: _stub_fingerprint_metadata(),
+    )
     monkeypatch.setattr("phenoradar.cli.git_snapshot", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         "phenoradar.cli.runtime_environment_snapshot",
@@ -1457,6 +1488,7 @@ def test_run_fails_when_split_artifact_build_raises(
     runner = CliRunner()
     monkeypatch.chdir(tmp_path)
     config = _write(tmp_path / "config.yml", "{}\n")
+    _stub_run_provenance(monkeypatch)
 
     monkeypatch.setattr(
         "phenoradar.cli.load_and_resolve_config",
@@ -1477,6 +1509,7 @@ def test_run_fails_when_outer_cv_raises(tmp_path: Path, monkeypatch: pytest.Monk
     runner = CliRunner()
     monkeypatch.chdir(tmp_path)
     config = _write(tmp_path / "config.yml", "{}\n")
+    _stub_run_provenance(monkeypatch)
 
     monkeypatch.setattr(
         "phenoradar.cli.load_and_resolve_config",
@@ -1501,6 +1534,7 @@ def test_run_fails_when_final_refit_raises(tmp_path: Path, monkeypatch: pytest.M
     runner = CliRunner()
     monkeypatch.chdir(tmp_path)
     config = _write(tmp_path / "config.yml", "{}\n")
+    _stub_run_provenance(monkeypatch)
 
     monkeypatch.setattr(
         "phenoradar.cli.load_and_resolve_config",
@@ -1531,6 +1565,7 @@ def test_run_fails_when_bundle_export_raises(
     runner = CliRunner()
     monkeypatch.chdir(tmp_path)
     config = _write(tmp_path / "config.yml", "{}\n")
+    _stub_run_provenance(monkeypatch)
 
     monkeypatch.setattr(
         "phenoradar.cli.load_and_resolve_config",
@@ -1566,6 +1601,7 @@ def test_run_fails_when_run_figure_generation_raises(
     runner = CliRunner()
     monkeypatch.chdir(tmp_path)
     config = _write(tmp_path / "config.yml", "{}\n")
+    _stub_run_provenance(monkeypatch)
 
     monkeypatch.setattr(
         "phenoradar.cli.load_and_resolve_config",
@@ -1654,6 +1690,10 @@ def test_run_writes_ensemble_tables_when_available(
     monkeypatch.setattr("phenoradar.cli.write_resolved_config", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("phenoradar.cli.write_run_figures", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("phenoradar.cli.collect_input_files", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "phenoradar.cli._build_run_fingerprint_metadata",
+        lambda **_kwargs: _stub_fingerprint_metadata(),
+    )
     monkeypatch.setattr("phenoradar.cli.git_snapshot", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         "phenoradar.cli.runtime_environment_snapshot",

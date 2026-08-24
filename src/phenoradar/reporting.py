@@ -35,6 +35,7 @@ class ReportOptions:
     strict: bool
     run_glob: str
     latest: int | None
+    allow_mixed_experiments: bool = False
 
 
 def _json_load(path: Path) -> dict[str, Any]:
@@ -143,6 +144,103 @@ def _record_warning(
             "message": message,
         }
     )
+
+
+def _fingerprint_or_none(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if len(normalized) != 64 or any(
+        character not in "0123456789abcdef" for character in normalized
+    ):
+        return None
+    return normalized
+
+
+def _fingerprint_schema_version_or_none(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return int(value)
+
+
+def _validate_experiment_compatibility(
+    *,
+    run_rows: list[dict[str, Any]],
+    warning_rows: list[dict[str, str]],
+    options: ReportOptions,
+) -> dict[str, Any]:
+    comparable_rows = [row for row in run_rows if row["metric_value"] is not None]
+    if not comparable_rows:
+        return {
+            "status": "not_applicable",
+            "mixed": False,
+            "experiment_fingerprints": [],
+            "unknown_run_ids": [],
+        }
+
+    known_fingerprints: set[str] = set()
+    unknown_run_ids: list[str] = []
+    for row in comparable_rows:
+        required_values = (
+            row["fingerprint_schema_version"],
+            row["dataset_fingerprint"],
+            row["split_fingerprint"],
+            row["experiment_fingerprint"],
+        )
+        if any(value is None for value in required_values):
+            run_id = str(row["run_id"])
+            if options.strict:
+                raise ReportError(
+                    f"{run_id}: missing or invalid experiment fingerprint metadata"
+                )
+            unknown_run_ids.append(run_id)
+            _record_warning(
+                warning_rows,
+                run_id=run_id,
+                run_dir=Path(str(row["run_dir"])),
+                warning_type="missing_experiment_fingerprint",
+                message=(
+                    "Run predates experiment fingerprints or contains invalid fingerprint "
+                    "metadata; comparability cannot be verified."
+                ),
+            )
+            continue
+        known_fingerprints.add(str(row["experiment_fingerprint"]))
+
+    known_sorted = sorted(known_fingerprints)
+    unknown_sorted = sorted(unknown_run_ids)
+    mixed = len(known_sorted) > 1 or (bool(known_sorted) and bool(unknown_sorted))
+    if mixed and not options.allow_mixed_experiments:
+        raise ReportError(
+            "Ranked runs do not share one verifiable experiment fingerprint. "
+            "Use --allow-mixed-experiments to override this comparison guard."
+        )
+    if mixed:
+        message = (
+            "Report combines runs with different or unknown experiment fingerprints because "
+            "--allow-mixed-experiments was specified."
+        )
+        for row in comparable_rows:
+            _record_warning(
+                warning_rows,
+                run_id=str(row["run_id"]),
+                run_dir=Path(str(row["run_dir"])),
+                warning_type="mixed_experiments",
+                message=message,
+            )
+
+    if mixed:
+        status = "mixed_override"
+    elif unknown_sorted:
+        status = "legacy_unverified"
+    else:
+        status = "verified"
+    return {
+        "status": status,
+        "mixed": mixed,
+        "experiment_fingerprints": known_sorted,
+        "unknown_run_ids": unknown_sorted,
+    }
 
 
 def _write_narrative(
@@ -296,6 +394,12 @@ def generate_report(
         start_time = str(metadata.get("start_time", ""))
         end_time = str(metadata.get("end_time", ""))
         duration_sec = _float_or_none(metadata.get("duration_sec"))
+        fingerprint_schema_version = _fingerprint_schema_version_or_none(
+            metadata.get("fingerprint_schema_version")
+        )
+        dataset_sha256 = _fingerprint_or_none(metadata.get("dataset_fingerprint"))
+        split_sha256 = _fingerprint_or_none(metadata.get("split_fingerprint"))
+        experiment_sha256 = _fingerprint_or_none(metadata.get("experiment_fingerprint"))
 
         metric_value: float | None = None
         metrics_path = _run_metrics_path(run_dir)
@@ -352,6 +456,10 @@ def generate_report(
                 "primary_metric": options.primary_metric,
                 "aggregate_scope": options.aggregate_scope,
                 "metric_value": metric_value,
+                "fingerprint_schema_version": fingerprint_schema_version,
+                "dataset_fingerprint": dataset_sha256,
+                "split_fingerprint": split_sha256,
+                "experiment_fingerprint": experiment_sha256,
             }
         )
         if metric_value is not None:
@@ -364,8 +472,18 @@ def generate_report(
                     "metric_name": options.primary_metric,
                     "aggregate_scope": options.aggregate_scope,
                     "metric_value": metric_value,
+                    "fingerprint_schema_version": fingerprint_schema_version,
+                    "dataset_fingerprint": dataset_sha256,
+                    "split_fingerprint": split_sha256,
+                    "experiment_fingerprint": experiment_sha256,
                 }
             )
+
+    compatibility = _validate_experiment_compatibility(
+        run_rows=run_rows,
+        warning_rows=warning_rows,
+        options=options,
+    )
 
     run_rows_sorted = sorted(
         run_rows,
@@ -400,6 +518,10 @@ def generate_report(
                 "primary_metric": pl.String,
                 "aggregate_scope": pl.String,
                 "metric_value": pl.Float64,
+                "fingerprint_schema_version": pl.Int64,
+                "dataset_fingerprint": pl.String,
+                "split_fingerprint": pl.String,
+                "experiment_fingerprint": pl.String,
             }
         )
     )
@@ -416,6 +538,10 @@ def generate_report(
                 "metric_name": pl.String,
                 "aggregate_scope": pl.String,
                 "metric_value": pl.Float64,
+                "fingerprint_schema_version": pl.Int64,
+                "dataset_fingerprint": pl.String,
+                "split_fingerprint": pl.String,
+                "experiment_fingerprint": pl.String,
             }
         )
     )
@@ -444,9 +570,11 @@ def generate_report(
             "include_stage": options.include_stage,
             "output_format": options.output_format,
             "strict": options.strict,
+            "allow_mixed_experiments": options.allow_mixed_experiments,
             "glob": options.run_glob,
             "latest": options.latest,
         },
+        "experiment_compatibility": compatibility,
         "selected_run_dirs": [str(path) for path in selected_dirs],
         "included_runs": [row["run_id"] for row in run_rows_sorted],
         "skipped_runs": skipped_runs,

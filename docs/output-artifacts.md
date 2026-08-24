@@ -134,6 +134,10 @@ Always written:
     - `external_test` pooled row (`full_run` only, `fold_id=NA`)
 - `run_metadata.json`
   - provenance and execution metadata (`status`, timings, seed policy, git/runtime snapshot, warnings)
+  - comparison identity: `fingerprint_schema_version`, `dataset_fingerprint`,
+    `split_fingerprint`, `experiment_fingerprint`, and `evaluation_contract`
+  - `dataset_fingerprint` hashes metadata/TPM contents by semantic role (not their paths)
+  - `split_fingerprint` hashes realized species pool/fold/group/label assignments
 - stage-specific `figures/` directories
   - always creates `cv/figures/`, `external_test/figures/`, and `inference/figures/`.
   - always attempts:
@@ -648,13 +652,19 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - `report_manifest.json`
   - selected runs, options, skipped runs, ranked count
   - `report_options.metric_direction` is `maximize` or `minimize`
+  - `experiment_compatibility` records verification status, fingerprints, unknown legacy
+    runs, and whether mixed comparison was explicitly enabled
 - `report_runs.tsv`
   - one row per included run after selection/filtering
-  - columns: `run_id`, `run_dir`, `command`, `execution_stage`, `status`, `start_time`, `end_time`, `duration_sec`, `primary_metric`, `aggregate_scope`, `metric_value`
+  - columns: `run_id`, `run_dir`, `command`, `execution_stage`, `status`, `start_time`,
+    `end_time`, `duration_sec`, `primary_metric`, `aggregate_scope`, `metric_value`,
+    `fingerprint_schema_version`, `dataset_fingerprint`, `split_fingerprint`,
+    `experiment_fingerprint`
   - `metric_value` can be `NA` (for example missing/invalid metrics in non-strict mode)
 - `report_ranking.tsv`
   - ranked runs with non-null metric
-  - columns: `run_id`, `run_dir`, `execution_stage`, `start_time`, `metric_name`, `aggregate_scope`, `metric_value`, `rank`
+  - columns: `run_id`, `run_dir`, `execution_stage`, `start_time`, `metric_name`,
+    `aggregate_scope`, `metric_value`, fingerprint columns, `rank`
   - `rank` follows the selected metric's documented better direction: descending for
     `mcc`, `balanced_accuracy`, `roc_auc`, and `pr_auc`; ascending for `brier`
   - ties are ordered by `start_time`, then `run_id`, both ascending

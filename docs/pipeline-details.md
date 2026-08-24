@@ -215,10 +215,14 @@ Per-run ingestion:
 - for non-predict runs, missing `cv/tables/metrics_cv.tsv` is an error in `--strict`.
 - in non-strict mode, missing/invalid `cv/tables/metrics_cv.tsv` records warnings and can leave runs included but unranked.
 - applies stage filter (`--include-stage`).
+- verifies that metric-bearing runs share one experiment fingerprint.
+- legacy runs without fingerprints are warned in non-strict mode and rejected in `--strict`.
 
 Ranking:
 
 - rank by selected `primary_metric` and `aggregate_scope`.
+- reject mixed known/unknown or different experiment fingerprints unless
+  `--allow-mixed-experiments` is specified.
 - tie-break by `start_time`, then `run_id`.
 
 Error policy:

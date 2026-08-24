@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import polars as pl
 import pytest
 
 import phenoradar.provenance as provenance_mod
@@ -10,7 +11,11 @@ from phenoradar.provenance import (
     ProvenanceError,
     bundle_payload_sha256,
     collect_input_files,
+    dataset_fingerprint,
+    experiment_fingerprint,
     git_snapshot,
+    input_hashes_by_role,
+    split_fingerprint,
 )
 
 
@@ -60,6 +65,87 @@ def test_collect_input_files_raises_when_path_is_missing(tmp_path: Path) -> None
 
     with pytest.raises(ProvenanceError, match="Input file not found for provenance"):
         collect_input_files([missing])
+
+
+def test_dataset_fingerprint_is_path_independent_and_content_sensitive(tmp_path: Path) -> None:
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_metadata = _write(first_dir / "metadata.tsv", "species\ttrait\nsp1\t1\n")
+    first_tpm = _write(first_dir / "tpm.tsv", "species\tfeature\ttpm\nsp1\tog1\t2\n")
+    second_metadata = _write(second_dir / "renamed-metadata.tsv", first_metadata.read_text())
+    second_tpm = _write(second_dir / "renamed-tpm.tsv", first_tpm.read_text())
+
+    first_files = collect_input_files([first_metadata, first_tpm])
+    second_files = collect_input_files([second_metadata, second_tpm])
+    first = dataset_fingerprint(
+        input_hashes_by_role(
+            first_files,
+            {"metadata": first_metadata, "tpm": first_tpm},
+        )
+    )
+    second = dataset_fingerprint(
+        input_hashes_by_role(
+            second_files,
+            {"metadata": second_metadata, "tpm": second_tpm},
+        )
+    )
+
+    assert first == second
+
+    _write(second_tpm, "species\tfeature\ttpm\nsp1\tog1\t3\n")
+    changed_files = collect_input_files([second_metadata, second_tpm])
+    changed = dataset_fingerprint(
+        input_hashes_by_role(
+            changed_files,
+            {"metadata": second_metadata, "tpm": second_tpm},
+        )
+    )
+    assert changed != first
+
+
+def test_split_fingerprint_is_row_order_independent_and_assignment_sensitive() -> None:
+    manifest = pl.DataFrame(
+        {
+            "species": ["sp1", "sp2"],
+            "pool": ["train", "validation"],
+            "fold_id": ["1", "1"],
+            "group_id": ["g1", "g2"],
+            "contrast_group_id": ["c1", "c2"],
+            "label": [1, 0],
+        }
+    )
+
+    original = split_fingerprint(manifest)
+    reversed_rows = split_fingerprint(manifest.reverse())
+    changed_fold = split_fingerprint(
+        manifest.with_columns(
+            pl.when(pl.col("species") == "sp2")
+            .then(pl.lit("2"))
+            .otherwise(pl.col("fold_id"))
+            .alias("fold_id")
+        )
+    )
+
+    assert reversed_rows == original
+    assert changed_fold != original
+
+
+def test_experiment_fingerprint_changes_with_evaluation_contract() -> None:
+    dataset_sha256 = "a" * 64
+    split_sha256 = "b" * 64
+
+    first = experiment_fingerprint(
+        dataset_sha256=dataset_sha256,
+        split_sha256=split_sha256,
+        evaluation_contract={"trait_col": "C4", "group_col": "group"},
+    )
+    second = experiment_fingerprint(
+        dataset_sha256=dataset_sha256,
+        split_sha256=split_sha256,
+        evaluation_contract={"trait_col": "C3", "group_col": "group"},
+    )
+
+    assert first != second
 
 
 def test_run_git_returns_none_on_file_not_found(

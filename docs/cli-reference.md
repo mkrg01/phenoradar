@@ -273,6 +273,8 @@ Ranking options:
 - `--aggregate-scope`: `macro|micro`
 - `--include-stage`: `cv_only|full_run|predict|all`
 - `--strict`: fail instead of non-strict warn-and-continue behavior
+- `--allow-mixed-experiments`: explicitly allow ranking runs whose experiment
+  fingerprints differ or cannot be verified
 - `--output-format`: `tsv|md|html|json`
 - `--out`: output directory (default auto-generated under `reports/`)
 - `--verbose`, `-v`: detailed stage-level logs
@@ -287,3 +289,8 @@ Outputs:
 - optional narrative file (`report.md`, `report.html`, or `report.json`)
 - `figures/` (`report_metric_ranking.svg`, `report_metric_comparison.svg`,
   and `report_stage_breakdown.svg` when more than one stage appears)
+
+By default, ranked runs must share one experiment fingerprint. The fingerprint is based on
+the metadata/TPM file contents, the realized split manifest, and the evaluation contract;
+file paths and model hyperparameters are excluded. Legacy runs without fingerprints remain
+reportable in non-strict mode with warnings, while `--strict` rejects them.

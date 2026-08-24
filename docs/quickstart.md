@@ -188,6 +188,9 @@ With:
 phenoradar report --runs-root runs
 ```
 
+The default comparison guard rejects rankings that mix datasets or realized splits. Use
+`--allow-mixed-experiments` only when that cross-experiment comparison is intentional.
+
 This writes:
 
 ```text
