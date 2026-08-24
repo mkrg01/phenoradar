@@ -17,7 +17,8 @@ This page explains execution flow for `run`, `predict`, and `report`.
 
 1. Resolve config.
 2. Load and verify bundle integrity.
-3. Build expression matrix, apply bundled expression transform, and align features to bundle schema.
+3. Build the expression matrix, align raw features to the bundled transform schema, and apply
+   bundled preprocessing.
 4. Run deterministic inference using bundled preprocessing/model state.
 5. Write artifacts, figures, metadata.
 
@@ -189,16 +190,18 @@ Bundle verification:
 
 Feature alignment:
 
-- apply the bundled expression transform before feature-schema alignment.
-- align transformed input features to bundle feature schema.
-- missing bundle features are filled with `0`.
-- extra input features are ignored.
-- zero overlap is an error.
+- for `sample_rank` and `sample_percentile_rank`, align raw input to the complete
+  `transform_feature_schema.tsv` before applying the expression transform.
+- raw transform features missing from the input are filled with `0`; extra input features are
+  removed before rank calculation and therefore cannot change retained-feature ranks.
+- for feature-wise `none` and `log1p`, alignment may be restricted to the model-feature union
+  because feature selection and transformation commute.
+- zero overlap with the model-feature union is an error.
 
 Inference:
 
 - apply per-model bundled preprocessing state
-  (feature subset alignment + optional model-local scaler transform).
+  (transformed feature subset selection + optional model-local scaler transform).
 - run all bundled models.
 - aggregate probs by bundled aggregation mode.
 - derive `pred_label_fixed_threshold` by bundled fixed threshold.

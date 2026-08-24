@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+* preserve the complete pre-transform feature schema in model bundles so sample-rank predictions
+  are invariant to unrelated input features
+
 ## [0.4.0](https://github.com/mkrg01/phenoradar/compare/v0.3.0...v0.4.0) (2026-05-19)
 
 

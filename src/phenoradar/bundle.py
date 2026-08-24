@@ -30,10 +30,25 @@ from phenoradar.metrics import (
 )
 from phenoradar.provenance import phenoradar_build_snapshot, runtime_environment_snapshot
 
-BUNDLE_FORMAT_VERSION = "1"
+BUNDLE_FORMAT_VERSION = "2"
+_LEGACY_BUNDLE_FORMAT_VERSION = "1"
+_SUPPORTED_BUNDLE_FORMAT_VERSIONS = {
+    _LEGACY_BUNDLE_FORMAT_VERSION,
+    BUNDLE_FORMAT_VERSION,
+}
 _BUNDLE_DIRNAME = "model_bundle"
 _SELF_SHA256_PLACEHOLDER = "0" * 64
+_CONTEXTUAL_EXPRESSION_TRANSFORMS = {"sample_rank", "sample_percentile_rank"}
 _REQUIRED_FILES = [
+    "bundle_manifest.json",
+    "feature_schema.tsv",
+    "transform_feature_schema.tsv",
+    "preprocess_state.joblib",
+    "model_state.joblib",
+    "thresholds.tsv",
+    "resolved_config.yml",
+]
+_LEGACY_REQUIRED_FILES = [
     "bundle_manifest.json",
     "feature_schema.tsv",
     "preprocess_state.joblib",
@@ -63,6 +78,7 @@ class LoadedBundle:
     manifest: dict[str, Any]
     manifest_sha256: str
     feature_names: list[str]
+    transform_feature_names: list[str]
     scaler: FeatureScaler
     model_preprocess: list[ModelPreprocessEntry]
     models: list[Any]
@@ -220,6 +236,7 @@ def export_model_bundle(
     bundle_dir.mkdir(parents=True, exist_ok=False)
 
     feature_schema_path = bundle_dir / "feature_schema.tsv"
+    transform_feature_schema_path = bundle_dir / "transform_feature_schema.tsv"
     preprocess_state_path = bundle_dir / "preprocess_state.joblib"
     model_state_path = bundle_dir / "model_state.joblib"
     thresholds_path = bundle_dir / "thresholds.tsv"
@@ -257,6 +274,21 @@ def export_model_bundle(
     if not feature_schema:
         raise BundleError("Final refit artifacts produced zero bundle features")
 
+    transform_feature_schema = [
+        str(feature) for feature in final_refit_artifacts.transform_feature_names
+    ]
+    if not transform_feature_schema:
+        raise BundleError("Final refit artifacts produced zero transform input features")
+    if any(not feature.strip() for feature in transform_feature_schema):
+        raise BundleError("Final refit artifacts contain an empty transform input feature")
+    if len(set(transform_feature_schema)) != len(transform_feature_schema):
+        raise BundleError("Final refit artifacts contain duplicate transform input features")
+    transform_feature_set = set(transform_feature_schema)
+    if any(feature not in transform_feature_set for feature in feature_schema):
+        raise BundleError(
+            "Final refit model features are not contained in the transform input schema"
+        )
+
     feature_schema_df = pl.DataFrame(
         {
             "feature": feature_schema,
@@ -264,10 +296,17 @@ def export_model_bundle(
         }
     )
     feature_schema_df.write_csv(feature_schema_path, separator="\t")
+    pl.DataFrame(
+        {
+            "feature": transform_feature_schema,
+            "feature_index": list(range(len(transform_feature_schema))),
+        }
+    ).write_csv(transform_feature_schema_path, separator="\t")
 
     joblib.dump(
         {
             "feature_names": feature_schema,
+            "transform_feature_names": transform_feature_schema,
             "scaler": final_refit_artifacts.scaler,
             "transform": _preprocess_transform_label(config),
             "expression_transform": config.preprocess.expression_transform.method,
@@ -349,12 +388,18 @@ def export_model_bundle(
     return BundleExportResult(bundle_dir=bundle_dir, manifest_sha256=manifest_sha)
 
 
-def _verify_file_inventory(bundle_dir: Path, manifest: dict[str, Any]) -> None:
+def _verify_file_inventory(
+    bundle_dir: Path,
+    manifest: dict[str, Any],
+    *,
+    required_files: list[str] | None = None,
+) -> None:
     files = manifest.get("files")
     if not isinstance(files, dict):
         raise BundleError("bundle_manifest.json is missing 'files' inventory")
 
-    for filename in _REQUIRED_FILES:
+    resolved_required_files = _REQUIRED_FILES if required_files is None else required_files
+    for filename in resolved_required_files:
         path = bundle_dir / filename
         if not path.exists():
             raise BundleError(f"Bundle is missing required file: {filename}")
@@ -401,17 +446,26 @@ def _verify_file_inventory(bundle_dir: Path, manifest: dict[str, Any]) -> None:
 
 
 def _load_feature_schema(path: Path) -> list[str]:
+    schema_name = path.name
     schema = pl.read_csv(path, separator="\t")
     if not {"feature", "feature_index"}.issubset(schema.columns):
-        raise BundleError("feature_schema.tsv must contain 'feature' and 'feature_index' columns")
+        raise BundleError(
+            f"{schema_name} must contain 'feature' and 'feature_index' columns"
+        )
     sorted_schema = schema.sort("feature_index")
     expected_indices = list(range(sorted_schema.height))
     actual_indices = [int(v) for v in sorted_schema.select("feature_index").to_series().to_list()]
     if actual_indices != expected_indices:
-        raise BundleError("feature_schema.tsv has non-contiguous or unordered feature_index values")
+        raise BundleError(
+            f"{schema_name} has non-contiguous or unordered feature_index values"
+        )
     features = [str(v) for v in sorted_schema.select("feature").to_series().to_list()]
     if not features:
-        raise BundleError("feature_schema.tsv does not contain any features")
+        raise BundleError(f"{schema_name} does not contain any features")
+    if any(not feature.strip() for feature in features):
+        raise BundleError(f"{schema_name} contains an empty feature identifier")
+    if len(set(features)) != len(features):
+        raise BundleError(f"{schema_name} contains duplicate feature identifiers")
     return features
 
 
@@ -427,23 +481,46 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
         raise BundleError(f"Invalid bundle_manifest.json: {manifest_path}") from exc
 
     version_value = manifest.get("bundle_format_version")
-    if version_value != BUNDLE_FORMAT_VERSION:
+    if (
+        not isinstance(version_value, str)
+        or version_value not in _SUPPORTED_BUNDLE_FORMAT_VERSIONS
+    ):
         raise BundleError(
             f"Unsupported bundle_format_version: {version_value} "
-            f"(expected {BUNDLE_FORMAT_VERSION})"
+            f"(supported: {', '.join(sorted(_SUPPORTED_BUNDLE_FORMAT_VERSIONS))})"
         )
 
-    _verify_file_inventory(bundle_dir, manifest)
+    required_files = (
+        _LEGACY_REQUIRED_FILES
+        if version_value == _LEGACY_BUNDLE_FORMAT_VERSION
+        else _REQUIRED_FILES
+    )
+    _verify_file_inventory(bundle_dir, manifest, required_files=required_files)
 
     feature_names = _load_feature_schema(bundle_dir / "feature_schema.tsv")
     preprocess_state = joblib.load(bundle_dir / "preprocess_state.joblib")
     model_state = joblib.load(bundle_dir / "model_state.joblib")
     if not isinstance(preprocess_state, dict):
         raise BundleError("preprocess_state.joblib must contain a mapping")
+    if not isinstance(model_state, dict):
+        raise BundleError("model_state.joblib must contain a mapping")
 
     expression_transform, feature_scaling = _preprocess_methods(preprocess_state)
+    if version_value == _LEGACY_BUNDLE_FORMAT_VERSION:
+        if expression_transform in _CONTEXTUAL_EXPRESSION_TRANSFORMS:
+            raise BundleError(
+                "Bundle format version 1 does not preserve the complete transform input "
+                f"schema required for {expression_transform}; rerun full_run and export the "
+                "model bundle with the current PhenoRadar version"
+            )
+        transform_feature_names = feature_names
+    else:
+        transform_feature_names = _load_feature_schema(
+            bundle_dir / "transform_feature_schema.tsv"
+        )
     scaler = preprocess_state.get("scaler")
     state_features = preprocess_state.get("feature_names")
+    state_transform_features = preprocess_state.get("transform_feature_names")
     scaler = _validate_scaler_state(
         scaler,
         feature_scaling=feature_scaling,
@@ -452,6 +529,20 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
     )
     if state_features != feature_names:
         raise BundleError("preprocess_state feature_names do not match feature_schema.tsv")
+    if (
+        version_value == BUNDLE_FORMAT_VERSION
+        and state_transform_features != transform_feature_names
+    ):
+        raise BundleError(
+            "preprocess_state transform_feature_names do not match "
+            "transform_feature_schema.tsv"
+        )
+    transform_feature_set = set(transform_feature_names)
+    if any(feature not in transform_feature_set for feature in feature_names):
+        raise BundleError(
+            "feature_schema.tsv features are not contained in "
+            "transform_feature_schema.tsv"
+        )
 
     models = model_state.get("models")
     aggregation = model_state.get("probability_aggregation")
@@ -494,6 +585,10 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
                     "preprocess_state.joblib model_preprocess entry feature_names is invalid"
                 )
             normalized_features = [str(value) for value in entry_features]
+            if len(set(normalized_features)) != len(normalized_features):
+                raise BundleError(
+                    "preprocess_state.joblib model_preprocess feature_names contain duplicates"
+                )
             if any(feature not in schema_feature_set for feature in normalized_features):
                 raise BundleError(
                     "preprocess_state.joblib model_preprocess feature_names are not "
@@ -517,6 +612,7 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
         manifest=manifest,
         manifest_sha256=_sha256_file(manifest_path),
         feature_names=feature_names,
+        transform_feature_names=transform_feature_names,
         scaler=scaler,
         model_preprocess=model_preprocess,
         models=models,
@@ -573,26 +669,42 @@ def predict_with_bundle(
     try:
         matrix_builder = ExpressionMatrixBuilder(config)
         x_raw, input_features = matrix_builder.build_matrix(species_list)
-        x_transformed = apply_expression_transform(x_raw, bundle.expression_transform)
     except CVError as exc:
         raise BundleError(str(exc)) from exc
     input_index = {feature: idx for idx, feature in enumerate(input_features)}
     bundle_features = bundle.feature_names
+    input_feature_set = set(input_features)
+    model_overlap_count = len(input_feature_set.intersection(bundle_features))
+    if model_overlap_count == 0:
+        raise BundleError("No bundle features were available in prediction input after alignment")
 
-    aligned = np.zeros((len(species_list), len(bundle_features)), dtype=float)
-    overlap_count = 0
-    for feature_idx, feature_name in enumerate(bundle_features):
+    if bundle.expression_transform in _CONTEXTUAL_EXPRESSION_TRANSFORMS:
+        alignment_features = bundle.transform_feature_names
+    else:
+        # Feature-wise transforms commute with feature selection, so aligning only
+        # the model-feature union avoids materializing unused input columns.
+        alignment_features = bundle_features
+    alignment_feature_set = set(alignment_features)
+
+    aligned_raw = np.zeros((len(species_list), len(alignment_features)), dtype=float)
+    alignment_overlap_count = 0
+    for feature_idx, feature_name in enumerate(alignment_features):
         input_idx = input_index.get(feature_name)
         if input_idx is None:
             continue
-        aligned[:, feature_idx] = x_transformed[:, input_idx]
-        overlap_count += 1
+        aligned_raw[:, feature_idx] = x_raw[:, input_idx]
+        alignment_overlap_count += 1
 
-    if overlap_count == 0:
-        raise BundleError("No bundle features were available in prediction input after alignment")
+    try:
+        transformed = apply_expression_transform(
+            aligned_raw,
+            bundle.expression_transform,
+        )
+    except CVError as exc:
+        raise BundleError(str(exc)) from exc
 
-    missing_count = len(bundle_features) - overlap_count
-    extra_count = len(set(input_features) - set(bundle_features))
+    missing_count = len(alignment_features) - alignment_overlap_count
+    extra_count = len(input_feature_set - alignment_feature_set)
     warnings: list[str] = []
     if missing_count > 0:
         warnings.append(
@@ -605,7 +717,7 @@ def predict_with_bundle(
             f"ignored {extra_count} features"
         )
 
-    schema_index = {feature: idx for idx, feature in enumerate(bundle_features)}
+    schema_index = {feature: idx for idx, feature in enumerate(alignment_features)}
 
     model_probs: list[np.ndarray] = []
     if len(bundle.model_preprocess) == len(bundle.models):
@@ -619,7 +731,7 @@ def predict_with_bundle(
         selected_indices = np.array(
             [schema_index[feature] for feature in preprocess.feature_names], dtype=int
         )
-        x_model = aligned[:, selected_indices]
+        x_model = transformed[:, selected_indices]
         try:
             x_model_scaled = apply_feature_scaling(
                 x_model,

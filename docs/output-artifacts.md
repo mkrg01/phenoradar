@@ -741,8 +741,12 @@ Files:
     `source_phenoradar_version`, `source_phenoradar_install_type`, `source_git_source`,
     `source_git_commit`, `source_git_dirty`, and `source_git_worktree_patch_sha256`
 - `feature_schema.tsv`
+  - ordered union of features consumed by at least one fitted model
+- `transform_feature_schema.tsv`
+  - complete ordered raw-feature schema supplied to the expression transform during final refit
+  - prediction raw values are aligned to this schema before sample-rank transforms
 - `preprocess_state.joblib`
-  - contains bundle feature schema plus preprocessing method metadata
+  - contains both feature schemas plus preprocessing method metadata
     (`expression_transform`, `feature_scaling`)
   - may include model-local preprocessing entries (`model_preprocess`),
     including selected features and optional scaler state
@@ -756,6 +760,13 @@ Bundle loading enforces:
 - required file presence
 - file inventory size/SHA-256 checks
 - feature schema continuity and consistency with preprocess/model states
+
+Bundle format compatibility:
+
+- current exports use format version `2`.
+- version `1` bundles using feature-wise `none` or `log1p` transforms remain loadable.
+- version `1` rank-transform bundles cannot reconstruct the complete pre-transform schema and
+  must be regenerated with the current PhenoRadar version.
 
 ## Status and warning interpretation
 

@@ -118,6 +118,7 @@ class FinalRefitArtifacts:
     model_sparsity_summary: pl.DataFrame
     warnings: list[str]
     ensemble_size: int
+    transform_feature_names: list[str]
     feature_names: list[str]
     scaler: FeatureScaler
     models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
@@ -3542,6 +3543,7 @@ def run_final_refit(
         model_sparsity_summary=model_sparsity_summary,
         warnings=warnings,
         ensemble_size=len(model_probs),
+        transform_feature_names=feature_names,
         feature_names=selected_features,
         scaler=scaler,
         models=fitted_models,

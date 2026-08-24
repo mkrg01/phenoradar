@@ -150,6 +150,18 @@ def _rewrite_manifest_to_current_files(
     manifest_path.write_text(_render(manifest, self_sha, size), encoding="utf-8")
 
 
+def _rewrite_bundle_as_v1(bundle_dir: Path) -> None:
+    (bundle_dir / "transform_feature_schema.tsv").unlink()
+    preprocess_state = joblib.load(bundle_dir / "preprocess_state.joblib")
+    preprocess_state.pop("transform_feature_names", None)
+    joblib.dump(preprocess_state, bundle_dir / "preprocess_state.joblib")
+
+    def _set_v1(manifest: dict[str, object]) -> None:
+        manifest["bundle_format_version"] = "1"
+
+    _rewrite_manifest_to_current_files(bundle_dir, manifest_mutator=_set_v1)
+
+
 def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
     metadata, tpm = _fixture_data(tmp_path)
     config = load_and_resolve_config([_config(tmp_path, metadata, tpm)])
@@ -193,6 +205,7 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
         manifest={},
         manifest_sha256="",
         feature_names=refit_feature_schema,
+        transform_feature_names=refit.transform_feature_names,
         scaler=refit.scaler,
         model_preprocess=refit_model_preprocess,
         models=refit.models,
@@ -238,6 +251,7 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
         "pred_label_fixed_threshold",
     }.issubset(pred_df.columns)
     assert bundle.source_run_id == run_dir.name
+    assert bundle.transform_feature_names == refit.transform_feature_names
     assert isinstance(warnings, list)
 
 
@@ -266,6 +280,106 @@ preprocess:
     assert all(entry.scaler is None for entry in bundle.model_preprocess)
     assert pred_df.height == 6
     assert warnings == []
+
+
+@pytest.mark.parametrize("rank_method", ["sample_rank", "sample_percentile_rank"])
+def test_rank_bundle_prediction_ignores_features_outside_transform_schema(
+    tmp_path: Path,
+    rank_method: str,
+) -> None:
+    metadata, _tpm = _fixture_data(tmp_path)
+    rank_tpm = _write(
+        tmp_path / "rank_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp1\tOG2\t3.0",
+                "sp2\tOG1\t3.0",
+                "sp2\tOG2\t1.0",
+                "sp3\tOG1\t1.0",
+                "sp3\tOG2\t4.0",
+                "sp4\tOG1\t4.0",
+                "sp4\tOG2\t1.0",
+                "sp5\tOG1\t2.0",
+                "sp5\tOG2\t3.0",
+                "sp6\tOG1\t3.0",
+                "sp6\tOG2\t2.0",
+            ]
+        )
+        + "\n",
+    )
+    config, bundle = _export_and_load_bundle(
+        tmp_path,
+        metadata,
+        rank_tpm,
+        f"""
+sampling:
+  sampled_set_count: 1
+preprocess:
+  expression_transform:
+    method: {rank_method}
+  pair_aware_filter:
+    enabled: true
+    max_features: 1
+  feature_scaling:
+    method: none
+""",
+    )
+    baseline, baseline_warnings = predict_with_bundle(config, bundle)
+    refit = run_final_refit(
+        config,
+        build_split_artifacts(config).split_manifest,
+    )
+    refit_targets = pl.concat(
+        [
+            refit.pred_external_test.select("species", "prob"),
+            refit.pred_inference.select("species", "prob"),
+        ]
+    ).sort("species")
+    baseline_targets = baseline.join(
+        refit_targets.select("species"),
+        on="species",
+        how="inner",
+    ).sort("species")
+
+    extra_tpm = _write(
+        tmp_path / "rank_tpm_extra.tsv",
+        rank_tpm.read_text(encoding="utf-8")
+        + "\n".join(
+            [
+                "sp1\tOGX\t2.0",
+                "sp2\tOGX\t2.0",
+                "sp3\tOGX\t2.5",
+                "sp4\tOGX\t2.5",
+                "sp5\tOGX\t2.5",
+                "sp6\tOGX\t2.5",
+            ]
+        )
+        + "\n",
+    )
+    extra_config = load_and_resolve_config([_config(tmp_path, metadata, extra_tpm)])
+    with_extra, extra_warnings = predict_with_bundle(extra_config, bundle)
+
+    assert bundle.transform_feature_names == ["OG1", "OG2"]
+    assert len(bundle.feature_names) == 1
+    assert baseline_warnings == []
+    assert baseline_targets.get_column("species").to_list() == refit_targets.get_column(
+        "species"
+    ).to_list()
+    np.testing.assert_allclose(
+        baseline_targets.get_column("prob").to_numpy(),
+        refit_targets.get_column("prob").to_numpy(),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert any("extra features" in warning for warning in extra_warnings)
+    np.testing.assert_allclose(
+        with_extra.get_column("prob").to_numpy(),
+        baseline.get_column("prob").to_numpy(),
+        rtol=0.0,
+        atol=1e-12,
+    )
 
 
 def test_bundle_integrity_failure_on_tampered_file(tmp_path: Path) -> None:
@@ -593,6 +707,49 @@ def test_load_model_bundle_rejects_unsupported_version(tmp_path: Path) -> None:
         load_model_bundle(bundle.bundle_dir)
 
 
+def test_load_model_bundle_supports_v1_feature_wise_transform(tmp_path: Path) -> None:
+    metadata, tpm = _fixture_data(tmp_path)
+    config, bundle = _export_and_load_bundle(tmp_path, metadata, tpm)
+    expected, expected_warnings = predict_with_bundle(config, bundle)
+    _rewrite_bundle_as_v1(bundle.bundle_dir)
+
+    legacy_bundle = load_model_bundle(bundle.bundle_dir)
+    actual, actual_warnings = predict_with_bundle(config, legacy_bundle)
+
+    assert legacy_bundle.manifest["bundle_format_version"] == "1"
+    assert legacy_bundle.transform_feature_names == legacy_bundle.feature_names
+    assert actual_warnings == expected_warnings
+    np.testing.assert_allclose(
+        actual.get_column("prob").to_numpy(),
+        expected.get_column("prob").to_numpy(),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_load_model_bundle_rejects_v1_contextual_rank_transform(tmp_path: Path) -> None:
+    metadata, tpm = _fixture_data(tmp_path)
+    _config_value, bundle = _export_and_load_bundle(
+        tmp_path,
+        metadata,
+        tpm,
+        """
+sampling:
+  sampled_set_count: 1
+preprocess:
+  expression_transform:
+    method: sample_rank
+""",
+    )
+    _rewrite_bundle_as_v1(bundle.bundle_dir)
+
+    with pytest.raises(
+        BundleError,
+        match="does not preserve the complete transform input schema required for sample_rank",
+    ):
+        load_model_bundle(bundle.bundle_dir)
+
+
 def test_load_model_bundle_rejects_missing_files_inventory(tmp_path: Path) -> None:
     metadata, tpm = _fixture_data(tmp_path)
     _config, bundle = _export_and_load_bundle(tmp_path, metadata, tpm)
@@ -608,12 +765,16 @@ def test_load_model_bundle_rejects_missing_files_inventory(tmp_path: Path) -> No
         load_model_bundle(bundle.bundle_dir)
 
 
-def test_load_model_bundle_rejects_missing_required_file(tmp_path: Path) -> None:
+@pytest.mark.parametrize("filename", ["thresholds.tsv", "transform_feature_schema.tsv"])
+def test_load_model_bundle_rejects_missing_required_file(
+    tmp_path: Path,
+    filename: str,
+) -> None:
     metadata, tpm = _fixture_data(tmp_path)
     _config, bundle = _export_and_load_bundle(tmp_path, metadata, tpm)
-    (bundle.bundle_dir / "thresholds.tsv").unlink()
+    (bundle.bundle_dir / filename).unlink()
 
-    with pytest.raises(BundleError, match="Bundle is missing required file: thresholds.tsv"):
+    with pytest.raises(BundleError, match=f"Bundle is missing required file: {filename}"):
         load_model_bundle(bundle.bundle_dir)
 
 
@@ -667,6 +828,7 @@ def test_load_model_bundle_rejects_invalid_scaler_type(tmp_path: Path) -> None:
     joblib.dump(
         {
             "feature_names": feature_names,
+            "transform_feature_names": bundle.transform_feature_names,
             "scaler": "not-a-scaler",
             "transform": "log1p_then_standard_scaler",
         },
@@ -684,6 +846,7 @@ def test_load_model_bundle_rejects_mismatched_preprocess_feature_names(tmp_path:
     joblib.dump(
         {
             "feature_names": ["OTHER"],
+            "transform_feature_names": bundle.transform_feature_names,
             "scaler": bundle.scaler,
             "transform": "log1p_then_standard_scaler",
         },
@@ -692,6 +855,23 @@ def test_load_model_bundle_rejects_mismatched_preprocess_feature_names(tmp_path:
     _rewrite_manifest_to_current_files(bundle.bundle_dir)
 
     with pytest.raises(BundleError, match="feature_names do not match"):
+        load_model_bundle(bundle.bundle_dir)
+
+
+def test_load_model_bundle_rejects_missing_transform_feature_names_state(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _fixture_data(tmp_path)
+    _config, bundle = _export_and_load_bundle(tmp_path, metadata, tpm)
+    preprocess_state = joblib.load(bundle.bundle_dir / "preprocess_state.joblib")
+    preprocess_state.pop("transform_feature_names")
+    joblib.dump(preprocess_state, bundle.bundle_dir / "preprocess_state.joblib")
+    _rewrite_manifest_to_current_files(bundle.bundle_dir)
+
+    with pytest.raises(
+        BundleError,
+        match="transform_feature_names do not match transform_feature_schema.tsv",
+    ):
         load_model_bundle(bundle.bundle_dir)
 
 

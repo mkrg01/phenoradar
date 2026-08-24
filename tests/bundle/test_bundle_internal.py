@@ -213,6 +213,20 @@ def test_export_model_bundle_rejects_manifest_size_mismatch(
         )
 
 
+def test_export_model_bundle_rejects_empty_transform_feature_schema(tmp_path: Path) -> None:
+    config, cv_artifacts, refit, run_dir, resolved_config_path = _prepare_export_inputs(tmp_path)
+    invalid_refit = replace(refit, transform_feature_names=[])
+
+    with pytest.raises(BundleError, match="zero transform input features"):
+        export_model_bundle(
+            run_dir=run_dir,
+            resolved_config_path=resolved_config_path,
+            config=config,  # type: ignore[arg-type]
+            final_refit_artifacts=invalid_refit,  # type: ignore[arg-type]
+            thresholds=cv_artifacts.thresholds,  # type: ignore[attr-defined]
+        )
+
+
 def test_verify_file_inventory_rejects_non_mapping_file_entry(tmp_path: Path) -> None:
     metadata, tpm = _fixture_data(tmp_path)
     _config, bundle = _export_and_load_bundle(tmp_path, metadata, tpm)
