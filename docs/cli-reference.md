@@ -64,6 +64,9 @@ Always written:
 - `cv/tables/feature_importance_by_fold.tsv`
 - `cv/tables/coefficients.tsv`
 - `cv/tables/coefficients_by_fold.tsv`
+- `cv/tables/feature_stability_by_feature.tsv`
+- `cv/tables/feature_stability_by_fold_pair.tsv`
+- `cv/tables/feature_stability_summary.tsv`
 - `cv/tables/prediction_cv.tsv`
 - `model/tables/thresholds.tsv`
 - `model/tables/evaluation_contract.tsv`
@@ -90,6 +93,8 @@ Notes:
   - `cv/figures/feature_importance_top.svg`
   - `cv/figures/feature_importance_by_fold_heatmap.svg`
   - `cv/figures/coefficients_signed_top.svg`
+  - `cv/figures/feature_stability_top.svg`
+  - `cv/figures/feature_set_jaccard_heatmap.svg`
   - `cv/figures/cv_species_probability_by_trait.svg`
   - `cv/figures/cv_fold_trait_probability.svg`
   - `cv/figures/feature_filter_funnel.svg`

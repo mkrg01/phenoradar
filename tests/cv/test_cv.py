@@ -174,6 +174,37 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "method",
         "reason",
     }.issubset(cv_artifacts.coefficients_by_fold.columns)
+    assert cv_artifacts.feature_stability_by_feature.height > 0
+    assert {
+        "feature",
+        "n_outer_folds",
+        "n_retained_folds",
+        "retained_frequency",
+        "n_nonzero_folds",
+        "selection_frequency",
+        "selection_frequency_when_retained",
+        "n_positive_folds",
+        "n_negative_folds",
+        "dominant_sign",
+        "sign_agreement_rate",
+        "sign_reason",
+    }.issubset(cv_artifacts.feature_stability_by_feature.columns)
+    assert cv_artifacts.feature_stability_by_fold_pair.height == 1
+    assert {
+        "fold_id_a",
+        "fold_id_b",
+        "n_intersection",
+        "n_union",
+        "jaccard",
+    }.issubset(cv_artifacts.feature_stability_by_fold_pair.columns)
+    assert cv_artifacts.feature_stability_summary.height == 1
+    assert {
+        "n_outer_folds",
+        "n_fold_pairs",
+        "jaccard_mean",
+        "n_features_ever_selected",
+        "sign_agreement_mean",
+    }.issubset(cv_artifacts.feature_stability_summary.columns)
     aggregate_rows = cv_artifacts.metrics_cv.filter(pl.col("fold_id") == "NA")
     assert aggregate_rows.height > 0
     assert aggregate_rows.filter(pl.col("n_valid_folds").is_null()).height == 0

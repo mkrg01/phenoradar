@@ -18,8 +18,9 @@ For one `run` result directory, a practical order is:
    (overall CV ranking behavior)
 5. `external_test/tables/prediction_external_test.tsv` /
    `inference/tables/prediction_inference.tsv` (`full_run` only)
-6. `cv/tables/feature_importance.tsv` and `cv/tables/coefficients.tsv`
-   (model interpretation)
+6. `cv/tables/feature_importance.tsv`, `cv/tables/coefficients.tsv`, and
+   `cv/tables/feature_stability_summary.tsv`
+   (model interpretation and outer-fold stability)
 
 ## Run directory layout
 
@@ -90,6 +91,21 @@ Always written:
 - `cv/tables/coefficients_by_fold.tsv`
   - columns: `fold_id`, `feature`, `coef_mean`, `n_models`, `method`, `reason`
   - for non-linear models, coefficient values can be `NA` with `reason=unsupported_model_non_linear`
+- `cv/tables/feature_stability_by_feature.tsv`
+  - one row per feature, computed after all outer folds have completed
+  - reports retention frequency, non-zero selection frequency, and selection
+    frequency conditional on having survived preprocessing
+  - for signed linear models, also reports positive/negative fold counts and
+    coefficient-sign agreement; these fields are `NA` for non-linear models
+- `cv/tables/feature_stability_by_fold_pair.tsv`
+  - one row per outer-fold pair
+  - `jaccard` compares the two final non-zero feature sets as
+    `intersection / union`; it is `NA` when both sets are empty
+- `cv/tables/feature_stability_summary.tsv`
+  - one-row summary of selection counts, pairwise Jaccard statistics, and
+    coefficient-sign agreement
+  - stability artifacts reuse already fitted outer-fold models and are purely
+    diagnostic; they do not affect feature selection, predictions, or scores
 - `cv/tables/prediction_cv.tsv`
   - columns: `fold_id`, `species`, `label`, `prob`
   - optional `uncertainty_std` (ensemble size > 1)
@@ -190,6 +206,8 @@ Always written:
     - `cv/figures/feature_importance_top.svg`
     - `cv/figures/feature_importance_by_fold_heatmap.svg`
     - `cv/figures/coefficients_signed_top.svg`
+    - `cv/figures/feature_stability_top.svg`
+    - `cv/figures/feature_set_jaccard_heatmap.svg`
     - `cv/figures/cv_species_probability_by_trait.svg`
     - `cv/figures/cv_fold_trait_probability.svg`
     - `cv/figures/feature_filter_funnel.svg`
@@ -569,6 +587,22 @@ when individual folds are single-label.
 - These fold-level values are the points and boxplot distribution in
   `cv/figures/coefficients_signed_top.svg`.
 
+#### Feature-stability tables
+
+- `selection_frequency` is the fraction of all outer folds in which a feature's
+  final model signal is non-zero (`abs(coef_mean) > 1e-12` for signed linear
+  models; `importance_mean > 1e-12` otherwise).
+- `selection_frequency_when_retained` separates model-selection instability from
+  preprocessing instability by using only folds where the feature was retained
+  in the denominator.
+- `sign_agreement_rate` is the larger of the positive and negative non-zero fold
+  counts divided by the number of non-zero folds. It is reported only when a
+  signed coefficient is available and the feature is selected in at least two folds.
+- Pairwise `jaccard` is `1` for identical non-empty sets, `0` for disjoint sets,
+  and closer to `1` as outer folds choose more similar features.
+- These are post-hoc outer-CV diagnostics. They must not be used to alter the
+  evaluated folds retrospectively; doing so would leak validation information.
+
 #### `classification_summary.tsv`
 
 - Purpose:
@@ -679,6 +713,14 @@ when individual folds are single-label.
   - Horizontal boxplot plus fold-level points; right is positive and left is negative.
   - When `data.orthogroup_annotation_path` is set, labels are rendered as
     `full annotation (orthogroup ID)` instead of ID-only labels.
+- `cv/figures/feature_stability_top.svg`
+  - Top `figures.top_features` features ranked by outer-fold selection frequency.
+  - Gray bars show preprocessing retention; colored bars show final non-zero
+    selection. Color indicates the dominant coefficient sign when available.
+- `cv/figures/feature_set_jaccard_heatmap.svg`
+  - Symmetric outer-fold heatmap of final non-zero feature-set overlap.
+  - The diagonal is `1`; off-diagonal values come from
+    `feature_stability_by_fold_pair.tsv`.
 - `cv/figures/cv_species_probability_by_trait.svg`
   - Out-of-fold species probabilities grouped by trait (`label`).
   - Boxplot with per-species points and trait-wise mean markers.

@@ -16,7 +16,7 @@ from matplotlib.colors import LinearSegmentedColormap, to_rgba
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
-from matplotlib.ticker import MaxNLocator
+from matplotlib.ticker import MaxNLocator, PercentFormatter
 from sklearn.metrics import (
     average_precision_score,
     precision_recall_curve,
@@ -4096,6 +4096,219 @@ def _non_zero_feature_count_by_fold(model_sparsity: pl.DataFrame, out_path: Path
     _save_svg_figure(fig, out_path)
 
 
+def _feature_stability_top(
+    feature_stability: pl.DataFrame,
+    out_path: Path,
+    *,
+    top_features: int = _DEFAULT_TOP_FEATURES,
+    orthogroup_annotations: pl.DataFrame | None = None,
+) -> None:
+    required = {
+        "feature",
+        "retained_frequency",
+        "selection_frequency",
+        "dominant_sign",
+    }
+    if not required.issubset(feature_stability.columns):
+        raise FigureError(
+            "feature_stability_by_feature.tsv schema is invalid for feature_stability_top.svg"
+        )
+    if top_features < 1:
+        raise FigureError("figures.top_features must be >= 1")
+
+    top = (
+        feature_stability.select(
+            pl.col("feature").cast(pl.String, strict=False).alias("feature"),
+            pl.col("retained_frequency").cast(pl.Float64, strict=False).alias("retained_frequency"),
+            pl.col("selection_frequency")
+            .cast(pl.Float64, strict=False)
+            .alias("selection_frequency"),
+            pl.col("dominant_sign").cast(pl.String, strict=False).alias("dominant_sign"),
+        )
+        .filter(
+            pl.col("feature").is_not_null()
+            & (pl.col("feature") != "")
+            & pl.col("retained_frequency").is_not_null()
+            & pl.col("retained_frequency").is_finite()
+            & pl.col("selection_frequency").is_not_null()
+            & pl.col("selection_frequency").is_finite()
+        )
+        .sort(
+            ["selection_frequency", "retained_frequency", "feature"],
+            descending=[True, True, False],
+        )
+        .head(top_features)
+    )
+    if top.height == 0:
+        _write_message_figure(
+            title="Feature Stability",
+            message="No finite feature-stability rows are available.",
+            out_path=out_path,
+            width_px=_FEATURE_IMPORTANCE_TOP_WIDTH_PX,
+            height_px=300,
+        )
+        return
+
+    features = [str(value) for value in top.get_column("feature").to_list()]
+    feature_labels = _feature_axis_labels(features, orthogroup_annotations)
+    retained = np.asarray(top.get_column("retained_frequency").to_list(), dtype=float)
+    selected = np.asarray(top.get_column("selection_frequency").to_list(), dtype=float)
+    signs = [None if value is None else str(value) for value in top["dominant_sign"].to_list()]
+    sign_colors = {
+        "positive": _TRAIT_POSITIVE_COLOR,
+        "negative": _TRAIT_NEGATIVE_COLOR,
+        "tie": _COLOR_PURPLE,
+    }
+    colors = [
+        sign_colors.get(sign, _COLOR_BLUE) if sign is not None else _COLOR_BLUE for sign in signs
+    ]
+
+    row_height_px = _feature_label_row_height_px(feature_labels)
+    height_px = max(260, 85 + len(features) * row_height_px)
+    base_width_px = _FEATURE_IMPORTANCE_TOP_WIDTH_PX
+    base_left = _label_left_margin(
+        features,
+        width_px=base_width_px,
+        fontsize_px=_MONO_FONTSIZE,
+    )
+    width_px, left_margin, right_margin = _feature_axis_layout(
+        feature_labels,
+        base_width_px=base_width_px,
+        base_left=base_left,
+        base_right=0.985,
+        fontsize_px=_MONO_FONTSIZE,
+    )
+    fig, ax = plt.subplots(figsize=_figure_size_inches(width_px, height_px), dpi=_FIG_DPI)
+    fig.patch.set_facecolor("white")
+    y_pos = np.arange(len(features), dtype=float)
+    ax.barh(y_pos, retained, color="#dddddd", height=0.68, label="Retained")
+    ax.barh(y_pos, selected, color=colors, height=0.42, label="Non-zero")
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(feature_labels, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
+    ax.invert_yaxis()
+    ax.set_xlim(0.0, 1.02)
+    ax.set_xlabel("Outer-fold frequency", fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel(_feature_label_axis_title(feature_labels), fontsize=_LABEL_FONTSIZE)
+    ax.xaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
+    ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
+    ax.set_axisbelow(True)
+    legend_handles = [
+        Patch(facecolor="#dddddd", label="Retained after preprocessing"),
+        Patch(facecolor=_TRAIT_POSITIVE_COLOR, label="Non-zero; positive coefficient"),
+        Patch(facecolor=_TRAIT_NEGATIVE_COLOR, label="Non-zero; negative coefficient"),
+        Patch(facecolor=_COLOR_PURPLE, label="Non-zero; tied coefficient sign"),
+        Patch(facecolor=_COLOR_BLUE, label="Non-zero; sign unavailable"),
+    ]
+    ax.legend(handles=legend_handles, loc="lower right", frameon=False, fontsize=_TICK_FONTSIZE)
+    fig.subplots_adjust(
+        left=left_margin,
+        right=right_margin,
+        top=0.98,
+        bottom=_compact_bottom_margin(height_px),
+    )
+    _save_svg_figure(fig, out_path)
+
+
+def _feature_set_jaccard_heatmap(
+    feature_stability_by_fold_pair: pl.DataFrame,
+    out_path: Path,
+) -> None:
+    required = {"fold_id_a", "fold_id_b", "jaccard"}
+    if not required.issubset(feature_stability_by_fold_pair.columns):
+        raise FigureError(
+            "feature_stability_by_fold_pair.tsv schema is invalid for "
+            "feature_set_jaccard_heatmap.svg"
+        )
+    if feature_stability_by_fold_pair.height == 0:
+        _write_message_figure(
+            title="Feature-set Jaccard by Fold",
+            message="At least two outer folds are required for pairwise stability.",
+            out_path=out_path,
+            width_px=_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX,
+            height_px=300,
+        )
+        return
+
+    pair_data = feature_stability_by_fold_pair.select(
+        pl.col("fold_id_a").cast(pl.String, strict=False).alias("fold_id_a"),
+        pl.col("fold_id_b").cast(pl.String, strict=False).alias("fold_id_b"),
+        pl.col("jaccard").cast(pl.Float64, strict=False).alias("jaccard"),
+    ).filter(
+        pl.col("fold_id_a").is_not_null()
+        & pl.col("fold_id_b").is_not_null()
+        & (pl.col("fold_id_a") != "")
+        & (pl.col("fold_id_b") != "")
+    )
+    fold_ids = sorted(
+        set(str(value) for value in pair_data["fold_id_a"].to_list())
+        | set(str(value) for value in pair_data["fold_id_b"].to_list()),
+        key=lambda value: (0, int(value)) if value.isdigit() else (1, value),
+    )
+    if not fold_ids:
+        raise FigureError("No fold identifiers are available for Jaccard heatmap")
+
+    fold_index = {fold_id: index for index, fold_id in enumerate(fold_ids)}
+    matrix = np.full((len(fold_ids), len(fold_ids)), np.nan, dtype=float)
+    np.fill_diagonal(matrix, 1.0)
+    for row in pair_data.iter_rows(named=True):
+        value = row["jaccard"]
+        if value is None or not np.isfinite(float(value)):
+            continue
+        index_a = fold_index[str(row["fold_id_a"])]
+        index_b = fold_index[str(row["fold_id_b"])]
+        matrix[index_a, index_b] = float(value)
+        matrix[index_b, index_a] = float(value)
+
+    width_px = _fold_axis_width_px(len(fold_ids), base_px=260, per_fold_px=36)
+    width_px = max(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, width_px)
+    height_px = max(420, 145 + len(fold_ids) * 24)
+    fig, ax = plt.subplots(figsize=_figure_size_inches(width_px, height_px), dpi=_FIG_DPI)
+    fig.patch.set_facecolor("white")
+    cmap = _FEATURE_IMPORTANCE_HEATMAP_CMAP.copy()
+    cmap.set_bad("#ffffff")
+    image = ax.imshow(
+        np.ma.masked_invalid(matrix),
+        aspect="equal",
+        cmap=cmap,
+        interpolation="nearest",
+        vmin=0.0,
+        vmax=1.0,
+    )
+    positions = np.arange(len(fold_ids), dtype=float)
+    ax.set_xticks(positions)
+    ax.set_xticklabels(fold_ids, rotation=90, fontsize=_TICK_FONTSIZE)
+    ax.set_yticks(positions)
+    ax.set_yticklabels(fold_ids, fontsize=_TICK_FONTSIZE)
+    ax.set_xlabel("Outer CV fold", fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel("Outer CV fold", fontsize=_LABEL_FONTSIZE)
+    ax.set_xticks(np.arange(-0.5, len(fold_ids), 1.0), minor=True)
+    ax.set_yticks(np.arange(-0.5, len(fold_ids), 1.0), minor=True)
+    ax.grid(which="minor", color="#ffffff", linewidth=0.5)
+    ax.tick_params(which="minor", bottom=False, left=False)
+    if len(fold_ids) <= 10:
+        for row_index in range(len(fold_ids)):
+            for col_index in range(len(fold_ids)):
+                value = matrix[row_index, col_index]
+                if not np.isfinite(value):
+                    continue
+                color = "#ffffff" if value > 0.55 else _AXIS_COLOR
+                ax.text(
+                    col_index,
+                    row_index,
+                    f"{value:.2f}",
+                    ha="center",
+                    va="center",
+                    fontsize=_MONO_FONTSIZE,
+                    color=color,
+                    fontfamily="monospace",
+                )
+    colorbar = fig.colorbar(image, ax=ax, fraction=0.035, pad=0.03)
+    colorbar.set_label("Jaccard similarity", fontsize=_LABEL_FONTSIZE)
+    colorbar.ax.tick_params(labelsize=_TICK_FONTSIZE)
+    fig.subplots_adjust(left=0.12, right=0.92, top=0.98, bottom=0.16)
+    _save_svg_figure(fig, out_path)
+
+
 def write_run_figures(
     *,
     run_dir: Path,
@@ -4107,6 +4320,8 @@ def write_run_figures(
     model_selection_trials: pl.DataFrame | None,
     feature_importance_by_fold: pl.DataFrame | None = None,
     coefficients_by_fold: pl.DataFrame | None = None,
+    feature_stability_by_feature: pl.DataFrame | None = None,
+    feature_stability_by_fold_pair: pl.DataFrame | None = None,
     loss_by_split_cv: pl.DataFrame | None = None,
     loss_by_split_final_refit: pl.DataFrame | None = None,
     pred_external_test: pl.DataFrame | None = None,
@@ -4205,6 +4420,25 @@ def write_run_figures(
             "orthogroup_annotations": feature_label_annotations,
         },
     )
+    if feature_stability_by_feature is not None:
+        add_job(
+            "feature_stability_top",
+            _feature_stability_top,
+            (feature_stability_by_feature, cv_dir / "feature_stability_top.svg"),
+            {
+                "top_features": top_features,
+                "orthogroup_annotations": orthogroup_annotations,
+            },
+        )
+    if feature_stability_by_fold_pair is not None:
+        add_job(
+            "feature_set_jaccard_heatmap",
+            _feature_set_jaccard_heatmap,
+            (
+                feature_stability_by_fold_pair,
+                cv_dir / "feature_set_jaccard_heatmap.svg",
+            ),
+        )
     add_job(
         "cv_species_probability_by_trait",
         _species_probability_by_trait,

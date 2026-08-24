@@ -1060,6 +1060,24 @@ def run(
         float_precision=8,
         null_value="NA",
     )
+    cv_artifacts.feature_stability_by_feature.write_csv(
+        cv_tables_dir / "feature_stability_by_feature.tsv",
+        separator="\t",
+        float_precision=12,
+        null_value="NA",
+    )
+    cv_artifacts.feature_stability_by_fold_pair.write_csv(
+        cv_tables_dir / "feature_stability_by_fold_pair.tsv",
+        separator="\t",
+        float_precision=12,
+        null_value="NA",
+    )
+    cv_artifacts.feature_stability_summary.write_csv(
+        cv_tables_dir / "feature_stability_summary.tsv",
+        separator="\t",
+        float_precision=12,
+        null_value="NA",
+    )
     cv_artifacts.oof_predictions.write_csv(
         cv_tables_dir / "prediction_cv.tsv", separator="\t", float_precision=8, null_value="NA"
     )
@@ -1381,6 +1399,8 @@ def run(
             coefficients=cv_artifacts.coefficients,
             feature_importance_by_fold=cv_artifacts.feature_importance_by_fold,
             coefficients_by_fold=cv_artifacts.coefficients_by_fold,
+            feature_stability_by_feature=cv_artifacts.feature_stability_by_feature,
+            feature_stability_by_fold_pair=cv_artifacts.feature_stability_by_fold_pair,
             ensemble_model_probs=cv_artifacts.ensemble_model_probs,
             model_selection_trials=cv_artifacts.model_selection_trials,
             model_selection_trials_summary=cv_artifacts.model_selection_trials_summary,

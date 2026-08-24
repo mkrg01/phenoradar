@@ -637,7 +637,8 @@ derived deterministically from `runtime.seed`.
     - controls how many top-ranked features are shown in
       `cv/figures/feature_importance_top.svg`,
       `cv/figures/feature_importance_by_fold_heatmap.svg`,
-      `cv/figures/coefficients_signed_top.svg`, and tree feature heatmaps when
+      `cv/figures/coefficients_signed_top.svg`,
+      `cv/figures/feature_stability_top.svg`, and tree feature heatmaps when
       `data.tree_path` is set.
 
 ## `report`

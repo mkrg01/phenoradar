@@ -228,6 +228,27 @@ def _minimal_feature_importance_by_fold() -> pl.DataFrame:
     )
 
 
+def _minimal_feature_stability_by_feature() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "feature": ["OG1", "OG2"],
+            "retained_frequency": [1.0, 1.0],
+            "selection_frequency": [1.0, 0.5],
+            "dominant_sign": ["positive", "negative"],
+        }
+    )
+
+
+def _minimal_feature_stability_by_fold_pair() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "fold_id_a": ["0"],
+            "fold_id_b": ["1"],
+            "jaccard": [0.5],
+        }
+    )
+
+
 def _minimal_feature_filter_counts() -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -391,6 +412,8 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
         feature_importance=_minimal_feature_importance(),
         feature_importance_by_fold=_minimal_feature_importance_by_fold(),
         coefficients=_minimal_coefficients(),
+        feature_stability_by_feature=_minimal_feature_stability_by_feature(),
+        feature_stability_by_fold_pair=_minimal_feature_stability_by_fold_pair(),
         ensemble_model_probs=None,
         model_selection_trials=None,
         loss_by_split_cv=_minimal_loss_by_split(),
@@ -410,6 +433,8 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
     assert (cv_figures_dir / "feature_importance_top.svg").exists()
     assert (cv_figures_dir / "feature_importance_by_fold_heatmap.svg").exists()
     assert (cv_figures_dir / "coefficients_signed_top.svg").exists()
+    assert (cv_figures_dir / "feature_stability_top.svg").exists()
+    assert (cv_figures_dir / "feature_set_jaccard_heatmap.svg").exists()
     assert (cv_figures_dir / "cv_species_probability_by_trait.svg").exists()
     assert (cv_figures_dir / "cv_fold_trait_probability.svg").exists()
     assert (cv_figures_dir / "roc_curve_cv.svg").exists()

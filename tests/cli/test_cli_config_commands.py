@@ -277,6 +277,28 @@ def _stub_cv_artifacts(
                 "reason": ["NA"],
             }
         ),
+        feature_stability_by_feature=pl.DataFrame(
+            {
+                "feature": ["OG1"],
+                "retained_frequency": [1.0],
+                "selection_frequency": [1.0],
+                "dominant_sign": ["positive"],
+            }
+        ),
+        feature_stability_by_fold_pair=pl.DataFrame(
+            schema={
+                "fold_id_a": pl.String,
+                "fold_id_b": pl.String,
+                "jaccard": pl.Float64,
+            }
+        ),
+        feature_stability_summary=pl.DataFrame(
+            {
+                "n_outer_folds": [1],
+                "n_fold_pairs": [0],
+                "jaccard_mean": [None],
+            }
+        ),
         oof_predictions=pl.DataFrame(
             {
                 "fold_id": ["0", "0"],
@@ -473,6 +495,8 @@ def test_run_passes_top_features_to_run_and_tree_figures(
 
     assert result.exit_code == 0, result.output
     assert captured_run_kwargs["top_features"] == 7
+    assert captured_run_kwargs["feature_stability_by_feature"] is not None
+    assert captured_run_kwargs["feature_stability_by_fold_pair"] is not None
     assert captured_tree_kwargs["feature_limit"] == 7
 
 
@@ -634,6 +658,30 @@ evaluation:
     assert (run_dirs[0] / "cv" / "tables" / "feature_importance_by_fold.tsv").exists()
     assert (run_dirs[0] / "cv" / "tables" / "coefficients.tsv").exists()
     assert (run_dirs[0] / "cv" / "tables" / "coefficients_by_fold.tsv").exists()
+    stability_feature_path = run_dirs[0] / "cv" / "tables" / "feature_stability_by_feature.tsv"
+    stability_pair_path = run_dirs[0] / "cv" / "tables" / "feature_stability_by_fold_pair.tsv"
+    stability_summary_path = run_dirs[0] / "cv" / "tables" / "feature_stability_summary.tsv"
+    assert stability_feature_path.exists()
+    assert stability_pair_path.exists()
+    assert stability_summary_path.exists()
+    assert {
+        "feature",
+        "retained_frequency",
+        "selection_frequency",
+        "sign_agreement_rate",
+    }.issubset(pl.read_csv(stability_feature_path, separator="\t").columns)
+    assert {
+        "fold_id_a",
+        "fold_id_b",
+        "jaccard",
+    }.issubset(pl.read_csv(stability_pair_path, separator="\t").columns)
+    stability_summary = pl.read_csv(stability_summary_path, separator="\t")
+    assert {
+        "n_outer_folds",
+        "n_fold_pairs",
+        "jaccard_mean",
+    }.issubset(stability_summary.columns)
+    assert stability_summary.get_column("nonzero_tolerance").item() > 0.0
     assert (run_dirs[0] / "model" / "tables" / "feature_filter_counts.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "feature_filter_counts_summary.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "retained_features.tsv").exists()
@@ -667,6 +715,8 @@ evaluation:
     assert (run_dirs[0] / "cv" / "figures" / "feature_importance_top.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "feature_importance_by_fold_heatmap.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "coefficients_signed_top.svg").exists()
+    assert (run_dirs[0] / "cv" / "figures" / "feature_stability_top.svg").exists()
+    assert (run_dirs[0] / "cv" / "figures" / "feature_set_jaccard_heatmap.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "cv_species_probability_by_trait.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "cv_fold_trait_probability.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "roc_curve_cv.svg").exists()

@@ -130,6 +130,9 @@ Core outputs include:
 - `cv/tables/feature_importance_by_fold.tsv`
 - `cv/tables/coefficients.tsv`
 - `cv/tables/coefficients_by_fold.tsv`
+- `cv/tables/feature_stability_by_feature.tsv`
+- `cv/tables/feature_stability_by_fold_pair.tsv`
+- `cv/tables/feature_stability_summary.tsv`
 - `cv/tables/prediction_cv.tsv`
 - `model/tables/thresholds.tsv`
 - `model/tables/evaluation_contract.tsv`

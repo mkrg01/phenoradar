@@ -35,6 +35,10 @@ from sklearn.svm import LinearSVC
 from sklearn.utils.validation import has_fit_parameter
 
 from phenoradar.config import AppConfig
+from phenoradar.feature_stability import (
+    FeatureStabilityError,
+    build_feature_stability_tables,
+)
 from phenoradar.interpret import (
     InterpretationError,
     ModelFeatureEntry,
@@ -100,6 +104,9 @@ class CVArtifacts:
     retained_features_summary: pl.DataFrame
     model_sparsity: pl.DataFrame
     model_sparsity_summary: pl.DataFrame
+    feature_stability_by_feature: pl.DataFrame
+    feature_stability_by_fold_pair: pl.DataFrame
+    feature_stability_summary: pl.DataFrame
     top_feature_expression: pl.DataFrame
     timing: pl.DataFrame
     warnings: list[str]
@@ -4836,6 +4843,15 @@ def _run_outer_cv_impl(
     retained_features_summary = _summarize_retained_features(retained_features)
     model_sparsity = _build_model_sparsity(model_sparsity_rows)
     model_sparsity_summary = _summarize_model_sparsity(model_sparsity)
+    try:
+        feature_stability = build_feature_stability_tables(
+            feature_importance_by_fold=interpretation_artifacts.feature_importance_by_fold,
+            coefficients_by_fold=interpretation_artifacts.coefficients_by_fold,
+            retained_features=retained_features,
+            nonzero_tolerance=_NONZERO_TOLERANCE,
+        )
+    except FeatureStabilityError as exc:
+        raise CVError(str(exc)) from exc
     convergence_diagnostics = _build_convergence_diagnostics(convergence_rows)
     convergence_warning = _convergence_summary_warning(convergence_diagnostics)
     if convergence_warning is not None:
@@ -4872,6 +4888,9 @@ def _run_outer_cv_impl(
         retained_features_summary=retained_features_summary,
         model_sparsity=model_sparsity,
         model_sparsity_summary=model_sparsity_summary,
+        feature_stability_by_feature=feature_stability.by_feature,
+        feature_stability_by_fold_pair=feature_stability.by_fold_pair,
+        feature_stability_summary=feature_stability.summary,
         top_feature_expression=top_feature_expression,
         timing=timing,
         warnings=warnings,
