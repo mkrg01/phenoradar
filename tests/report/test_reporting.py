@@ -7,6 +7,7 @@ import polars as pl
 import pytest
 
 import phenoradar.reporting as reporting_mod
+from phenoradar import __version__
 from phenoradar.figures import FigureError
 from phenoradar.metrics import evaluation_metric_contract
 from phenoradar.reporting import PrimaryMetric, ReportError, ReportOptions, generate_report
@@ -29,6 +30,7 @@ def _write_run_dir(
     include_metrics: bool = True,
     metrics_valid_schema: bool = True,
     experiment_fingerprint_value: str | None = "c" * 64,
+    phenoradar_version_value: str | None = __version__,
 ) -> Path:
     run_dir = runs_root / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
@@ -40,10 +42,18 @@ def _write_run_dir(
         "end_time": start_time,
         "duration_sec": 1.0,
         "warnings": [],
+        "provenance_schema_version": 1,
+        "phenoradar_install_type": "installed_distribution",
+        "git_source": "unavailable",
+        "git_commit": "unknown",
+        "git_dirty": None,
+        "git_worktree_patch_sha256": None,
         "evaluation_contract": {
             "metric_contract": evaluation_metric_contract(),
         },
     }
+    if phenoradar_version_value is not None:
+        metadata["phenoradar_version"] = phenoradar_version_value
     if experiment_fingerprint_value is not None:
         metadata.update(
             {
@@ -421,6 +431,84 @@ def test_generate_report_allows_mixed_experiments_only_with_explicit_override(
     assert manifest["experiment_compatibility"]["status"] == "mixed_override"
     assert manifest["experiment_compatibility"]["mixed"] is True
     assert manifest["report_options"]["allow_mixed_experiments"] is True
+
+
+def test_generate_report_warns_when_phenoradar_versions_are_mixed(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    for run_id, version in [
+        ("20260101T000001Z_run_a", "0.4.0"),
+        ("20260101T000002Z_run_b", "0.5.0"),
+    ]:
+        _write_run_dir(
+            runs_root,
+            run_id=run_id,
+            stage="full_run",
+            start_time="2026-01-01T00:00:00+00:00",
+            metric_value=0.8,
+            phenoradar_version_value=version,
+        )
+    out_dir = tmp_path / "report_out"
+
+    generate_report(
+        run_dirs=[],
+        runs_root=runs_root,
+        run_glob="*",
+        latest=None,
+        options=_options(),
+        output_dir=out_dir,
+    )
+
+    report_runs = pl.read_csv(out_dir / "report_runs.tsv", separator="\t")
+    assert {
+        "provenance_schema_version",
+        "phenoradar_version",
+        "phenoradar_install_type",
+        "git_source",
+        "git_commit",
+        "git_dirty",
+        "git_worktree_patch_sha256",
+    }.issubset(report_runs.columns)
+    warnings = pl.read_csv(out_dir / "report_warnings.tsv", separator="\t")
+    assert warnings.filter(pl.col("warning_type") == "mixed_phenoradar_versions").height == 2
+    manifest = json.loads((out_dir / "report_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["software_compatibility"] == {
+        "dirty_run_ids": [],
+        "mixed": True,
+        "phenoradar_versions": ["0.4.0", "0.5.0"],
+        "status": "mixed",
+        "unknown_run_ids": [],
+    }
+    assert manifest["generated_by"]["phenoradar_version"] == __version__
+
+
+def test_generate_report_warns_when_phenoradar_version_is_missing(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    _write_run_dir(
+        runs_root,
+        run_id="20260101T000001Z_run_legacy",
+        stage="full_run",
+        start_time="2026-01-01T00:00:00+00:00",
+        metric_value=0.7,
+        phenoradar_version_value=None,
+    )
+    out_dir = tmp_path / "report_out"
+
+    generate_report(
+        run_dirs=[],
+        runs_root=runs_root,
+        run_glob="*",
+        latest=None,
+        options=_options(strict=False),
+        output_dir=out_dir,
+    )
+
+    warnings = pl.read_csv(out_dir / "report_warnings.tsv", separator="\t")
+    assert warnings.filter(pl.col("warning_type") == "missing_phenoradar_version").height == 1
+    manifest = json.loads((out_dir / "report_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["software_compatibility"]["status"] == "legacy_unverified"
+    assert manifest["software_compatibility"]["unknown_run_ids"] == [
+        "20260101T000001Z_run_legacy"
+    ]
 
 
 def test_generate_report_legacy_fingerprint_policy_depends_on_strict_mode(

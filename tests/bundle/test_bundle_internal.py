@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import polars as pl
@@ -143,38 +142,6 @@ def test_resolve_manifest_size_raises_when_not_converged(monkeypatch: pytest.Mon
 
     with pytest.raises(BundleError, match="Failed to resolve deterministic"):
         bundle_mod._resolve_manifest_size({"files": {}})
-
-
-def test_run_git_returns_none_on_file_not_found(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    def _raise_file_not_found(*_args: object, **_kwargs: object) -> object:
-        raise FileNotFoundError
-
-    monkeypatch.setattr(bundle_mod.subprocess, "run", _raise_file_not_found)
-    assert bundle_mod._run_git(["git", "status"], cwd=tmp_path) is None
-
-
-def test_run_git_returns_none_on_non_zero_exit(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(
-        bundle_mod.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout=""),
-    )
-    assert bundle_mod._run_git(["git", "status"], cwd=tmp_path) is None
-
-
-def test_run_git_returns_stripped_stdout_on_success(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(
-        bundle_mod.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="  abc123\n"),
-    )
-    assert bundle_mod._run_git(["git", "rev-parse", "HEAD"], cwd=tmp_path) == "abc123"
 
 
 def test_threshold_value_raises_when_not_exactly_one_row() -> None:

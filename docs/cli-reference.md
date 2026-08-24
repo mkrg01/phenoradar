@@ -299,3 +299,7 @@ file paths and model hyperparameters are excluded. Legacy runs without fingerpri
 reportable in non-strict mode with warnings, while `--strict` rejects them. Report metric
 definitions are read from each run's persisted contract, so missing legacy definitions are
 left unknown rather than inferred from the installed version.
+The report also carries each run's persisted PhenoRadar version/build fields and emits
+`mixed_phenoradar_versions`, `missing_phenoradar_version`, or `dirty_phenoradar_build`
+warnings when applicable. The report-generating build is recorded separately under
+`report_manifest.json.generated_by`.

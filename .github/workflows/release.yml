@@ -60,6 +60,17 @@ jobs:
           uv pip install --python "${RUNNER_TEMP}/phenoradar-wheel-smoke/bin/python" dist/*.whl
           mkdir -p "${RUNNER_TEMP}/phenoradar-wheel-smoke-output"
           cd "${RUNNER_TEMP}/phenoradar-wheel-smoke-output"
+          "${RUNNER_TEMP}/phenoradar-wheel-smoke/bin/python" - <<'PY'
+          from importlib.metadata import version
+
+          from phenoradar.provenance import phenoradar_build_snapshot
+
+          snapshot = phenoradar_build_snapshot()
+          assert snapshot["phenoradar_version"] == version("phenoradar")
+          assert snapshot["phenoradar_install_type"] == "installed_distribution"
+          assert snapshot["git_source"] == "unavailable"
+          assert snapshot["git_commit"] == "unknown"
+          PY
           "${RUNNER_TEMP}/phenoradar-wheel-smoke/bin/phenoradar" dataset --out c4_tiny
           test -f c4_tiny/species_metadata.tsv
           test -f c4_tiny/species_trait.tsv

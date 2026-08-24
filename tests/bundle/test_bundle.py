@@ -213,6 +213,12 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
     assert manifest["threshold_fixed"] == pytest.approx(0.5)
     assert manifest["threshold_policy"] == "fixed_constant"
     assert manifest["threshold_derived_from_cv"] is False
+    assert manifest["source_provenance_schema_version"] == 1
+    assert isinstance(manifest["source_phenoradar_version"], str)
+    assert manifest["source_git_source"] in {"phenoradar_source", "unavailable"}
+    assert manifest["library_versions"]["phenoradar"] == manifest[
+        "source_phenoradar_version"
+    ]
 
     assert pred_df.get_column("species").to_list() == refit_pred_df.get_column("species").to_list()
     np.testing.assert_allclose(

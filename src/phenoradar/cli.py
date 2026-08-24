@@ -60,8 +60,8 @@ from phenoradar.provenance import (
     collect_input_files,
     dataset_fingerprint,
     experiment_fingerprint,
-    git_snapshot,
     input_hashes_by_role,
+    phenoradar_build_snapshot,
     runtime_environment_snapshot,
     split_fingerprint,
 )
@@ -1268,7 +1268,7 @@ def run(
 
     end_time = datetime.now(UTC)
     _log("Collect runtime provenance metadata.")
-    git_meta = git_snapshot(Path.cwd())
+    build_meta = phenoradar_build_snapshot()
     environment = runtime_environment_snapshot()
     metadata_payload: dict[str, Any] = {
         "command": "run",
@@ -1290,7 +1290,7 @@ def run(
         "environment": environment,
         "warnings": warnings,
         **fingerprint_metadata,
-        **git_meta,
+        **build_meta,
     }
     if final_refit_artifacts is not None:
         metadata_payload["final_refit_ensemble_size"] = final_refit_artifacts.ensemble_size
@@ -1853,7 +1853,7 @@ def predict(
         payload_sha = bundle_payload_sha256(model_bundle)
     except ProvenanceError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    git_meta = git_snapshot(Path.cwd())
+    build_meta = phenoradar_build_snapshot()
     environment = runtime_environment_snapshot()
     metadata_path = run_dir / "run_metadata.json"
     _write_metadata(
@@ -1873,10 +1873,17 @@ def predict(
             "model_bundle_payload_sha256": payload_sha,
             "bundle_source_run_id": bundle.source_run_id,
             "bundle_source_run_dir": str(bundle.manifest.get("source_run_dir", "unknown")),
+            "bundle_source_provenance_schema_version": bundle.manifest.get(
+                "source_provenance_schema_version"
+            ),
+            "bundle_source_phenoradar_version": bundle.manifest.get(
+                "source_phenoradar_version"
+            ),
+            "bundle_source_git_commit": bundle.manifest.get("source_git_commit"),
             "input_files": input_files,
             "environment": environment,
             "warnings": predict_warnings,
-            **git_meta,
+            **build_meta,
         },
     )
     _log(f"Metadata written: {metadata_path}.")

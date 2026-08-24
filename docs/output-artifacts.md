@@ -140,6 +140,12 @@ Always written:
     - `external_test` pooled row (`full_run` only, `fold_id=NA`)
 - `run_metadata.json`
   - provenance and execution metadata (`status`, timings, seed policy, git/runtime snapshot, warnings)
+  - software provenance: `provenance_schema_version`, `phenoradar_version`,
+    `phenoradar_install_type`, `git_source`, `git_commit`, `git_dirty`, and
+    `git_worktree_patch_sha256`
+  - Git fields describe the imported PhenoRadar source checkout only. For an installed
+    distribution they are left explicitly unavailable instead of inspecting the invocation
+    directory or an enclosing unrelated repository.
   - comparison identity: `fingerprint_schema_version`, `dataset_fingerprint`,
     `split_fingerprint`, `experiment_fingerprint`, and `evaluation_contract`
   - `evaluation_contract.metric_contract` records exact metric implementations and the
@@ -649,6 +655,10 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
   - Same schema as run-stage grouped summaries.
 - `run_metadata.json`
   - includes bundle manifest/payload hash values and bundle source metadata
+  - includes the same PhenoRadar version/build provenance fields as `run`
+  - copies `bundle_source_provenance_schema_version`,
+    `bundle_source_phenoradar_version`, and `bundle_source_git_commit` from the bundle
+    manifest without inferring values for legacy bundles
 - `inference/figures/`
   - `predict_probability_distribution.svg`
   - `probability_by_<group>.svg` (when `summary.group_col` is present in metadata)
@@ -671,15 +681,19 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 
 - `report_manifest.json`
   - selected runs, options, skipped runs, ranked count
+  - `generated_by` records the PhenoRadar version/build that generated the report
   - `report_options.metric_direction` is `maximize` or `minimize`
   - `report_options` also records the metric display name, implementation, and any
     fixed-threshold dependency
   - `experiment_compatibility` records verification status, fingerprints, unknown legacy
     runs, and whether mixed comparison was explicitly enabled
+  - `software_compatibility` records observed PhenoRadar versions, legacy runs with unknown
+    versions, dirty source-checkout runs, and whether versions are mixed
 - `report_runs.tsv`
   - one row per included run after selection/filtering
   - columns: `run_id`, `run_dir`, `command`, `execution_stage`, `status`, `start_time`,
-    `end_time`, `duration_sec`, `primary_metric`, `metric_contract_version`,
+    `end_time`, `duration_sec`, software-provenance columns, `primary_metric`,
+    `metric_contract_version`,
     `metric_display_name`,
     `metric_implementation`, `metric_threshold_name`, `metric_threshold_value`,
     `aggregate_scope`, `metric_value`,
@@ -691,7 +705,8 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - `report_ranking.tsv`
   - ranked runs with non-null metric
   - columns: `run_id`, `run_dir`, `execution_stage`, `start_time`, `metric_name`,
-    metric-definition columns, `aggregate_scope`, `metric_value`, fingerprint columns, `rank`
+    software-provenance columns, metric-definition columns, `aggregate_scope`, `metric_value`,
+    fingerprint columns, `rank`
   - `rank` follows the selected metric's documented better direction: descending for
     `mcc`, `balanced_accuracy`, `roc_auc`, and `pr_auc`; ascending for `brier`
   - ties are ordered by `start_time`, then `run_id`, both ascending
@@ -722,6 +737,9 @@ Files:
 - `bundle_manifest.json`
   - records `threshold_name`, `threshold_fixed`, `threshold_policy`, and
     `threshold_derived_from_cv=false`
+  - records the exporting build in `source_provenance_schema_version`,
+    `source_phenoradar_version`, `source_phenoradar_install_type`, `source_git_source`,
+    `source_git_commit`, `source_git_dirty`, and `source_git_worktree_patch_sha256`
 - `feature_schema.tsv`
 - `preprocess_state.joblib`
   - contains bundle feature schema plus preprocessing method metadata

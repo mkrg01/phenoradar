@@ -218,8 +218,13 @@ Per-run ingestion:
 - verifies that metric-bearing runs share one experiment fingerprint.
 - reads each run's persisted metric contract rather than inferring its implementation from
   the currently installed version.
+- reads each run's persisted PhenoRadar version/build provenance and warns about missing
+  legacy versions, dirty source checkouts, or reports that mix PhenoRadar versions.
 - legacy runs without fingerprints or metric contracts are warned in non-strict mode and
   rejected in `--strict`.
+- software-version warnings are diagnostic: experiment fingerprints and metric contracts
+  remain the comparison guard, so a version mismatch is surfaced without silently changing
+  ranking eligibility.
 
 Ranking:
 

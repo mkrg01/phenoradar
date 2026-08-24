@@ -398,7 +398,9 @@ def test_run_passes_top_features_to_run_and_tree_figures(
         "phenoradar.cli._build_run_fingerprint_metadata",
         lambda **_kwargs: _stub_fingerprint_metadata(),
     )
-    monkeypatch.setattr("phenoradar.cli.git_snapshot", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        "phenoradar.cli.phenoradar_build_snapshot", lambda *_args, **_kwargs: {}
+    )
     monkeypatch.setattr(
         "phenoradar.cli.runtime_environment_snapshot",
         lambda *_args, **_kwargs: {"python": "test"},
@@ -727,6 +729,9 @@ data:
     assert "git_commit" in run_metadata
     assert "git_dirty" in run_metadata
     assert "git_worktree_patch_sha256" in run_metadata
+    assert run_metadata["provenance_schema_version"] == 1
+    assert isinstance(run_metadata["phenoradar_version"], str)
+    assert run_metadata["git_source"] in {"phenoradar_source", "unavailable"}
     assert "seed_policy" in run_metadata
     assert run_metadata["seed_policy"]["runtime_seed"] == 42
     assert "environment" in run_metadata
@@ -1016,7 +1021,9 @@ def test_run_emits_warning_summary_and_quiet_mode_suppresses_progress(
         "phenoradar.cli._build_run_fingerprint_metadata",
         lambda **_kwargs: _stub_fingerprint_metadata(),
     )
-    monkeypatch.setattr("phenoradar.cli.git_snapshot", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        "phenoradar.cli.phenoradar_build_snapshot", lambda *_args, **_kwargs: {}
+    )
     monkeypatch.setattr(
         "phenoradar.cli.runtime_environment_snapshot",
         lambda *_args, **_kwargs: {"python": "test"},
@@ -1133,11 +1140,17 @@ data:
     assert "git_commit" in predict_metadata
     assert "git_dirty" in predict_metadata
     assert "git_worktree_patch_sha256" in predict_metadata
+    assert predict_metadata["provenance_schema_version"] == 1
+    assert isinstance(predict_metadata["phenoradar_version"], str)
+    assert predict_metadata["git_source"] in {"phenoradar_source", "unavailable"}
     assert "environment" in predict_metadata
     assert "input_files" in predict_metadata
     assert "model_bundle_manifest_sha256" in predict_metadata
     assert "model_bundle_payload_sha256" in predict_metadata
     assert "bundle_source_run_dir" in predict_metadata
+    assert predict_metadata["bundle_source_provenance_schema_version"] == 1
+    assert isinstance(predict_metadata["bundle_source_phenoradar_version"], str)
+    assert isinstance(predict_metadata["bundle_source_git_commit"], str)
     assert "seed_policy" in predict_metadata
 
 
@@ -1717,7 +1730,9 @@ def test_run_writes_ensemble_tables_when_available(
         "phenoradar.cli._build_run_fingerprint_metadata",
         lambda **_kwargs: _stub_fingerprint_metadata(),
     )
-    monkeypatch.setattr("phenoradar.cli.git_snapshot", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        "phenoradar.cli.phenoradar_build_snapshot", lambda *_args, **_kwargs: {}
+    )
     monkeypatch.setattr(
         "phenoradar.cli.runtime_environment_snapshot",
         lambda *_args, **_kwargs: {"python": "test"},

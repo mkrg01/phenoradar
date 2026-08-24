@@ -15,6 +15,8 @@ from phenoradar.provenance import (
     experiment_fingerprint,
     git_snapshot,
     input_hashes_by_role,
+    phenoradar_build_snapshot,
+    runtime_environment_snapshot,
     split_fingerprint,
 )
 
@@ -207,3 +209,70 @@ def test_git_snapshot_uses_unknown_when_git_unavailable(
 
     assert snapshot["git_commit"] == "unknown"
     assert snapshot["git_dirty"] is False
+
+
+def test_phenoradar_build_snapshot_uses_validated_source_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    project_root = tmp_path / "phenoradar-source"
+    package_file = _write(project_root / "src/phenoradar/provenance.py", "# package\n")
+    _write(
+        project_root / "pyproject.toml",
+        '[project]\nname = "phenoradar"\nversion = "9.9.9"\n',
+    )
+
+    def _fake_run_git(args: list[str], cwd: Path) -> str | None:
+        assert cwd == project_root
+        if args[-1] == "--show-toplevel":
+            return str(project_root)
+        if args[-1] == "HEAD" and args[:2] == ["git", "rev-parse"]:
+            return "abc123"
+        if args[:3] == ["git", "status", "--porcelain"]:
+            return " M src/phenoradar/provenance.py"
+        if args[:3] == ["git", "diff", "HEAD"]:
+            return "patch"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(provenance_mod, "_run_git", _fake_run_git)
+
+    snapshot = phenoradar_build_snapshot(package_file)
+
+    assert snapshot["provenance_schema_version"] == 1
+    assert snapshot["phenoradar_version"] == provenance_mod.__version__
+    assert snapshot["phenoradar_install_type"] == "source_checkout"
+    assert snapshot["git_source"] == "phenoradar_source"
+    assert snapshot["git_commit"] == "abc123"
+    assert snapshot["git_dirty"] is True
+
+
+def test_phenoradar_build_snapshot_does_not_use_unrelated_enclosing_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    project_root = tmp_path / "unrelated-project"
+    package_file = _write(
+        project_root / ".venv/lib/python/site-packages/phenoradar/provenance.py",
+        "# installed package\n",
+    )
+    _write(
+        project_root / "pyproject.toml",
+        '[project]\nname = "phenoradar"\nversion = "9.9.9"\n',
+    )
+
+    def _unexpected_git(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("Git must not be queried for an installed distribution")
+
+    monkeypatch.setattr(provenance_mod, "_run_git", _unexpected_git)
+
+    snapshot = phenoradar_build_snapshot(package_file)
+
+    assert snapshot["phenoradar_install_type"] == "installed_distribution"
+    assert snapshot["git_source"] == "unavailable"
+    assert snapshot["git_commit"] == "unknown"
+    assert snapshot["git_dirty"] is None
+    assert snapshot["git_worktree_patch_sha256"] is None
+
+
+def test_runtime_environment_snapshot_includes_phenoradar_version() -> None:
+    snapshot = runtime_environment_snapshot()
+
+    assert snapshot["library_versions"]["phenoradar"] == provenance_mod.__version__

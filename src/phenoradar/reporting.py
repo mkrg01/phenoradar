@@ -13,6 +13,7 @@ import yaml
 
 from phenoradar.figures import FigureError, write_report_figures
 from phenoradar.metrics import metric_contract, metric_direction, metric_sort_value
+from phenoradar.provenance import phenoradar_build_snapshot
 
 PrimaryMetric = Literal["mcc", "balanced_accuracy", "roc_auc", "pr_auc", "brier"]
 AggregateScope = Literal["macro", "micro"]
@@ -163,6 +164,17 @@ def _fingerprint_schema_version_or_none(value: Any) -> int | None:
     return int(value)
 
 
+def _nonempty_string_or_none(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
 def _run_metric_contract_or_none(
     metadata: dict[str, Any], metric_name: str
 ) -> dict[str, Any] | None:
@@ -282,6 +294,86 @@ def _validate_experiment_compatibility(
         "mixed": mixed,
         "experiment_fingerprints": known_sorted,
         "unknown_run_ids": unknown_sorted,
+    }
+
+
+def _validate_software_compatibility(
+    *,
+    run_rows: list[dict[str, Any]],
+    warning_rows: list[dict[str, str]],
+) -> dict[str, Any]:
+    if not run_rows:
+        return {
+            "status": "not_applicable",
+            "mixed": False,
+            "phenoradar_versions": [],
+            "unknown_run_ids": [],
+            "dirty_run_ids": [],
+        }
+
+    known_versions: set[str] = set()
+    unknown_run_ids: list[str] = []
+    dirty_run_ids: list[str] = []
+    for row in run_rows:
+        run_id = str(row["run_id"])
+        run_dir = Path(str(row["run_dir"]))
+        version = row["phenoradar_version"]
+        if version is None:
+            unknown_run_ids.append(run_id)
+            _record_warning(
+                warning_rows,
+                run_id=run_id,
+                run_dir=run_dir,
+                warning_type="missing_phenoradar_version",
+                message=(
+                    "Run predates PhenoRadar software provenance or contains an invalid "
+                    "phenoradar_version; software compatibility cannot be verified."
+                ),
+            )
+        else:
+            known_versions.add(str(version))
+
+        if row["git_dirty"] is True:
+            dirty_run_ids.append(run_id)
+            _record_warning(
+                warning_rows,
+                run_id=run_id,
+                run_dir=run_dir,
+                warning_type="dirty_phenoradar_build",
+                message=(
+                    "Run used a PhenoRadar source checkout with uncommitted or untracked "
+                    "changes; inspect its Git commit and worktree patch checksum."
+                ),
+            )
+
+    known_sorted = sorted(known_versions)
+    unknown_sorted = sorted(unknown_run_ids)
+    dirty_sorted = sorted(dirty_run_ids)
+    mixed = len(known_sorted) > 1
+    if mixed:
+        versions_label = ", ".join(known_sorted)
+        message = f"Report combines PhenoRadar versions: {versions_label}."
+        for row in run_rows:
+            _record_warning(
+                warning_rows,
+                run_id=str(row["run_id"]),
+                run_dir=Path(str(row["run_dir"])),
+                warning_type="mixed_phenoradar_versions",
+                message=message,
+            )
+
+    if mixed:
+        status = "mixed"
+    elif unknown_sorted:
+        status = "legacy_unverified"
+    else:
+        status = "verified"
+    return {
+        "status": status,
+        "mixed": mixed,
+        "phenoradar_versions": known_sorted,
+        "unknown_run_ids": unknown_sorted,
+        "dirty_run_ids": dirty_sorted,
     }
 
 
@@ -442,6 +534,19 @@ def generate_report(
         start_time = str(metadata.get("start_time", ""))
         end_time = str(metadata.get("end_time", ""))
         duration_sec = _float_or_none(metadata.get("duration_sec"))
+        provenance_schema_version = _fingerprint_schema_version_or_none(
+            metadata.get("provenance_schema_version")
+        )
+        phenoradar_version = _nonempty_string_or_none(metadata.get("phenoradar_version"))
+        phenoradar_install_type = _nonempty_string_or_none(
+            metadata.get("phenoradar_install_type")
+        )
+        git_source = _nonempty_string_or_none(metadata.get("git_source"))
+        git_commit = _nonempty_string_or_none(metadata.get("git_commit"))
+        git_dirty = _bool_or_none(metadata.get("git_dirty"))
+        git_worktree_patch_sha256 = _fingerprint_or_none(
+            metadata.get("git_worktree_patch_sha256")
+        )
         fingerprint_schema_version = _fingerprint_schema_version_or_none(
             metadata.get("fingerprint_schema_version")
         )
@@ -516,6 +621,13 @@ def generate_report(
                 "start_time": start_time,
                 "end_time": end_time,
                 "duration_sec": duration_sec,
+                "provenance_schema_version": provenance_schema_version,
+                "phenoradar_version": phenoradar_version,
+                "phenoradar_install_type": phenoradar_install_type,
+                "git_source": git_source,
+                "git_commit": git_commit,
+                "git_dirty": git_dirty,
+                "git_worktree_patch_sha256": git_worktree_patch_sha256,
                 "primary_metric": options.primary_metric,
                 "metric_contract_version": (
                     None
@@ -555,6 +667,13 @@ def generate_report(
                     "run_dir": str(run_dir),
                     "execution_stage": stage,
                     "start_time": start_time,
+                    "provenance_schema_version": provenance_schema_version,
+                    "phenoradar_version": phenoradar_version,
+                    "phenoradar_install_type": phenoradar_install_type,
+                    "git_source": git_source,
+                    "git_commit": git_commit,
+                    "git_dirty": git_dirty,
+                    "git_worktree_patch_sha256": git_worktree_patch_sha256,
                     "metric_name": options.primary_metric,
                     "metric_contract_version": (
                         None
@@ -595,6 +714,10 @@ def generate_report(
         warning_rows=warning_rows,
         options=options,
     )
+    software_compatibility = _validate_software_compatibility(
+        run_rows=run_rows,
+        warning_rows=warning_rows,
+    )
 
     run_rows_sorted = sorted(
         run_rows,
@@ -626,6 +749,13 @@ def generate_report(
                 "start_time": pl.String,
                 "end_time": pl.String,
                 "duration_sec": pl.Float64,
+                "provenance_schema_version": pl.Int64,
+                "phenoradar_version": pl.String,
+                "phenoradar_install_type": pl.String,
+                "git_source": pl.String,
+                "git_commit": pl.String,
+                "git_dirty": pl.Boolean,
+                "git_worktree_patch_sha256": pl.String,
                 "primary_metric": pl.String,
                 "metric_contract_version": pl.Int64,
                 "metric_display_name": pl.String,
@@ -651,6 +781,13 @@ def generate_report(
                 "run_dir": pl.String,
                 "execution_stage": pl.String,
                 "start_time": pl.String,
+                "provenance_schema_version": pl.Int64,
+                "phenoradar_version": pl.String,
+                "phenoradar_install_type": pl.String,
+                "git_source": pl.String,
+                "git_commit": pl.String,
+                "git_dirty": pl.Boolean,
+                "git_worktree_patch_sha256": pl.String,
                 "metric_name": pl.String,
                 "metric_contract_version": pl.Int64,
                 "metric_display_name": pl.String,
@@ -699,7 +836,9 @@ def generate_report(
             "glob": options.run_glob,
             "latest": options.latest,
         },
+        "generated_by": phenoradar_build_snapshot(),
         "experiment_compatibility": compatibility,
+        "software_compatibility": software_compatibility,
         "selected_run_dirs": [str(path) for path in selected_dirs],
         "included_runs": [row["run_id"] for row in run_rows_sorted],
         "skipped_runs": skipped_runs,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import platform
 import subprocess
+import tomllib
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from importlib.metadata import version as package_version
@@ -13,7 +14,10 @@ from typing import Any
 
 import polars as pl
 
+from phenoradar import __version__
+
 FINGERPRINT_SCHEMA_VERSION = 1
+PROVENANCE_SCHEMA_VERSION = 1
 _SPLIT_FINGERPRINT_COLUMNS = (
     "species",
     "pool",
@@ -57,6 +61,7 @@ def runtime_environment_snapshot() -> dict[str, Any]:
         "python_version": platform.python_version(),
         "platform": platform.platform(),
         "library_versions": {
+            "phenoradar": __version__,
             "polars": package_version("polars"),
             "scikit-learn": package_version("scikit-learn"),
             "pydantic": package_version("pydantic"),
@@ -92,6 +97,77 @@ def git_snapshot(cwd: Path) -> dict[str, Any]:
         "git_commit": commit,
         "git_dirty": dirty,
         "git_worktree_patch_sha256": patch_sha,
+    }
+
+
+def _phenoradar_project_root(package_file: Path) -> Path | None:
+    """Find a source-tree root without mistaking a containing project for PhenoRadar."""
+    package_dir = package_file.resolve().parent
+    for candidate in package_dir.parents:
+        expected_package_dirs = {
+            (candidate / "src" / "phenoradar").resolve(),
+            (candidate / "phenoradar").resolve(),
+        }
+        if package_dir not in expected_package_dirs:
+            continue
+        pyproject_path = candidate / "pyproject.toml"
+        try:
+            pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        project = pyproject.get("project")
+        if isinstance(project, dict) and project.get("name") == "phenoradar":
+            return candidate.resolve()
+    return None
+
+
+def _validated_git_root(project_root: Path) -> Path | None:
+    """Return project_root only when it is itself the enclosing Git worktree root."""
+    raw_root = _run_git(["git", "rev-parse", "--show-toplevel"], cwd=project_root)
+    if raw_root is None:
+        return None
+    try:
+        resolved_root = Path(raw_root).resolve()
+    except OSError:
+        return None
+    return project_root if resolved_root == project_root.resolve() else None
+
+
+def phenoradar_build_snapshot(package_file: Path | None = None) -> dict[str, Any]:
+    """Capture version/build provenance from the PhenoRadar package location.
+
+    An installed wheel can live inside an unrelated Git worktree. Git metadata is
+    therefore collected only when the imported package has the exact layout of a
+    validated PhenoRadar source checkout.
+    """
+    resolved_package_file = Path(__file__) if package_file is None else package_file
+    project_root = _phenoradar_project_root(resolved_package_file)
+    git_root = None if project_root is None else _validated_git_root(project_root)
+
+    if git_root is None:
+        git_metadata: dict[str, Any] = {
+            "git_commit": "unknown",
+            "git_dirty": None,
+            "git_worktree_patch_sha256": None,
+        }
+        git_source = "unavailable"
+    else:
+        git_metadata = git_snapshot(git_root)
+        git_source = "phenoradar_source"
+
+    if git_root is not None:
+        install_type = "source_checkout"
+    elif project_root is not None:
+        install_type = "source_tree"
+    else:
+        install_type = "installed_distribution"
+
+    return {
+        "provenance_schema_version": PROVENANCE_SCHEMA_VERSION,
+        "phenoradar_version": __version__,
+        "phenoradar_install_type": install_type,
+        "git_source": git_source,
+        **git_metadata,
     }
 
 

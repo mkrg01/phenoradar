@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import json
-import platform
 import shutil
-import subprocess
 from dataclasses import dataclass
 from hashlib import sha256
-from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +28,7 @@ from phenoradar.metrics import (
     FIXED_PROBABILITY_THRESHOLD_NAME,
     FIXED_PROBABILITY_THRESHOLD_POLICY,
 )
+from phenoradar.provenance import phenoradar_build_snapshot, runtime_environment_snapshot
 
 BUNDLE_FORMAT_VERSION = "1"
 _BUNDLE_DIRNAME = "model_bundle"
@@ -139,31 +137,6 @@ def _manifest_canonical_self_sha(manifest_base: dict[str, Any], manifest_size: i
         manifest_size=manifest_size,
     )
     return sha256(rendered.encode("utf-8")).hexdigest()
-
-
-def _run_git(args: list[str], cwd: Path) -> str | None:
-    try:
-        result = subprocess.run(
-            args,
-            cwd=cwd,
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-    except FileNotFoundError:
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
-
-
-def _git_metadata(cwd: Path) -> tuple[str, bool, str]:
-    commit = _run_git(["git", "rev-parse", "HEAD"], cwd=cwd) or "unknown"
-    status = _run_git(["git", "status", "--porcelain"], cwd=cwd)
-    dirty = bool(status) if status is not None else False
-    patch = _run_git(["git", "diff", "HEAD"], cwd=cwd)
-    patch_sha = sha256((patch or "").encode("utf-8")).hexdigest()
-    return commit, dirty, patch_sha
 
 
 def _calibration_for_model(model_name: str) -> str:
@@ -325,7 +298,8 @@ def export_model_bundle(
     )
     shutil.copy2(resolved_config_path, resolved_copy_path)
 
-    commit, dirty, patch_sha = _git_metadata(run_dir)
+    build = phenoradar_build_snapshot()
+    environment = runtime_environment_snapshot()
     files_info: dict[str, dict[str, int | str]] = {}
     for filename in _REQUIRED_FILES:
         if filename == "bundle_manifest.json":
@@ -337,9 +311,13 @@ def export_model_bundle(
         "bundle_format_version": BUNDLE_FORMAT_VERSION,
         "source_run_dir": str(run_dir),
         "source_run_id": run_dir.name,
-        "source_git_commit": commit,
-        "source_git_dirty": dirty,
-        "source_git_worktree_patch_sha256": patch_sha,
+        "source_provenance_schema_version": build["provenance_schema_version"],
+        "source_phenoradar_version": build["phenoradar_version"],
+        "source_phenoradar_install_type": build["phenoradar_install_type"],
+        "source_git_source": build["git_source"],
+        "source_git_commit": build["git_commit"],
+        "source_git_dirty": build["git_dirty"],
+        "source_git_worktree_patch_sha256": build["git_worktree_patch_sha256"],
         "model_name": config.model.name,
         "calibration": _calibration_for_model(config.model.name),
         "ensemble_size": final_refit_artifacts.ensemble_size,
@@ -348,13 +326,8 @@ def export_model_bundle(
         "threshold_name": FIXED_PROBABILITY_THRESHOLD_NAME,
         "threshold_policy": FIXED_PROBABILITY_THRESHOLD_POLICY,
         "threshold_derived_from_cv": FIXED_PROBABILITY_THRESHOLD_DERIVED_FROM_CV,
-        "python_version": platform.python_version(),
-        "library_versions": {
-            "polars": package_version("polars"),
-            "scikit-learn": package_version("scikit-learn"),
-            "pydantic": package_version("pydantic"),
-            "typer": package_version("typer"),
-        },
+        "python_version": environment["python_version"],
+        "library_versions": environment["library_versions"],
         "files": files_info,
     }
     manifest_size = _resolve_manifest_size(manifest_base)
