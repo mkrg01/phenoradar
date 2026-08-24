@@ -136,6 +136,15 @@ Always written:
     - `n_models`, `n_models_with_nonzero_count`
     - `n_nonzero_min`, `n_nonzero_median`, `n_nonzero_mean`, `n_nonzero_max`
     - `nonzero_ratio_min`, `nonzero_ratio_median`, `nonzero_ratio_mean`, `nonzero_ratio_max`
+- `model/tables/convergence_diagnostics.tsv`
+  - one row per estimator fit, including inner-CV candidate evaluation, selected outer-fold
+    models, and final-refit candidate/model fits
+  - columns:
+    - `training_scope`, `fit_scope`, `fold_id`, `sample_set_id`
+    - `selection_source_sample_set_id`, `candidate_index`, `inner_fold_id`, `model_index`
+    - `model_name`, `estimator_class`, `convergence_applicable`, `converged`
+    - `n_iter_max`, `n_iter_values_json`, `max_iter`
+    - `convergence_warning_count`, `convergence_warning_message`, `params_json`
 - `summary/tables/classification_summary.tsv`
   - columns:
     - `pool`, `fold_id`
@@ -510,6 +519,19 @@ when individual folds are single-label.
 - Summary grouped by (`scope`, `model_name`).
 - `n_models_with_nonzero_count` helps identify how many models exposed usable sparsity counts.
 
+#### `convergence_diagnostics.tsv`
+
+- `fit_scope=candidate_evaluation` identifies fits used to score hyperparameter candidates;
+  `fit_scope=selected_model` identifies models used for predictions.
+- `convergence_applicable=false` means the estimator has no iterative convergence contract
+  (for example, Random Forest); it does not mean that fitting failed.
+- For iterative estimators, `converged=false` means scikit-learn emitted a
+  `ConvergenceWarning` during that fit. `n_iter_max` is the largest observed `n_iter_`, while
+  `n_iter_values_json` preserves all observed values, including calibrated SVM sub-estimators.
+- When any iterative fit is not converged, a compact summary is also stored in
+  `run_metadata.json` `warnings`. Use this table to locate the affected fold/candidate before
+  increasing `max_iter` or changing regularization.
+
 #### `feature_importance.tsv`
 
 - `importance_mean`:
@@ -869,4 +891,7 @@ Bundle format compatibility:
   - predict: `predict_completed`
 - CLI commands print warning summaries at completion when warnings are present.
 - `run_metadata.json` `warnings` aggregates runtime and figure-generation warnings.
+- Estimator non-convergence is captured in those warnings and detailed in
+  `model/tables/convergence_diagnostics.tsv`; raw `ConvergenceWarning` messages are not left
+  only on stderr.
 - `report_warnings.tsv` includes per-run ingestion warnings during report aggregation.

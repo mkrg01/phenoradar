@@ -73,6 +73,7 @@ Always written:
 - `model/tables/retained_features_summary.tsv`
 - `model/tables/model_sparsity.tsv`
 - `model/tables/model_sparsity_summary.tsv`
+- `model/tables/convergence_diagnostics.tsv`
 - `summary/tables/classification_summary.tsv`
 - `runtime/tables/timing.tsv`
 - `run_metadata.json`

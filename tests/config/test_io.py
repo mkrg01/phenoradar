@@ -61,6 +61,8 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.sampling.max_samples_per_label_per_group == 1
     assert resolved.sampling.sampled_set_count == 10
     assert resolved.sampling.weighting == "none"
+    assert resolved.model.logistic_solver == "saga"
+    assert resolved.model.logistic_warm_start_path is False
     assert resolved.model_selection.selection_metric == "log_loss"
     assert resolved.model_selection.selection_rule == "best"
     assert resolved.model_selection.candidate_source_policy == "per_sample_set"
@@ -754,6 +756,118 @@ model:
     )
 
     with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_liblinear_solver_accepts_explicit_l1_or_l2_ratios(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "liblinear.yml",
+        """
+model:
+  name: logistic_elasticnet
+  logistic_solver: liblinear
+model_selection:
+  search_space:
+    l1_ratio: [0, 1]
+""".strip()
+        + "\n",
+    )
+
+    resolved = load_and_resolve_config([cfg])
+
+    assert resolved.model.logistic_solver == "liblinear"
+
+
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        (
+            """
+model:
+  name: logistic_elasticnet
+  logistic_solver: liblinear
+""",
+            "requires an explicit",
+        ),
+        (
+            """
+model:
+  name: logistic_elasticnet
+  logistic_solver: liblinear
+model_selection:
+  search_space:
+    l1_ratio: [0.5]
+""",
+            "supports only l1_ratio values 0 or 1",
+        ),
+        (
+            """
+model:
+  name: random_forest
+  logistic_solver: liblinear
+model_selection:
+  search_space:
+    l1_ratio: [1]
+""",
+            "only valid when model.name=logistic_elasticnet",
+        ),
+    ],
+)
+def test_liblinear_solver_rejects_incompatible_config(
+    tmp_path: Path,
+    extra: str,
+    message: str,
+) -> None:
+    cfg = _write(tmp_path / "invalid_liblinear.yml", extra.strip() + "\n")
+
+    with pytest.raises(ConfigError, match=message):
+        load_and_resolve_config([cfg])
+
+
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        (
+            """
+model:
+  name: random_forest
+  logistic_warm_start_path: true
+""",
+            "only valid when model.name=logistic_elasticnet",
+        ),
+        (
+            """
+model:
+  name: logistic_elasticnet
+  logistic_solver: liblinear
+  logistic_warm_start_path: true
+model_selection:
+  search_space:
+    l1_ratio: [1]
+""",
+            "requires model.logistic_solver=saga",
+        ),
+        (
+            """
+model:
+  name: logistic_elasticnet
+  logistic_warm_start_path: true
+model_selection:
+  search_strategy: random
+  trial_count: 2
+""",
+            "currently requires model_selection.search_strategy=grid",
+        ),
+    ],
+)
+def test_logistic_warm_start_path_rejects_incompatible_config(
+    tmp_path: Path,
+    extra: str,
+    message: str,
+) -> None:
+    cfg = _write(tmp_path / "invalid_warm_start.yml", extra.strip() + "\n")
+
+    with pytest.raises(ConfigError, match=message):
         load_and_resolve_config([cfg])
 
 

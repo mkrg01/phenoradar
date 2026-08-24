@@ -602,6 +602,21 @@ evaluation:
     assert (run_dirs[0] / "model" / "tables" / "retained_features_summary.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "model_sparsity.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "model_sparsity_summary.tsv").exists()
+    convergence_path = run_dirs[0] / "model" / "tables" / "convergence_diagnostics.tsv"
+    assert convergence_path.exists()
+    assert {
+        "training_scope",
+        "fit_scope",
+        "fold_id",
+        "sample_set_id",
+        "candidate_index",
+        "model_index",
+        "convergence_applicable",
+        "converged",
+        "n_iter_max",
+        "max_iter",
+        "convergence_warning_count",
+    }.issubset(pl.read_csv(convergence_path, separator="\t").columns)
     assert (run_dirs[0] / "external_test" / "tables" / "prediction_external_test.tsv").exists()
     assert (run_dirs[0] / "inference" / "tables" / "prediction_inference.tsv").exists()
     assert (run_dirs[0] / "external_test" / "tables" / "loss_by_split_final_refit.tsv").exists()

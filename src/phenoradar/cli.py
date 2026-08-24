@@ -1249,6 +1249,37 @@ def run(
             null_value="NA",
         )
 
+    convergence_tables: list[pl.DataFrame] = []
+    cv_convergence_diagnostics = getattr(cv_artifacts, "convergence_diagnostics", None)
+    if isinstance(cv_convergence_diagnostics, pl.DataFrame):
+        convergence_tables.append(cv_convergence_diagnostics)
+    final_convergence_diagnostics = (
+        None
+        if final_refit_artifacts is None
+        else getattr(final_refit_artifacts, "convergence_diagnostics", None)
+    )
+    if isinstance(final_convergence_diagnostics, pl.DataFrame):
+        convergence_tables.append(final_convergence_diagnostics)
+    if convergence_tables:
+        convergence_diagnostics = pl.concat(convergence_tables, how="vertical").sort(
+            [
+                "training_scope",
+                "fold_id",
+                "fit_scope",
+                "sample_set_id",
+                "candidate_index",
+                "inner_fold_id",
+                "model_index",
+            ],
+            nulls_last=True,
+        )
+        convergence_diagnostics.write_csv(
+            model_tables_dir / "convergence_diagnostics.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
+
     classification_summary = _classification_summary(
         oof_predictions=cv_artifacts.oof_predictions,
         thresholds=cv_artifacts.thresholds,

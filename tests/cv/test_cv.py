@@ -7,6 +7,7 @@ import polars as pl
 import pytest
 from sklearn import config_context
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     auc,
@@ -642,6 +643,7 @@ model_selection:
   search_strategy: grid
   search_space:
     C: [0.5, 1.0]
+    max_iter: [1]
   selected_candidate_count: 1
   inner_cv_strategy: logo
 """.strip(),
@@ -657,6 +659,16 @@ model_selection:
     assert cv_artifacts.model_selection_selected.height > 0
     assert cv_artifacts.model_selection_trials.height > 0
     assert cv_artifacts.model_selection_trials_summary.height > 0
+    assert cv_artifacts.convergence_diagnostics.height > 0
+    assert set(cv_artifacts.convergence_diagnostics.get_column("fit_scope")) == {
+        "candidate_evaluation",
+        "selected_model",
+    }
+    assert set(cv_artifacts.convergence_diagnostics.get_column("training_scope")) == {
+        "outer_fold"
+    }
+    assert cv_artifacts.convergence_diagnostics.filter(~pl.col("converged")).height > 0
+    assert any("non-converged fit(s)" in warning for warning in cv_artifacts.warnings)
     assert {
         "selection_scope",
         "fold_id",
@@ -2268,6 +2280,33 @@ def test_fit_estimator_passes_sample_weight_once_without_modification() -> None:
     assert estimator.received_sample_weight is sample_weight
 
 
+def test_fit_estimator_captures_logistic_convergence_diagnostic() -> None:
+    estimator = LogisticRegression(solver="saga", max_iter=1, random_state=42)
+    x = np.array(
+        [
+            [0.0, 0.0],
+            [0.1, 1.0],
+            [0.2, 2.0],
+            [1.0, 0.1],
+            [2.0, 0.2],
+            [3.0, 0.3],
+        ],
+        dtype=float,
+    )
+    y = np.array([0, 0, 0, 1, 1, 1], dtype=int)
+
+    with pytest.warns(ConvergenceWarning):
+        diagnostic = _fit_estimator(estimator, x, y, sample_weight=None)
+
+    assert diagnostic.estimator_class == "LogisticRegression"
+    assert diagnostic.convergence_applicable is True
+    assert diagnostic.converged is False
+    assert diagnostic.n_iter_values == (1,)
+    assert diagnostic.max_iter == 1
+    assert diagnostic.convergence_warning_count == 1
+    assert diagnostic.convergence_warning_messages
+
+
 def test_linear_svm_accepts_sample_weight_with_metadata_routing_enabled(
     tmp_path: Path,
 ) -> None:
@@ -2373,6 +2412,45 @@ def test_build_estimator_logistic_elasticnet_uses_l1_ratio_semantics() -> None:
     _fit_estimator(elasticnet_estimator, x_train, y_train, sample_weight=None)
 
     assert not np.allclose(l2_estimator.coef_, elasticnet_estimator.coef_)
+
+
+def test_build_estimator_logistic_liblinear_supports_l1_and_sample_weight(
+    tmp_path: Path,
+) -> None:
+    config_path = _write(
+        tmp_path / "liblinear.yml",
+        """
+model:
+  name: logistic_elasticnet
+  logistic_solver: liblinear
+model_selection:
+  search_space:
+    l1_ratio: [1]
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([config_path])
+    x_train = np.array(
+        [[0.0, 0.0], [0.5, 1.0], [1.0, 0.0], [1.5, 1.0], [2.0, 0.0], [2.5, 1.0]],
+        dtype=float,
+    )
+    y_train = np.array([0, 0, 0, 1, 1, 1], dtype=int)
+    sample_weight = np.array([1.0, 0.5, 1.5, 1.0, 0.5, 1.5], dtype=float)
+    estimator = _build_estimator(
+        config,
+        model_seed=123,
+        y_train=y_train,
+        model_params={"C": 1.0, "l1_ratio": 1.0, "max_iter": 5000},
+    )
+
+    diagnostic = _fit_estimator(estimator, x_train, y_train, sample_weight)
+
+    assert isinstance(estimator, LogisticRegression)
+    assert estimator.solver == "liblinear"
+    assert estimator.l1_ratio == pytest.approx(1.0)
+    assert diagnostic.convergence_applicable is True
+    assert diagnostic.converged is True
+    assert _predict_positive_probability(estimator, x_train).shape == (6,)
 
 
 def test_build_estimator_random_forest_respects_explicit_n_jobs(tmp_path: Path) -> None:
@@ -3135,6 +3213,75 @@ def test_with_native_thread_limit_reuses_threadpool_controller(
     assert second == "ok"
     assert init_count == 1
     assert captured_limits == [2, 3]
+
+
+def test_score_candidate_inner_cv_reuses_logistic_estimators_for_warm_start_path(
+    tmp_path: Path,
+) -> None:
+    config_path = _write(
+        tmp_path / "warm_start.yml",
+        """
+model:
+  name: logistic_elasticnet
+  logistic_solver: saga
+  logistic_warm_start_path: true
+model_selection:
+  search_space:
+    C: [0.1, 1.0]
+    l1_ratio: [1]
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([config_path])
+    folds = [
+        cv_mod.InnerCvPreprocessedFold(
+            inner_fold_id="0",
+            x_train=np.array(
+                [[0.0, 0.0], [0.2, 1.0], [1.0, 0.2], [1.2, 1.0]], dtype=float
+            ),
+            x_valid=np.array([[0.1, 0.1], [1.1, 0.9]], dtype=float),
+            y_train=np.array([0, 0, 1, 1], dtype=int),
+            y_valid=np.array([0, 1], dtype=int),
+            sample_weight=None,
+        ),
+        cv_mod.InnerCvPreprocessedFold(
+            inner_fold_id="1",
+            x_train=np.array(
+                [[0.0, 1.0], [0.3, 0.0], [1.0, 1.0], [1.3, 0.0]], dtype=float
+            ),
+            x_valid=np.array([[0.2, 0.8], [1.2, 0.2]], dtype=float),
+            y_train=np.array([0, 0, 1, 1], dtype=int),
+            y_valid=np.array([0, 1], dtype=int),
+            sample_weight=None,
+        ),
+    ]
+    cache: dict[str, LogisticRegression] = {}
+
+    first_score, first_rows = cv_mod._score_candidate_inner_cv(
+        config=config,
+        training_scope_id="outer_fold_0",
+        source_sample_set_id=0,
+        candidate=Candidate(candidate_index=0, params={"C": 0.1, "l1_ratio": 1}),
+        preprocessed_folds=folds,
+        warm_start_estimators=cache,
+    )
+    cached_ids = {fold_id: id(estimator) for fold_id, estimator in cache.items()}
+    second_score, second_rows = cv_mod._score_candidate_inner_cv(
+        config=config,
+        training_scope_id="outer_fold_0",
+        source_sample_set_id=0,
+        candidate=Candidate(candidate_index=1, params={"C": 1.0, "l1_ratio": 1}),
+        preprocessed_folds=folds,
+        warm_start_estimators=cache,
+    )
+
+    assert np.isfinite(first_score)
+    assert np.isfinite(second_score)
+    assert len(first_rows) == len(second_rows) == 2
+    assert set(cache) == {"0", "1"}
+    assert {fold_id: id(estimator) for fold_id, estimator in cache.items()} == cached_ids
+    assert all(estimator.warm_start for estimator in cache.values())
+    assert all(pytest.approx(1.0) == estimator.C for estimator in cache.values())
 
 
 def test_with_native_thread_limit_falls_back_when_controller_is_unavailable(

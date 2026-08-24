@@ -30,13 +30,13 @@ preprocess:
     method: log1p  # choices: none, log1p, sample_rank, sample_percentile_rank
   sparse_feature_filter:
     enabled: true
-    min_nonzero_fraction_in_at_least_one_trait: 0.8
+    min_nonzero_fraction_in_at_least_one_trait: 0.9
   low_variance_filter:
     enabled: false
     min_variance: null
   pair_aware_filter:
     enabled: true
-    max_features: 30
+    max_features: 100
   correlation_filter:
     enabled: false
     method: pearson  # choices: pearson, spearman
@@ -63,8 +63,8 @@ model_selection:
       inclusive_end: true
     l1_ratio: [1]
     max_iter: [10000]
-  inner_cv_strategy: logo  # choices: logo, group_kfold
-  inner_cv_n_splits: null
+  inner_cv_strategy: stratified_group_kfold  # choices: logo, group_kfold, stratified_group_kfold
+  inner_cv_n_splits: 5
   selection_metric: log_loss  # choices: mcc, balanced_accuracy, log_loss
   selection_rule: one_se  # choices: best, one_se
 

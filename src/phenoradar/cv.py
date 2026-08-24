@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings as warning_control
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,6 +23,7 @@ from scipy.stats import rankdata
 from sklearn import get_config
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     balanced_accuracy_score,
@@ -101,6 +103,7 @@ class CVArtifacts:
     top_feature_expression: pl.DataFrame
     timing: pl.DataFrame
     warnings: list[str]
+    convergence_diagnostics: pl.DataFrame
 
 
 @dataclass(frozen=True)
@@ -124,6 +127,7 @@ class FinalRefitArtifacts:
     feature_names: list[str]
     scaler: FeatureScaler
     models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
+    convergence_diagnostics: pl.DataFrame
     model_entries: list[FinalModelEntry] = field(default_factory=list)
 
 
@@ -184,6 +188,7 @@ class OuterFoldResult:
     n_features_after_correlation: int
     n_features_after_preprocess: int
     warnings: list[str]
+    convergence_rows: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -221,6 +226,7 @@ class OuterSampleSetFitResult:
     filter_counts: FeatureFilterCounts
     model_count: int
     warnings: list[str]
+    convergence_rows: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -236,6 +242,20 @@ class FinalSampleSetFitResult:
     filter_counts: FeatureFilterCounts
     model_count: int
     warnings: list[str]
+    convergence_rows: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class EstimatorFitDiagnostic:
+    """Convergence state observed during one estimator fit call."""
+
+    estimator_class: str
+    convergence_applicable: bool
+    converged: bool | None
+    n_iter_values: tuple[int, ...]
+    max_iter: int | None
+    convergence_warning_count: int
+    convergence_warning_messages: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -266,6 +286,70 @@ _FEATURE_FILTER_STAGE_ORDER = {
 _NONZERO_TOLERANCE = 1e-12
 _PAIR_AWARE_SE_QUANTILE = 0.1
 _PAIR_AWARE_SCORE_FLOOR = 1e-12
+
+_CONVERGENCE_DIAGNOSTIC_SCHEMA = {
+    "training_scope": pl.String,
+    "fit_scope": pl.String,
+    "fold_id": pl.String,
+    "sample_set_id": pl.Int64,
+    "selection_source_sample_set_id": pl.Int64,
+    "candidate_index": pl.Int64,
+    "inner_fold_id": pl.String,
+    "model_index": pl.Int64,
+    "model_name": pl.String,
+    "estimator_class": pl.String,
+    "convergence_applicable": pl.Boolean,
+    "converged": pl.Boolean,
+    "n_iter_max": pl.Int64,
+    "n_iter_values_json": pl.String,
+    "max_iter": pl.Int64,
+    "convergence_warning_count": pl.Int64,
+    "convergence_warning_message": pl.String,
+    "params_json": pl.String,
+}
+
+
+def _build_convergence_diagnostics(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    if not rows:
+        return pl.DataFrame(schema=_CONVERGENCE_DIAGNOSTIC_SCHEMA)
+    return pl.DataFrame(rows, schema=_CONVERGENCE_DIAGNOSTIC_SCHEMA).sort(
+        [
+            "training_scope",
+            "fold_id",
+            "fit_scope",
+            "sample_set_id",
+            "candidate_index",
+            "inner_fold_id",
+            "model_index",
+        ],
+        nulls_last=True,
+    )
+
+
+def _convergence_summary_warning(diagnostics: pl.DataFrame) -> str | None:
+    if diagnostics.is_empty():
+        return None
+    applicable = diagnostics.filter(pl.col("convergence_applicable"))
+    if applicable.is_empty():
+        return None
+    non_converged = applicable.filter(~pl.col("converged"))
+    if non_converged.is_empty():
+        return None
+    scope_counts = (
+        non_converged.group_by(["training_scope", "fit_scope"])
+        .len(name="fit_count")
+        .sort(["training_scope", "fit_scope"])
+    )
+    scope_summary = ", ".join(
+        f"{row['training_scope']}/{row['fit_scope']}={row['fit_count']}"
+        for row in scope_counts.iter_rows(named=True)
+    )
+    return (
+        "Estimator convergence diagnostics detected "
+        f"{non_converged.height} non-converged fit(s) among {applicable.height} "
+        f"iterative fit(s) ({scope_summary}); see "
+        "model/tables/convergence_diagnostics.tsv."
+    )
 
 
 def _empty_feature_filter_counts() -> pl.DataFrame:
@@ -1649,7 +1733,7 @@ def _build_estimator(
         l1_ratio = float(params.get("l1_ratio", 0.5))
         max_iter = int(params.get("max_iter", 5000))
         return LogisticRegression(
-            solver="saga",
+            solver=config.model.logistic_solver,
             l1_ratio=l1_ratio,
             C=c_value,
             max_iter=max_iter,
@@ -1697,27 +1781,114 @@ def _fit_estimator(
     x_train: np.ndarray,
     y_train: np.ndarray,
     sample_weight: np.ndarray | None,
-) -> None:
+) -> EstimatorFitDiagnostic:
     if sample_weight is None:
         estimator.fit(x_train, y_train)
-        return
-    if not has_fit_parameter(estimator, "sample_weight"):
-        raise CVError(
-            f"{type(estimator).__name__}.fit does not support sample_weight; "
-            "refusing to ignore configured sample weighting"
-        )
-    if (
-        isinstance(estimator, CalibratedClassifierCV)
-        and isinstance(estimator.estimator, LinearSVC)
-        and bool(get_config().get("enable_metadata_routing", False))
+    else:
+        if not has_fit_parameter(estimator, "sample_weight"):
+            raise CVError(
+                f"{type(estimator).__name__}.fit does not support sample_weight; "
+                "refusing to ignore configured sample weighting"
+            )
+        if (
+            isinstance(estimator, CalibratedClassifierCV)
+            and isinstance(estimator.estimator, LinearSVC)
+            and bool(get_config().get("enable_metadata_routing", False))
+        ):
+            estimator.estimator.set_fit_request(sample_weight=True)
+        try:
+            estimator.fit(x_train, y_train, sample_weight=sample_weight)
+        except TypeError as exc:
+            raise CVError(
+                f"{type(estimator).__name__}.fit failed while applying sample_weight: {exc}"
+            ) from exc
+
+    iterative_estimators: list[LogisticRegression | LinearSVC] = []
+    if isinstance(estimator, LogisticRegression):
+        iterative_estimators.append(estimator)
+    elif isinstance(estimator, CalibratedClassifierCV) and isinstance(
+        estimator.estimator, LinearSVC
     ):
-        estimator.estimator.set_fit_request(sample_weight=True)
-    try:
-        estimator.fit(x_train, y_train, sample_weight=sample_weight)
-    except TypeError as exc:
-        raise CVError(
-            f"{type(estimator).__name__}.fit failed while applying sample_weight: {exc}"
-        ) from exc
+        calibrated_estimators = [
+            calibrated.estimator
+            for calibrated in estimator.calibrated_classifiers_
+            if isinstance(calibrated.estimator, LinearSVC)
+        ]
+        iterative_estimators.extend(calibrated_estimators)
+
+    n_iter_values: list[int] = []
+    max_iter_values: list[int] = []
+    iteration_limit_reached_count = 0
+    for iterative_estimator in iterative_estimators:
+        raw_n_iter = getattr(iterative_estimator, "n_iter_", None)
+        estimator_n_iter_values: list[int] = []
+        if raw_n_iter is not None:
+            estimator_n_iter_values = [
+                int(value) for value in np.asarray(raw_n_iter, dtype=int).reshape(-1).tolist()
+            ]
+            n_iter_values.extend(estimator_n_iter_values)
+        raw_max_iter = getattr(iterative_estimator, "max_iter", None)
+        if raw_max_iter is not None:
+            estimator_max_iter = int(raw_max_iter)
+            max_iter_values.append(estimator_max_iter)
+            iteration_limit_reached_count += sum(
+                n_iter >= estimator_max_iter for n_iter in estimator_n_iter_values
+            )
+
+    convergence_applicable = bool(iterative_estimators)
+    convergence_messages = (
+        (
+            "Iteration limit reached (observed n_iter_ >= configured max_iter); "
+            "coefficients may not have converged"
+        ),
+    ) if iteration_limit_reached_count > 0 else ()
+    return EstimatorFitDiagnostic(
+        estimator_class=type(estimator).__name__,
+        convergence_applicable=convergence_applicable,
+        converged=(iteration_limit_reached_count == 0 if convergence_applicable else None),
+        n_iter_values=tuple(n_iter_values),
+        max_iter=max(max_iter_values) if max_iter_values else None,
+        convergence_warning_count=iteration_limit_reached_count,
+        convergence_warning_messages=convergence_messages,
+    )
+
+
+def _convergence_diagnostic_row(
+    diagnostic: EstimatorFitDiagnostic,
+    *,
+    training_scope: str,
+    fit_scope: str,
+    fold_id: str,
+    sample_set_id: int,
+    selection_source_sample_set_id: int,
+    candidate_index: int,
+    inner_fold_id: str,
+    model_index: int | None,
+    model_name: str,
+    params_json: str,
+) -> dict[str, Any]:
+    return {
+        "training_scope": training_scope,
+        "fit_scope": fit_scope,
+        "fold_id": fold_id,
+        "sample_set_id": sample_set_id,
+        "selection_source_sample_set_id": selection_source_sample_set_id,
+        "candidate_index": candidate_index,
+        "inner_fold_id": inner_fold_id,
+        "model_index": model_index,
+        "model_name": model_name,
+        "estimator_class": diagnostic.estimator_class,
+        "convergence_applicable": diagnostic.convergence_applicable,
+        "converged": diagnostic.converged,
+        "n_iter_max": max(diagnostic.n_iter_values) if diagnostic.n_iter_values else None,
+        "n_iter_values_json": json.dumps(diagnostic.n_iter_values),
+        "max_iter": diagnostic.max_iter,
+        "convergence_warning_count": diagnostic.convergence_warning_count,
+        "convergence_warning_message": " | ".join(
+            diagnostic.convergence_warning_messages
+        ),
+        "params_json": params_json,
+    }
 
 
 def _predict_positive_probability(
@@ -2109,6 +2280,7 @@ def _score_candidate_inner_cv(
     preprocessed_folds: list[InnerCvPreprocessedFold],
     estimator_n_jobs: int | None = None,
     timing_recorder: TimingRecorder | None = None,
+    warm_start_estimators: dict[str, LogisticRegression] | None = None,
 ) -> tuple[float, list[dict[str, Any]]]:
     resolved_estimator_n_jobs = (
         _runtime_n_jobs(config) if estimator_n_jobs is None else int(estimator_n_jobs)
@@ -2126,14 +2298,36 @@ def _score_candidate_inner_cv(
                 f"{config.runtime.seed}|{training_scope_id}|source_{source_sample_set_id}|"
                 f"candidate_{candidate.candidate_index}|inner_{fold.inner_fold_id}"
             )
-            estimator = _build_estimator(
+            fresh_estimator = _build_estimator(
                 config,
                 seed,
                 fold.y_train,
                 model_params=candidate.params,
                 rf_n_jobs=resolved_estimator_n_jobs,
             )
-            _fit_estimator(estimator, fold.x_train, fold.y_train, fold.sample_weight)
+            estimator: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier
+            if warm_start_estimators is None:
+                estimator = fresh_estimator
+            else:
+                if not isinstance(fresh_estimator, LogisticRegression):
+                    raise CVError("Warm-start candidate path requires logistic regression")
+                cached_estimator = warm_start_estimators.get(fold.inner_fold_id)
+                if cached_estimator is None:
+                    fresh_estimator.set_params(warm_start=True)
+                    estimator = fresh_estimator
+                    warm_start_estimators[fold.inner_fold_id] = fresh_estimator
+                else:
+                    cached_estimator.set_params(
+                        C=fresh_estimator.C,
+                        l1_ratio=fresh_estimator.l1_ratio,
+                        max_iter=fresh_estimator.max_iter,
+                        random_state=fresh_estimator.random_state,
+                        warm_start=True,
+                    )
+                    estimator = cached_estimator
+            fit_diagnostic = _fit_estimator(
+                estimator, fold.x_train, fold.y_train, fold.sample_weight
+            )
             prob = _predict_positive_probability(estimator, fold.x_valid)
             score = _selection_metric_from_probability(config, fold.y_valid, prob)
             fold_scores.append(score)
@@ -2144,6 +2338,7 @@ def _score_candidate_inner_cv(
                     "metric_name": config.model_selection.selection_metric,
                     "metric_value": score,
                     "params_json": params_json,
+                    "fit_diagnostic": fit_diagnostic,
                 }
             )
 
@@ -2489,7 +2684,15 @@ def _prepare_source_selection(
     trial_rows: list[dict[str, Any]] = []
     if worker_count == 1:
         scored_rows: list[tuple[float, list[dict[str, Any]]]] = []
+        warm_start_caches: dict[str, dict[str, LogisticRegression]] = {}
         for candidate_progress, candidate in enumerate(candidates, start=1):
+            warm_start_estimators: dict[str, LogisticRegression] | None = None
+            if config.model.logistic_warm_start_path:
+                path_params = {
+                    name: value for name, value in candidate.params.items() if name != "C"
+                }
+                path_key = json.dumps(path_params, ensure_ascii=True, sort_keys=True)
+                warm_start_estimators = warm_start_caches.setdefault(path_key, {})
             mean_score, rows = _score_candidate_inner_cv(
                 config=config,
                 training_scope_id=training_scope_id,
@@ -2498,6 +2701,7 @@ def _prepare_source_selection(
                 preprocessed_folds=preprocessed_folds,
                 estimator_n_jobs=estimator_n_jobs,
                 timing_recorder=timing_recorder,
+                warm_start_estimators=warm_start_estimators,
             )
             scored_rows.append((mean_score, rows))
             if progress_callback is not None:
@@ -2512,6 +2716,11 @@ def _prepare_source_selection(
                     ),
                 )
     else:
+        if config.model.logistic_warm_start_path:
+            warnings.append(
+                "model.logistic_warm_start_path was not applied because candidate "
+                f"scoring used {worker_count} parallel workers"
+            )
         scored_rows_by_index: dict[int, tuple[float, list[dict[str, Any]]]] = {}
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = {
@@ -2992,6 +3201,7 @@ def _fit_outer_sample_set(
     sample_set_id: int,
     sampled_idx: np.ndarray,
     source_result: SourceSelectionResult,
+    selection_source_sample_set_id: int,
     base_model_index: int,
     x_train_raw: np.ndarray,
     y_train: np.ndarray,
@@ -3042,6 +3252,7 @@ def _fit_outer_sample_set(
     interpretation_entries: list[ModelFeatureEntry] = []
     ensemble_model_prob_rows: list[dict[str, float | int | str]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
+    convergence_rows: list[dict[str, Any]] = []
     for selected_offset, selected in enumerate(source_result.selected_candidates):
         model_index = base_model_index + selected_offset
         model_seed = _ensemble_seed(
@@ -3056,7 +3267,7 @@ def _fit_outer_sample_set(
             model_params=selected.candidate.params,
         )
         fit_started = None if timing_recorder is None else timing_recorder.start()
-        _fit_estimator(estimator, x_sampled, y_sampled, sample_weight)
+        fit_diagnostic = _fit_estimator(estimator, x_sampled, y_sampled, sample_weight)
         if timing_recorder is not None and fit_started is not None:
             timing_recorder.record_since(
                 fit_started,
@@ -3067,6 +3278,25 @@ def _fit_outer_sample_set(
                 candidate_index=selected.candidate.candidate_index,
             )
         fold_models.append(estimator)
+        convergence_rows.append(
+            _convergence_diagnostic_row(
+                fit_diagnostic,
+                training_scope="outer_fold",
+                fit_scope="selected_model",
+                fold_id=fold_id,
+                sample_set_id=sample_set_id,
+                selection_source_sample_set_id=selection_source_sample_set_id,
+                candidate_index=selected.candidate.candidate_index,
+                inner_fold_id="NA",
+                model_index=model_index,
+                model_name=config.model.name,
+                params_json=json.dumps(
+                    selected.candidate.params,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            )
+        )
         model_sparsity_rows.append(
             _model_sparsity_row(
                 scope="outer_fold",
@@ -3123,6 +3353,7 @@ def _fit_outer_sample_set(
         filter_counts=filter_counts,
         model_count=len(source_result.selected_candidates),
         warnings=warnings,
+        convergence_rows=convergence_rows,
     )
 
 
@@ -3145,6 +3376,7 @@ def _fit_final_refit_sample_set(
     x_train: np.ndarray | None = None,
     x_target: np.ndarray | None = None,
     timing_recorder: TimingRecorder | None = None,
+    selection_source_sample_set_id: int | None = None,
 ) -> FinalSampleSetFitResult:
     resolved_x_train_raw = x_train_raw if x_train_raw is not None else x_train
     resolved_x_target_raw = x_target_raw if x_target_raw is not None else x_target
@@ -3195,6 +3427,11 @@ def _fit_final_refit_sample_set(
     selected_count = len(source_result.selected_candidates)
     model_workers, per_model_n_jobs = _sample_set_parallel_plan(config, selected_count)
     model_config = _config_with_runtime_n_jobs(config, per_model_n_jobs)
+    resolved_selection_source_sample_set_id = (
+        sample_set_id
+        if selection_source_sample_set_id is None
+        else selection_source_sample_set_id
+    )
 
     def _fit_one(
         selected_offset: int,
@@ -3204,12 +3441,14 @@ def _fit_final_refit_sample_set(
         LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
         np.ndarray,
         np.ndarray,
+        EstimatorFitDiagnostic,
     ]:
         def _fit_one_limited() -> tuple[
             int,
             LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
             np.ndarray,
             np.ndarray,
+            EstimatorFitDiagnostic,
         ]:
             model_index = base_model_index + selected_offset
             model_seed = _ensemble_seed(config.runtime.seed, "final_refit", model_index)
@@ -3220,7 +3459,9 @@ def _fit_final_refit_sample_set(
                 model_params=selected.candidate.params,
             )
             fit_started = None if timing_recorder is None else timing_recorder.start()
-            _fit_estimator(estimator, x_sampled, y_sampled, sample_weight)
+            fit_diagnostic = _fit_estimator(
+                estimator, x_sampled, y_sampled, sample_weight
+            )
             if timing_recorder is not None and fit_started is not None:
                 timing_recorder.record_since(
                     fit_started,
@@ -3243,7 +3484,13 @@ def _fit_final_refit_sample_set(
                     sample_set_id=sample_set_id,
                     candidate_index=selected.candidate.candidate_index,
                 )
-            return selected_offset, estimator, model_prob, train_model_prob
+            return (
+                selected_offset,
+                estimator,
+                model_prob,
+                train_model_prob,
+                fit_diagnostic,
+            )
 
         return _with_native_thread_limit_for_config(model_config, _fit_one_limited)
 
@@ -3253,6 +3500,7 @@ def _fit_final_refit_sample_set(
             LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
             np.ndarray,
             np.ndarray,
+            EstimatorFitDiagnostic,
         ]
     ] = []
     if model_workers == 1:
@@ -3272,9 +3520,32 @@ def _fit_final_refit_sample_set(
     model_probs: list[np.ndarray] = []
     train_model_probs: list[np.ndarray] = []
     model_sparsity_rows: list[dict[str, Any]] = []
-    for selected_offset, model, prob, train_prob in ordered_results:
+    convergence_rows: list[dict[str, Any]] = []
+    for selected_offset, model, prob, train_prob, fit_diagnostic in ordered_results:
         model_index = base_model_index + selected_offset
+        selected = source_result.selected_candidates[selected_offset]
         fitted_models.append(model)
+        convergence_rows.append(
+            _convergence_diagnostic_row(
+                fit_diagnostic,
+                training_scope="final_refit",
+                fit_scope="selected_model",
+                fold_id="NA",
+                sample_set_id=sample_set_id,
+                selection_source_sample_set_id=(
+                    resolved_selection_source_sample_set_id
+                ),
+                candidate_index=selected.candidate.candidate_index,
+                inner_fold_id="NA",
+                model_index=model_index,
+                model_name=config.model.name,
+                params_json=json.dumps(
+                    selected.candidate.params,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            )
+        )
         model_sparsity_rows.append(
             _model_sparsity_row(
                 scope="final_refit",
@@ -3299,10 +3570,11 @@ def _fit_final_refit_sample_set(
         filter_counts=filter_counts,
         model_count=selected_count,
         warnings=warnings,
+        convergence_rows=convergence_rows,
     )
 
 
-def run_final_refit(
+def _run_final_refit_impl(
     config: AppConfig,
     split_manifest: pl.DataFrame,
     timing_recorder: TimingRecorder | None = None,
@@ -3420,6 +3692,7 @@ def run_final_refit(
     fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
     selection_active = _selection_is_active(config)
     model_selection_selected_rows: list[dict[str, Any]] = []
+    convergence_rows: list[dict[str, Any]] = []
 
     source_sample_set_ids = _selection_source_sample_set_ids(config, len(sampled_sets))
     source_workers, per_source_n_jobs = _sample_set_parallel_plan(
@@ -3467,6 +3740,27 @@ def run_final_refit(
                 source_id, source_result, local_warnings = futures[source_sample_set_id].result()
                 source_results[source_id] = source_result
                 warnings.extend(local_warnings)
+
+    if selection_active:
+        for source_sample_set_id in source_sample_set_ids:
+            for row in source_results[source_sample_set_id].trial_rows:
+                fit_diagnostic = row.get("fit_diagnostic")
+                if isinstance(fit_diagnostic, EstimatorFitDiagnostic):
+                    convergence_rows.append(
+                        _convergence_diagnostic_row(
+                            fit_diagnostic,
+                            training_scope="final_refit",
+                            fit_scope="candidate_evaluation",
+                            fold_id="NA",
+                            sample_set_id=source_sample_set_id,
+                            selection_source_sample_set_id=source_sample_set_id,
+                            candidate_index=int(row["candidate_index"]),
+                            inner_fold_id=str(row["inner_fold_id"]),
+                            model_index=None,
+                            model_name=config.model.name,
+                            params_json=str(row["params_json"]),
+                        )
+                    )
 
     for sample_set_id, _sampled_idx in enumerate(sampled_sets):
         source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
@@ -3543,6 +3837,7 @@ def run_final_refit(
             target_count=target_count,
             n_features_before_override=n_features_before_override,
             timing_recorder=recorder,
+            selection_source_sample_set_id=source_sample_set_id,
         )
         recorder.record_since(
             sample_fit_started,
@@ -3639,6 +3934,7 @@ def run_final_refit(
         )
         warnings.extend(fit_result.warnings)
         model_sparsity_rows.extend(fit_result.model_sparsity_rows)
+        convergence_rows.extend(fit_result.convergence_rows)
         fitted_models.extend(fit_result.fitted_models)
         sample_model_probs = target_model_probs_by_sample[sample_set_id]
         model_probs.extend(sample_model_probs)
@@ -3746,6 +4042,10 @@ def run_final_refit(
     retained_features_summary = _summarize_retained_features(retained_features)
     model_sparsity = _build_model_sparsity(model_sparsity_rows)
     model_sparsity_summary = _summarize_model_sparsity(model_sparsity)
+    convergence_diagnostics = _build_convergence_diagnostics(convergence_rows)
+    convergence_warning = _convergence_summary_warning(convergence_diagnostics)
+    if convergence_warning is not None:
+        warnings.append(convergence_warning)
     recorder.record_since(
         postprocess_started,
         scope="final_refit",
@@ -3772,8 +4072,20 @@ def run_final_refit(
         feature_names=selected_features,
         scaler=scaler,
         models=fitted_models,
+        convergence_diagnostics=convergence_diagnostics,
         model_entries=model_entries,
     )
+
+
+def run_final_refit(
+    config: AppConfig,
+    split_manifest: pl.DataFrame,
+    timing_recorder: TimingRecorder | None = None,
+) -> FinalRefitArtifacts:
+    """Refit final models while recording convergence without stderr warning noise."""
+    with warning_control.catch_warnings():
+        warning_control.simplefilter("ignore", ConvergenceWarning)
+        return _run_final_refit_impl(config, split_manifest, timing_recorder)
 
 
 def _run_outer_fold(
@@ -3958,6 +4270,7 @@ def _run_outer_fold(
         )
 
     model_selection_trial_rows: list[dict[str, Any]] = []
+    convergence_rows: list[dict[str, Any]] = []
     if selection_active:
         for source_sample_set_id in source_sample_set_ids:
             source_result = source_results[source_sample_set_id]
@@ -3973,6 +4286,23 @@ def _run_outer_fold(
                         "params_json": row["params_json"],
                     }
                 )
+                fit_diagnostic = row.get("fit_diagnostic")
+                if isinstance(fit_diagnostic, EstimatorFitDiagnostic):
+                    convergence_rows.append(
+                        _convergence_diagnostic_row(
+                            fit_diagnostic,
+                            training_scope="outer_fold",
+                            fit_scope="candidate_evaluation",
+                            fold_id=fold_id,
+                            sample_set_id=source_sample_set_id,
+                            selection_source_sample_set_id=source_sample_set_id,
+                            candidate_index=int(row["candidate_index"]),
+                            inner_fold_id=str(row["inner_fold_id"]),
+                            model_index=None,
+                            model_name=config.model.name,
+                            params_json=str(row["params_json"]),
+                        )
+                    )
 
     model_selection_selected_rows: list[dict[str, Any]] = []
     for sample_set_id, _sampled_idx in enumerate(sampled_sets):
@@ -4041,6 +4371,7 @@ def _run_outer_fold(
             sample_set_id=sample_set_id,
             sampled_idx=sampled_idx,
             source_result=source_results[source_sample_set_id],
+            selection_source_sample_set_id=source_sample_set_id,
             base_model_index=model_index_offsets[sample_set_id],
             x_train_raw=x_train_raw,
             y_train=y_train,
@@ -4086,6 +4417,7 @@ def _run_outer_fold(
             )
         )
         model_sparsity_rows.extend(fit_result.model_sparsity_rows)
+        convergence_rows.extend(fit_result.convergence_rows)
         warnings.extend(fit_result.warnings)
         _emit_fold_progress(
             "preprocess_sample_set_done",
@@ -4262,6 +4594,7 @@ def _run_outer_fold(
         n_features_after_correlation=n_features_after_correlation,
         n_features_after_preprocess=n_features_after_preprocess,
         warnings=warnings,
+        convergence_rows=convergence_rows,
     )
     if timing_recorder is not None and postprocess_started is not None:
         timing_recorder.record_since(
@@ -4273,7 +4606,7 @@ def _run_outer_fold(
     return result
 
 
-def run_outer_cv(
+def _run_outer_cv_impl(
     config: AppConfig,
     split_manifest: pl.DataFrame,
     progress_callback: Callable[[str], None] | None = None,
@@ -4302,6 +4635,7 @@ def run_outer_cv(
     feature_filter_count_rows: list[dict[str, Any]] = []
     retained_feature_rows: list[dict[str, Any]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
+    convergence_rows: list[dict[str, Any]] = []
     max_fold_ensemble_size = 0
 
     fold_ids = _fold_ids(split_manifest)
@@ -4344,6 +4678,7 @@ def run_outer_cv(
         feature_filter_count_rows.extend(fold_result.feature_filter_count_rows)
         retained_feature_rows.extend(fold_result.retained_feature_rows)
         model_sparsity_rows.extend(fold_result.model_sparsity_rows)
+        convergence_rows.extend(fold_result.convergence_rows)
         max_fold_ensemble_size = max(max_fold_ensemble_size, fold_result.fold_model_count)
 
     def _execute_fold(fold_id: str) -> OuterFoldResult:
@@ -4501,6 +4836,10 @@ def run_outer_cv(
     retained_features_summary = _summarize_retained_features(retained_features)
     model_sparsity = _build_model_sparsity(model_sparsity_rows)
     model_sparsity_summary = _summarize_model_sparsity(model_sparsity)
+    convergence_diagnostics = _build_convergence_diagnostics(convergence_rows)
+    convergence_warning = _convergence_summary_warning(convergence_diagnostics)
+    if convergence_warning is not None:
+        warnings.append(convergence_warning)
     top_feature_expression = _build_top_feature_expression(
         outer_matrix_cache,
         interpretation_artifacts.feature_importance,
@@ -4536,4 +4875,22 @@ def run_outer_cv(
         top_feature_expression=top_feature_expression,
         timing=timing,
         warnings=warnings,
+        convergence_diagnostics=convergence_diagnostics,
     )
+
+
+def run_outer_cv(
+    config: AppConfig,
+    split_manifest: pl.DataFrame,
+    progress_callback: Callable[[str], None] | None = None,
+    timing_recorder: TimingRecorder | None = None,
+) -> CVArtifacts:
+    """Execute outer CV while recording convergence without stderr warning noise."""
+    with warning_control.catch_warnings():
+        warning_control.simplefilter("ignore", ConvergenceWarning)
+        return _run_outer_cv_impl(
+            config,
+            split_manifest,
+            progress_callback=progress_callback,
+            timing_recorder=timing_recorder,
+        )

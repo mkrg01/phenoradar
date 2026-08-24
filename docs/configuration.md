@@ -80,6 +80,8 @@ preprocess:
     method: standard
 model:
   name: logistic_elasticnet
+  logistic_solver: saga
+  logistic_warm_start_path: false
 model_selection:
   selected_candidate_count: null
   selected_candidate_percent: null
@@ -341,6 +343,27 @@ Compatibility rules:
     - `logistic_elasticnet` assumes scikit-learn `>= 1.8`.
     - with the built-in `saga` solver, `l1_ratio=0` gives L2, `l1_ratio=1`
       gives L1, and `0 < l1_ratio < 1` gives elastic-net.
+- `model.logistic_solver`
+  - type: `saga | liblinear`
+  - default: `saga`
+  - behavior:
+    - applies only to `model.name=logistic_elasticnet`
+    - `saga` supports the full `l1_ratio` range from 0 through 1
+    - `liblinear` supports only explicit `l1_ratio` list values of 0 (L2) or 1 (L1)
+    - `liblinear` can be faster for small-sample, moderate-feature binary problems
+- `model.logistic_warm_start_path`
+  - type: `bool`
+  - default: `false`
+  - behavior:
+    - experimental opt-in for reducing repeated SAGA iterations during model selection
+    - reuses fold-local SAGA coefficients between grid candidates that differ in `C`
+    - requires `model.name=logistic_elasticnet`, `model.logistic_solver=saga`, and
+      `model_selection.search_strategy=grid`
+    - applies when candidate scoring is serial; parallel candidate scoring falls back to
+      independent fits and records a warning
+    - because SAGA stops at a numerical tolerance, warm-start and independent fits can
+      produce different candidate scores and therefore select different hyperparameters;
+      validate the resulting metrics before adopting it for a production analysis
 
 ## `model_selection`
 
