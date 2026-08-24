@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from math import sqrt
@@ -67,9 +66,10 @@ from phenoradar.reporting import (
 )
 from phenoradar.split import SplitError, build_split_artifacts
 from phenoradar.testdata import (
-    DEFAULT_C4_TINY_BASE_URL,
+    BUNDLED_C4_TINY_SOURCE,
     TestDataError,
     fetch_c4_tiny_test_data,
+    resolve_c4_tiny_base_url,
 )
 from phenoradar.tree_prediction import (
     TreePredictionError,
@@ -1623,9 +1623,9 @@ def dataset(
         typer.Option(
             "--base-url",
             help=(
-                "Base URL containing c4_tiny dataset files. "
-                "Defaults to GitHub raw content for this repository; "
-                "can also be set via PHENORADAR_TESTDATA_BASE_URL."
+                "Optional base URL containing c4_tiny dataset files. "
+                "By default the dataset bundled with PhenoRadar is copied; "
+                "an external source can also be set via PHENORADAR_TESTDATA_BASE_URL."
             ),
         ),
     ] = None,
@@ -1639,28 +1639,28 @@ def dataset(
     verbose: VerboseArg = False,
     quiet: QuietArg = False,
 ) -> None:
-    """Fetch compact bundled test data from GitHub (or a custom base URL)."""
+    """Install compact bundled test data, optionally from a custom base URL."""
     start_time = datetime.now(UTC)
     log_verbosity = _resolve_log_verbosity(verbose=verbose, quiet=quiet)
     _progress_log(
         "dataset",
-        "Fetch compact test data files.",
+        "Install compact test data files.",
         start_time=start_time,
         log_verbosity=log_verbosity,
     )
     try:
-        written_paths = fetch_c4_tiny_test_data(out, base_url=base_url, overwrite=force)
+        resolved_base_url = resolve_c4_tiny_base_url(base_url)
+        written_paths = fetch_c4_tiny_test_data(
+            out,
+            base_url=resolved_base_url,
+            overwrite=force,
+        )
     except TestDataError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
     file_names = ", ".join(path.name for path in written_paths)
-    resolved_source = base_url
-    if resolved_source is None:
-        resolved_source = os.environ.get(
-            "PHENORADAR_TESTDATA_BASE_URL",
-            DEFAULT_C4_TINY_BASE_URL,
-        )
-    typer.echo(f"Fetched test data into {out} from {resolved_source} ({file_names}).")
+    resolved_source = resolved_base_url or BUNDLED_C4_TINY_SOURCE
+    typer.echo(f"Installed test data into {out} from {resolved_source} ({file_names}).")
     _progress_log(
         "dataset",
         "Completed.",

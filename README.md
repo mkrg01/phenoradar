@@ -17,7 +17,7 @@ pip install phenoradar
 
 ## Fastest Run
 
-Fetch compact test data, materialize default config, then run:
+Install the bundled compact test data, materialize default config, then run:
 
 ```bash
 phenoradar dataset

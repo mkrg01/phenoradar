@@ -48,20 +48,25 @@ Check installed version:
 phenoradar --version
 ```
 
-## 2) Fetch compact test data
+## 2) Install compact test data
 
-Use the built-in download command:
+Use the built-in dataset command:
 
 ```bash
 phenoradar dataset
 ```
 
-This downloads a compact dataset from GitHub into `testdata/c4_tiny/`:
+This copies the compact dataset bundled with the installed PhenoRadar package into
+`testdata/c4_tiny/`; the default operation does not require network access:
 
 - `testdata/c4_tiny/species_metadata.tsv`
 - `testdata/c4_tiny/species_trait.tsv`
 - `testdata/c4_tiny/ncbi_tree.nwk`
 - `testdata/c4_tiny/tpm.tsv`
+
+For development or mirrors, `--base-url URL` (or
+`PHENORADAR_TESTDATA_BASE_URL`) selects an external source. Every copied or
+downloaded file is checked against the bundled `SHA256SUMS` manifest.
 
 You can also supply your own files; see [data-format.md](data-format.md) for required columns.
 

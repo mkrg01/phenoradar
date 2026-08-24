@@ -54,6 +54,17 @@ jobs:
         run: uv run --with build python -m build
       - name: Check distributions
         run: uv run --with twine twine check dist/*
+      - name: Smoke test dataset command from installed wheel
+        run: |
+          uv venv --python 3.12 "${RUNNER_TEMP}/phenoradar-wheel-smoke"
+          uv pip install --python "${RUNNER_TEMP}/phenoradar-wheel-smoke/bin/python" dist/*.whl
+          mkdir -p "${RUNNER_TEMP}/phenoradar-wheel-smoke-output"
+          cd "${RUNNER_TEMP}/phenoradar-wheel-smoke-output"
+          "${RUNNER_TEMP}/phenoradar-wheel-smoke/bin/phenoradar" dataset --out c4_tiny
+          test -f c4_tiny/species_metadata.tsv
+          test -f c4_tiny/species_trait.tsv
+          test -f c4_tiny/ncbi_tree.nwk
+          test -f c4_tiny/tpm.tsv
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
         with:

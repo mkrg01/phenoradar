@@ -231,7 +231,7 @@ Prediction-time feature alignment policy:
 
 ## `dataset`
 
-Download compact test data from GitHub raw content.
+Install compact test data bundled with PhenoRadar.
 
 ```bash
 phenoradar dataset [--out testdata/c4_tiny] [--base-url URL] [--force]
@@ -240,10 +240,15 @@ phenoradar dataset [--out testdata/c4_tiny] [--base-url URL] [--force]
 Options:
 
 - `--out`: output directory (default: `testdata/c4_tiny`)
-- `--base-url`: alternate source URL containing the c4_tiny dataset files
+- `--base-url`: optional external source URL containing the c4_tiny dataset files;
+  `PHENORADAR_TESTDATA_BASE_URL` provides the same override
 - `--force`: overwrite existing files if checksum does not match expected values
 - `--verbose`, `-v`: detailed stage-level logs
 - `--quiet`, `-q`: suppress progress logs
+
+Without an external source override, this command copies package resources and
+does not access the network. All files are checked against the bundled
+`SHA256SUMS` manifest.
 
 ## `report`
 

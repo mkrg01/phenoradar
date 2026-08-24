@@ -50,3 +50,18 @@ jobs:
         run: uv run mypy src
       - name: Pytest
         run: uv run pytest -q
+      - name: Build wheel for package-data smoke test
+        if: matrix.python-version == '3.12'
+        run: uv build --wheel
+      - name: Smoke test dataset command from installed wheel
+        if: matrix.python-version == '3.12'
+        run: |
+          uv venv --python "${{ matrix.python-version }}" "${RUNNER_TEMP}/phenoradar-wheel-smoke"
+          uv pip install --python "${RUNNER_TEMP}/phenoradar-wheel-smoke/bin/python" dist/*.whl
+          mkdir -p "${RUNNER_TEMP}/phenoradar-wheel-smoke-output"
+          cd "${RUNNER_TEMP}/phenoradar-wheel-smoke-output"
+          "${RUNNER_TEMP}/phenoradar-wheel-smoke/bin/phenoradar" dataset --out c4_tiny
+          test -f c4_tiny/species_metadata.tsv
+          test -f c4_tiny/species_trait.tsv
+          test -f c4_tiny/ncbi_tree.nwk
+          test -f c4_tiny/tpm.tsv

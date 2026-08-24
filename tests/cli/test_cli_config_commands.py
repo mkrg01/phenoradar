@@ -33,7 +33,13 @@ def _plain_output(text: str) -> str:
 
 
 def _c4_tiny_source_uri() -> str:
-    return (Path(__file__).resolve().parents[2] / "testdata" / "c4_tiny").resolve().as_uri()
+    return (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "phenoradar"
+        / "data"
+        / "c4_tiny"
+    ).resolve().as_uri()
 
 
 def _write_split_fixture(tmp_path: Path) -> tuple[Path, Path]:
@@ -1805,7 +1811,7 @@ data:
     assert predict_result.exit_code == 0, predict_result.output
 
 
-def test_dataset_downloads_compact_dataset(tmp_path: Path) -> None:
+def test_dataset_copies_bundled_compact_dataset_by_default(tmp_path: Path) -> None:
     runner = CliRunner()
     out_dir = tmp_path / "c4_dataset"
 
@@ -1813,14 +1819,13 @@ def test_dataset_downloads_compact_dataset(tmp_path: Path) -> None:
         app,
         [
             "dataset",
-            "--base-url",
-            _c4_tiny_source_uri(),
             "--out",
             str(out_dir),
         ],
     )
 
     assert result.exit_code == 0, result.output
+    assert "bundled package data" in result.output
     assert (out_dir / "species_metadata.tsv").exists()
     assert (out_dir / "species_trait.tsv").exists()
     assert (out_dir / "ncbi_tree.nwk").exists()
