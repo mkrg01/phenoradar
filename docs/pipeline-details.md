@@ -132,6 +132,10 @@ After all folds:
 - write macro/micro aggregate metrics.
 - write the configured fixed prediction threshold.
 - build interpretation tables (`feature_importance`, `coefficients`).
+- when `evaluation.group_bootstrap.enabled=true`, pool the OOF predictions and
+  resample the intact `split.group_col` groups to estimate percentile confidence
+  intervals for ROC AUC, Average Precision, balanced accuracy, MCC, Brier score,
+  and log loss. This is prediction-level resampling and does not refit models.
 
 ### 4) Final refit (`execution_stage=full_run`)
 

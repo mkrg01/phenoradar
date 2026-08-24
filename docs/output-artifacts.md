@@ -192,6 +192,22 @@ Always written:
 
 Conditionally written:
 
+- `cv/tables/group_bootstrap_metrics.tsv`
+  (`evaluation.group_bootstrap.enabled=true`)
+  - one row per metric (`roc_auc`, `pr_auc`, `balanced_accuracy`, `mcc`,
+    `brier`, `log_loss`)
+  - columns: `metric`, `point_estimate`, `ci_lower`, `ci_upper`,
+    `confidence_level`, `n_resamples`, `n_valid_resamples`,
+    `valid_resample_fraction`, `n_groups`, `group_col`, `bootstrap_method`,
+    `seed`
+- `cv/tables/group_bootstrap_replicates.tsv`
+  (`evaluation.group_bootstrap.enabled=true`)
+  - one row per bootstrap replicate and metric
+  - columns: `resample_id`, `metric`, `metric_value`, `n_sampled_groups`,
+    `n_unique_sampled_groups`, `n_species_with_multiplicity`, `n_pos`, `n_neg`
+- `cv/figures/group_bootstrap_metrics.svg`
+  (`evaluation.group_bootstrap.enabled=true`)
+  - pooled OOF point estimates with configured percentile confidence intervals
 - `external_test/tables/prediction_external_test.tsv` (`full_run` only)
   - columns:
     - `species`, `true_label`, `prob`
@@ -306,6 +322,22 @@ when individual folds are single-label.
   are threshold-independent.
 - The legacy-compatible key `pr_auc` has `display_name=Average Precision` and
   `implementation=sklearn.metrics.average_precision_score`.
+
+#### `group_bootstrap_metrics.tsv` and `group_bootstrap_replicates.tsv` (optional)
+
+- The resampling unit is the actual `split.group_col`, not necessarily family.
+  For example, selecting `contrast_pair_id` or `order_id` bootstraps contrast
+  pairs or orders, respectively.
+- With `G` unique OOF groups, each replicate draws `G` groups with replacement
+  and includes all member species. Repeated groups contribute their species
+  repeatedly.
+- The models are not refit. The tables quantify sampling uncertainty of pooled
+  OOF performance under group-level resampling.
+- `point_estimate` is computed once from all OOF rows; `ci_lower` and `ci_upper`
+  are percentile bounds from finite bootstrap values.
+- A replicate containing only one label has `NA` for metrics that require two
+  labels. Use `n_valid_resamples` and `valid_resample_fraction` to assess how
+  much information supported each interval.
 
 #### `thresholds.tsv`
 
@@ -566,6 +598,11 @@ when individual folds are single-label.
 - `cv/figures/cv_loss_by_split.svg`
   - Fold-wise final `log_loss` comparison of `train` vs `validation`.
   - Useful for quick overfitting diagnostics without per-iteration learning curves.
+- `cv/figures/group_bootstrap_metrics.svg`
+  (`evaluation.group_bootstrap.enabled=true`)
+  - Pooled OOF metric estimates with group-bootstrap percentile intervals.
+  - The annotation records the grouping column, group count, resample count,
+    and smallest valid-replicate count across plotted metrics.
 - `cv/figures/roc_curve_cv.svg`
   - Pooled OOF ROC curve.
   - Curve summarizes all folds together (not per-fold overlays).

@@ -7,6 +7,8 @@
 * allow single-label outer-CV validation groups while keeping two-label training folds mandatory;
   emit undefined two-class fold metrics as `NA`, write split diagnostics for every fold, and add
   reproducible `stratified_group_kfold` for outer and inner CV
+* add optional group-level bootstrap confidence intervals for pooled OOF metrics,
+  with auditable replicate tables and an interval figure
 
 ### Bug Fixes
 

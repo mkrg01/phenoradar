@@ -75,6 +75,25 @@ def _minimal_metrics_cv() -> pl.DataFrame:
     )
 
 
+def _minimal_group_bootstrap_metrics() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "metric": ["roc_auc", "brier"],
+            "point_estimate": [0.8, 0.15],
+            "ci_lower": [0.65, 0.1],
+            "ci_upper": [0.9, 0.22],
+            "confidence_level": [0.95, 0.95],
+            "n_resamples": [2000, 2000],
+            "n_valid_resamples": [1980, 2000],
+            "valid_resample_fraction": [0.99, 1.0],
+            "n_groups": [20, 20],
+            "group_col": ["family_id", "family_id"],
+            "bootstrap_method": ["percentile_group", "percentile_group"],
+            "seed": [123, 123],
+        }
+    )
+
+
 def test_write_predict_figures_requires_uncertainty_when_requested(tmp_path) -> None:
     with pytest.raises(FigureError):
         write_predict_figures(
@@ -399,6 +418,29 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
     assert not (external_figures_dir / "external_species_probability_by_trait.svg").exists()
     assert not (inference_figures_dir / "inference_probability_distribution.svg").exists()
     assert not (inference_figures_dir / "species_probability_cv_and_inference.svg").exists()
+    assert warnings == []
+
+
+def test_write_run_figures_writes_group_bootstrap_confidence_intervals(
+    tmp_path: Path,
+) -> None:
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_minimal_oof(),
+        feature_importance=_minimal_feature_importance(),
+        feature_importance_by_fold=_minimal_feature_importance_by_fold(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        group_bootstrap_metrics=_minimal_group_bootstrap_metrics(),
+    )
+
+    figure_path = tmp_path / "run" / "cv" / "figures" / "group_bootstrap_metrics.svg"
+    assert figure_path.exists()
+    svg_text = figure_path.read_text(encoding="utf-8")
+    assert "OOF group-bootstrap confidence intervals" in svg_text
+    assert "family_id" in svg_text
     assert warnings == []
 
 

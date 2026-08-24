@@ -71,6 +71,9 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
         == 0.8
     )
     assert resolved.preprocess.feature_scaling.method == "standard"
+    assert resolved.evaluation.group_bootstrap.enabled is False
+    assert resolved.evaluation.group_bootstrap.n_resamples == 2000
+    assert resolved.evaluation.group_bootstrap.confidence_level == 0.95
     assert resolved.summary.group_col == "family_id"
     assert resolved.summary.group_name_col == "family_name"
     assert resolved.figures.top_features == 30
@@ -96,6 +99,9 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
         == 0.8
     )
     assert resolved.preprocess.feature_scaling.method == "standard"
+    assert resolved.evaluation.group_bootstrap.enabled is False
+    assert resolved.evaluation.group_bootstrap.n_resamples == 2000
+    assert resolved.evaluation.group_bootstrap.confidence_level == 0.95
     assert resolved.summary.group_col == "family_id"
     assert resolved.summary.group_name_col == "family_name"
     assert resolved.figures.top_features == 30
@@ -116,6 +122,44 @@ summary:
 
     assert resolved.summary.group_col == "order_id"
     assert resolved.summary.group_name_col == "order_name"
+
+
+def test_group_bootstrap_is_configurable(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "config.yml",
+        """
+evaluation:
+  group_bootstrap:
+    enabled: true
+    n_resamples: 123
+    confidence_level: 0.9
+""".strip()
+        + "\n",
+    )
+
+    resolved = load_and_resolve_config([cfg])
+
+    assert resolved.evaluation.group_bootstrap.enabled is True
+    assert resolved.evaluation.group_bootstrap.n_resamples == 123
+    assert resolved.evaluation.group_bootstrap.confidence_level == 0.9
+
+
+@pytest.mark.parametrize("confidence_level", [0.0, 1.0, -0.1, 1.1])
+def test_group_bootstrap_rejects_invalid_confidence_level(
+    tmp_path: Path, confidence_level: float
+) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        f"""
+evaluation:
+  group_bootstrap:
+    confidence_level: {confidence_level}
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
 
 
 def test_unknown_key_is_rejected(tmp_path: Path) -> None:

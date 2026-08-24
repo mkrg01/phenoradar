@@ -34,6 +34,11 @@ from phenoradar.figures import (
     write_predict_figures,
     write_run_figures,
 )
+from phenoradar.group_bootstrap import (
+    GroupBootstrapArtifacts,
+    GroupBootstrapError,
+    run_oof_group_bootstrap,
+)
 from phenoradar.group_summary import (
     GroupSummaryError,
     build_group_summary_artifacts,
@@ -869,6 +874,34 @@ def run(
     )
 
     warnings = list(cv_artifacts.warnings)
+    group_bootstrap_artifacts: GroupBootstrapArtifacts | None = None
+    group_bootstrap_config = resolved.evaluation.group_bootstrap
+    if group_bootstrap_config.enabled:
+        _log(
+            "Run OOF group bootstrap "
+            f"(group_col={resolved.split.group_col}, "
+            f"n_resamples={group_bootstrap_config.n_resamples})."
+        )
+        try:
+            group_bootstrap_artifacts = run_oof_group_bootstrap(
+                oof_predictions=cv_artifacts.oof_predictions,
+                split_manifest=split_artifacts.split_manifest,
+                group_col=resolved.split.group_col,
+                n_resamples=int(group_bootstrap_config.n_resamples),
+                confidence_level=float(group_bootstrap_config.confidence_level),
+                runtime_seed=int(resolved.runtime.seed),
+            )
+        except GroupBootstrapError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        warnings.extend(group_bootstrap_artifacts.warnings)
+        _log(
+            "OOF group bootstrap completed "
+            f"(n_groups={group_bootstrap_artifacts.n_groups}, "
+            f"seed={group_bootstrap_artifacts.seed})."
+        )
+    else:
+        _log("Skip OOF group bootstrap (evaluation.group_bootstrap.enabled=false).")
+
     status = "cv_completed"
     final_refit_artifacts = None
     if resolved.runtime.execution_stage == "full_run":
@@ -911,6 +944,19 @@ def run(
     cv_artifacts.loss_by_split_cv.write_csv(
         cv_tables_dir / "loss_by_split_cv.tsv", separator="\t", float_precision=8, null_value="NA"
     )
+    if group_bootstrap_artifacts is not None:
+        group_bootstrap_artifacts.summary.write_csv(
+            cv_tables_dir / "group_bootstrap_metrics.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
+        group_bootstrap_artifacts.replicates.write_csv(
+            cv_tables_dir / "group_bootstrap_replicates.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
     cv_artifacts.thresholds.write_csv(
         model_tables_dir / "thresholds.tsv", separator="\t", float_precision=8, null_value="NA"
     )
@@ -1241,6 +1287,11 @@ def run(
             top_features=resolved.figures.top_features,
             orthogroup_annotations=orthogroup_annotations,
             parallel_workers=_artifact_parallel_workers(resolved),
+            group_bootstrap_metrics=(
+                None
+                if group_bootstrap_artifacts is None
+                else group_bootstrap_artifacts.summary
+            ),
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -1311,6 +1362,15 @@ def run(
     if bundle_export_result is not None:
         metadata_payload["model_bundle_dir"] = str(bundle_export_result.bundle_dir)
         metadata_payload["model_bundle_manifest_sha256"] = bundle_export_result.manifest_sha256
+    if group_bootstrap_artifacts is not None:
+        metadata_payload["group_bootstrap"] = {
+            "group_col": resolved.split.group_col,
+            "n_groups": group_bootstrap_artifacts.n_groups,
+            "n_resamples": int(group_bootstrap_config.n_resamples),
+            "confidence_level": float(group_bootstrap_config.confidence_level),
+            "bootstrap_method": "percentile_group",
+            "seed": group_bootstrap_artifacts.seed,
+        }
 
     metadata_path = run_dir / "run_metadata.json"
     _write_metadata(run_dir, payload=metadata_payload)

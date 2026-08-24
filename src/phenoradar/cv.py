@@ -24,12 +24,8 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
-    average_precision_score,
     balanced_accuracy_score,
-    brier_score_loss,
-    log_loss,
     matthews_corrcoef,
-    roc_auc_score,
 )
 from sklearn.model_selection import GroupKFold, LeaveOneGroupOut, StratifiedGroupKFold
 from sklearn.preprocessing import StandardScaler
@@ -47,6 +43,8 @@ from phenoradar.metrics import (
     FIXED_PROBABILITY_THRESHOLD_NAME,
     FIXED_PROBABILITY_THRESHOLD_POLICY,
     FIXED_PROBABILITY_THRESHOLD_VALUE,
+    binary_log_loss,
+    binary_probability_metrics,
     metric_higher_is_better,
 )
 from phenoradar.model_selection import (
@@ -2524,53 +2522,11 @@ def _prepare_source_selection(
 def _compute_fold_metrics(
     y_true: np.ndarray, prob: np.ndarray, threshold: float
 ) -> dict[str, float]:
-    y_pred = (prob >= threshold).astype(int)
-    metrics: dict[str, float] = {}
-
-    if np.unique(y_true).size < 2:
-        metrics["roc_auc"] = np.nan
-        metrics["pr_auc"] = np.nan
-        metrics["balanced_accuracy"] = np.nan
-        metrics["mcc"] = np.nan
-        try:
-            metrics["brier"] = float(brier_score_loss(y_true, prob))
-        except (IndexError, ValueError):
-            metrics["brier"] = np.nan
-        return metrics
-
-    try:
-        metrics["roc_auc"] = float(roc_auc_score(y_true, prob))
-    except (IndexError, ValueError):
-        metrics["roc_auc"] = np.nan
-
-    try:
-        metrics["pr_auc"] = float(average_precision_score(y_true, prob))
-    except (IndexError, ValueError):
-        metrics["pr_auc"] = np.nan
-
-    try:
-        metrics["balanced_accuracy"] = float(balanced_accuracy_score(y_true, y_pred))
-    except (IndexError, ValueError):
-        metrics["balanced_accuracy"] = np.nan
-
-    try:
-        metrics["mcc"] = float(matthews_corrcoef(y_true, y_pred))
-    except (IndexError, ValueError):
-        metrics["mcc"] = np.nan
-
-    try:
-        metrics["brier"] = float(brier_score_loss(y_true, prob))
-    except (IndexError, ValueError):
-        metrics["brier"] = np.nan
-
-    return metrics
+    return binary_probability_metrics(y_true, prob, threshold=threshold)
 
 
 def _binary_log_loss(y_true: np.ndarray, prob: np.ndarray) -> float:
-    try:
-        return float(log_loss(y_true, prob, labels=[0, 1]))
-    except (IndexError, ValueError):
-        return np.nan
+    return binary_log_loss(y_true, prob)
 
 
 def _summarize_model_selection_trials(model_selection_trials: pl.DataFrame) -> pl.DataFrame:

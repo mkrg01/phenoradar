@@ -93,6 +93,11 @@ model_selection:
   selection_rule: best
 ensemble:
   probability_aggregation: mean
+evaluation:
+  group_bootstrap:
+    enabled: false
+    n_resamples: 2000
+    confidence_level: 0.95
 summary:
   group_col: family_id
   group_name_col: family_name
@@ -113,6 +118,7 @@ runtime:
 - `model`
 - `model_selection`
 - `ensemble`
+- `evaluation`
 - `summary`
 - `figures`
 - `report`
@@ -558,6 +564,28 @@ Unknown parameter names are rejected at training time.
 - `ensemble.probability_aggregation`
   - type: `mean | median`
   - default: `mean`
+
+## `evaluation`
+
+- `evaluation.group_bootstrap.enabled`
+  - type: `bool`
+  - default: `false`
+  - behavior: resample intact outer-CV groups from pooled OOF predictions and
+    estimate percentile confidence intervals without refitting models.
+- `evaluation.group_bootstrap.n_resamples`
+  - type: `int`
+  - default: `2000`
+  - rule: must be `>= 1`
+- `evaluation.group_bootstrap.confidence_level`
+  - type: `float`
+  - default: `0.95`
+  - rule: must be strictly between `0` and `1`
+
+The bootstrap group is always `split.group_col`. For example, it is
+`contrast_pair_id`, `family_id`, or `order_id` when that column is selected for
+the split. If there are `G` unique OOF groups, every replicate draws `G` groups
+with replacement and includes all species in every selected group. The seed is
+derived deterministically from `runtime.seed`.
 
 ## `summary`
 

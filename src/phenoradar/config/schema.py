@@ -399,6 +399,20 @@ class ReportConfig(StrictModel):
     pass
 
 
+class GroupBootstrapConfig(StrictModel):
+    """OOF group-bootstrap confidence interval controls."""
+
+    enabled: bool = False
+    n_resamples: PositiveInt = 2000
+    confidence_level: float = Field(default=0.95, gt=0.0, lt=1.0)
+
+
+class EvaluationConfig(StrictModel):
+    """Evaluation uncertainty controls."""
+
+    group_bootstrap: GroupBootstrapConfig = Field(default_factory=GroupBootstrapConfig)
+
+
 class SummaryConfig(StrictModel):
     """Stage-level grouped summary controls."""
 
@@ -436,6 +450,7 @@ class AppConfig(StrictModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     model_selection: ModelSelectionConfig = Field(default_factory=ModelSelectionConfig)
     ensemble: EnsembleConfig = Field(default_factory=EnsembleConfig)
+    evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     summary: SummaryConfig = Field(default_factory=SummaryConfig)
     figures: FiguresConfig = Field(default_factory=FiguresConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)

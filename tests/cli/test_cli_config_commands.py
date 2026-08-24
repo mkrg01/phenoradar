@@ -84,6 +84,14 @@ def _stub_resolved_config(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         runtime=SimpleNamespace(execution_stage=execution_stage, seed=42),
+        split=SimpleNamespace(group_col="contrast_pair_id"),
+        evaluation=SimpleNamespace(
+            group_bootstrap=SimpleNamespace(
+                enabled=False,
+                n_resamples=2000,
+                confidence_level=0.95,
+            )
+        ),
         report=SimpleNamespace(),
         summary=SimpleNamespace(group_col="family_id", group_name_col="family_name"),
         figures=SimpleNamespace(top_features=top_features),
@@ -548,6 +556,11 @@ def test_run_respects_execution_stage_override(
 data:
   metadata_path: {metadata}
   tpm_path: {tpm}
+evaluation:
+  group_bootstrap:
+    enabled: true
+    n_resamples: 20
+    confidence_level: 0.9
 """.strip()
         + "\n",
     )
@@ -574,6 +587,8 @@ data:
     assert (run_dirs[0] / "split" / "tables" / "fold_validation_groups.tsv").exists()
     assert (run_dirs[0] / "split" / "tables" / "fold_diagnostics.tsv").exists()
     assert (run_dirs[0] / "cv" / "tables" / "metrics_cv.tsv").exists()
+    assert (run_dirs[0] / "cv" / "tables" / "group_bootstrap_metrics.tsv").exists()
+    assert (run_dirs[0] / "cv" / "tables" / "group_bootstrap_replicates.tsv").exists()
     assert (run_dirs[0] / "cv" / "tables" / "loss_by_split_cv.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "thresholds.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "evaluation_contract.tsv").exists()
@@ -593,6 +608,7 @@ data:
     assert (run_dirs[0] / "summary" / "tables" / "classification_summary.tsv").exists()
     assert (run_dirs[0] / "model_bundle").exists()
     assert (run_dirs[0] / "cv" / "figures" / "cv_metrics_overview.svg").exists()
+    assert (run_dirs[0] / "cv" / "figures" / "group_bootstrap_metrics.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "cv_loss_by_split.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "feature_importance_top.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "feature_importance_by_fold_heatmap.svg").exists()
@@ -661,6 +677,32 @@ data:
 
     metrics = pl.read_csv(run_dirs[0] / "cv" / "tables" / "metrics_cv.tsv", separator="\t")
     assert {"aggregate_scope", "fold_id", "metric", "metric_value"}.issubset(metrics.columns)
+    bootstrap_metrics = pl.read_csv(
+        run_dirs[0] / "cv" / "tables" / "group_bootstrap_metrics.tsv",
+        separator="\t",
+        null_values="NA",
+    )
+    assert set(bootstrap_metrics.get_column("metric")) == {
+        "roc_auc",
+        "pr_auc",
+        "balanced_accuracy",
+        "mcc",
+        "brier",
+        "log_loss",
+    }
+    assert bootstrap_metrics.get_column("group_col").unique().to_list() == [
+        "contrast_pair_id"
+    ]
+    assert bootstrap_metrics.get_column("n_groups").unique().to_list() == [2]
+    assert bootstrap_metrics.get_column("n_resamples").unique().to_list() == [20]
+    assert bootstrap_metrics.get_column("confidence_level").unique().to_list() == [0.9]
+    bootstrap_replicates = pl.read_csv(
+        run_dirs[0] / "cv" / "tables" / "group_bootstrap_replicates.tsv",
+        separator="\t",
+        null_values="NA",
+    )
+    assert bootstrap_replicates.height == 20 * 6
+    assert bootstrap_replicates.get_column("resample_id").n_unique() == 20
     fold_validation_groups = pl.read_csv(
         run_dirs[0] / "split" / "tables" / "fold_validation_groups.tsv",
         separator="\t",
@@ -771,6 +813,14 @@ data:
     assert run_metadata["git_source"] in {"phenoradar_source", "unavailable"}
     assert "seed_policy" in run_metadata
     assert run_metadata["seed_policy"]["runtime_seed"] == 42
+    assert run_metadata["group_bootstrap"] == {
+        "group_col": "contrast_pair_id",
+        "n_groups": 2,
+        "n_resamples": 20,
+        "confidence_level": 0.9,
+        "bootstrap_method": "percentile_group",
+        "seed": bootstrap_metrics.get_column("seed").item(0),
+    }
     assert "environment" in run_metadata
     assert "input_files" in run_metadata
     assert isinstance(run_metadata["input_files"], list)

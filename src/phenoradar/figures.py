@@ -27,6 +27,7 @@ from sklearn.metrics import (
 from phenoradar.group_summary import GroupSummaryError, finite_group_probabilities
 from phenoradar.metrics import (
     FIXED_PROBABILITY_THRESHOLD_NAME,
+    metric_contract,
     metric_direction,
     metric_higher_is_better,
 )
@@ -646,6 +647,112 @@ def _cv_metrics_overview(metrics_cv: pl.DataFrame, out_path: Path) -> None:
     ax.legend(loc="upper right", frameon=False)
 
     fig.subplots_adjust(left=0.08, right=0.99, top=0.96, bottom=0.18)
+    _save_svg_figure(fig, out_path)
+
+
+def _group_bootstrap_metrics_figure(
+    group_bootstrap_metrics: pl.DataFrame,
+    out_path: Path,
+) -> None:
+    required_columns = {
+        "metric",
+        "point_estimate",
+        "ci_lower",
+        "ci_upper",
+        "confidence_level",
+        "n_resamples",
+        "n_valid_resamples",
+        "n_groups",
+        "group_col",
+    }
+    if not required_columns.issubset(group_bootstrap_metrics.columns):
+        raise FigureError(
+            "group_bootstrap_metrics.tsv schema is invalid for "
+            "group_bootstrap_metrics.svg"
+        )
+    data = group_bootstrap_metrics.filter(
+        pl.col("point_estimate").is_not_null()
+        & pl.col("point_estimate").is_finite()
+        & pl.col("ci_lower").is_not_null()
+        & pl.col("ci_lower").is_finite()
+        & pl.col("ci_upper").is_not_null()
+        & pl.col("ci_upper").is_finite()
+    )
+    if data.height == 0:
+        raise FigureError("group_bootstrap_metrics.tsv contains no finite confidence intervals")
+
+    preferred_order = [
+        "roc_auc",
+        "pr_auc",
+        "balanced_accuracy",
+        "mcc",
+        "brier",
+        "log_loss",
+    ]
+    rows_by_metric = {
+        str(row["metric"]): row for row in data.iter_rows(named=True)
+    }
+    metric_names = [name for name in preferred_order if name in rows_by_metric] + sorted(
+        set(rows_by_metric) - set(preferred_order)
+    )
+    rows = [rows_by_metric[name] for name in metric_names]
+    point_estimates = np.asarray([float(row["point_estimate"]) for row in rows])
+    ci_lower = np.asarray([float(row["ci_lower"]) for row in rows])
+    ci_upper = np.asarray([float(row["ci_upper"]) for row in rows])
+    labels: list[str] = []
+    for metric_name in metric_names:
+        try:
+            labels.append(str(metric_contract(metric_name)["display_name"]))
+        except ValueError:
+            labels.append(metric_name)
+
+    y_pos = np.arange(len(rows), dtype=float)
+    width_px = _NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX
+    height_px = max(280, 120 + len(rows) * 34)
+    fig, ax = plt.subplots(
+        figsize=_figure_size_inches(width_px, height_px),
+        dpi=_FIG_DPI,
+    )
+    fig.patch.set_facecolor("white")
+    ax.hlines(y_pos, ci_lower, ci_upper, color=_COLOR_SKY, linewidth=1.4)
+    ax.scatter(point_estimates, y_pos, color=_COLOR_BLUE, s=18, zorder=3)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels, fontsize=_TICK_FONTSIZE)
+    ax.invert_yaxis()
+
+    x_min, x_max = _padded_domain(
+        [*ci_lower.tolist(), *ci_upper.tolist(), *point_estimates.tolist()],
+        include_zero=True,
+    )
+    ax.set_xlim(x_min, x_max)
+    if x_min <= 0.0 <= x_max:
+        ax.axvline(0.0, color=_MUTED_TEXT_COLOR, linewidth=0.7)
+    confidence_level = float(rows[0]["confidence_level"])
+    confidence_percent = confidence_level * 100.0
+    ax.set_xlabel(
+        f"Metric value ({confidence_percent:g}% group-bootstrap CI)",
+        fontsize=_LABEL_FONTSIZE,
+    )
+    ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
+    ax.set_axisbelow(True)
+    group_col = str(rows[0]["group_col"])
+    n_groups = int(rows[0]["n_groups"])
+    n_resamples = int(rows[0]["n_resamples"])
+    min_valid_resamples = min(int(row["n_valid_resamples"]) for row in rows)
+    ax.set_title("OOF group-bootstrap confidence intervals", pad=8.0)
+    fig.text(
+        0.99,
+        0.01,
+        (
+            f"group_col={group_col}; groups={n_groups}; resamples={n_resamples}; "
+            f"minimum valid resamples={min_valid_resamples}"
+        ),
+        ha="right",
+        va="bottom",
+        fontsize=_ANNOTATION_FONTSIZE,
+        color=_MUTED_TEXT_COLOR,
+    )
+    fig.subplots_adjust(left=0.31, right=0.985, top=0.89, bottom=0.16)
     _save_svg_figure(fig, out_path)
 
 
@@ -3999,6 +4106,7 @@ def write_run_figures(
     top_features: int = _DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
     parallel_workers: int = 1,
+    group_bootstrap_metrics: pl.DataFrame | None = None,
 ) -> list[str]:
     """Write run-level SVG figures under <run_dir>/<stage>/figures."""
     stage_dirs = _stage_figure_dirs(run_dir)
@@ -4028,6 +4136,13 @@ def write_run_figures(
         _cv_metrics_overview,
         (metrics_cv, cv_dir / "cv_metrics_overview.svg"),
     )
+    if group_bootstrap_metrics is not None:
+        add_job(
+            "group_bootstrap_metrics",
+            _group_bootstrap_metrics_figure,
+            (group_bootstrap_metrics, cv_dir / "group_bootstrap_metrics.svg"),
+            catch_figure_error=True,
+        )
     if loss_by_split_cv is not None:
         add_job(
             "cv_loss_by_split",

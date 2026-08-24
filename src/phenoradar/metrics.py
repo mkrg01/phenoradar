@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from types import MappingProxyType
 from typing import Any, Final, Literal, TypedDict, cast
+
+import numpy as np
+from sklearn.metrics import (
+    average_precision_score,
+    balanced_accuracy_score,
+    brier_score_loss,
+    log_loss,
+    matthews_corrcoef,
+    roc_auc_score,
+)
 
 MetricDirection = Literal["maximize", "minimize"]
 MetricInput = Literal["probability", "predicted_label"]
@@ -158,3 +168,48 @@ def metric_higher_is_better(metric_name: str) -> bool:
 def metric_sort_value(metric_name: str, metric_value: float) -> float:
     """Return an ascending sort value that places better metrics first."""
     return -metric_value if metric_higher_is_better(metric_name) else metric_value
+
+
+def binary_probability_metrics(
+    y_true: np.ndarray,
+    probability: np.ndarray,
+    *,
+    threshold: float,
+) -> dict[str, float]:
+    """Compute the shared binary evaluation metrics for one prediction set."""
+    y_pred = (probability >= threshold).astype(int)
+    if np.unique(y_true).size < 2:
+        try:
+            brier = float(brier_score_loss(y_true, probability))
+        except (IndexError, ValueError):
+            brier = np.nan
+        return {
+            "roc_auc": np.nan,
+            "pr_auc": np.nan,
+            "balanced_accuracy": np.nan,
+            "mcc": np.nan,
+            "brier": brier,
+        }
+
+    metric_functions: dict[str, Callable[[], float]] = {
+        "roc_auc": lambda: roc_auc_score(y_true, probability),
+        "pr_auc": lambda: average_precision_score(y_true, probability),
+        "balanced_accuracy": lambda: balanced_accuracy_score(y_true, y_pred),
+        "mcc": lambda: matthews_corrcoef(y_true, y_pred),
+        "brier": lambda: brier_score_loss(y_true, probability),
+    }
+    metrics: dict[str, float] = {}
+    for metric_name, compute in metric_functions.items():
+        try:
+            metrics[metric_name] = float(compute())
+        except (IndexError, ValueError):
+            metrics[metric_name] = np.nan
+    return metrics
+
+
+def binary_log_loss(y_true: np.ndarray, probability: np.ndarray) -> float:
+    """Compute binary log loss while retaining both labels in the contract."""
+    try:
+        return float(log_loss(y_true, probability, labels=[0, 1]))
+    except (IndexError, ValueError):
+        return np.nan

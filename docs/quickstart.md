@@ -140,6 +140,20 @@ Core outputs include:
 If warnings are recorded, they are printed at command end and stored in
 `run_metadata.json` (`warnings` field).
 
+To add group-level 95% confidence intervals for the pooled OOF metrics, enable:
+
+```yaml
+evaluation:
+  group_bootstrap:
+    enabled: true
+    n_resamples: 2000
+    confidence_level: 0.95
+```
+
+This writes `cv/tables/group_bootstrap_metrics.tsv`, the per-replicate audit
+table, and `cv/figures/group_bootstrap_metrics.svg`. The resampling unit is the
+configured `split.group_col`.
+
 ## 5) Run full refit and export a reusable bundle
 
 ```bash

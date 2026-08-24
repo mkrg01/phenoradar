@@ -106,6 +106,10 @@ Notes:
 
 Conditionally written:
 
+- `cv/tables/group_bootstrap_metrics.tsv`,
+  `cv/tables/group_bootstrap_replicates.tsv`, and
+  `cv/figures/group_bootstrap_metrics.svg`
+  (`evaluation.group_bootstrap.enabled=true`)
 - `external_test/tables/prediction_external_test.tsv` (`full_run` only)
 - `inference/tables/prediction_inference.tsv` (`full_run` only)
 - `external_test/tables/loss_by_split_final_refit.tsv` (`full_run` only)
