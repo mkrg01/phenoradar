@@ -239,6 +239,29 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "n_models",
         "n_models_with_nonzero_count",
     }.issubset(cv_artifacts.model_sparsity_summary.columns)
+    assert {
+        "scope",
+        "stage",
+        "fold_id",
+        "sample_set_id",
+        "candidate_index",
+        "started_at_sec",
+        "ended_at_sec",
+        "duration_sec",
+    } == set(cv_artifacts.timing.columns)
+    timing_pairs = set(cv_artifacts.timing.select("scope", "stage").iter_rows())
+    assert {
+        ("outer_cv", "matrix_build"),
+        ("outer_cv", "fold_execution"),
+        ("outer_cv", "interpretation"),
+        ("outer_cv", "total"),
+        ("outer_fold", "preprocessing"),
+        ("outer_fold", "model_fit"),
+        ("outer_fold", "prediction"),
+        ("outer_fold", "sample_set_total"),
+        ("outer_fold", "total"),
+    }.issubset(timing_pairs)
+    assert cv_artifacts.timing.filter(pl.col("duration_sec") < 0.0).height == 0
 
 
 def test_metrics_dataframe_handles_valid_fold_counts_after_schema_inference_limit() -> None:
@@ -872,6 +895,22 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
         "n_nonzero_features",
     }.issubset(refit_artifacts.model_sparsity.columns)
     assert refit_artifacts.model_sparsity_summary.height > 0
+    timing_stages = set(refit_artifacts.timing.get_column("stage"))
+    assert {
+        "pool_preparation",
+        "matrix_build",
+        "sampling",
+        "candidate_generation",
+        "preprocessing",
+        "model_fit",
+        "prediction",
+        "sample_set_total",
+        "postprocess",
+        "total",
+    }.issubset(timing_stages)
+    assert refit_artifacts.timing.get_column("scope").unique().to_list() == [
+        "final_refit"
+    ]
 
 
 def test_run_final_refit_prunes_target_matrix_without_changing_outputs(
@@ -1124,6 +1163,11 @@ model_selection:
     assert set(selected.select("selection_source_sample_set_id").to_series().to_list()) == {0, 1}
     assert set(trials.select("sample_set_id").to_series().to_list()) == {0, 1}
     assert set(trials_summary.select("sample_set_id").to_series().to_list()) == {0, 1}
+    candidate_timings = cv_artifacts.timing.filter(pl.col("stage") == "candidate_score")
+    assert candidate_timings.height > 0
+    assert set(candidate_timings.get_column("sample_set_id")) == {0, 1}
+    assert set(candidate_timings.get_column("candidate_index")) == {0, 1}
+    assert candidate_timings.get_column("fold_id").null_count() == 0
 
 
 def test_outer_cv_selection_can_reuse_first_sample_set(

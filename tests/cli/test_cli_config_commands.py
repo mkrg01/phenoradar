@@ -606,6 +606,7 @@ evaluation:
     assert (run_dirs[0] / "inference" / "tables" / "prediction_inference.tsv").exists()
     assert (run_dirs[0] / "external_test" / "tables" / "loss_by_split_final_refit.tsv").exists()
     assert (run_dirs[0] / "summary" / "tables" / "classification_summary.tsv").exists()
+    assert (run_dirs[0] / "runtime" / "tables" / "timing.tsv").exists()
     assert (run_dirs[0] / "model_bundle").exists()
     assert (run_dirs[0] / "cv" / "figures" / "cv_metrics_overview.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "group_bootstrap_metrics.svg").exists()
@@ -703,6 +704,35 @@ evaluation:
     )
     assert bootstrap_replicates.height == 20 * 6
     assert bootstrap_replicates.get_column("resample_id").n_unique() == 20
+    timing = pl.read_csv(
+        run_dirs[0] / "runtime" / "tables" / "timing.tsv",
+        separator="\t",
+        null_values="NA",
+    )
+    assert {
+        "scope",
+        "stage",
+        "fold_id",
+        "sample_set_id",
+        "candidate_index",
+        "started_at_sec",
+        "ended_at_sec",
+        "duration_sec",
+    } == set(timing.columns)
+    run_timing_stages = set(
+        timing.filter(pl.col("scope") == "run").get_column("stage")
+    )
+    assert {
+        "config_resolution",
+        "split_construction",
+        "outer_cv",
+        "group_bootstrap",
+        "final_refit",
+        "artifact_writing",
+        "figure_generation",
+        "total",
+    }.issubset(run_timing_stages)
+    assert timing.filter(pl.col("duration_sec") < 0.0).height == 0
     fold_validation_groups = pl.read_csv(
         run_dirs[0] / "split" / "tables" / "fold_validation_groups.tsv",
         separator="\t",
@@ -821,6 +851,10 @@ evaluation:
         "bootstrap_method": "percentile_group",
         "seed": bootstrap_metrics.get_column("seed").item(0),
     }
+    assert run_metadata["timing"]["artifact_path"] == "runtime/tables/timing.tsv"
+    assert run_metadata["timing"]["clock"] == "time.perf_counter"
+    assert run_metadata["timing"]["parallel_intervals_may_overlap"] is True
+    assert set(run_metadata["timing"]["stage_duration_sec"]) == run_timing_stages
     assert "environment" in run_metadata
     assert "input_files" in run_metadata
     assert isinstance(run_metadata["input_files"], list)

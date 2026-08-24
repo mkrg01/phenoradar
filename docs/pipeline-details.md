@@ -11,7 +11,8 @@ This page explains execution flow for `run`, `predict`, and `report`.
 3. Run outer CV (training + validation predictions + metrics).
 4. Record the fixed probability-threshold contract (`0.5`); it is not derived from OOF data.
 5. If `full_run`, refit on train+validation and predict external/inference.
-6. Write artifacts, figures, metadata, and optional model bundle.
+6. Write artifacts, figures, metadata, optional model bundle, and a monotonic
+   timing trace.
 
 `predict`:
 
@@ -158,6 +159,21 @@ After all folds:
 - Produce `external_test/tables/prediction_external_test.tsv` and
   `inference/tables/prediction_inference.tsv`.
 - Export `model_bundle/` with model-local preprocessing state.
+
+### 5) Timing instrumentation
+
+- `runtime/tables/timing.tsv` uses one `time.perf_counter` origin for the whole
+  successful `run` command.
+- Top-level rows cover config, provenance, split construction, outer CV,
+  optional group bootstrap/final refit, artifact writing, and figures.
+- Nested rows cover outer-CV matrix construction, individual folds,
+  sample-set preprocessing, selected-model fitting/prediction, and inner-CV
+  candidate scoring. Final refit uses the same sample/candidate identifiers.
+- Start/end offsets make concurrent intervals explicit. Nested or parallel
+  durations are diagnostic measurements and are not expected to sum to the
+  top-level wall-clock duration.
+- `run_metadata.json.timing.stage_duration_sec` stores the `scope=run` summary;
+  the TSV remains the detailed source of truth.
 
 ## Model selection behavior details
 

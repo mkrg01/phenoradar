@@ -9,6 +9,8 @@
   reproducible `stratified_group_kfold` for outer and inner CV
 * add optional group-level bootstrap confidence intervals for pooled OOF metrics,
   with auditable replicate tables and an interval figure
+* add monotonic stage/fold/sample-set/candidate timing traces and top-level run
+  timing metadata for performance profiling
 
 ### Bug Fixes
 

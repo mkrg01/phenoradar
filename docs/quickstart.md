@@ -134,6 +134,7 @@ Core outputs include:
 - `model/tables/thresholds.tsv`
 - `model/tables/evaluation_contract.tsv`
 - `summary/tables/classification_summary.tsv`
+- `runtime/tables/timing.tsv`
 - `run_metadata.json`
 - `cv/figures/`
 
@@ -153,6 +154,11 @@ evaluation:
 This writes `cv/tables/group_bootstrap_metrics.tsv`, the per-replicate audit
 table, and `cv/figures/group_bootstrap_metrics.svg`. The resampling unit is the
 configured `split.group_col`.
+
+`runtime/tables/timing.tsv` is always written. Start with `scope=run` and
+`stage=total`, then inspect `outer_fold`, `sample_set_id`, and
+`candidate_index` rows to locate bottlenecks. Parallel intervals can overlap,
+so their durations are not additive.
 
 ## 5) Run full refit and export a reusable bundle
 

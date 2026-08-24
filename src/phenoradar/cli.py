@@ -86,6 +86,7 @@ from phenoradar.testdata import (
     fetch_c4_tiny_test_data,
     resolve_c4_tiny_base_url,
 )
+from phenoradar.timing import TimingRecorder, run_timing_summary
 from phenoradar.tree_prediction import (
     TreePredictionError,
     write_predict_tree_prediction_artifacts,
@@ -219,6 +220,7 @@ def _run_table_dirs(run_dir: Path) -> dict[str, Path]:
         "inference": run_dir / "inference" / "tables",
         "model": run_dir / "model" / "tables",
         "summary": run_dir / "summary" / "tables",
+        "runtime": run_dir / "runtime" / "tables",
     }
     for tables_dir in table_dirs.values():
         tables_dir.mkdir(parents=True, exist_ok=True)
@@ -777,6 +779,8 @@ def run(
 ) -> None:
     """Run training/evaluation pipeline."""
     start_time = datetime.now(UTC)
+    timing_recorder = TimingRecorder()
+    run_total_started = timing_recorder.start()
     log_verbosity = _resolve_log_verbosity(verbose=verbose, quiet=quiet)
     config_paths = _normalize_config_paths(config)
 
@@ -791,6 +795,7 @@ def run(
 
     _log("Start training/evaluation pipeline.")
     _log("Load and resolve configuration.")
+    config_started = timing_recorder.start()
     try:
         resolved = load_and_resolve_config(
             config_paths,
@@ -799,11 +804,17 @@ def run(
         )
     except ConfigError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    timing_recorder.record_since(
+        config_started,
+        scope="run",
+        stage="config_resolution",
+    )
     _log(f"Configuration resolved (execution_stage={resolved.runtime.execution_stage}).")
 
     tree_path = getattr(resolved.data, "tree_path", None)
     orthogroup_annotation_path = getattr(resolved.data, "orthogroup_annotation_path", None)
     _log("Collect input file identities.")
+    input_provenance_started = timing_recorder.start()
     try:
         input_files = collect_input_files(
             [
@@ -820,12 +831,23 @@ def run(
         )
     except ProvenanceError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    timing_recorder.record_since(
+        input_provenance_started,
+        scope="run",
+        stage="input_provenance",
+    )
 
     _log("Build split artifacts.")
+    split_started = timing_recorder.start()
     try:
         split_artifacts = build_split_artifacts(resolved)
     except SplitError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    timing_recorder.record_since(
+        split_started,
+        scope="run",
+        stage="split_construction",
+    )
     fold_count = getattr(split_artifacts, "fold_count", "unknown")
     excluded_rows = getattr(split_artifacts, "expression_rows_excluded", "unknown")
     _log(
@@ -843,6 +865,7 @@ def run(
         f"(single_label_validation_folds={single_label_validation_folds}, "
         f"single_label_validation_groups={single_label_validation_groups})."
     )
+    fingerprint_started = timing_recorder.start()
     try:
         fingerprint_metadata = _build_run_fingerprint_metadata(
             config=resolved,
@@ -851,20 +874,32 @@ def run(
         )
     except ProvenanceError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    timing_recorder.record_since(
+        fingerprint_started,
+        scope="run",
+        stage="fingerprint_generation",
+    )
 
     _log("Run outer cross-validation.")
 
     def _outer_cv_progress(message: str) -> None:
         _log(message, detail=message.startswith("Outer CV fold stage"))
 
+    outer_cv_started = timing_recorder.start()
     try:
         cv_artifacts = run_outer_cv(
             resolved,
             split_artifacts.split_manifest,
             progress_callback=_outer_cv_progress,
+            timing_recorder=timing_recorder,
         )
     except CVError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    timing_recorder.record_since(
+        outer_cv_started,
+        scope="run",
+        stage="outer_cv",
+    )
     _log("Outer cross-validation completed.")
 
     _emit_run_metric_summary(
@@ -882,6 +917,7 @@ def run(
             f"(group_col={resolved.split.group_col}, "
             f"n_resamples={group_bootstrap_config.n_resamples})."
         )
+        group_bootstrap_started = timing_recorder.start()
         try:
             group_bootstrap_artifacts = run_oof_group_bootstrap(
                 oof_predictions=cv_artifacts.oof_predictions,
@@ -893,6 +929,11 @@ def run(
             )
         except GroupBootstrapError as exc:
             raise typer.BadParameter(str(exc)) from exc
+        timing_recorder.record_since(
+            group_bootstrap_started,
+            scope="run",
+            stage="group_bootstrap",
+        )
         warnings.extend(group_bootstrap_artifacts.warnings)
         _log(
             "OOF group bootstrap completed "
@@ -906,13 +947,20 @@ def run(
     final_refit_artifacts = None
     if resolved.runtime.execution_stage == "full_run":
         _log("Run final refit stage.")
+        final_refit_started = timing_recorder.start()
         try:
             final_refit_artifacts = run_final_refit(
                 config=resolved,
                 split_manifest=split_artifacts.split_manifest,
+                timing_recorder=timing_recorder,
             )
         except CVError as exc:
             raise typer.BadParameter(str(exc)) from exc
+        timing_recorder.record_since(
+            final_refit_started,
+            scope="run",
+            stage="final_refit",
+        )
         warnings.extend(final_refit_artifacts.warnings)
         status = "full_run_completed"
         _log("Final refit completed.")
@@ -920,6 +968,7 @@ def run(
         _log("Skip final refit stage (execution_stage=cv_only).")
 
     _log("Create run directory and write core tabular artifacts.")
+    artifact_writing_started = timing_recorder.start()
     run_dir = _build_run_dir("run")
     table_dirs = _run_table_dirs(run_dir)
     split_tables_dir = table_dirs["split"]
@@ -928,6 +977,7 @@ def run(
     inference_tables_dir = table_dirs["inference"]
     model_tables_dir = table_dirs["model"]
     summary_tables_dir = table_dirs["summary"]
+    runtime_tables_dir = table_dirs["runtime"]
     write_resolved_config(resolved, run_dir / "resolved_config.yml")
     split_artifacts.split_manifest.write_csv(
         split_tables_dir / "split_manifest.tsv", separator="\t"
@@ -1244,7 +1294,13 @@ def run(
                 )
             )
     warnings.extend(group_summary_warnings)
+    timing_recorder.record_since(
+        artifact_writing_started,
+        scope="run",
+        stage="artifact_writing",
+    )
 
+    figure_generation_started = timing_recorder.start()
     figure_warnings: list[str] = []
     try:
         orthogroup_annotations = load_orthogroup_annotations(
@@ -1329,12 +1385,35 @@ def run(
             "Skipped tree prediction artifacts because data.contrast_pair_col is null."
         )
     warnings.extend(figure_warnings)
+    timing_recorder.record_since(
+        figure_generation_started,
+        scope="run",
+        stage="figure_generation",
+    )
     _log(f"Run figures generated (figure_warnings={len(figure_warnings)}).")
 
-    end_time = datetime.now(UTC)
     _log("Collect runtime provenance metadata.")
+    runtime_provenance_started = timing_recorder.start()
     build_meta = phenoradar_build_snapshot()
     environment = runtime_environment_snapshot()
+    timing_recorder.record_since(
+        runtime_provenance_started,
+        scope="run",
+        stage="runtime_provenance",
+    )
+    timing_recorder.record_since(
+        run_total_started,
+        scope="run",
+        stage="total",
+    )
+    timing_table = timing_recorder.to_frame()
+    timing_table.write_csv(
+        runtime_tables_dir / "timing.tsv",
+        separator="\t",
+        float_precision=8,
+        null_value="NA",
+    )
+    end_time = datetime.now(UTC)
     metadata_payload: dict[str, Any] = {
         "command": "run",
         "execution_stage": resolved.runtime.execution_stage,
@@ -1354,6 +1433,12 @@ def run(
         "input_files": input_files,
         "environment": environment,
         "warnings": warnings,
+        "timing": {
+            "artifact_path": "runtime/tables/timing.tsv",
+            "clock": "time.perf_counter",
+            "parallel_intervals_may_overlap": True,
+            "stage_duration_sec": run_timing_summary(timing_table),
+        },
         **fingerprint_metadata,
         **build_meta,
     }
@@ -1394,7 +1479,7 @@ def run(
     typer.echo(
         f"Wrote run artifacts at {run_dir} "
         "(resolved_config.yml, split/tables/, cv/tables/, cv/figures/, "
-        "model/tables/, summary/tables/, "
+        "model/tables/, summary/tables/, runtime/tables/, "
         "run_metadata.json"
         f"{full_run_suffix}; warnings={len(warnings)}).",
     )

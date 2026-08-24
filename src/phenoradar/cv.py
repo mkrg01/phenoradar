@@ -55,6 +55,7 @@ from phenoradar.model_selection import (
     expanded_search_space,
     generate_candidates,
 )
+from phenoradar.timing import TimingRecorder
 
 type FeatureScaler = StandardScaler | None
 
@@ -97,6 +98,7 @@ class CVArtifacts:
     retained_features_summary: pl.DataFrame
     model_sparsity: pl.DataFrame
     model_sparsity_summary: pl.DataFrame
+    timing: pl.DataFrame
     warnings: list[str]
 
 
@@ -114,6 +116,7 @@ class FinalRefitArtifacts:
     retained_features_summary: pl.DataFrame
     model_sparsity: pl.DataFrame
     model_sparsity_summary: pl.DataFrame
+    timing: pl.DataFrame
     warnings: list[str]
     ensemble_size: int
     transform_feature_names: list[str]
@@ -1950,6 +1953,14 @@ def _selection_source_sample_set_ids(config: AppConfig, sampled_set_count: int) 
     )
 
 
+def _selection_timing_location(training_scope_id: str) -> tuple[str, str | None]:
+    if training_scope_id.startswith("outer_fold_"):
+        return "outer_fold", training_scope_id.removeprefix("outer_fold_")
+    if training_scope_id == "final_refit":
+        return "final_refit", None
+    return "model_selection", None
+
+
 def _requested_selected_candidate_count(
     *,
     config: AppConfig,
@@ -2075,6 +2086,7 @@ def _score_candidate_inner_cv(
     candidate: Candidate,
     preprocessed_folds: list[InnerCvPreprocessedFold],
     estimator_n_jobs: int | None = None,
+    timing_recorder: TimingRecorder | None = None,
 ) -> tuple[float, list[dict[str, Any]]]:
     resolved_estimator_n_jobs = (
         _runtime_n_jobs(config) if estimator_n_jobs is None else int(estimator_n_jobs)
@@ -2120,7 +2132,19 @@ def _score_candidate_inner_cv(
             return np.nan, trial_rows
         return float(np.nanmean(fold_score_array)), trial_rows
 
-    return _with_native_thread_limit(resolved_estimator_n_jobs, _score)
+    timing_started = None if timing_recorder is None else timing_recorder.start()
+    result = _with_native_thread_limit(resolved_estimator_n_jobs, _score)
+    if timing_recorder is not None and timing_started is not None:
+        timing_scope, timing_fold_id = _selection_timing_location(training_scope_id)
+        timing_recorder.record_since(
+            timing_started,
+            scope=timing_scope,
+            stage="candidate_score",
+            fold_id=timing_fold_id,
+            sample_set_id=source_sample_set_id,
+            candidate_index=candidate.candidate_index,
+        )
+    return result
 
 
 def _score_std_error_from_trial_rows(trial_rows: list[dict[str, Any]]) -> float | None:
@@ -2184,6 +2208,7 @@ def _prepare_source_selection_tpe(
     warnings: list[str],
     progress_callback: Callable[[str, str | None], None] | None = None,
     contrast_groups_train: np.ndarray | None = None,
+    timing_recorder: TimingRecorder | None = None,
 ) -> SourceSelectionResult:
     if not _selection_is_active(config):
         raise CVError(
@@ -2255,6 +2280,7 @@ def _prepare_source_selection_tpe(
             candidate=candidate,
             preprocessed_folds=preprocessed_folds,
             estimator_n_jobs=estimator_n_jobs,
+            timing_recorder=timing_recorder,
         )
         trial_rows.extend(rows)
         if progress_callback is not None:
@@ -2342,6 +2368,7 @@ def _prepare_source_selection(
     warnings: list[str],
     progress_callback: Callable[[str, str | None], None] | None = None,
     contrast_groups_train: np.ndarray | None = None,
+    timing_recorder: TimingRecorder | None = None,
 ) -> SourceSelectionResult:
     selection_active = _selection_is_active(config)
     if selection_active and config.model_selection.search_strategy == "tpe":
@@ -2357,6 +2384,7 @@ def _prepare_source_selection(
             warnings=warnings,
             progress_callback=progress_callback,
             contrast_groups_train=contrast_groups_train,
+            timing_recorder=timing_recorder,
         )
 
     try:
@@ -2427,6 +2455,7 @@ def _prepare_source_selection(
                 candidate=candidate,
                 preprocessed_folds=preprocessed_folds,
                 estimator_n_jobs=estimator_n_jobs,
+                timing_recorder=timing_recorder,
             )
             scored_rows.append((mean_score, rows))
             if progress_callback is not None:
@@ -2452,6 +2481,7 @@ def _prepare_source_selection(
                     candidate=candidate,
                     preprocessed_folds=preprocessed_folds,
                     estimator_n_jobs=estimator_n_jobs,
+                    timing_recorder=timing_recorder,
                 ): candidate
                 for candidate in candidates
             }
@@ -2877,6 +2907,7 @@ def _fit_outer_sample_set(
     x_valid_raw: np.ndarray,
     valid_species: list[str],
     feature_names: list[str],
+    timing_recorder: TimingRecorder | None = None,
 ) -> OuterSampleSetFitResult:
     x_sampled_raw = x_train_raw[sampled_idx, :]
     y_sampled = y_train[sampled_idx]
@@ -2887,6 +2918,7 @@ def _fit_outer_sample_set(
     warnings: list[str] = []
     if np.unique(y_sampled).size < 2:
         raise CVError(f"Fold {fold_id} sampled training set became single-class")
+    preprocess_started = None if timing_recorder is None else timing_recorder.start()
     try:
         x_sampled, x_valid, selected_features, filter_counts = _preprocess_fold_with_counts(
             config,
@@ -2901,6 +2933,14 @@ def _fit_outer_sample_set(
         raise CVError(
             f"Fold {fold_id} sample_set_id={sample_set_id} preprocessing failed: {exc}"
         ) from exc
+    if timing_recorder is not None and preprocess_started is not None:
+        timing_recorder.record_since(
+            preprocess_started,
+            scope="outer_fold",
+            stage="preprocessing",
+            fold_id=fold_id,
+            sample_set_id=sample_set_id,
+        )
     sample_weight = _fit_sample_weights(config, y_sampled, groups_sampled)
 
     model_probs: list[np.ndarray] = []
@@ -2922,7 +2962,17 @@ def _fit_outer_sample_set(
             y_sampled,
             model_params=selected.candidate.params,
         )
+        fit_started = None if timing_recorder is None else timing_recorder.start()
         _fit_estimator(estimator, x_sampled, y_sampled, sample_weight)
+        if timing_recorder is not None and fit_started is not None:
+            timing_recorder.record_since(
+                fit_started,
+                scope="outer_fold",
+                stage="model_fit",
+                fold_id=fold_id,
+                sample_set_id=sample_set_id,
+                candidate_index=selected.candidate.candidate_index,
+            )
         fold_models.append(estimator)
         model_sparsity_rows.append(
             _model_sparsity_row(
@@ -2935,6 +2985,7 @@ def _fit_outer_sample_set(
                 model=estimator,
             )
         )
+        prediction_started = None if timing_recorder is None else timing_recorder.start()
         train_model_probs.append(_predict_positive_probability(estimator, x_sampled))
         interpretation_entries.append(
             ModelFeatureEntry(
@@ -2944,6 +2995,15 @@ def _fit_outer_sample_set(
             )
         )
         model_prob = _predict_positive_probability(estimator, x_valid)
+        if timing_recorder is not None and prediction_started is not None:
+            timing_recorder.record_since(
+                prediction_started,
+                scope="outer_fold",
+                stage="prediction",
+                fold_id=fold_id,
+                sample_set_id=sample_set_id,
+                candidate_index=selected.candidate.candidate_index,
+            )
         model_probs.append(model_prob)
         for species_name, prob_value in zip(
             valid_species,
@@ -2991,6 +3051,7 @@ def _fit_final_refit_sample_set(
     n_features_before_override: int | None = None,
     x_train: np.ndarray | None = None,
     x_target: np.ndarray | None = None,
+    timing_recorder: TimingRecorder | None = None,
 ) -> FinalSampleSetFitResult:
     resolved_x_train_raw = x_train_raw if x_train_raw is not None else x_train
     resolved_x_target_raw = x_target_raw if x_target_raw is not None else x_target
@@ -3010,6 +3071,7 @@ def _fit_final_refit_sample_set(
     warnings: list[str] = []
     if np.unique(y_sampled).size < 2:
         raise CVError("Final refit sampled training set became single-class")
+    preprocess_started = None if timing_recorder is None else timing_recorder.start()
     x_sampled, selected_features, scaler, filter_counts = _preprocess_train_only_with_counts(
         config,
         x_sampled_raw,
@@ -3027,6 +3089,13 @@ def _fit_final_refit_sample_set(
             target_feature_names,
             selected_features,
             scaler,
+        )
+    if timing_recorder is not None and preprocess_started is not None:
+        timing_recorder.record_since(
+            preprocess_started,
+            scope="final_refit",
+            stage="preprocessing",
+            sample_set_id=sample_set_id,
         )
     sample_weight = _fit_sample_weights(config, y_sampled, groups_sampled)
 
@@ -3057,12 +3126,30 @@ def _fit_final_refit_sample_set(
                 y_sampled,
                 model_params=selected.candidate.params,
             )
+            fit_started = None if timing_recorder is None else timing_recorder.start()
             _fit_estimator(estimator, x_sampled, y_sampled, sample_weight)
+            if timing_recorder is not None and fit_started is not None:
+                timing_recorder.record_since(
+                    fit_started,
+                    scope="final_refit",
+                    stage="model_fit",
+                    sample_set_id=sample_set_id,
+                    candidate_index=selected.candidate.candidate_index,
+                )
+            prediction_started = None if timing_recorder is None else timing_recorder.start()
             if target_count == 0 or x_target_scaled is None:
                 model_prob = np.array([], dtype=float)
             else:
                 model_prob = _predict_positive_probability(estimator, x_target_scaled)
             train_model_prob = _predict_positive_probability(estimator, x_sampled)
+            if timing_recorder is not None and prediction_started is not None:
+                timing_recorder.record_since(
+                    prediction_started,
+                    scope="final_refit",
+                    stage="prediction",
+                    sample_set_id=sample_set_id,
+                    candidate_index=selected.candidate.candidate_index,
+                )
             return selected_offset, estimator, model_prob, train_model_prob
 
         return _with_native_thread_limit_for_config(model_config, _fit_one_limited)
@@ -3125,8 +3212,12 @@ def _fit_final_refit_sample_set(
 def run_final_refit(
     config: AppConfig,
     split_manifest: pl.DataFrame,
+    timing_recorder: TimingRecorder | None = None,
 ) -> FinalRefitArtifacts:
     """Refit final model(s) on full training pool and predict external/inference pools."""
+    recorder = timing_recorder if timing_recorder is not None else TimingRecorder()
+    timing_start_index = recorder.record_count
+    total_started = recorder.start()
     split_manifest = _with_contrast_group_column(config, split_manifest)
     warnings: list[str] = []
     polars_warning = _polars_thread_pool_warning(config)
@@ -3134,6 +3225,7 @@ def run_final_refit(
         warnings.append(polars_warning)
     matrix_builder = ExpressionMatrixBuilder(config)
 
+    pool_preparation_started = recorder.start()
     train_pool = (
         split_manifest.filter(pl.col("pool").is_in(["train", "validation"]))
         .group_by("species")
@@ -3168,6 +3260,11 @@ def run_final_refit(
     )
     inference_species = [str(v) for v in inference_pool.select("species").to_series().to_list()]
     target_species = external_species + inference_species
+    recorder.record_since(
+        pool_preparation_started,
+        scope="final_refit",
+        stage="pool_preparation",
+    )
 
     train_count = len(train_species)
     target_count = len(target_species)
@@ -3176,6 +3273,7 @@ def run_final_refit(
     n_features_before_override: int | None = None
     target_feature_names: list[str] | None = None
 
+    matrix_build_started = recorder.start()
     if prune_target_matrix:
         _with_native_thread_limit_for_config(
             config, matrix_builder.cache_species, train_species + target_species
@@ -3199,6 +3297,11 @@ def run_final_refit(
             else np.empty((0, x_all_raw.shape[1]), dtype=float)
         )
         target_feature_names = feature_names
+    recorder.record_since(
+        matrix_build_started,
+        scope="final_refit",
+        stage="matrix_build",
+    )
 
     y_train = np.array(train_pool.select("label").to_series().to_list(), dtype=int)
     groups_train = np.array(train_pool.select("group_id").to_series().to_list(), dtype=str)
@@ -3206,12 +3309,18 @@ def run_final_refit(
     if config.data.contrast_pair_col is not None or config.preprocess.pair_aware_filter.enabled:
         contrast_values = train_pool.select("contrast_group_id").to_series().to_list()
         contrast_groups_train = np.array(contrast_values, dtype=object)
+    sampling_started = recorder.start()
     sampled_sets = _sample_training_sets(
         config=config,
         y_train=y_train,
         groups_train=groups_train,
         training_scope_id="final_refit",
         warnings=warnings,
+    )
+    recorder.record_since(
+        sampling_started,
+        scope="final_refit",
+        stage="sampling",
     )
 
     model_probs: list[np.ndarray] = []
@@ -3227,6 +3336,7 @@ def run_final_refit(
 
     def _prepare_source(source_sample_set_id: int) -> tuple[int, SourceSelectionResult, list[str]]:
         local_warnings: list[str] = []
+        selection_started = recorder.start()
         source_result = _prepare_source_selection(
             config=source_config,
             training_scope_id="final_refit",
@@ -3238,6 +3348,13 @@ def run_final_refit(
             contrast_groups_train=contrast_groups_train,
             feature_names=feature_names,
             warnings=local_warnings,
+            timing_recorder=recorder,
+        )
+        recorder.record_since(
+            selection_started,
+            scope="final_refit",
+            stage="model_selection" if selection_active else "candidate_generation",
+            sample_set_id=source_sample_set_id,
         )
         return source_sample_set_id, source_result, local_warnings
 
@@ -3314,6 +3431,7 @@ def run_final_refit(
         sampled_idx: np.ndarray,
     ) -> tuple[int, FinalSampleSetFitResult]:
         source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
+        sample_fit_started = recorder.start()
         fit_result = _with_native_thread_limit_for_config(
             sample_config,
             _fit_final_refit_sample_set,
@@ -3331,6 +3449,13 @@ def run_final_refit(
             target_feature_names=target_feature_names,
             target_count=target_count,
             n_features_before_override=n_features_before_override,
+            timing_recorder=recorder,
+        )
+        recorder.record_since(
+            sample_fit_started,
+            scope="final_refit",
+            stage="sample_set_total",
+            sample_set_id=sample_set_id,
         )
         return sample_set_id, fit_result
 
@@ -3372,11 +3497,18 @@ def run_final_refit(
                 feature_order=target_feature_union,
             )
             for sample_set_id in range(len(sampled_sets)):
+                target_prediction_started = recorder.start()
                 target_model_probs_by_sample[sample_set_id] = _predict_final_refit_targets(
                     config,
                     sample_results[sample_set_id],
                     x_target_pruned,
                     target_feature_names,
+                )
+                recorder.record_since(
+                    target_prediction_started,
+                    scope="final_refit",
+                    stage="target_prediction",
+                    sample_set_id=sample_set_id,
                 )
         else:
             for sample_set_id in range(len(sampled_sets)):
@@ -3387,6 +3519,7 @@ def run_final_refit(
         for sample_set_id in range(len(sampled_sets)):
             target_model_probs_by_sample[sample_set_id] = sample_results[sample_set_id].model_probs
 
+    postprocess_started = recorder.start()
     model_entries: list[FinalModelEntry] = []
     feature_filter_count_rows: list[dict[str, Any]] = []
     retained_feature_rows: list[dict[str, Any]] = []
@@ -3520,6 +3653,13 @@ def run_final_refit(
     retained_features_summary = _summarize_retained_features(retained_features)
     model_sparsity = _build_model_sparsity(model_sparsity_rows)
     model_sparsity_summary = _summarize_model_sparsity(model_sparsity)
+    recorder.record_since(
+        postprocess_started,
+        scope="final_refit",
+        stage="postprocess",
+    )
+    recorder.record_since(total_started, scope="final_refit", stage="total")
+    timing = recorder.to_frame(start_index=timing_start_index)
 
     return FinalRefitArtifacts(
         pred_external_test=pred_external,
@@ -3532,6 +3672,7 @@ def run_final_refit(
         retained_features_summary=retained_features_summary,
         model_sparsity=model_sparsity,
         model_sparsity_summary=model_sparsity_summary,
+        timing=timing,
         warnings=warnings,
         ensemble_size=len(model_probs),
         transform_feature_names=feature_names,
@@ -3551,6 +3692,7 @@ def _run_outer_fold(
     fixed_threshold: float,
     selection_active: bool,
     progress_callback: Callable[[str], None] | None = None,
+    timing_recorder: TimingRecorder | None = None,
 ) -> OuterFoldResult:
     warnings: list[str] = []
 
@@ -3590,15 +3732,24 @@ def _run_outer_fold(
         ),
     )
 
+    matrix_slice_started = None if timing_recorder is None else timing_recorder.start()
     x_train_raw, x_valid_raw = _slice_outer_cv_matrix(
         outer_matrix_cache,
         fold_id=fold_id,
         train_species=train_species,
         valid_species=valid_species,
     )
+    if timing_recorder is not None and matrix_slice_started is not None:
+        timing_recorder.record_since(
+            matrix_slice_started,
+            scope="outer_fold",
+            stage="matrix_slice",
+            fold_id=fold_id,
+        )
     feature_names = outer_matrix_cache.feature_names
     _emit_fold_progress("matrix_ready", f"n_features_raw={len(feature_names)}")
 
+    sampling_started = None if timing_recorder is None else timing_recorder.start()
     sampled_sets = _sample_training_sets(
         config=config,
         y_train=y_train,
@@ -3606,6 +3757,13 @@ def _run_outer_fold(
         training_scope_id=f"fold_{fold_id}",
         warnings=warnings,
     )
+    if timing_recorder is not None and sampling_started is not None:
+        timing_recorder.record_since(
+            sampling_started,
+            scope="outer_fold",
+            stage="sampling",
+            fold_id=fold_id,
+        )
     _emit_fold_progress("sampling_done", f"sampled_set_count={len(sampled_sets)}")
     source_sample_set_ids = _selection_source_sample_set_ids(config, len(sampled_sets))
     source_workers, per_source_n_jobs = _sample_set_parallel_plan(
@@ -3625,6 +3783,7 @@ def _run_outer_fold(
 
     def _prepare_source(source_sample_set_id: int) -> tuple[int, SourceSelectionResult, list[str]]:
         local_warnings: list[str] = []
+        selection_started = None if timing_recorder is None else timing_recorder.start()
         source_result = _prepare_source_selection(
             config=source_config,
             training_scope_id=f"outer_fold_{fold_id}",
@@ -3637,7 +3796,16 @@ def _run_outer_fold(
             feature_names=feature_names,
             warnings=local_warnings,
             progress_callback=_emit_fold_progress,
+            timing_recorder=timing_recorder,
         )
+        if timing_recorder is not None and selection_started is not None:
+            timing_recorder.record_since(
+                selection_started,
+                scope="outer_fold",
+                stage="model_selection" if selection_active else "candidate_generation",
+                fold_id=fold_id,
+                sample_set_id=source_sample_set_id,
+            )
         return source_sample_set_id, source_result, local_warnings
 
     source_results: dict[int, SourceSelectionResult] = {}
@@ -3771,6 +3939,7 @@ def _run_outer_fold(
         sample_set_id: int, sampled_idx: np.ndarray
     ) -> tuple[int, OuterSampleSetFitResult]:
         source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
+        sample_fit_started = None if timing_recorder is None else timing_recorder.start()
         fit_result = _with_native_thread_limit_for_config(
             sample_config,
             _fit_outer_sample_set,
@@ -3787,7 +3956,16 @@ def _run_outer_fold(
             x_valid_raw=x_valid_raw,
             valid_species=valid_species,
             feature_names=feature_names,
+            timing_recorder=timing_recorder,
         )
+        if timing_recorder is not None and sample_fit_started is not None:
+            timing_recorder.record_since(
+                sample_fit_started,
+                scope="outer_fold",
+                stage="sample_set_total",
+                fold_id=fold_id,
+                sample_set_id=sample_set_id,
+            )
         return sample_set_id, fit_result
 
     sample_results: dict[int, OuterSampleSetFitResult] = {}
@@ -3844,6 +4022,7 @@ def _run_outer_fold(
                 result_id, fit_result = sample_futures[sample_set_id].result()
                 _record_sample_fit_result(result_id, fit_result)
 
+    postprocess_started = None if timing_recorder is None else timing_recorder.start()
     first_sample_result = sample_results.get(0)
     if first_sample_result is None:
         raise CVError(f"Fold {fold_id} produced zero sampled-set fit results")
@@ -3970,7 +4149,7 @@ def _run_outer_fold(
                 }
             )
 
-    return OuterFoldResult(
+    result = OuterFoldResult(
         fold_metrics=fold_metrics,
         metric_rows=metric_rows,
         loss_rows=loss_rows,
@@ -3991,14 +4170,26 @@ def _run_outer_fold(
         n_features_after_preprocess=n_features_after_preprocess,
         warnings=warnings,
     )
+    if timing_recorder is not None and postprocess_started is not None:
+        timing_recorder.record_since(
+            postprocess_started,
+            scope="outer_fold",
+            stage="postprocess",
+            fold_id=fold_id,
+        )
+    return result
 
 
 def run_outer_cv(
     config: AppConfig,
     split_manifest: pl.DataFrame,
     progress_callback: Callable[[str], None] | None = None,
+    timing_recorder: TimingRecorder | None = None,
 ) -> CVArtifacts:
     """Execute outer CV using split manifest and return evaluation artifacts."""
+    recorder = timing_recorder if timing_recorder is not None else TimingRecorder()
+    timing_start_index = recorder.record_count
+    total_started = recorder.start()
     split_manifest = _with_contrast_group_column(config, split_manifest)
     warnings: list[str] = []
     polars_warning = _polars_thread_pool_warning(config)
@@ -4021,7 +4212,13 @@ def run_outer_cv(
     max_fold_ensemble_size = 0
 
     fold_ids = _fold_ids(split_manifest)
+    matrix_build_started = recorder.start()
     outer_matrix_cache = _build_outer_cv_matrix_cache(config, split_manifest)
+    recorder.record_since(
+        matrix_build_started,
+        scope="outer_cv",
+        stage="matrix_build",
+    )
     fold_workers, per_fold_n_jobs = _outer_cv_parallel_plan(config, len(fold_ids))
     fold_config = _config_with_runtime_n_jobs(config, per_fold_n_jobs)
     progress_lock = Lock()
@@ -4056,17 +4253,30 @@ def run_outer_cv(
         model_sparsity_rows.extend(fold_result.model_sparsity_rows)
         max_fold_ensemble_size = max(max_fold_ensemble_size, fold_result.fold_model_count)
 
+    def _execute_fold(fold_id: str) -> OuterFoldResult:
+        fold_started = recorder.start()
+        fold_result = _run_outer_fold(
+            config=fold_config,
+            split_manifest=split_manifest,
+            outer_matrix_cache=outer_matrix_cache,
+            fold_id=fold_id,
+            fixed_threshold=fixed_threshold,
+            selection_active=selection_active,
+            progress_callback=_emit_progress,
+            timing_recorder=recorder,
+        )
+        recorder.record_since(
+            fold_started,
+            scope="outer_fold",
+            stage="total",
+            fold_id=fold_id,
+        )
+        return fold_result
+
+    fold_execution_started = recorder.start()
     if fold_workers == 1:
         for fold_id in fold_ids:
-            fold_result = _run_outer_fold(
-                config=fold_config,
-                split_manifest=split_manifest,
-                outer_matrix_cache=outer_matrix_cache,
-                fold_id=fold_id,
-                fixed_threshold=fixed_threshold,
-                selection_active=selection_active,
-                progress_callback=_emit_progress,
-            )
+            fold_result = _execute_fold(fold_id)
             _consume_fold_result(fold_result)
             completed_count += 1
             _emit_progress(
@@ -4077,14 +4287,8 @@ def run_outer_cv(
         with ThreadPoolExecutor(max_workers=fold_workers) as executor:
             futures = {
                 executor.submit(
-                    _run_outer_fold,
-                    config=fold_config,
-                    split_manifest=split_manifest,
-                    outer_matrix_cache=outer_matrix_cache,
-                    fold_id=fold_id,
-                    fixed_threshold=fixed_threshold,
-                    selection_active=selection_active,
-                    progress_callback=_emit_progress,
+                    _execute_fold,
+                    fold_id,
                 ): fold_id
                 for fold_id in fold_ids
             }
@@ -4097,10 +4301,16 @@ def run_outer_cv(
                     f"Outer CV fold completed (fold_id={fold_id}, "
                     f"progress={completed_count}/{total_folds})."
                 )
+    recorder.record_since(
+        fold_execution_started,
+        scope="outer_cv",
+        stage="fold_execution",
+    )
 
     if not oof_rows:
         raise CVError("No out-of-fold predictions were generated")
 
+    postprocess_started = recorder.start()
     oof_df = pl.DataFrame(oof_rows).sort(["fold_id", "species"])
     oof_y = np.array(oof_df.select("label").to_series().to_list(), dtype=int)
     oof_prob = np.array(oof_df.select("prob").to_series().to_list(), dtype=float)
@@ -4155,12 +4365,18 @@ def run_outer_cv(
             },
         ]
     ).sort("threshold_name")
+    interpretation_started = recorder.start()
     try:
         interpretation_artifacts = _with_native_thread_limit_for_config(
             config, build_interpretation_tables, interpretation_entries
         )
     except InterpretationError as exc:
         raise CVError(str(exc)) from exc
+    recorder.record_since(
+        interpretation_started,
+        scope="outer_cv",
+        stage="interpretation",
+    )
     warnings.extend(interpretation_artifacts.warnings)
 
     ensemble_model_probs: pl.DataFrame | None = None
@@ -4192,6 +4408,13 @@ def run_outer_cv(
     retained_features_summary = _summarize_retained_features(retained_features)
     model_sparsity = _build_model_sparsity(model_sparsity_rows)
     model_sparsity_summary = _summarize_model_sparsity(model_sparsity)
+    recorder.record_since(
+        postprocess_started,
+        scope="outer_cv",
+        stage="postprocess",
+    )
+    recorder.record_since(total_started, scope="outer_cv", stage="total")
+    timing = recorder.to_frame(start_index=timing_start_index)
 
     return CVArtifacts(
         metrics_cv=metrics_df,
@@ -4212,5 +4435,6 @@ def run_outer_cv(
         retained_features_summary=retained_features_summary,
         model_sparsity=model_sparsity,
         model_sparsity_summary=model_sparsity_summary,
+        timing=timing,
         warnings=warnings,
     )

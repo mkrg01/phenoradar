@@ -8,16 +8,17 @@ them for `run` / `predict` / `report`.
 For one `run` result directory, a practical order is:
 
 1. `run_metadata.json` (status, warnings, pool counts, timing)
-2. `cv/tables/metrics_cv.tsv`, `cv/tables/loss_by_split_cv.tsv`,
+2. `runtime/tables/timing.tsv` (stage, fold, sample-set, and candidate bottlenecks)
+3. `cv/tables/metrics_cv.tsv`, `cv/tables/loss_by_split_cv.tsv`,
    `model/tables/evaluation_contract.tsv`, `model/tables/thresholds.tsv`, and
    `summary/tables/classification_summary.tsv`
    (overall quality, train/validation loss gap, thresholds, and threshold-wise classification tradeoffs)
-3. `cv/tables/prediction_cv.tsv`, `cv/figures/roc_curve_cv.svg`, and
+4. `cv/tables/prediction_cv.tsv`, `cv/figures/roc_curve_cv.svg`, and
    `cv/figures/pr_curve_cv.svg`
    (overall CV ranking behavior)
-4. `external_test/tables/prediction_external_test.tsv` /
+5. `external_test/tables/prediction_external_test.tsv` /
    `inference/tables/prediction_inference.tsv` (`full_run` only)
-5. `cv/tables/feature_importance.tsv` and `cv/tables/coefficients.tsv`
+6. `cv/tables/feature_importance.tsv` and `cv/tables/coefficients.tsv`
    (model interpretation)
 
 ## Run directory layout
@@ -28,7 +29,7 @@ For one `run` result directory, a practical order is:
 
 Run outputs use a stage-first layout. Stage-specific TSVs are placed in
 `<stage>/tables/`, and stage-specific SVGs are placed in `<stage>/figures/`.
-The main stage directories are `split/`, `cv/`, `model/`, `summary/`,
+The main stage directories are `split/`, `cv/`, `model/`, `summary/`, `runtime/`,
 `external_test/`, and `inference/`.
 
 `phenoradar predict` writes:
@@ -162,6 +163,16 @@ Always written:
     fixed, non-CV-derived classification threshold policy
   - `dataset_fingerprint` hashes metadata/TPM contents by semantic role (not their paths)
   - `split_fingerprint` hashes realized species pool/fold/group/label assignments
+- `runtime/tables/timing.tsv`
+  - columns: `scope`, `stage`, `fold_id`, `sample_set_id`, `candidate_index`,
+    `started_at_sec`, `ended_at_sec`, `duration_sec`
+  - always written for successful `run` commands
+  - uses a monotonic wall clock; offsets are relative to one recorder created at
+    command start
+  - records top-level run stages, outer-CV/final-refit stages, each outer fold,
+    sampled-set preprocessing/fitting, and model-selection candidate scoring
+  - `run_metadata.json.timing.stage_duration_sec` repeats the top-level
+    `scope=run` durations for machine-readable comparison
 - stage-specific `figures/` directories
   - always creates `cv/figures/`, `external_test/figures/`, and `inference/figures/`.
   - always attempts:
@@ -273,6 +284,20 @@ when individual folds are single-label.
 `n_valid_folds` is metric-specific for aggregate rows:
 
 - If some folds are not computable for a metric (for example single-class fold for AUC), this value shows how many folds were valid.
+
+### Timing semantics (`runtime/tables/timing.tsv`)
+
+- `scope=run` contains the major command stages such as split construction,
+  outer CV, optional group bootstrap, final refit, artifact writing, and figure
+  generation.
+- `scope=outer_cv` and `scope=final_refit` contain stage-level measurements.
+- `scope=outer_fold` adds `fold_id`; sampled-set and candidate rows also add
+  `sample_set_id` and, where applicable, `candidate_index`.
+- `started_at_sec` and `ended_at_sec` expose overlap between parallel work.
+  Concurrent row durations must not be summed to estimate elapsed wall time.
+- Use `stage=total` rows for outer-CV, final-refit, and per-fold wall-clock
+  comparisons. Use the finer rows to locate the expensive preprocessing,
+  candidate scoring, fitting, or prediction path.
 
 ### Core run artifact interpretation
 

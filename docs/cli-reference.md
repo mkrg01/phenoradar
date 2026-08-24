@@ -74,12 +74,15 @@ Always written:
 - `model/tables/model_sparsity.tsv`
 - `model/tables/model_sparsity_summary.tsv`
 - `summary/tables/classification_summary.tsv`
+- `runtime/tables/timing.tsv`
 - `run_metadata.json`
 - stage-specific figure directories (`cv/figures/`, `external_test/figures/`, `inference/figures/`)
 
 Notes:
 
 - `prediction_cv.tsv` may include optional `uncertainty_std` when ensemble size > 1.
+- Timing rows use one monotonic clock. Parallel fold/sample/candidate intervals
+  can overlap and should not be summed as elapsed wall time.
 - Stage figure directories include:
   - `cv/figures/cv_metrics_overview.svg`
   - `cv/figures/cv_loss_by_split.svg`
