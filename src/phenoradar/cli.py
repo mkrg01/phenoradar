@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from math import sqrt
 from pathlib import Path
@@ -80,7 +81,7 @@ from phenoradar.reporting import (
     ReportOptions,
     generate_report,
 )
-from phenoradar.split import SplitError, build_split_artifacts
+from phenoradar.split import SplitArtifacts, SplitError, build_split_artifacts
 from phenoradar.testdata import (
     BUNDLED_C4_TINY_SOURCE,
     TestDataError,
@@ -145,6 +146,56 @@ def _build_run_fingerprint_metadata(
 def _artifact_parallel_workers(config: AppConfig) -> int:
     runtime_n_jobs = int(getattr(config.runtime, "n_jobs", 1))
     return max(1, min(runtime_n_jobs, _ARTIFACT_PARALLEL_WORKER_CAP))
+
+
+def _prepare_run_inputs(
+    *,
+    config_paths: list[Path],
+    config: AppConfig,
+    timing_recorder: TimingRecorder,
+) -> tuple[list[dict[str, Any]], SplitArtifacts]:
+    """Hash run inputs while independently constructing split artifacts."""
+
+    tree_path = getattr(config.data, "tree_path", None)
+    orthogroup_annotation_path = getattr(config.data, "orthogroup_annotation_path", None)
+    provenance_paths = [
+        *config_paths,
+        Path(config.data.metadata_path),
+        Path(config.data.tpm_path),
+        *([] if tree_path is None else [Path(tree_path)]),
+        *(
+            []
+            if orthogroup_annotation_path is None
+            else [Path(orthogroup_annotation_path)]
+        ),
+    ]
+
+    def _collect_provenance() -> list[dict[str, Any]]:
+        started = timing_recorder.start()
+        try:
+            return collect_input_files(provenance_paths)
+        finally:
+            timing_recorder.record_since(
+                started,
+                scope="run",
+                stage="input_provenance",
+            )
+
+    def _build_splits() -> SplitArtifacts:
+        started = timing_recorder.start()
+        try:
+            return build_split_artifacts(config)
+        finally:
+            timing_recorder.record_since(
+                started,
+                scope="run",
+                stage="split_construction",
+            )
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="phenoradar-input") as executor:
+        provenance_future = executor.submit(_collect_provenance)
+        split_future = executor.submit(_build_splits)
+        return provenance_future.result(), split_future.result()
 
 
 def _feature_filter_funnel_stage_order(config: AppConfig) -> list[str]:
@@ -814,41 +865,15 @@ def run(
 
     tree_path = getattr(resolved.data, "tree_path", None)
     orthogroup_annotation_path = getattr(resolved.data, "orthogroup_annotation_path", None)
-    _log("Collect input file identities.")
-    input_provenance_started = timing_recorder.start()
+    _log("Collect input file identities and build split artifacts.")
     try:
-        input_files = collect_input_files(
-            [
-                *config_paths,
-                Path(resolved.data.metadata_path),
-                Path(resolved.data.tpm_path),
-                *([] if tree_path is None else [Path(tree_path)]),
-                *(
-                    []
-                    if orthogroup_annotation_path is None
-                    else [Path(orthogroup_annotation_path)]
-                ),
-            ]
+        input_files, split_artifacts = _prepare_run_inputs(
+            config_paths=config_paths,
+            config=resolved,
+            timing_recorder=timing_recorder,
         )
-    except ProvenanceError as exc:
+    except (ProvenanceError, SplitError) as exc:
         raise typer.BadParameter(str(exc)) from exc
-    timing_recorder.record_since(
-        input_provenance_started,
-        scope="run",
-        stage="input_provenance",
-    )
-
-    _log("Build split artifacts.")
-    split_started = timing_recorder.start()
-    try:
-        split_artifacts = build_split_artifacts(resolved)
-    except SplitError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    timing_recorder.record_since(
-        split_started,
-        scope="run",
-        stage="split_construction",
-    )
     fold_count = getattr(split_artifacts, "fold_count", "unknown")
     excluded_rows = getattr(split_artifacts, "expression_rows_excluded", "unknown")
     _log(

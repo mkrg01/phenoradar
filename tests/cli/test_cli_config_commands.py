@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import polars as pl
@@ -10,6 +11,7 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
+import phenoradar.cli as cli_mod
 from phenoradar import __version__
 from phenoradar.bundle import BundleError
 from phenoradar.cli import app
@@ -19,6 +21,7 @@ from phenoradar.figures import FigureError
 from phenoradar.provenance import ProvenanceError
 from phenoradar.reporting import ReportError
 from phenoradar.split import SplitError
+from phenoradar.timing import TimingRecorder
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
 
@@ -166,6 +169,41 @@ def _stub_run_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
         "phenoradar.cli._build_run_fingerprint_metadata",
         lambda **_kwargs: _stub_fingerprint_metadata(),
     )
+
+
+def test_prepare_run_inputs_hashes_and_builds_splits_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provenance_started = Event()
+    split_started = Event()
+    expected_splits = _stub_split_artifacts()
+
+    def _collect(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        provenance_started.set()
+        assert split_started.wait(timeout=5.0)
+        return []
+
+    def _split(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        split_started.set()
+        assert provenance_started.wait(timeout=5.0)
+        return expected_splits
+
+    monkeypatch.setattr(cli_mod, "collect_input_files", _collect)
+    monkeypatch.setattr(cli_mod, "build_split_artifacts", _split)
+    timing_recorder = TimingRecorder()
+
+    input_files, split_artifacts = cli_mod._prepare_run_inputs(
+        config_paths=[Path("config.yml")],
+        config=_stub_resolved_config(execution_stage="cv_only"),  # type: ignore[arg-type]
+        timing_recorder=timing_recorder,
+    )
+
+    assert input_files == []
+    assert split_artifacts is expected_splits
+    assert set(timing_recorder.to_frame().get_column("stage")) == {
+        "input_provenance",
+        "split_construction",
+    }
 
 
 def _stub_cv_artifacts(

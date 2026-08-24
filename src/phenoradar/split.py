@@ -276,24 +276,23 @@ def _expression_species_and_excluded_rows(
     species_expr = (
         pl.col(species_col).cast(pl.String, strict=False).str.strip_chars().alias("__species")
     )
-    expression_species = (
-        scan.select(species_expr)
-        .filter(pl.col("__species").is_not_null() & (pl.col("__species") != ""))
+    normalized_species = scan.select(species_expr)
+    valid_species = pl.col("__species").is_not_null() & (pl.col("__species") != "")
+    species_summary = normalized_species.select(
+        pl.col("__species")
+        .filter(valid_species)
         .unique()
-        .collect()
-        .to_series()
-        .to_list()
-    )
-    excluded_rows = (
-        scan.select(species_expr)
-        .filter(~pl.col("__species").is_in(metadata_species))
-        .select(pl.len().alias("n"))
-        .collect()
-        .item()
-    )
-    if not isinstance(excluded_rows, int):
+        .implode()
+        .alias("__expression_species"),
+        (~pl.col("__species").is_in(metadata_species))
+        .sum()
+        .alias("__excluded_rows"),
+    ).collect()
+    expression_species = species_summary.item(0, "__expression_species")
+    excluded_rows = species_summary.item(0, "__excluded_rows")
+    if not isinstance(expression_species, pl.Series) or not isinstance(excluded_rows, int):
         raise SplitError("Failed to compute expression rows excluded from metadata")
-    return set(str(v) for v in expression_species), excluded_rows
+    return set(str(v) for v in expression_species.to_list()), excluded_rows
 
 
 def _validate_expression_coverage(metadata: pl.DataFrame, expression_species: set[str]) -> None:

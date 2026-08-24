@@ -1050,21 +1050,15 @@ def test_expression_rows_excluded_rejects_non_integer_count(
         def names(self) -> list[str]:
             return ["species"]
 
-    class _FakeSeries:
-        def to_list(self) -> list[str]:
-            return ["sp1"]
-
-    class _FakeCollectedSpecies:
-        def to_series(self) -> _FakeSeries:
-            return _FakeSeries()
-
-    class _FakeCollectedCount:
-        def item(self) -> str:
+    class _FakeSpeciesSummary:
+        def item(self, _row: int, column: str) -> pl.Series | str:
+            if column == "__expression_species":
+                return pl.Series(["sp1"])
             return "not-an-int"
 
     class _FakeScan:
         def __init__(self) -> None:
-            self._collect_calls = 0
+            self.collect_calls = 0
 
         def collect_schema(self) -> _FakeSchema:
             return _FakeSchema()
@@ -1072,23 +1066,17 @@ def test_expression_rows_excluded_rejects_non_integer_count(
         def select(self, *_args: object, **_kwargs: object) -> _FakeScan:
             return self
 
-        def filter(self, *_args: object, **_kwargs: object) -> _FakeScan:
-            return self
-
-        def unique(self, *_args: object, **_kwargs: object) -> _FakeScan:
-            return self
-
-        def collect(self) -> object:
-            self._collect_calls += 1
-            if self._collect_calls == 1:
-                return _FakeCollectedSpecies()
-            return _FakeCollectedCount()
+        def collect(self) -> _FakeSpeciesSummary:
+            self.collect_calls += 1
+            return _FakeSpeciesSummary()
 
     metadata, tpm = _fixture_data(tmp_path)
     config = load_and_resolve_config([_write_config(tmp_path, metadata, tpm)])
-    monkeypatch.setattr(split_mod.pl, "scan_csv", lambda *_args, **_kwargs: _FakeScan())
+    fake_scan = _FakeScan()
+    monkeypatch.setattr(split_mod.pl, "scan_csv", lambda *_args, **_kwargs: fake_scan)
 
     with pytest.raises(
         SplitError, match="Failed to compute expression rows excluded from metadata"
     ):
         build_split_artifacts(config)
+    assert fake_scan.collect_calls == 1
