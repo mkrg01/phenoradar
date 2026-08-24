@@ -51,10 +51,20 @@ Always written:
   - `train` / `validation` rows are the per-fold expansion of the internal
     `training_validation` pool.
 - `split/tables/fold_validation_groups.tsv`
-  - columns: `fold_id`, `group_id`, `n_validation_species`, `n_validation_pos`, `n_validation_neg`
+  - columns: `fold_id`, `group_id`, `n_validation_species`, `n_validation_pos`,
+    `n_validation_neg`, `validation_label_profile`
   - one row per validation-side group in each outer fold
+  - `validation_label_profile`: `both`, `positive_only`, or `negative_only`
   - for `logo`, each `fold_id` has exactly one row
-  - for `group_kfold`, a `fold_id` can have multiple rows
+  - for `group_kfold` and `stratified_group_kfold`, a `fold_id` can have
+    multiple rows
+- `split/tables/fold_diagnostics.tsv`
+  - one row per outer fold, written before CV execution results
+  - columns: `fold_id`, train/validation group and species counts,
+    train/validation positive and negative counts, `train_label_profile`,
+    `validation_label_profile`, and `two_class_validation_metrics_defined`
+  - use this table with `fold_validation_groups.tsv` to audit taxonomic-block
+    assignments and identify single-label validation folds
 - `cv/tables/metrics_cv.tsv`
   - columns: `aggregate_scope`, `fold_id`, `metric`, `metric_value`, `n_pos`, `n_neg`, `n_valid_folds`
   - `aggregate_scope`: per-fold rows use `NA`, aggregate rows use `macro`/`micro`
@@ -232,6 +242,12 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 | `mcc` | higher | yes | Correlation-like binary metric; robust under imbalance. |
 | `brier` | lower | no | Probability calibration error (squared). |
 
+For a single-label validation fold, `roc_auc`, `pr_auc`,
+`balanced_accuracy`, and `mcc` are explicitly written as `NA`. Brier score and
+validation log loss remain defined. Aggregate `micro` metrics are recomputed
+from all pooled out-of-fold predictions and can therefore remain defined even
+when individual folds are single-label.
+
 `aggregate_scope` meaning:
 
 - `NA`: per-fold row (`fold_id` is concrete 1-based fold index).
@@ -267,7 +283,20 @@ diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
 - Lookup table from outer `fold_id` to validation-side `group_id`.
 - Use this when numeric `fold_id` values need to be interpreted later.
 - In `logo`, this is the held-out group for each fold.
-- In `group_kfold`, multiple validation groups can map to the same fold.
+- In `group_kfold` and `stratified_group_kfold`, multiple validation groups can
+  map to the same fold.
+- `validation_label_profile` identifies two-class, positive-only, and
+  negative-only validation groups.
+
+#### `fold_diagnostics.tsv`
+
+- Pre-CV audit table with one row per realized outer fold.
+- Reports train/validation group counts, species counts, positive/negative
+  counts, and label profiles.
+- `two_class_validation_metrics_defined=false` means fold-level ROC AUC,
+  Average Precision, balanced accuracy, and MCC will be written as `NA`.
+- A single-label validation fold is allowed, but every training fold must still
+  contain both labels.
 
 #### `evaluation_contract.tsv`
 

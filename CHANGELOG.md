@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Features
+
+* allow single-label outer-CV validation groups while keeping two-label training folds mandatory;
+  emit undefined two-class fold metrics as `NA`, write split diagnostics for every fold, and add
+  reproducible `stratified_group_kfold` for outer and inner CV
+
 ### Bug Fixes
 
 * preserve the complete pre-transform feature schema in model bundles so sample-rank predictions

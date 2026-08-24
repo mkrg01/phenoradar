@@ -827,6 +827,17 @@ def run(
         "Split artifacts ready "
         f"(fold_count={fold_count}, excluded_expression_rows={excluded_rows})."
     )
+    single_label_validation_folds = split_artifacts.fold_diagnostics.filter(
+        ~pl.col("two_class_validation_metrics_defined")
+    ).height
+    single_label_validation_groups = split_artifacts.fold_validation_groups.filter(
+        pl.col("validation_label_profile") != "both"
+    ).height
+    _log(
+        "Split diagnostics ready "
+        f"(single_label_validation_folds={single_label_validation_folds}, "
+        f"single_label_validation_groups={single_label_validation_groups})."
+    )
     try:
         fingerprint_metadata = _build_run_fingerprint_metadata(
             config=resolved,
@@ -890,6 +901,9 @@ def run(
     )
     split_artifacts.fold_validation_groups.write_csv(
         split_tables_dir / "fold_validation_groups.tsv", separator="\t"
+    )
+    split_artifacts.fold_diagnostics.write_csv(
+        split_tables_dir / "fold_diagnostics.tsv", separator="\t"
     )
     cv_artifacts.metrics_cv.write_csv(
         cv_tables_dir / "metrics_cv.tsv", separator="\t", float_precision=8, null_value="NA"

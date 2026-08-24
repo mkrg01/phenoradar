@@ -15,7 +15,7 @@ from pydantic import (
 )
 
 ExecutionStage = Literal["cv_only", "full_run"]
-OuterCvStrategy = Literal["logo", "group_kfold"]
+OuterCvStrategy = Literal["logo", "group_kfold", "stratified_group_kfold"]
 SamplingStrategy = Literal["all_samples", "group_balanced"]
 WeightingMode = Literal["none", "group_label_inverse"]
 ModelName = Literal["logistic_elasticnet", "linear_svm", "random_forest"]
@@ -152,18 +152,22 @@ class SplitConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_group_kfold_args(self) -> SplitConfig:
-        if self.outer_cv_strategy == "group_kfold":
+        split_count_strategies = {"group_kfold", "stratified_group_kfold"}
+        if self.outer_cv_strategy in split_count_strategies:
             if self.outer_cv_n_splits is None:
                 raise ValueError(
                     "split.outer_cv_n_splits is required "
-                    "when outer_cv_strategy=group_kfold"
+                    "when outer_cv_strategy=group_kfold|stratified_group_kfold"
                 )
             if self.outer_cv_n_splits < 2:
-                raise ValueError("split.outer_cv_n_splits must be >= 2 for group_kfold")
+                raise ValueError(
+                    "split.outer_cv_n_splits must be >= 2 for "
+                    "group_kfold|stratified_group_kfold"
+                )
         elif self.outer_cv_n_splits is not None:
             raise ValueError(
                 "split.outer_cv_n_splits is only valid "
-                "when outer_cv_strategy=group_kfold"
+                "when outer_cv_strategy=group_kfold|stratified_group_kfold"
             )
         return self
 
@@ -359,17 +363,22 @@ class ModelSelectionConfig(StrictModel):
                 "continuous_range/continuous_log_range"
             )
 
-        if self.inner_cv_strategy == "group_kfold":
+        split_count_strategies = {"group_kfold", "stratified_group_kfold"}
+        if self.inner_cv_strategy in split_count_strategies:
             if self.inner_cv_n_splits is None:
                 raise ValueError(
                     "model_selection.inner_cv_n_splits is required "
-                    "when inner_cv_strategy=group_kfold"
+                    "when inner_cv_strategy=group_kfold|stratified_group_kfold"
                 )
             if self.inner_cv_n_splits < 2:
-                raise ValueError("model_selection.inner_cv_n_splits must be >= 2 for group_kfold")
+                raise ValueError(
+                    "model_selection.inner_cv_n_splits must be >= 2 for "
+                    "group_kfold|stratified_group_kfold"
+                )
         elif self.inner_cv_n_splits is not None:
             raise ValueError(
-                "model_selection.inner_cv_n_splits is only valid when inner_cv_strategy=group_kfold"
+                "model_selection.inner_cv_n_splits is only valid when "
+                "inner_cv_strategy=group_kfold|stratified_group_kfold"
             )
 
         if (

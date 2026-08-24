@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
-from sklearn.model_selection import GroupKFold, LeaveOneGroupOut
+from sklearn.model_selection import GroupKFold, LeaveOneGroupOut, StratifiedGroupKFold
 
 from phenoradar.config import AppConfig
 
@@ -29,6 +29,7 @@ class SplitArtifacts:
 
     split_manifest: pl.DataFrame
     fold_validation_groups: pl.DataFrame
+    fold_diagnostics: pl.DataFrame
     pool_counts: dict[str, int]
     fold_count: int
     expression_rows_excluded: int
@@ -334,13 +335,10 @@ def _validate_fold_labels(
     training_df: pl.DataFrame, folds: list[tuple[list[int], list[int]]]
 ) -> None:
     labels = training_df.select("__label").to_series().to_list()
-    for fold_id, (train_idx, valid_idx) in enumerate(folds, start=1):
+    for fold_id, (train_idx, _valid_idx) in enumerate(folds, start=1):
         train_labels = {int(labels[idx]) for idx in train_idx}
-        valid_labels = {int(labels[idx]) for idx in valid_idx}
         if len(train_labels) < 2:
             raise SplitError(f"Fold {fold_id} training split contains fewer than two labels")
-        if len(valid_labels) < 2:
-            raise SplitError(f"Fold {fold_id} validation split contains fewer than two labels")
 
 
 def _build_fold_indices(
@@ -351,13 +349,25 @@ def _build_fold_indices(
     indices = list(range(training_df.height))
 
     split_iter: Any
-    if config.split.outer_cv_strategy == "logo":
+    strategy = config.split.outer_cv_strategy
+    if strategy == "logo":
         split_iter = LeaveOneGroupOut().split(indices, labels, groups)
-    else:
+    elif strategy == "group_kfold":
         n_splits = config.split.outer_cv_n_splits
         if n_splits is None:
             raise SplitError("split.outer_cv_n_splits must be set for group_kfold")
         split_iter = GroupKFold(n_splits=n_splits).split(indices, labels, groups)
+    else:
+        n_splits = config.split.outer_cv_n_splits
+        if n_splits is None:
+            raise SplitError(
+                "split.outer_cv_n_splits must be set for stratified_group_kfold"
+            )
+        split_iter = StratifiedGroupKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=config.runtime.seed,
+        ).split(indices, labels, groups)
 
     folds: list[tuple[list[int], list[int]]] = []
     try:
@@ -489,17 +499,71 @@ def _build_fold_validation_groups(
             ).alias("n_validation_neg"),
             pl.col("fold_id").cast(pl.Int64).alias("__fold_order"),
         )
+        .with_columns(
+            pl.when(
+                (pl.col("n_validation_pos") > 0) & (pl.col("n_validation_neg") > 0)
+            )
+            .then(pl.lit("both"))
+            .when(pl.col("n_validation_pos") > 0)
+            .then(pl.lit("positive_only"))
+            .otherwise(pl.lit("negative_only"))
+            .alias("validation_label_profile")
+        )
         .select(
             "fold_id",
             "group_id",
             "n_validation_species",
             "n_validation_pos",
             "n_validation_neg",
+            "validation_label_profile",
             "__fold_order",
         )
         .sort(["__fold_order", "group_id"])
         .drop("__fold_order")
     )
+
+
+def _label_profile(n_pos: int, n_neg: int) -> str:
+    if n_pos > 0 and n_neg > 0:
+        return "both"
+    if n_pos > 0:
+        return "positive_only"
+    return "negative_only"
+
+
+def _build_fold_diagnostics(
+    training_df: pl.DataFrame,
+    folds: list[tuple[list[int], list[int]]],
+) -> pl.DataFrame:
+    groups = [str(value) for value in training_df.select("__group").to_series().to_list()]
+    labels = [int(value) for value in training_df.select("__label").to_series().to_list()]
+
+    rows: list[dict[str, Any]] = []
+    for fold_id, (train_idx, valid_idx) in enumerate(folds, start=1):
+        train_pos = sum(labels[idx] == 1 for idx in train_idx)
+        valid_pos = sum(labels[idx] == 1 for idx in valid_idx)
+        train_neg = len(train_idx) - train_pos
+        valid_neg = len(valid_idx) - valid_pos
+        rows.append(
+            {
+                "fold_id": str(fold_id),
+                "n_train_groups": len({groups[idx] for idx in train_idx}),
+                "n_validation_groups": len({groups[idx] for idx in valid_idx}),
+                "n_train_species": len(train_idx),
+                "n_train_pos": train_pos,
+                "n_train_neg": train_neg,
+                "n_validation_species": len(valid_idx),
+                "n_validation_pos": valid_pos,
+                "n_validation_neg": valid_neg,
+                "train_label_profile": _label_profile(train_pos, train_neg),
+                "validation_label_profile": _label_profile(valid_pos, valid_neg),
+                "two_class_validation_metrics_defined": valid_pos > 0 and valid_neg > 0,
+            }
+        )
+
+    if not rows:
+        raise SplitError("Fold diagnostics are empty")
+    return pl.DataFrame(rows).sort(pl.col("fold_id").cast(pl.Int64))
 
 
 def build_split_artifacts(config: AppConfig) -> SplitArtifacts:
@@ -522,6 +586,7 @@ def build_split_artifacts(config: AppConfig) -> SplitArtifacts:
     _validate_fold_labels(training_df, folds)
     manifest = _build_split_manifest(training_df, external_df, inference_df, folds)
     fold_validation_groups = _build_fold_validation_groups(training_df, folds)
+    fold_diagnostics = _build_fold_diagnostics(training_df, folds)
 
     pool_counts = {
         _POOL_TRAINING_VALIDATION: training_df.height,
@@ -533,6 +598,7 @@ def build_split_artifacts(config: AppConfig) -> SplitArtifacts:
     return SplitArtifacts(
         split_manifest=manifest,
         fold_validation_groups=fold_validation_groups,
+        fold_diagnostics=fold_diagnostics,
         pool_counts=pool_counts,
         fold_count=len(folds),
         expression_rows_excluded=excluded_rows,

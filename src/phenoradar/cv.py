@@ -31,7 +31,7 @@ from sklearn.metrics import (
     matthews_corrcoef,
     roc_auc_score,
 )
-from sklearn.model_selection import GroupKFold, LeaveOneGroupOut
+from sklearn.model_selection import GroupKFold, LeaveOneGroupOut, StratifiedGroupKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
 from sklearn.utils.validation import has_fit_parameter
@@ -1760,6 +1760,9 @@ def _selection_metric_from_probability(
     if metric_name == "log_loss":
         return _binary_log_loss(y_true, prob)
 
+    if np.unique(y_true).size < 2:
+        return np.nan
+
     threshold = FIXED_PROBABILITY_THRESHOLD_VALUE
     pred = (prob >= threshold).astype(int)
     if metric_name == "mcc":
@@ -1973,15 +1976,28 @@ def _inner_cv_splits(
 
     indices = np.arange(y.shape[0], dtype=int)
     split_iter: Any
-    if config.model_selection.inner_cv_strategy == "logo":
+    strategy = config.model_selection.inner_cv_strategy
+    if strategy == "logo":
         split_iter = LeaveOneGroupOut().split(indices, y, groups)
-    else:
+    elif strategy == "group_kfold":
         n_splits = config.model_selection.inner_cv_n_splits
         if n_splits is None:
             raise CVError(
                 "model_selection.inner_cv_n_splits is required for inner_cv_strategy=group_kfold"
             )
         split_iter = GroupKFold(n_splits=n_splits).split(indices, y, groups)
+    else:
+        n_splits = config.model_selection.inner_cv_n_splits
+        if n_splits is None:
+            raise CVError(
+                "model_selection.inner_cv_n_splits is required for "
+                "inner_cv_strategy=stratified_group_kfold"
+            )
+        split_iter = StratifiedGroupKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=config.runtime.seed,
+        ).split(indices, y, groups)
 
     rows: list[tuple[np.ndarray, np.ndarray, str]] = []
     try:
@@ -1990,6 +2006,11 @@ def _inner_cv_splits(
             valid_idx_array = np.asarray(valid_idx, dtype=int)
             if train_idx_array.size == 0 or valid_idx_array.size == 0:
                 raise CVError("Inner CV produced an empty train/validation split")
+            if np.unique(y[train_idx_array]).size < 2:
+                raise CVError(
+                    f"Inner CV fold {inner_fold_index} training split contains "
+                    "fewer than two labels"
+                )
             rows.append((train_idx_array, valid_idx_array, str(inner_fold_index)))
     except ValueError as exc:
         raise CVError(f"Inner CV split error: {exc}") from exc
@@ -2096,7 +2117,10 @@ def _score_candidate_inner_cv(
 
         if not fold_scores:
             return np.nan, trial_rows
-        return float(np.nanmean(np.asarray(fold_scores, dtype=float))), trial_rows
+        fold_score_array = np.asarray(fold_scores, dtype=float)
+        if np.all(np.isnan(fold_score_array)):
+            return np.nan, trial_rows
+        return float(np.nanmean(fold_score_array)), trial_rows
 
     return _with_native_thread_limit(resolved_estimator_n_jobs, _score)
 
@@ -2502,6 +2526,17 @@ def _compute_fold_metrics(
 ) -> dict[str, float]:
     y_pred = (prob >= threshold).astype(int)
     metrics: dict[str, float] = {}
+
+    if np.unique(y_true).size < 2:
+        metrics["roc_auc"] = np.nan
+        metrics["pr_auc"] = np.nan
+        metrics["balanced_accuracy"] = np.nan
+        metrics["mcc"] = np.nan
+        try:
+            metrics["brier"] = float(brier_score_loss(y_true, prob))
+        except (IndexError, ValueError):
+            metrics["brier"] = np.nan
+        return metrics
 
     try:
         metrics["roc_auc"] = float(roc_auc_score(y_true, prob))

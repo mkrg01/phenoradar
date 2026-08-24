@@ -68,7 +68,10 @@ Expression coverage checks:
 Preflight before CV:
 
 - the full `training_validation` pool must contain both labels.
-- each outer fold's train and validation side must contain both labels.
+- each outer fold's training side must contain both labels.
+- a validation side may contain one label. In that case, two-class
+  discrimination metrics are written as `NA`, while Brier score and log loss
+  remain computable.
 - `sampling.strategy: group_balanced` requires each `split.group_col` group to
   contain both labels.
 - `preprocess.pair_aware_filter.enabled: true` requires `data.contrast_pair_col`.
@@ -80,6 +83,9 @@ Outer CV splits:
 
 - `logo` -> `LeaveOneGroupOut`
 - `group_kfold` -> `GroupKFold(n_splits=outer_cv_n_splits)`
+- `stratified_group_kfold` -> `StratifiedGroupKFold` with intact groups,
+  approximate label stratification, reproducible shuffling, and
+  `n_splits=outer_cv_n_splits`
 
 ### 3) Outer CV training/evaluation
 
@@ -165,7 +171,7 @@ Search-space notes:
 Inner-CV selection:
 
 - enabled only when selection is active (`selected_candidate_count` or `selected_candidate_percent` is set).
-- `inner_cv_strategy`: `logo` or `group_kfold`.
+- `inner_cv_strategy`: `logo`, `group_kfold`, or `stratified_group_kfold`.
 - `selection_rule=best` ranks by mean inner-CV score.
 - `selection_rule=one_se` first identifies candidates within one standard error
   of the best mean score, then prefers the simpler candidate.

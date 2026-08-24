@@ -8,7 +8,13 @@ import pytest
 from sklearn import config_context
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import auc, average_precision_score, log_loss, precision_recall_curve
+from sklearn.metrics import (
+    auc,
+    average_precision_score,
+    brier_score_loss,
+    log_loss,
+    precision_recall_curve,
+)
 
 import phenoradar.cv as cv_mod
 from phenoradar.config import load_and_resolve_config
@@ -289,6 +295,76 @@ def test_run_outer_cv_oof_species_and_fold_match_validation_manifest(tmp_path: P
     assert cv_artifacts.oof_predictions.get_column("species").n_unique() == (
         cv_artifacts.oof_predictions.height
     )
+
+
+def test_run_outer_cv_allows_single_class_validation_folds(tmp_path: Path) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t1\tg1\tno",
+                "sp3\t0\tg2\tno",
+                "sp4\t0\tg2\tno",
+                "sp5\t1\tg3\tno",
+                "sp6\t0\tg3\tno",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "species\torthogroup\ttpm\n"
+        + "\n".join(
+            [
+                "sp1\tOG1\t6.0",
+                "sp2\tOG1\t5.0",
+                "sp3\tOG1\t1.0",
+                "sp4\tOG1\t2.0",
+                "sp5\tOG1\t4.0",
+                "sp6\tOG1\t3.0",
+            ]
+        )
+        + "\n",
+    )
+    config_path = _write(
+        tmp_path / "config.yml",
+        f"""
+data:
+  metadata_path: {metadata}
+  tpm_path: {tpm}
+sampling:
+  strategy: all_samples
+  max_samples_per_label_per_group: null
+  sampled_set_count: 1
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([config_path])
+    split_artifacts = build_split_artifacts(config)
+
+    artifacts = run_outer_cv(config, split_artifacts.split_manifest)
+
+    assert artifacts.oof_predictions.height == 6
+    per_fold = artifacts.metrics_cv.filter(pl.col("aggregate_scope") == "NA")
+    single_class_folds = per_fold.filter(pl.col("fold_id").is_in(["1", "2"]))
+    assert single_class_folds.filter(pl.col("metric") == "brier").select(
+        pl.col("metric_value").is_finite().all()
+    ).item()
+    assert single_class_folds.filter(
+        pl.col("metric").is_in(["roc_auc", "pr_auc", "balanced_accuracy", "mcc"])
+    ).select(pl.col("metric_value").is_nan().all()).item()
+
+    macro = artifacts.metrics_cv.filter(pl.col("aggregate_scope") == "macro")
+    valid_counts = dict(macro.select("metric", "n_valid_folds").iter_rows())
+    assert valid_counts == {
+        "balanced_accuracy": 1,
+        "brier": 3,
+        "mcc": 1,
+        "pr_auc": 1,
+        "roc_auc": 1,
+    }
 
 
 def test_run_outer_cv_builds_expression_matrix_once_across_folds(
@@ -1273,6 +1349,18 @@ def test_compute_fold_metrics_returns_nan_when_metrics_are_undefined() -> None:
     assert np.isnan(metrics["balanced_accuracy"])
     assert np.isnan(metrics["mcc"])
     assert np.isnan(metrics["brier"])
+
+
+@pytest.mark.parametrize("label", [0, 1])
+def test_compute_fold_metrics_single_class_keeps_only_brier(label: int) -> None:
+    y_true = np.full(3, label, dtype=int)
+    prob = np.array([0.1, 0.4, 0.8], dtype=float)
+
+    metrics = _compute_fold_metrics(y_true, prob, threshold=0.5)
+
+    for metric_name in ("roc_auc", "pr_auc", "balanced_accuracy", "mcc"):
+        assert np.isnan(metrics[metric_name])
+    assert metrics["brier"] == pytest.approx(brier_score_loss(y_true, prob))
 
 
 def test_compute_fold_metrics_pr_auc_key_is_average_precision_not_trapezoidal_auc() -> None:
@@ -4161,6 +4249,30 @@ def test_inner_cv_splits_supports_group_kfold(tmp_path: Path) -> None:
     )
 
     assert len(rows) == 2
+
+
+def test_inner_cv_splits_supports_stratified_group_kfold(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    stratified_config = config.model_copy(
+        update={
+            "model_selection": config.model_selection.model_copy(
+                update={
+                    "inner_cv_strategy": "stratified_group_kfold",
+                    "inner_cv_n_splits": 2,
+                }
+            )
+        }
+    )
+    y = np.array([1, 0, 1, 0, 1, 0, 1, 0], dtype=int)
+    groups = np.array(["g1", "g1", "g2", "g2", "g3", "g3", "g4", "g4"], dtype=str)
+
+    rows = _inner_cv_splits(stratified_config, y, groups)
+
+    assert len(rows) == 2
+    for train_idx, valid_idx, _fold_id in rows:
+        assert set(groups[train_idx]).isdisjoint(set(groups[valid_idx]))
+        assert set(y[valid_idx]) == {0, 1}
 
 
 def test_inner_cv_splits_rejects_empty_train_or_validation_split(

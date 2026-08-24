@@ -160,6 +160,37 @@ split:
         load_and_resolve_config([cfg])
 
 
+def test_stratified_group_kfold_requires_n_splits(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+split:
+  outer_cv_strategy: stratified_group_kfold
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_stratified_group_kfold_accepts_valid_n_splits(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "config.yml",
+        """
+split:
+  outer_cv_strategy: stratified_group_kfold
+  outer_cv_n_splits: 5
+""".strip()
+        + "\n",
+    )
+
+    resolved = load_and_resolve_config([cfg])
+
+    assert resolved.split.outer_cv_strategy == "stratified_group_kfold"
+    assert resolved.split.outer_cv_n_splits == 5
+
+
 def test_all_samples_rejects_group_balancing_fields(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path / "invalid.yml",
@@ -556,6 +587,21 @@ def test_inner_group_kfold_requires_inner_n_splits(tmp_path: Path) -> None:
 model_selection:
   selected_candidate_count: 1
   inner_cv_strategy: group_kfold
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_inner_stratified_group_kfold_requires_inner_n_splits(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+model_selection:
+  selected_candidate_count: 1
+  inner_cv_strategy: stratified_group_kfold
 """.strip()
         + "\n",
     )

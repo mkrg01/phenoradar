@@ -121,7 +121,7 @@ runtime:
 ## Key enums (quick lookup)
 
 - `runtime.execution_stage`: `cv_only` | `full_run`
-- `split.outer_cv_strategy`: `logo` | `group_kfold`
+- `split.outer_cv_strategy`: `logo` | `group_kfold` | `stratified_group_kfold`
 - `model.name`: `logistic_elasticnet` | `linear_svm` | `random_forest`
 - `sampling.strategy`: `all_samples` | `group_balanced`
 - `sampling.weighting`: `none` | `group_label_inverse`
@@ -191,13 +191,16 @@ runtime:
     and inference pools. It accepts the same boolean values as
     `split.test_holdout_col`.
 - `split.outer_cv_strategy`
-  - type: `logo | group_kfold`
+  - type: `logo | group_kfold | stratified_group_kfold`
   - default: `logo`
+  - `stratified_group_kfold` keeps groups intact while approximating the
+    overall trait-label ratio in each fold. It shuffles groups reproducibly
+    using `runtime.seed`.
 - `split.outer_cv_n_splits`
   - type: `int >= 1 | null`
   - default: `null`
   - rule:
-    - required when `outer_cv_strategy=group_kfold`
+    - required when `outer_cv_strategy=group_kfold|stratified_group_kfold`
     - must be `>= 2`
     - must be `null` when `outer_cv_strategy=logo`
 
@@ -356,13 +359,13 @@ Compatibility rules:
   - type: mapping (`dict[str, SearchSpaceValue]`)
   - default: `{}`
 - `model_selection.inner_cv_strategy`
-  - type: `logo | group_kfold | null`
+  - type: `logo | group_kfold | stratified_group_kfold | null`
   - default: `null`
 - `model_selection.inner_cv_n_splits`
   - type: `int >= 1 | null`
   - default: `null`
   - rules:
-    - required when `inner_cv_strategy=group_kfold`
+    - required when `inner_cv_strategy=group_kfold|stratified_group_kfold`
     - must be `>= 2`
     - must be `null` when `inner_cv_strategy=logo|null`
 - `model_selection.selection_metric`

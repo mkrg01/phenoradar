@@ -9,7 +9,7 @@ from typing import Any, Final, Literal, TypedDict, cast
 MetricDirection = Literal["maximize", "minimize"]
 MetricInput = Literal["probability", "predicted_label"]
 
-EVALUATION_METRIC_CONTRACT_VERSION: Final = 1
+EVALUATION_METRIC_CONTRACT_VERSION: Final = 2
 FIXED_PROBABILITY_THRESHOLD_NAME: Final = "fixed_probability_threshold"
 FIXED_PROBABILITY_THRESHOLD_POLICY: Final = "fixed_constant"
 FIXED_PROBABILITY_THRESHOLD_VALUE: Final = 0.5
@@ -37,7 +37,9 @@ _METRIC_CONTRACTS: Final[Mapping[str, MetricContract]] = MappingProxyType(
             "input_type": "predicted_label",
             "threshold_name": FIXED_PROBABILITY_THRESHOLD_NAME,
             "threshold_value": FIXED_PROBABILITY_THRESHOLD_VALUE,
-            "compatibility_note": None,
+            "compatibility_note": (
+                "Per-fold value is NA when the validation fold contains only one label."
+            ),
         },
         "balanced_accuracy": {
             "display_name": "Balanced accuracy",
@@ -46,7 +48,9 @@ _METRIC_CONTRACTS: Final[Mapping[str, MetricContract]] = MappingProxyType(
             "input_type": "predicted_label",
             "threshold_name": FIXED_PROBABILITY_THRESHOLD_NAME,
             "threshold_value": FIXED_PROBABILITY_THRESHOLD_VALUE,
-            "compatibility_note": None,
+            "compatibility_note": (
+                "Per-fold value is NA when the validation fold contains only one label."
+            ),
         },
         "roc_auc": {
             "display_name": "ROC AUC",
@@ -55,7 +59,9 @@ _METRIC_CONTRACTS: Final[Mapping[str, MetricContract]] = MappingProxyType(
             "input_type": "probability",
             "threshold_name": None,
             "threshold_value": None,
-            "compatibility_note": None,
+            "compatibility_note": (
+                "Per-fold value is NA when the validation fold contains only one label."
+            ),
         },
         "pr_auc": {
             "display_name": "Average Precision",
@@ -66,7 +72,8 @@ _METRIC_CONTRACTS: Final[Mapping[str, MetricContract]] = MappingProxyType(
             "threshold_value": None,
             "compatibility_note": (
                 "The pr_auc key is retained for compatibility; its value is Average "
-                "Precision, not trapezoidal precision-recall curve area."
+                "Precision, not trapezoidal precision-recall curve area. Per-fold "
+                "value is NA when the validation fold contains only one label."
             ),
         },
         "brier": {
@@ -76,7 +83,9 @@ _METRIC_CONTRACTS: Final[Mapping[str, MetricContract]] = MappingProxyType(
             "input_type": "probability",
             "threshold_name": None,
             "threshold_value": None,
-            "compatibility_note": None,
+            "compatibility_note": (
+                "Defined for single-label validation folds when probabilities are finite."
+            ),
         },
         "log_loss": {
             "display_name": "Log loss",
@@ -85,7 +94,9 @@ _METRIC_CONTRACTS: Final[Mapping[str, MetricContract]] = MappingProxyType(
             "input_type": "probability",
             "threshold_name": None,
             "threshold_value": None,
-            "compatibility_note": None,
+            "compatibility_note": (
+                "Defined for single-label validation folds because labels=[0, 1] is explicit."
+            ),
         },
     }
 )

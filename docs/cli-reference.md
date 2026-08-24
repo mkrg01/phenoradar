@@ -57,6 +57,7 @@ Always written:
 - `resolved_config.yml`
 - `split/tables/split_manifest.tsv`
 - `split/tables/fold_validation_groups.tsv`
+- `split/tables/fold_diagnostics.tsv`
 - `cv/tables/metrics_cv.tsv`
 - `cv/tables/loss_by_split_cv.tsv`
 - `cv/tables/feature_importance.tsv`

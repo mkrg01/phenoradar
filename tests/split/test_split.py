@@ -74,6 +74,7 @@ def test_build_split_artifacts_success(tmp_path: Path) -> None:
     assert artifacts.expression_rows_excluded == 0
     assert artifacts.split_manifest.height > 0
     assert artifacts.fold_validation_groups.height == 2
+    assert artifacts.fold_diagnostics.height == 2
 
 
 def test_split_group_col_can_differ_from_contrast_pair_col(tmp_path: Path) -> None:
@@ -441,6 +442,7 @@ def test_fold_validation_groups_map_logo_folds_to_held_out_groups(tmp_path: Path
         "n_validation_species",
         "n_validation_pos",
         "n_validation_neg",
+        "validation_label_profile",
     ]
     assert fold_validation_groups.to_dicts() == [
         {
@@ -449,6 +451,7 @@ def test_fold_validation_groups_map_logo_folds_to_held_out_groups(tmp_path: Path
             "n_validation_species": 2,
             "n_validation_pos": 1,
             "n_validation_neg": 1,
+            "validation_label_profile": "both",
         },
         {
             "fold_id": "2",
@@ -456,6 +459,7 @@ def test_fold_validation_groups_map_logo_folds_to_held_out_groups(tmp_path: Path
             "n_validation_species": 2,
             "n_validation_pos": 1,
             "n_validation_neg": 1,
+            "validation_label_profile": "both",
         },
     ]
 
@@ -541,7 +545,7 @@ def test_missing_species_in_expression_are_rejected(tmp_path: Path) -> None:
         build_split_artifacts(config)
 
 
-def test_single_class_group_is_rejected(tmp_path: Path) -> None:
+def test_single_class_validation_groups_are_allowed_and_diagnosed(tmp_path: Path) -> None:
     metadata = _write(
         tmp_path / "species_metadata.tsv",
         "\n".join(
@@ -550,7 +554,9 @@ def test_single_class_group_is_rejected(tmp_path: Path) -> None:
                 "sp1\t1\tg1\tno",
                 "sp2\t1\tg1\tno",
                 "sp3\t0\tg2\tno",
-                "sp4\t1\tg2\tno",
+                "sp4\t0\tg2\tno",
+                "sp5\t0\tg3\tno",
+                "sp6\t1\tg3\tno",
             ]
         )
         + "\n",
@@ -564,14 +570,145 @@ def test_single_class_group_is_rejected(tmp_path: Path) -> None:
                 "sp2\tOG1\t2.0",
                 "sp3\tOG1\t3.0",
                 "sp4\tOG1\t4.0",
+                "sp5\tOG1\t5.0",
+                "sp6\tOG1\t6.0",
             ]
         )
         + "\n",
     )
-    config = load_and_resolve_config([_write_config(tmp_path, metadata, tpm)])
+    config_path = _write(
+        tmp_path / "config.yml",
+        f"""
+data:
+  metadata_path: {metadata}
+  tpm_path: {tpm}
+sampling:
+  strategy: all_samples
+  max_samples_per_label_per_group: null
+  sampled_set_count: 1
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([config_path])
 
-    with pytest.raises(SplitError):
+    artifacts = build_split_artifacts(config)
+
+    assert artifacts.fold_count == 3
+    diagnostics = artifacts.fold_diagnostics.sort("fold_id")
+    assert diagnostics.select("validation_label_profile").to_series().to_list() == [
+        "positive_only",
+        "negative_only",
+        "both",
+    ]
+    assert diagnostics.select("two_class_validation_metrics_defined").to_series().to_list() == [
+        False,
+        False,
+        True,
+    ]
+
+
+def test_single_class_training_fold_is_still_rejected(tmp_path: Path) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
+                "sp1\t1\tg1\tno",
+                "sp2\t1\tg1\tno",
+                "sp3\t0\tg2\tno",
+                "sp4\t0\tg2\tno",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "species\torthogroup\ttpm\n"
+        + "\n".join(f"sp{index}\tOG1\t{float(index)}" for index in range(1, 5))
+        + "\n",
+    )
+    config_path = _write(
+        tmp_path / "config.yml",
+        f"""
+data:
+  metadata_path: {metadata}
+  tpm_path: {tpm}
+sampling:
+  strategy: all_samples
+  max_samples_per_label_per_group: null
+  sampled_set_count: 1
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([config_path])
+
+    with pytest.raises(SplitError, match="training split contains fewer than two labels"):
         build_split_artifacts(config)
+
+
+def test_stratified_group_kfold_keeps_groups_disjoint_and_balances_labels(
+    tmp_path: Path,
+) -> None:
+    species_rows = [
+        f"sp{index}\t{1 if index <= 5 else 0}\tg{index}\tno"
+        for index in range(1, 11)
+    ]
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\n"
+        + "\n".join(species_rows)
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "species\torthogroup\ttpm\n"
+        + "\n".join(f"sp{index}\tOG1\t{float(index)}" for index in range(1, 11))
+        + "\n",
+    )
+    config_path = _write(
+        tmp_path / "config.yml",
+        f"""
+data:
+  metadata_path: {metadata}
+  tpm_path: {tpm}
+split:
+  outer_cv_strategy: stratified_group_kfold
+  outer_cv_n_splits: 5
+sampling:
+  strategy: all_samples
+  max_samples_per_label_per_group: null
+  sampled_set_count: 1
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([config_path])
+
+    artifacts = build_split_artifacts(config)
+    repeated_artifacts = build_split_artifacts(config)
+
+    assert artifacts.fold_count == 5
+    assert artifacts.split_manifest.equals(repeated_artifacts.split_manifest)
+    assert artifacts.fold_diagnostics.select(
+        pl.col("two_class_validation_metrics_defined").all()
+    ).item()
+    for fold_id in artifacts.fold_diagnostics.select("fold_id").to_series().to_list():
+        train_groups = set(
+            artifacts.split_manifest.filter(
+                (pl.col("fold_id") == fold_id) & (pl.col("pool") == "train")
+            )
+            .select("group_id")
+            .to_series()
+            .to_list()
+        )
+        valid_groups = set(
+            artifacts.split_manifest.filter(
+                (pl.col("fold_id") == fold_id) & (pl.col("pool") == "validation")
+            )
+            .select("group_id")
+            .to_series()
+            .to_list()
+        )
+        assert train_groups.isdisjoint(valid_groups)
 
 
 def test_invalid_trait_values_error_lists_offending_values(tmp_path: Path) -> None:

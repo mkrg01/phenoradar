@@ -117,6 +117,23 @@ def _stub_split_artifacts() -> SimpleNamespace:
                 "n_validation_species": [1],
                 "n_validation_pos": [1],
                 "n_validation_neg": [0],
+                "validation_label_profile": ["positive_only"],
+            }
+        ),
+        fold_diagnostics=pl.DataFrame(
+            {
+                "fold_id": ["0"],
+                "n_train_groups": [1],
+                "n_validation_groups": [1],
+                "n_train_species": [2],
+                "n_train_pos": [1],
+                "n_train_neg": [1],
+                "n_validation_species": [1],
+                "n_validation_pos": [1],
+                "n_validation_neg": [0],
+                "train_label_profile": ["both"],
+                "validation_label_profile": ["positive_only"],
+                "two_class_validation_metrics_defined": [False],
             }
         ),
         fold_count=1,
@@ -555,6 +572,7 @@ data:
     assert resolved["runtime"]["execution_stage"] == "full_run"
     assert (run_dirs[0] / "split" / "tables" / "split_manifest.tsv").exists()
     assert (run_dirs[0] / "split" / "tables" / "fold_validation_groups.tsv").exists()
+    assert (run_dirs[0] / "split" / "tables" / "fold_diagnostics.tsv").exists()
     assert (run_dirs[0] / "cv" / "tables" / "metrics_cv.tsv").exists()
     assert (run_dirs[0] / "cv" / "tables" / "loss_by_split_cv.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "thresholds.tsv").exists()
@@ -653,7 +671,26 @@ data:
         "n_validation_species",
         "n_validation_pos",
         "n_validation_neg",
+        "validation_label_profile",
     }.issubset(fold_validation_groups.columns)
+    fold_diagnostics = pl.read_csv(
+        run_dirs[0] / "split" / "tables" / "fold_diagnostics.tsv",
+        separator="\t",
+    )
+    assert {
+        "fold_id",
+        "n_train_groups",
+        "n_validation_groups",
+        "n_train_species",
+        "n_train_pos",
+        "n_train_neg",
+        "n_validation_species",
+        "n_validation_pos",
+        "n_validation_neg",
+        "train_label_profile",
+        "validation_label_profile",
+        "two_class_validation_metrics_defined",
+    }.issubset(fold_diagnostics.columns)
     thresholds = pl.read_csv(run_dirs[0] / "model" / "tables" / "thresholds.tsv", separator="\t")
     assert set(thresholds.select("threshold_name").to_series().to_list()) == {
         "fixed_probability_threshold",
