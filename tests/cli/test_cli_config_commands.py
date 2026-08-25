@@ -307,6 +307,13 @@ def _stub_cv_artifacts(
                 "prob": [0.2, 0.8],
             }
         ),
+        top_feature_expression=pl.DataFrame(
+            {
+                "species": ["sp1", "sp2"],
+                "feature": ["OG1", "OG1"],
+                "tpm": [1.0, 4.0],
+            }
+        ),
         ensemble_model_probs=ensemble_model_probs,
         model_selection_trials=None,
         model_selection_trials_summary=None,
@@ -495,6 +502,7 @@ def test_run_passes_top_features_to_run_and_tree_figures(
 
     assert result.exit_code == 0, result.output
     assert captured_run_kwargs["top_features"] == 7
+    assert captured_run_kwargs["top_feature_expression"] is not None
     assert captured_run_kwargs["feature_stability_by_feature"] is not None
     assert captured_run_kwargs["feature_stability_by_fold_pair"] is not None
     assert captured_tree_kwargs["feature_limit"] == 7
@@ -714,6 +722,7 @@ evaluation:
     assert (run_dirs[0] / "cv" / "figures" / "group_bootstrap_metrics.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "cv_loss_by_split.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "feature_importance_top.svg").exists()
+    assert (run_dirs[0] / "cv" / "figures" / "top_feature_expression_by_confusion.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "feature_importance_by_fold_heatmap.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "coefficients_signed_top.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "feature_stability_top.svg").exists()

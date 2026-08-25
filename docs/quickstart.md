@@ -143,6 +143,7 @@ Core outputs include:
 - `cv/tables/metrics_cv.tsv`
 - `cv/tables/feature_importance.tsv`
 - `cv/tables/feature_importance_by_fold.tsv`
+- `cv/figures/top_feature_expression_by_confusion.svg`
 - `cv/tables/coefficients.tsv`
 - `cv/tables/coefficients_by_fold.tsv`
 - `cv/tables/feature_stability_by_feature.tsv`

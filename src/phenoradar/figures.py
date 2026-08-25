@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import textwrap
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import get_context
@@ -27,6 +28,7 @@ from sklearn.metrics import (
 from phenoradar.group_summary import GroupSummaryError, finite_group_probabilities
 from phenoradar.metrics import (
     FIXED_PROBABILITY_THRESHOLD_NAME,
+    FIXED_PROBABILITY_THRESHOLD_VALUE,
     metric_contract,
     metric_direction,
     metric_higher_is_better,
@@ -87,6 +89,13 @@ _UNANNOTATED_COLOR = "#6f6f6f"
 _PROBABILITY_THRESHOLD_COLOR = "#999999"
 _MODEL_SELECTION_SAMPLE_SET_LIMIT = 1
 _DEFAULT_TOP_FEATURES = 30
+_CONFUSION_GROUP_ORDER = ("TP", "FN", "TN", "FP")
+_CONFUSION_GROUP_COLORS = {
+    "TP": _COLOR_BLUE,
+    "FN": _COLOR_PURPLE,
+    "TN": _COLOR_GREEN,
+    "FP": _COLOR_ORANGE,
+}
 _FEATURE_IMPORTANCE_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
 _FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE = _LABEL_FONTSIZE
 _FEATURE_ANNOTATION_LABEL_PADDING_PX = 180
@@ -1513,6 +1522,274 @@ def _coefficients_signed_top(
         right=right_margin,
         top=0.985,
         bottom=_compact_bottom_margin(height_px),
+    )
+    _save_svg_figure(fig, out_path)
+
+
+def _top_feature_expression_by_confusion(
+    *,
+    oof_predictions: pl.DataFrame,
+    top_feature_expression: pl.DataFrame,
+    feature_importance: pl.DataFrame,
+    coefficients: pl.DataFrame,
+    out_path: Path,
+    top_features: int = _DEFAULT_TOP_FEATURES,
+    orthogroup_annotations: pl.DataFrame | None = None,
+) -> None:
+    prediction_required = {"species", "label", "prob"}
+    expression_required = {"species", "feature", "tpm"}
+    importance_required = {"feature", "importance_mean"}
+    coefficient_required = {"feature", "coef_mean", "method"}
+    if not prediction_required.issubset(oof_predictions.columns):
+        raise FigureError(
+            "prediction_cv.tsv schema is invalid for top_feature_expression_by_confusion.svg"
+        )
+    if not expression_required.issubset(top_feature_expression.columns):
+        raise FigureError(
+            "top-feature expression schema is invalid for top_feature_expression_by_confusion.svg"
+        )
+    if not importance_required.issubset(feature_importance.columns):
+        raise FigureError(
+            "feature_importance.tsv schema is invalid for top_feature_expression_by_confusion.svg"
+        )
+    if not coefficient_required.issubset(coefficients.columns):
+        raise FigureError(
+            "coefficients.tsv schema is invalid for top_feature_expression_by_confusion.svg"
+        )
+    if top_features < 1:
+        raise FigureError("figures.top_features must be >= 1")
+
+    predictions = (
+        oof_predictions.select(
+            pl.col("species").cast(pl.String, strict=False).str.strip_chars().alias("__species"),
+            pl.col("label").cast(pl.Int8, strict=False).alias("__label"),
+            pl.col("prob").cast(pl.Float64, strict=False).alias("__prob"),
+        )
+        .filter(
+            pl.col("__species").is_not_null()
+            & (pl.col("__species") != "")
+            & pl.col("__label").is_not_null()
+            & pl.col("__prob").is_not_null()
+            & pl.col("__prob").is_finite()
+        )
+        .sort("__species")
+    )
+    if predictions.height == 0:
+        raise FigureError(
+            "prediction_cv.tsv is empty; cannot draw top_feature_expression_by_confusion.svg"
+        )
+    labels = [int(value) for value in predictions.get_column("__label").to_list()]
+    _binary_trait_color_map(
+        labels,
+        source_table_name="prediction_cv.tsv",
+        figure_name="top_feature_expression_by_confusion.svg",
+    )
+    if predictions.get_column("__species").n_unique() != predictions.height:
+        raise FigureError(
+            "prediction_cv.tsv must contain one row per species for "
+            "top_feature_expression_by_confusion.svg"
+        )
+    predictions = predictions.with_columns(
+        (pl.col("__prob") >= FIXED_PROBABILITY_THRESHOLD_VALUE).alias("__pred_label")
+    ).with_columns(
+        pl.when((pl.col("__label") == 1) & pl.col("__pred_label"))
+        .then(pl.lit("TP"))
+        .when((pl.col("__label") == 1) & ~pl.col("__pred_label"))
+        .then(pl.lit("FN"))
+        .when((pl.col("__label") == 0) & ~pl.col("__pred_label"))
+        .then(pl.lit("TN"))
+        .otherwise(pl.lit("FP"))
+        .alias("__confusion_group")
+    )
+
+    top = (
+        feature_importance.select(
+            pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("__feature"),
+            pl.col("importance_mean").cast(pl.Float64, strict=False).alias("__importance"),
+        )
+        .filter(
+            pl.col("__feature").is_not_null()
+            & (pl.col("__feature") != "")
+            & pl.col("__importance").is_not_null()
+            & pl.col("__importance").is_finite()
+        )
+        .sort(["__importance", "__feature"], descending=[True, False])
+        .head(top_features)
+    )
+    features = [str(value) for value in top.get_column("__feature").to_list()]
+    if not features:
+        raise FigureError(
+            "feature_importance.tsv is empty; cannot draw top_feature_expression_by_confusion.svg"
+        )
+    importance_lookup = {
+        str(row["__feature"]): float(row["__importance"]) for row in top.iter_rows(named=True)
+    }
+    coefficient_lookup = {
+        str(row["__feature"]): float(row["__coef"])
+        for row in coefficients.filter(pl.col("method") == "coef_signed")
+        .select(
+            pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("__feature"),
+            pl.col("coef_mean").cast(pl.Float64, strict=False).alias("__coef"),
+        )
+        .filter(
+            pl.col("__feature").is_not_null()
+            & (pl.col("__feature") != "")
+            & pl.col("__coef").is_not_null()
+            & pl.col("__coef").is_finite()
+        )
+        .iter_rows(named=True)
+    }
+    annotation_lookup = _orthogroup_annotation_lookup(orthogroup_annotations)
+    expression = top_feature_expression.select(
+        pl.col("species").cast(pl.String, strict=False).str.strip_chars().alias("__species"),
+        pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("__feature"),
+        pl.col("tpm").cast(pl.Float64, strict=False).alias("__tpm"),
+    ).filter(
+        pl.col("__species").is_not_null()
+        & (pl.col("__species") != "")
+        & pl.col("__feature").is_in(features)
+        & pl.col("__tpm").is_not_null()
+        & pl.col("__tpm").is_finite()
+    )
+    if expression.filter(pl.col("__tpm") < 0.0).height > 0:
+        raise FigureError(
+            "top-feature expression contains negative TPM values for "
+            "top_feature_expression_by_confusion.svg"
+        )
+    data = (
+        expression.join(
+            predictions.select(["__species", "__confusion_group"]),
+            on="__species",
+            how="inner",
+        )
+        .with_columns((pl.col("__tpm") + 1.0).log(base=2.0).alias("__log2_tpm"))
+        .sort(["__feature", "__confusion_group", "__species"])
+    )
+    available_features = set(data.get_column("__feature").unique().to_list())
+    features = [feature for feature in features if feature in available_features]
+    if not features:
+        raise FigureError(
+            "No top-feature expression rows overlap CV species for "
+            "top_feature_expression_by_confusion.svg"
+        )
+
+    n_columns = min(5, len(features))
+    n_rows = int(np.ceil(len(features) / n_columns))
+    width_px = max(_NATURE_DOUBLE_COLUMN_WIDTH_PX, 210 * n_columns)
+    height_px = max(350, 115 + 205 * n_rows)
+    fig, axes = plt.subplots(
+        n_rows,
+        n_columns,
+        figsize=_figure_size_inches(width_px, height_px),
+        dpi=_FIG_DPI,
+        squeeze=False,
+    )
+    fig.patch.set_facecolor("white")
+    flat_axes = np.asarray(axes, dtype=object).reshape(-1)
+    positions = np.arange(1, len(_CONFUSION_GROUP_ORDER) + 1, dtype=float)
+
+    for axis_index, feature in enumerate(features):
+        ax = flat_axes[axis_index]
+        feature_data = data.filter(pl.col("__feature") == feature)
+        values_by_group: dict[str, np.ndarray] = {}
+        for group in _CONFUSION_GROUP_ORDER:
+            group_data = feature_data.filter(pl.col("__confusion_group") == group).sort("__species")
+            values_by_group[group] = np.asarray(
+                group_data.get_column("__log2_tpm").to_list(), dtype=float
+            )
+
+        nonempty_groups = [
+            group for group in _CONFUSION_GROUP_ORDER if values_by_group[group].size > 0
+        ]
+        if nonempty_groups:
+            box = ax.boxplot(
+                [values_by_group[group].tolist() for group in nonempty_groups],
+                positions=[
+                    float(_CONFUSION_GROUP_ORDER.index(group) + 1) for group in nonempty_groups
+                ],
+                widths=0.56,
+                patch_artist=True,
+                showmeans=True,
+                showfliers=False,
+                manage_ticks=False,
+                meanprops={
+                    "marker": "D",
+                    "markerfacecolor": _AXIS_COLOR,
+                    "markeredgecolor": _AXIS_COLOR,
+                    "markersize": 2.4,
+                },
+                medianprops={"linewidth": 0.8, "color": _AXIS_COLOR},
+                whiskerprops={"linewidth": 0.7, "color": _MUTED_TEXT_COLOR},
+                capprops={"linewidth": 0.7, "color": _MUTED_TEXT_COLOR},
+            )
+            for patch, group in zip(box["boxes"], nonempty_groups, strict=True):
+                color = _CONFUSION_GROUP_COLORS[group]
+                patch.set_facecolor(color)
+                patch.set_alpha(0.22)
+                patch.set_edgecolor(color)
+                patch.set_linewidth(0.8)
+
+        for group_index, group in enumerate(_CONFUSION_GROUP_ORDER):
+            values = values_by_group[group]
+            if values.size == 0:
+                continue
+            offsets = _deterministic_offsets(values.size, 0.18)
+            x_values = np.full(values.size, positions[group_index], dtype=float) + offsets
+            scatter_kwargs: dict[str, Any] = {
+                "s": 8,
+                "color": _CONFUSION_GROUP_COLORS[group],
+                "linewidths": 0.45,
+                "alpha": 0.64,
+                "zorder": 3,
+            }
+            if group in {"FN", "FP"}:
+                scatter_kwargs["marker"] = "x"
+            else:
+                scatter_kwargs["marker"] = "o"
+                scatter_kwargs["edgecolors"] = "white"
+            ax.scatter(x_values, values, **scatter_kwargs)
+
+        importance = importance_lookup[feature]
+        coefficient = coefficient_lookup.get(feature)
+        annotation = annotation_lookup.get(feature)
+        title_lines = (
+            textwrap.wrap(
+                " ".join(annotation.split()),
+                width=36,
+                break_long_words=False,
+            )
+            if annotation is not None
+            else []
+        )
+        title_lines.extend([f"({feature})", f"importance={importance:.3g}"])
+        if coefficient is not None:
+            if np.isclose(coefficient, 0.0):
+                title_lines[-1] += " | β=0"
+            else:
+                title_lines[-1] += f" | β={coefficient:+.3g}"
+        ax.set_title("\n".join(title_lines), fontsize=_SUBTITLE_FONTSIZE, pad=3.0)
+        ax.axvline(2.5, color="#d0d0d0", linewidth=0.6, linestyle=(0, (3, 3)))
+        ax.set_xlim(0.55, 4.45)
+        ax.set_xticks(positions)
+        ax.set_xticklabels(
+            [f"{group}\nn={values_by_group[group].size}" for group in _CONFUSION_GROUP_ORDER],
+            fontsize=_TICK_FONTSIZE,
+        )
+        ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
+        ax.set_axisbelow(True)
+
+    for axis_index in range(len(features), flat_axes.size):
+        flat_axes[axis_index].set_visible(False)
+
+    fig.supxlabel("OOF confusion group", fontsize=_LABEL_FONTSIZE, y=0.012)
+    fig.supylabel("log2(TPM + 1)", fontsize=_LABEL_FONTSIZE, x=0.008)
+    fig.subplots_adjust(
+        left=0.055,
+        right=0.995,
+        top=0.955,
+        bottom=0.055,
+        wspace=0.32,
+        hspace=0.88,
     )
     _save_svg_figure(fig, out_path)
 
@@ -4333,6 +4610,7 @@ def write_run_figures(
     feature_filter_counts_summary: pl.DataFrame | None = None,
     model_sparsity: pl.DataFrame | None = None,
     model_sparsity_summary: pl.DataFrame | None = None,
+    top_feature_expression: pl.DataFrame | None = None,
     feature_filter_funnel_stage_order: Sequence[str] | None = None,
     top_features: int = _DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
@@ -4420,6 +4698,21 @@ def write_run_figures(
             "orthogroup_annotations": feature_label_annotations,
         },
     )
+    if top_feature_expression is not None:
+        add_job(
+            "top_feature_expression_by_confusion",
+            _top_feature_expression_by_confusion,
+            kwargs={
+                "oof_predictions": oof_predictions,
+                "top_feature_expression": top_feature_expression,
+                "feature_importance": feature_importance,
+                "coefficients": coefficients,
+                "out_path": cv_dir / "top_feature_expression_by_confusion.svg",
+                "top_features": top_features,
+                "orthogroup_annotations": feature_label_annotations,
+            },
+            catch_figure_error=True,
+        )
     if feature_stability_by_feature is not None:
         add_job(
             "feature_stability_top",

@@ -236,6 +236,7 @@ Always written:
     - `cv/figures/cv_metrics_overview.svg`
     - `cv/figures/cv_loss_by_split.svg`
     - `cv/figures/feature_importance_top.svg`
+    - `cv/figures/top_feature_expression_by_confusion.svg`
     - `cv/figures/feature_importance_by_fold_heatmap.svg`
     - `cv/figures/coefficients_signed_top.svg`
     - `cv/figures/feature_stability_top.svg`
@@ -732,6 +733,14 @@ when individual folds are single-label.
   - Horizontal boxplot plus fold-level points.
   - When `data.orthogroup_annotation_path` is set, labels are rendered as
     `full annotation (orthogroup ID)` instead of ID-only labels.
+- `cv/figures/top_feature_expression_by_confusion.svg`
+  - Small multiples for the same top-importance features, ordered by
+    `importance_mean`.
+  - Each panel shows `log2(TPM + 1)` boxplots and species-level points in the
+    OOF `TP`, `FN`, `TN`, and `FP` groups at the fixed probability threshold.
+  - Panel headings include the orthogroup annotation and ID, mean feature
+    importance, and signed linear coefficient when available.
+  - Correct predictions use circles and errors use crosses.
 - `cv/figures/feature_importance_by_fold_heatmap.svg`
   - Top `figures.top_features` features by mean fold-level `importance_mean`.
   - Rows are features, columns are CV folds, and color is fold-level

@@ -145,6 +145,36 @@ def _minimal_oof() -> pl.DataFrame:
     )
 
 
+def _confusion_oof() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "fold_id": ["0", "0", "0", "0"],
+            "species": ["sp_tp", "sp_fn", "sp_tn", "sp_fp"],
+            "label": [1, 1, 0, 0],
+            "prob": [0.8, 0.2, 0.2, 0.8],
+        }
+    )
+
+
+def _minimal_top_feature_expression() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "species": [
+                "sp_tp",
+                "sp_tp",
+                "sp_fn",
+                "sp_fn",
+                "sp_tn",
+                "sp_tn",
+                "sp_fp",
+                "sp_fp",
+            ],
+            "feature": ["OG1", "OG2"] * 4,
+            "tpm": [15.0, 2.0, 1.0, 8.0, 0.0, 12.0, 6.0, 3.0],
+        }
+    )
+
+
 def _minimal_loss_by_split() -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -444,6 +474,55 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
     assert not (inference_figures_dir / "inference_probability_distribution.svg").exists()
     assert not (inference_figures_dir / "species_probability_cv_and_inference.svg").exists()
     assert warnings == []
+
+
+def test_write_run_figures_writes_top_feature_expression_by_confusion(
+    tmp_path: Path,
+) -> None:
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_confusion_oof(),
+        feature_importance=_minimal_feature_importance(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        top_feature_expression=_minimal_top_feature_expression(),
+        trait_name="C4",
+        orthogroup_annotations=_minimal_orthogroup_annotations(),
+    )
+
+    figure_path = tmp_path / "run" / "cv" / "figures" / "top_feature_expression_by_confusion.svg"
+    assert figure_path.exists()
+    svg_text = figure_path.read_text(encoding="utf-8")
+    assert "Top-feature expression by OOF confusion group" not in svg_text
+    assert "Features ordered by mean CV importance" not in svg_text
+    assert "log2(TPM + 1)" in svg_text
+    assert "beta carbonic anhydrase" in svg_text
+    assert "photosynthetic annotation" in svg_text
+    assert "(OG1)" in svg_text
+    assert "importance=0.7" in svg_text
+    assert "β=+0.2" in svg_text
+    assert "higher" not in svg_text
+    assert "C4=1" not in svg_text
+    for group in ["TP", "FN", "TN", "FP"]:
+        assert group in svg_text
+    assert warnings == []
+
+
+def test_top_feature_expression_by_confusion_rejects_duplicate_cv_species(
+    tmp_path: Path,
+) -> None:
+    duplicate_oof = pl.concat([_confusion_oof(), _confusion_oof().head(1)])
+
+    with pytest.raises(FigureError, match="one row per species"):
+        figures_mod._top_feature_expression_by_confusion(
+            oof_predictions=duplicate_oof,
+            top_feature_expression=_minimal_top_feature_expression(),
+            feature_importance=_minimal_feature_importance(),
+            coefficients=_minimal_coefficients(),
+            out_path=tmp_path / "figure.svg",
+        )
 
 
 def test_write_run_figures_writes_group_bootstrap_confidence_intervals(

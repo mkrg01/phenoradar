@@ -4,6 +4,8 @@
 
 ### Features
 
+* add a top-feature `log2(TPM + 1)` small-multiple view with species points grouped by
+  OOF TP, FN, TN, and FP status
 * allow single-label outer-CV validation groups while keeping two-label training folds mandatory;
   emit undefined two-class fold metrics as `NA`, write split diagnostics for every fold, and add
   reproducible `stratified_group_kfold` for outer and inner CV

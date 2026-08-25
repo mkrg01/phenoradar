@@ -1486,6 +1486,7 @@ def _run_single(
             feature_filter_funnel_stage_order=_feature_filter_funnel_stage_order(resolved),
             model_sparsity=model_sparsity_table,
             model_sparsity_summary=model_sparsity_summary_table,
+            top_feature_expression=cv_artifacts.top_feature_expression,
             top_features=resolved.figures.top_features,
             orthogroup_annotations=orthogroup_annotations,
             parallel_workers=_artifact_parallel_workers(resolved),
