@@ -28,6 +28,33 @@ For one `run` result directory, a practical order is:
 
 - `runs/<timestamp>_run_<id>/...`
 
+When scalar-list condition expansion is used, it instead writes:
+
+- `runs/<timestamp>_study_<id>/...`
+
+The study directory contains the archived source config, one shared split,
+ordered condition manifest, complete run artifacts under `conditions/`, and
+cross-condition outputs:
+
+- `condition_manifest.tsv`
+- `config_differences.tsv`
+- `study_metadata.json`
+- `split/tables/split_manifest.tsv`
+- `tables/condition_metrics.tsv`
+- `tables/pairwise_comparisons.tsv`
+- `figures/condition_metrics.{svg,pdf,png}`
+- `figures/pairwise_improvement.{svg,pdf,png}`
+- `figures/ranked_feature_sensitivity.{svg,pdf,png}` when both ranked-filter
+  method and `max_features` vary as a complete two-method grid
+- `figures/ranked_feature_method_difference.{svg,pdf,png}` for the matched
+  second-method improvement over the first method at each `max_features`
+
+`condition_metrics.tsv` reports absolute OOF metrics and available group-bootstrap
+intervals for every condition. `pairwise_comparisons.tsv` contains every unordered
+condition pair. `improvement_a_over_b` is oriented so that positive values always
+favor condition A, including for loss metrics. Pairwise intervals use matched
+bootstrap replicate IDs generated from the shared groups and seed.
+
 Run outputs use a stage-first layout. Stage-specific TSVs are placed in
 `<stage>/tables/`, and stage-specific SVGs are placed in `<stage>/figures/`.
 The main stage directories are `split/`, `cv/`, `model/`, `summary/`, `runtime/`,
@@ -124,7 +151,7 @@ Always written:
     - `n_features_before`
     - `n_features_after_sparse_feature_filter`
     - `n_features_after_low_variance`
-    - `n_features_after_pair_aware`
+    - `n_features_after_ranked_feature_filter`
     - `n_features_after_correlation`
     - `n_features_after_all`
 - `model/tables/feature_filter_counts_summary.tsv`
@@ -134,6 +161,11 @@ Always written:
       `n_features_q3`, `n_features_max`
     - `retained_ratio_min`, `retained_ratio_q1`, `retained_ratio_median`,
       `retained_ratio_mean`, `retained_ratio_q3`, `retained_ratio_max`
+- `model/tables/ranked_feature_scores.tsv`
+  - one row per ranked-filter candidate in each outer-fold or final-refit sample set
+  - includes `method`, `feature`, `effect`, `standard_error`, `score`, `rank`,
+    `retained`, label/pair counts, requested/effective feature counts, and any
+    skip reason
 - `model/tables/retained_features.tsv`
   - columns:
     - `scope`, `fold_id`, `sample_set_id`, `feature`

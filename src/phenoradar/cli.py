@@ -23,9 +23,12 @@ from phenoradar.bundle import (
 )
 from phenoradar.config import (
     AppConfig,
+    ConfigConditionSet,
     ConfigError,
     ExecutionStage,
+    has_condition_dimensions,
     load_and_resolve_config,
+    load_config_conditions,
     write_resolved_config,
 )
 from phenoradar.cv import CVError, run_final_refit, run_outer_cv
@@ -82,6 +85,17 @@ from phenoradar.reporting import (
     generate_report,
 )
 from phenoradar.split import SplitArtifacts, SplitError, build_split_artifacts
+from phenoradar.study import (
+    StudyError,
+    condition_run_is_complete,
+    generate_study_report,
+    load_condition_manifest,
+    new_condition_manifest,
+    prepare_condition_attempt,
+    validate_resume_manifest,
+    write_condition_manifest,
+    write_config_differences,
+)
 from phenoradar.testdata import (
     BUNDLED_C4_TINY_SOURCE,
     TestDataError,
@@ -153,6 +167,7 @@ def _prepare_run_inputs(
     config_paths: list[Path],
     config: AppConfig,
     timing_recorder: TimingRecorder,
+    split_artifacts_override: SplitArtifacts | None = None,
 ) -> tuple[list[dict[str, Any]], SplitArtifacts]:
     """Hash run inputs while independently constructing split artifacts."""
 
@@ -184,6 +199,8 @@ def _prepare_run_inputs(
     def _build_splits() -> SplitArtifacts:
         started = timing_recorder.start()
         try:
+            if split_artifacts_override is not None:
+                return split_artifacts_override
             return build_split_artifacts(config)
         finally:
             timing_recorder.record_since(
@@ -204,8 +221,8 @@ def _feature_filter_funnel_stage_order(config: AppConfig) -> list[str]:
         stages.append("n_features_after_sparse_feature_filter")
     if config.preprocess.low_variance_filter.enabled:
         stages.append("n_features_after_low_variance")
-    if config.preprocess.pair_aware_filter.enabled:
-        stages.append("n_features_after_pair_aware")
+    if config.preprocess.ranked_feature_filter.method != "none":
+        stages.append("n_features_after_ranked_feature_filter")
     if config.preprocess.correlation_filter.enabled:
         stages.append("n_features_after_correlation")
     return stages
@@ -357,6 +374,18 @@ QuietArg = Annotated[
         "--quiet",
         "-q",
         help="Suppress progress logs and print only final summaries/warnings.",
+    ),
+]
+ResumeStudyArg = Annotated[
+    Path | None,
+    typer.Option(
+        "--resume",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        writable=True,
+        help="Resume a multi-condition study directory.",
     ),
 ]
 
@@ -822,13 +851,17 @@ def _classification_summary(
     return pl.DataFrame(rows).sort(["pool", "fold_id", "threshold_name"])
 
 
-@app.command()
-def run(
+def _run_single(
     config: ConfigPathsArg,
     execution_stage: ExecutionStageArg = None,
     verbose: VerboseArg = False,
     quiet: QuietArg = False,
-) -> None:
+    *,
+    resolved_override: AppConfig | None = None,
+    split_artifacts_override: SplitArtifacts | None = None,
+    run_dir_override: Path | None = None,
+    study_context: dict[str, Any] | None = None,
+) -> Path:
     """Run training/evaluation pipeline."""
     start_time = datetime.now(UTC)
     timing_recorder = TimingRecorder()
@@ -848,14 +881,17 @@ def run(
     _log("Start training/evaluation pipeline.")
     _log("Load and resolve configuration.")
     config_started = timing_recorder.start()
-    try:
-        resolved = load_and_resolve_config(
-            config_paths,
-            execution_stage_override=execution_stage,
-            allow_empty=False,
-        )
-    except ConfigError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+    if resolved_override is None:
+        try:
+            resolved = load_and_resolve_config(
+                config_paths,
+                execution_stage_override=execution_stage,
+                allow_empty=False,
+            )
+        except ConfigError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    else:
+        resolved = resolved_override
     timing_recorder.record_since(
         config_started,
         scope="run",
@@ -871,6 +907,7 @@ def run(
             config_paths=config_paths,
             config=resolved,
             timing_recorder=timing_recorder,
+            split_artifacts_override=split_artifacts_override,
         )
     except (ProvenanceError, SplitError) as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -995,7 +1032,11 @@ def run(
 
     _log("Create run directory and write core tabular artifacts.")
     artifact_writing_started = timing_recorder.start()
-    run_dir = _build_run_dir("run")
+    if run_dir_override is None:
+        run_dir = _build_run_dir("run")
+    else:
+        run_dir = run_dir_override
+        run_dir.mkdir(parents=True, exist_ok=False)
     table_dirs = _run_table_dirs(run_dir)
     split_tables_dir = table_dirs["split"]
     cv_tables_dir = table_dirs["cv"]
@@ -1192,6 +1233,28 @@ def run(
         ).sort(["scope", "stage"])
         feature_filter_counts_summary_table.write_csv(
             model_tables_dir / "feature_filter_counts_summary.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
+
+    ranked_feature_score_tables: list[pl.DataFrame] = []
+    cv_ranked_feature_scores = getattr(cv_artifacts, "ranked_feature_scores", None)
+    if isinstance(cv_ranked_feature_scores, pl.DataFrame):
+        ranked_feature_score_tables.append(cv_ranked_feature_scores)
+    final_ranked_feature_scores = (
+        None
+        if final_refit_artifacts is None
+        else getattr(final_refit_artifacts, "ranked_feature_scores", None)
+    )
+    if isinstance(final_ranked_feature_scores, pl.DataFrame):
+        ranked_feature_score_tables.append(final_ranked_feature_scores)
+    if ranked_feature_score_tables:
+        pl.concat(ranked_feature_score_tables, how="vertical_relaxed").sort(
+            ["scope", "fold_id", "sample_set_id", "rank", "feature"],
+            nulls_last=True,
+        ).write_csv(
+            model_tables_dir / "ranked_feature_scores.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
@@ -1528,6 +1591,8 @@ def run(
         **fingerprint_metadata,
         **build_meta,
     }
+    if study_context is not None:
+        metadata_payload["study"] = study_context
     if final_refit_artifacts is not None:
         metadata_payload["final_refit_ensemble_size"] = final_refit_artifacts.ensemble_size
     if bundle_export_result is not None:
@@ -1570,6 +1635,293 @@ def run(
         f"{full_run_suffix}; warnings={len(warnings)}).",
     )
     _log("Completed.")
+    return run_dir
+
+
+def _write_study_metadata(study_dir: Path, payload: dict[str, Any]) -> Path:
+    metadata_path = study_dir / "study_metadata.json"
+    metadata_path.write_text(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return metadata_path
+
+
+def _write_study_split_artifacts(study_dir: Path, split_artifacts: SplitArtifacts) -> None:
+    tables_dir = study_dir / "split" / "tables"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    split_artifacts.split_manifest.write_csv(
+        tables_dir / "split_manifest.tsv",
+        separator="\t",
+    )
+    split_artifacts.fold_validation_groups.write_csv(
+        tables_dir / "fold_validation_groups.tsv",
+        separator="\t",
+    )
+    split_artifacts.fold_diagnostics.write_csv(
+        tables_dir / "fold_diagnostics.tsv",
+        separator="\t",
+    )
+
+
+def _study_split_artifacts(
+    *,
+    study_dir: Path,
+    condition_set: ConfigConditionSet,
+    resume: bool,
+) -> tuple[SplitArtifacts, str]:
+    try:
+        split_artifacts = build_split_artifacts(condition_set.conditions[0].config)
+        split_sha256 = split_fingerprint(split_artifacts.split_manifest)
+    except (ProvenanceError, SplitError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    shared_manifest_path = study_dir / "split" / "tables" / "split_manifest.tsv"
+    if resume:
+        if not shared_manifest_path.exists():
+            raise typer.BadParameter(
+                f"Study split manifest was not found: {shared_manifest_path}"
+            )
+    else:
+        _write_study_split_artifacts(study_dir, split_artifacts)
+    return split_artifacts, split_sha256
+
+
+def _run_condition_study(
+    *,
+    config_paths: list[Path],
+    condition_set: ConfigConditionSet,
+    execution_stage: ExecutionStage | None,
+    verbose: bool,
+    quiet: bool,
+    resume_dir: Path | None,
+) -> Path:
+    log_verbosity = _resolve_log_verbosity(verbose=verbose, quiet=quiet)
+    session_start = datetime.now(UTC)
+    is_resume = resume_dir is not None
+    study_dir = resume_dir if resume_dir is not None else _build_run_dir("study")
+    assert study_dir is not None
+    study_dir = study_dir.resolve()
+
+    if is_resume:
+        try:
+            manifest_rows = load_condition_manifest(study_dir)
+            validate_resume_manifest(manifest_rows, condition_set)
+        except StudyError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        metadata_path = study_dir / "study_metadata.json"
+        try:
+            study_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise typer.BadParameter(f"Failed to read study metadata: {metadata_path}") from exc
+        study_metadata["status"] = "running"
+        study_metadata["resume_time"] = session_start.isoformat()
+    else:
+        (study_dir / "conditions").mkdir(parents=True, exist_ok=True)
+        source_config_path = study_dir / "source_config.yml"
+        source_config_path.write_text(
+            config_paths[0].read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        manifest_rows = new_condition_manifest(condition_set, study_dir=study_dir)
+        write_condition_manifest(study_dir, manifest_rows)
+        study_metadata = {
+            "command": "run",
+            "mode": "multi_condition",
+            "status": "running",
+            "start_time": session_start.isoformat(),
+            "source_config": str(config_paths[0].resolve()),
+            "archived_source_config": str(source_config_path),
+            "condition_count": len(condition_set.conditions),
+            "condition_dimensions": [
+                dimension.dotted_path for dimension in condition_set.dimensions
+            ],
+        }
+    write_config_differences(study_dir, condition_set)
+
+    split_artifacts, split_sha256 = _study_split_artifacts(
+        study_dir=study_dir,
+        condition_set=condition_set,
+        resume=is_resume,
+    )
+    stored_split_sha256 = study_metadata.get("split_fingerprint")
+    if stored_split_sha256 is not None and stored_split_sha256 != split_sha256:
+        raise typer.BadParameter(
+            "The current config/data split fingerprint differs from the resumed study"
+        )
+    study_metadata["split_fingerprint"] = split_sha256
+    _write_study_metadata(study_dir, study_metadata)
+
+    condition_by_id = {
+        condition.condition_id: condition for condition in condition_set.conditions
+    }
+    _progress_log(
+        "run",
+        f"Run multi-condition study ({len(manifest_rows)} conditions, study_dir={study_dir}).",
+        start_time=session_start,
+        log_verbosity=log_verbosity,
+    )
+    for row in manifest_rows:
+        condition_id = str(row["condition_id"])
+        condition = condition_by_id[condition_id]
+        if condition_run_is_complete(row):
+            row["status"] = "completed"
+            write_condition_manifest(study_dir, manifest_rows)
+            _progress_log(
+                "run",
+                f"Skip completed condition {condition.index}/{len(manifest_rows)} "
+                f"({condition_id}).",
+                start_time=session_start,
+                log_verbosity=log_verbosity,
+            )
+            continue
+
+        run_dir = prepare_condition_attempt(row, study_dir=study_dir)
+        row["status"] = "running"
+        row["started_at"] = datetime.now(UTC).isoformat()
+        row["ended_at"] = None
+        row["error"] = None
+        write_condition_manifest(study_dir, manifest_rows)
+        _progress_log(
+            "run",
+            f"Start condition {condition.index}/{len(manifest_rows)}: {condition.label}.",
+            start_time=session_start,
+            log_verbosity=log_verbosity,
+        )
+        try:
+            completed_dir = _run_single(
+                config_paths,
+                execution_stage=execution_stage,
+                verbose=verbose,
+                quiet=quiet,
+                resolved_override=condition.config,
+                split_artifacts_override=split_artifacts,
+                run_dir_override=run_dir,
+                study_context={
+                    "study_dir": str(study_dir),
+                    "condition_index": condition.index,
+                    "condition_id": condition.condition_id,
+                    "condition_label": condition.label,
+                },
+            )
+            metadata = json.loads(
+                (completed_dir / "run_metadata.json").read_text(encoding="utf-8")
+            )
+            if metadata.get("split_fingerprint") != split_sha256:
+                raise StudyError(
+                    f"Condition {condition_id} did not use the shared study split"
+                )
+        except Exception as exc:
+            row["status"] = "failed"
+            row["ended_at"] = datetime.now(UTC).isoformat()
+            row["error"] = str(exc)
+            write_condition_manifest(study_dir, manifest_rows)
+            study_metadata["status"] = "failed"
+            study_metadata["end_time"] = datetime.now(UTC).isoformat()
+            study_metadata["failed_condition_id"] = condition_id
+            _write_study_metadata(study_dir, study_metadata)
+            raise
+        row["status"] = "completed"
+        row["ended_at"] = datetime.now(UTC).isoformat()
+        write_condition_manifest(study_dir, manifest_rows)
+
+    try:
+        report_artifacts = generate_study_report(study_dir, manifest_rows)
+    except Exception as exc:
+        study_metadata["status"] = "report_failed"
+        study_metadata["end_time"] = datetime.now(UTC).isoformat()
+        study_metadata["report_error"] = str(exc)
+        _write_study_metadata(study_dir, study_metadata)
+        if isinstance(exc, StudyError):
+            raise typer.BadParameter(str(exc)) from exc
+        raise
+
+    end_time = datetime.now(UTC)
+    study_metadata["status"] = "completed"
+    study_metadata.pop("failed_condition_id", None)
+    study_metadata.pop("report_error", None)
+    study_metadata["end_time"] = end_time.isoformat()
+    study_metadata["last_session_duration_sec"] = (end_time - session_start).total_seconds()
+    study_metadata["condition_metrics_path"] = "tables/condition_metrics.tsv"
+    study_metadata["pairwise_comparisons_path"] = "tables/pairwise_comparisons.tsv"
+    study_metadata["config_differences_path"] = "config_differences.tsv"
+    study_metadata["figure_paths"] = [
+        str(path.relative_to(study_dir)) for path in report_artifacts.figure_paths
+    ]
+    _write_study_metadata(study_dir, study_metadata)
+    typer.echo(
+        f"Wrote multi-condition study at {study_dir} "
+        "(condition_manifest.tsv, config_differences.tsv, split/tables/, "
+        "conditions/, tables/, figures/)."
+    )
+    return study_dir
+
+
+@app.command()
+def run(
+    config: ConfigPathsArg,
+    execution_stage: ExecutionStageArg = None,
+    verbose: VerboseArg = False,
+    quiet: QuietArg = False,
+    resume: ResumeStudyArg = None,
+) -> None:
+    """Run training/evaluation pipeline."""
+    config_paths = _normalize_config_paths(config)
+    try:
+        resolved = load_and_resolve_config(
+            config_paths,
+            execution_stage_override=execution_stage,
+            allow_empty=False,
+        )
+    except ConfigError as single_config_error:
+        try:
+            contains_conditions = has_condition_dimensions(
+                config_paths,
+                execution_stage_override=execution_stage,
+            )
+        except ConfigError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        if not contains_conditions:
+            raise typer.BadParameter(str(single_config_error)) from single_config_error
+        try:
+            condition_set = load_config_conditions(
+                config_paths,
+                execution_stage_override=execution_stage,
+            )
+        except ConfigError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    else:
+        if resume is not None:
+            raise typer.BadParameter("--resume requires a config with multiple conditions")
+        _run_single(
+            config_paths,
+            execution_stage=execution_stage,
+            verbose=verbose,
+            quiet=quiet,
+            resolved_override=resolved,
+        )
+        return
+
+    if len(condition_set.conditions) == 1:
+        if resume is not None:
+            raise typer.BadParameter("--resume requires at least two generated conditions")
+        _run_single(
+            config_paths,
+            execution_stage=execution_stage,
+            verbose=verbose,
+            quiet=quiet,
+            resolved_override=condition_set.conditions[0].config,
+        )
+        return
+
+    _run_condition_study(
+        config_paths=config_paths,
+        condition_set=condition_set,
+        execution_stage=execution_stage,
+        verbose=verbose,
+        quiet=quiet,
+        resume_dir=resume,
+    )
 
 
 @app.command("config")

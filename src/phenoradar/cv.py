@@ -100,6 +100,7 @@ class CVArtifacts:
     model_selection_trials_summary: pl.DataFrame | None
     feature_filter_counts: pl.DataFrame
     feature_filter_counts_summary: pl.DataFrame
+    ranked_feature_scores: pl.DataFrame
     retained_features: pl.DataFrame
     retained_features_summary: pl.DataFrame
     model_sparsity: pl.DataFrame
@@ -123,6 +124,7 @@ class FinalRefitArtifacts:
     model_selection_selected: pl.DataFrame | None
     feature_filter_counts: pl.DataFrame
     feature_filter_counts_summary: pl.DataFrame
+    ranked_feature_scores: pl.DataFrame
     retained_features: pl.DataFrame
     retained_features_summary: pl.DataFrame
     model_sparsity: pl.DataFrame
@@ -185,13 +187,14 @@ class OuterFoldResult:
     model_selection_selected_rows: list[dict[str, Any]]
     model_selection_trial_rows: list[dict[str, Any]]
     feature_filter_count_rows: list[dict[str, Any]]
+    ranked_feature_score_rows: list[dict[str, Any]]
     retained_feature_rows: list[dict[str, Any]]
     model_sparsity_rows: list[dict[str, Any]]
     fold_model_count: int
     n_features_before_preprocess: int
     n_features_after_sparse_feature_filter: int
     n_features_after_low_variance: int
-    n_features_after_pair_aware: int
+    n_features_after_ranked_feature_filter: int
     n_features_after_correlation: int
     n_features_after_preprocess: int
     warnings: list[str]
@@ -214,7 +217,7 @@ class FeatureFilterCounts:
     n_features_before: int
     n_features_after_sparse_feature_filter: int
     n_features_after_low_variance: int
-    n_features_after_pair_aware: int
+    n_features_after_ranked_feature_filter: int
     n_features_after_correlation: int
     n_features_after_all: int
 
@@ -231,6 +234,7 @@ class OuterSampleSetFitResult:
     model_sparsity_rows: list[dict[str, Any]]
     selected_features: list[str]
     filter_counts: FeatureFilterCounts
+    ranked_feature_score_rows: list[dict[str, Any]]
     model_count: int
     warnings: list[str]
     convergence_rows: list[dict[str, Any]]
@@ -247,6 +251,7 @@ class FinalSampleSetFitResult:
     selected_features: list[str]
     scaler: FeatureScaler
     filter_counts: FeatureFilterCounts
+    ranked_feature_score_rows: list[dict[str, Any]]
     model_count: int
     warnings: list[str]
     convergence_rows: list[dict[str, Any]]
@@ -274,11 +279,20 @@ class FinalModelEntry:
     model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier
 
 
+@dataclass(frozen=True)
+class RankedFeatureFilterResult:
+    """Selected indices, correlation priorities, and feature-level diagnostics."""
+
+    selected: np.ndarray
+    priority_scores: np.ndarray | None
+    score_rows: list[dict[str, Any]]
+
+
 _FEATURE_FILTER_STAGE_COLUMNS = [
     "n_features_before",
     "n_features_after_sparse_feature_filter",
     "n_features_after_low_variance",
-    "n_features_after_pair_aware",
+    "n_features_after_ranked_feature_filter",
     "n_features_after_correlation",
     "n_features_after_all",
 ]
@@ -286,13 +300,13 @@ _FEATURE_FILTER_STAGE_ORDER = {
     "n_features_before": 0,
     "n_features_after_sparse_feature_filter": 1,
     "n_features_after_low_variance": 2,
-    "n_features_after_pair_aware": 3,
+    "n_features_after_ranked_feature_filter": 3,
     "n_features_after_correlation": 4,
     "n_features_after_all": 5,
 }
 _NONZERO_TOLERANCE = 1e-12
-_PAIR_AWARE_SE_QUANTILE = 0.1
-_PAIR_AWARE_SCORE_FLOOR = 1e-12
+_RANKED_FEATURE_SE_QUANTILE = 0.1
+_RANKED_FEATURE_SCORE_FLOOR = 1e-12
 
 _CONVERGENCE_DIAGNOSTIC_SCHEMA = {
     "training_scope": pl.String,
@@ -368,7 +382,7 @@ def _empty_feature_filter_counts() -> pl.DataFrame:
             "n_features_before": pl.Int64,
             "n_features_after_sparse_feature_filter": pl.Int64,
             "n_features_after_low_variance": pl.Int64,
-            "n_features_after_pair_aware": pl.Int64,
+            "n_features_after_ranked_feature_filter": pl.Int64,
             "n_features_after_correlation": pl.Int64,
             "n_features_after_all": pl.Int64,
         }
@@ -437,7 +451,9 @@ def _feature_filter_count_row(
             counts.n_features_after_sparse_feature_filter
         ),
         "n_features_after_low_variance": int(counts.n_features_after_low_variance),
-        "n_features_after_pair_aware": int(counts.n_features_after_pair_aware),
+        "n_features_after_ranked_feature_filter": int(
+            counts.n_features_after_ranked_feature_filter
+        ),
         "n_features_after_correlation": int(counts.n_features_after_correlation),
         "n_features_after_all": int(counts.n_features_after_all),
     }
@@ -447,6 +463,54 @@ def _build_feature_filter_counts(rows: list[dict[str, Any]]) -> pl.DataFrame:
     if not rows:
         return _empty_feature_filter_counts()
     return pl.DataFrame(rows).sort(["scope", "fold_id", "sample_set_id"])
+
+
+_RANKED_FEATURE_SCORE_SCHEMA = {
+    "scope": pl.String,
+    "fold_id": pl.String,
+    "sample_set_id": pl.Int64,
+    "method": pl.String,
+    "feature": pl.String,
+    "effect": pl.Float64,
+    "standard_error": pl.Float64,
+    "score": pl.Float64,
+    "rank": pl.Int64,
+    "retained": pl.Boolean,
+    "n_valid_contrast_pairs": pl.Int64,
+    "n_label0": pl.Int64,
+    "n_label1": pl.Int64,
+    "max_features_requested": pl.Int64,
+    "max_features_effective": pl.Int64,
+    "applied": pl.Boolean,
+    "skip_reason": pl.String,
+}
+
+
+def _build_ranked_feature_scores(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    if not rows:
+        return pl.DataFrame(schema=_RANKED_FEATURE_SCORE_SCHEMA)
+    return pl.DataFrame(rows, schema=_RANKED_FEATURE_SCORE_SCHEMA).sort(
+        ["scope", "fold_id", "sample_set_id", "rank", "feature"],
+        nulls_last=True,
+    )
+
+
+def _with_ranked_feature_score_context(
+    rows: list[dict[str, Any]],
+    *,
+    scope: str,
+    fold_id: str,
+    sample_set_id: int,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "scope": scope,
+            "fold_id": fold_id,
+            "sample_set_id": int(sample_set_id),
+            **row,
+        }
+        for row in rows
+    ]
 
 
 def _summarize_feature_filter_counts(feature_filter_counts: pl.DataFrame) -> pl.DataFrame:
@@ -1304,82 +1368,270 @@ def _pair_group_contrasts(
     return np.vstack(contrast_rows)
 
 
-def _apply_pair_aware_filter(
-    config: AppConfig,
-    x_train_expr: np.ndarray,
-    y_train: np.ndarray,
-    groups_train: np.ndarray,
+def _ranked_score_rows(
+    *,
+    method: str,
     selected: np.ndarray,
     feature_names: list[str],
-    warnings: list[str] | None = None,
-) -> tuple[np.ndarray, np.ndarray | None]:
-    max_features = config.preprocess.pair_aware_filter.max_features
-    if max_features is None:
-        raise CVError("pair_aware_filter is enabled but max_features is missing")
-    if selected.size == 0:
-        return selected, np.empty(0, dtype=float)
+    effect: np.ndarray,
+    standard_error: np.ndarray,
+    score: np.ndarray,
+    rank_by_local: np.ndarray,
+    retained_local: set[int],
+    n_valid_contrast_pairs: int | None,
+    n_label0: int | None,
+    n_label1: int | None,
+    max_features_requested: int | None,
+    max_features_effective: int,
+    applied: bool,
+    skip_reason: str | None,
+) -> list[dict[str, Any]]:
+    def _finite_or_none(value: float) -> float | None:
+        return float(value) if np.isfinite(value) else None
 
-    min_contrast_pairs = int(config.preprocess.pair_aware_filter.min_contrast_pairs)
-    contrasts = _pair_group_contrasts(x_train_expr, y_train, groups_train, selected)
-    n_contrast_pairs = int(contrasts.shape[0])
-    if n_contrast_pairs < min_contrast_pairs:
-        if warnings is not None:
-            warnings.append(
-                "pair_aware_filter skipped because too few valid contrast pairs were available "
-                f"in a split; valid_contrast_pairs={n_contrast_pairs}, "
-                f"min_contrast_pairs={min_contrast_pairs}"
-            )
-        return selected, None
-
-    effect = np.asarray(np.mean(contrasts, axis=0), dtype=float)
-    if n_contrast_pairs == 1:
-        if warnings is not None:
-            warnings.append(
-                "pair_aware_filter used absolute mean group contrast because all per-feature "
-                "standard errors were unavailable with one valid contrast pair"
-            )
-        score = np.abs(effect)
-    else:
-        se = np.asarray(np.std(contrasts, axis=0, ddof=1), dtype=float) / np.sqrt(
-            float(n_contrast_pairs)
+    rows: list[dict[str, Any]] = []
+    for local_idx, feature_index in enumerate(selected.tolist()):
+        rank_value = int(rank_by_local[local_idx])
+        rows.append(
+            {
+                "method": method,
+                "feature": feature_names[feature_index],
+                "effect": _finite_or_none(float(effect[local_idx])),
+                "standard_error": _finite_or_none(float(standard_error[local_idx])),
+                "score": _finite_or_none(float(score[local_idx])),
+                "rank": None if rank_value <= 0 else rank_value,
+                "retained": local_idx in retained_local,
+                "n_valid_contrast_pairs": n_valid_contrast_pairs,
+                "n_label0": n_label0,
+                "n_label1": n_label1,
+                "max_features_requested": max_features_requested,
+                "max_features_effective": max_features_effective,
+                "applied": applied,
+                "skip_reason": skip_reason,
+            }
         )
-        positive_se = se[np.isfinite(se) & (se > 0.0)]
-        if positive_se.size == 0:
+    return rows
+
+
+def _apply_ranked_feature_filter(
+    config: AppConfig,
+    x_train_expr: np.ndarray,
+    selected: np.ndarray,
+    feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
+) -> RankedFeatureFilterResult:
+    filter_config = config.preprocess.ranked_feature_filter
+    method = filter_config.method
+    candidate_count = int(selected.size)
+    if candidate_count == 0:
+        return RankedFeatureFilterResult(
+            selected=selected,
+            priority_scores=np.empty(0, dtype=float),
+            score_rows=[],
+        )
+
+    max_features = filter_config.max_features
+    max_features_requested = None if max_features is None else int(max_features)
+    n_label0: int | None = None
+    n_label1: int | None = None
+    if y_train is not None:
+        y_train = np.asarray(y_train)
+        if y_train.shape[0] != x_train_expr.shape[0]:
+            raise CVError("ranked_feature_filter y_train length does not match training rows")
+        n_label0 = int(np.count_nonzero(y_train == 0))
+        n_label1 = int(np.count_nonzero(y_train == 1))
+
+    empty_values = np.full(candidate_count, np.nan, dtype=float)
+    if method == "none":
+        rows = _ranked_score_rows(
+            method=method,
+            selected=selected,
+            feature_names=feature_names,
+            effect=empty_values,
+            standard_error=empty_values,
+            score=empty_values,
+            rank_by_local=np.zeros(candidate_count, dtype=int),
+            retained_local=set(range(candidate_count)),
+            n_valid_contrast_pairs=None,
+            n_label0=n_label0,
+            n_label1=n_label1,
+            max_features_requested=max_features_requested,
+            max_features_effective=candidate_count,
+            applied=False,
+            skip_reason="method_none",
+        )
+        return RankedFeatureFilterResult(selected=selected, priority_scores=None, score_rows=rows)
+
+    if max_features is None:
+        raise CVError(
+            "ranked_feature_filter max_features is missing for method " f"{method}"
+        )
+
+    effect = empty_values.copy()
+    standard_error = empty_values.copy()
+    score = empty_values.copy()
+    n_valid_contrast_pairs: int | None = None
+    fallback_to_absolute_effect = False
+
+    if method == "pair_aware":
+        if y_train is None or groups_train is None:
+            raise CVError(
+                "ranked_feature_filter method pair_aware requires y_train and groups_train"
+            )
+        contrasts = _pair_group_contrasts(x_train_expr, y_train, groups_train, selected)
+        n_valid_contrast_pairs = int(contrasts.shape[0])
+        min_contrast_pairs = int(filter_config.min_contrast_pairs)
+        if n_valid_contrast_pairs < min_contrast_pairs:
             if warnings is not None:
                 warnings.append(
-                    "pair_aware_filter used absolute mean group contrast because all per-feature "
-                    "standard errors were zero"
+                    "ranked_feature_filter method pair_aware skipped because too few valid "
+                    "contrast pairs were available in a split; "
+                    f"valid_contrast_pairs={n_valid_contrast_pairs}, "
+                    f"min_contrast_pairs={min_contrast_pairs}"
                 )
+            rows = _ranked_score_rows(
+                method=method,
+                selected=selected,
+                feature_names=feature_names,
+                effect=effect,
+                standard_error=standard_error,
+                score=score,
+                rank_by_local=np.zeros(candidate_count, dtype=int),
+                retained_local=set(range(candidate_count)),
+                n_valid_contrast_pairs=n_valid_contrast_pairs,
+                n_label0=n_label0,
+                n_label1=n_label1,
+                max_features_requested=max_features_requested,
+                max_features_effective=candidate_count,
+                applied=False,
+                skip_reason="too_few_valid_contrast_pairs",
+            )
+            return RankedFeatureFilterResult(
+                selected=selected, priority_scores=None, score_rows=rows
+            )
+        effect = np.asarray(np.mean(contrasts, axis=0), dtype=float)
+        if n_valid_contrast_pairs > 1:
+            standard_error = np.asarray(
+                np.std(contrasts, axis=0, ddof=1), dtype=float
+            ) / np.sqrt(float(n_valid_contrast_pairs))
+        else:
+            fallback_to_absolute_effect = True
+    elif method == "unpaired":
+        if y_train is None:
+            raise CVError("ranked_feature_filter method unpaired requires y_train")
+        label0_idx = np.flatnonzero(y_train == 0)
+        label1_idx = np.flatnonzero(y_train == 1)
+        if label0_idx.size == 0 or label1_idx.size == 0:
+            raise CVError("ranked_feature_filter method unpaired requires both labels")
+        label0_values = x_train_expr[label0_idx][:, selected]
+        label1_values = x_train_expr[label1_idx][:, selected]
+        effect = np.asarray(
+            np.mean(label1_values, axis=0) - np.mean(label0_values, axis=0),
+            dtype=float,
+        )
+        if label0_idx.size > 1 and label1_idx.size > 1:
+            standard_error = np.sqrt(
+                np.var(label1_values, axis=0, ddof=1) / float(label1_idx.size)
+                + np.var(label0_values, axis=0, ddof=1) / float(label0_idx.size)
+            )
+        else:
+            fallback_to_absolute_effect = True
+    elif method == "variance":
+        if x_train_expr.shape[0] > 1:
+            score = np.asarray(
+                np.var(x_train_expr[:, selected], axis=0, ddof=1), dtype=float
+            )
+        else:
+            score = np.zeros(candidate_count, dtype=float)
+    else:  # pragma: no cover - guarded by config validation.
+        raise CVError(f"Unsupported ranked_feature_filter method: {method}")
+
+    if method in {"pair_aware", "unpaired"}:
+        positive_se = standard_error[
+            np.isfinite(standard_error) & (standard_error > 0.0)
+        ]
+        if positive_se.size == 0:
+            fallback_to_absolute_effect = True
             score = np.abs(effect)
         else:
             s0 = max(
-                float(np.quantile(positive_se, _PAIR_AWARE_SE_QUANTILE)),
-                _PAIR_AWARE_SCORE_FLOOR,
+                float(np.quantile(positive_se, _RANKED_FEATURE_SE_QUANTILE)),
+                _RANKED_FEATURE_SCORE_FLOOR,
             )
-            score = np.abs(effect) / np.maximum(se, s0)
+            score = np.abs(effect) / np.maximum(standard_error, s0)
+        if fallback_to_absolute_effect and warnings is not None:
+            warnings.append(
+                f"ranked_feature_filter method {method} used absolute effect because usable "
+                "per-feature standard errors were unavailable"
+            )
+
     score = np.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0)
+    feature_keys = np.asarray(
+        [feature_names[feature_index] for feature_index in selected], dtype=str
+    )
+    secondary = (
+        np.abs(np.nan_to_num(effect, nan=0.0))
+        if method in {"pair_aware", "unpaired"}
+        else np.zeros(candidate_count, dtype=float)
+    )
+    order = np.lexsort((feature_keys, -secondary, -score))
+    rank_by_local = np.empty(candidate_count, dtype=int)
+    rank_by_local[order] = np.arange(1, candidate_count + 1, dtype=int)
+
     if np.all(np.isclose(score, 0.0)):
         if warnings is not None:
             warnings.append(
-                "pair_aware_filter skipped because all pair-aware scores were zero or non-finite "
-                "in a split"
+                f"ranked_feature_filter method {method} skipped because all scores were zero "
+                "or non-finite in a split"
             )
-        return selected, None
+        rows = _ranked_score_rows(
+            method=method,
+            selected=selected,
+            feature_names=feature_names,
+            effect=effect,
+            standard_error=standard_error,
+            score=score,
+            rank_by_local=rank_by_local,
+            retained_local=set(range(candidate_count)),
+            n_valid_contrast_pairs=n_valid_contrast_pairs,
+            n_label0=n_label0,
+            n_label1=n_label1,
+            max_features_requested=max_features_requested,
+            max_features_effective=candidate_count,
+            applied=False,
+            skip_reason="all_scores_zero_or_non_finite",
+        )
+        return RankedFeatureFilterResult(selected=selected, priority_scores=None, score_rows=rows)
 
-    keep_count = min(int(max_features), int(selected.size))
-    feature_keys = np.asarray(
-        [feature_names[feature_index] for feature_index in selected],
-        dtype=str,
-    )
-    order = np.lexsort((feature_keys, -np.abs(effect), -score))
+    keep_count = min(int(max_features), candidate_count)
     kept_local = np.asarray(order[:keep_count], dtype=int)
+    rows = _ranked_score_rows(
+        method=method,
+        selected=selected,
+        feature_names=feature_names,
+        effect=effect,
+        standard_error=standard_error,
+        score=score,
+        rank_by_local=rank_by_local,
+        retained_local=set(kept_local.tolist()),
+        n_valid_contrast_pairs=n_valid_contrast_pairs,
+        n_label0=n_label0,
+        n_label1=n_label1,
+        max_features_requested=max_features_requested,
+        max_features_effective=keep_count,
+        applied=True,
+        skip_reason=None,
+    )
     kept_global = selected[kept_local]
     kept_priority = score[kept_local]
-
     order_by_feature = np.argsort(kept_global)
-    kept_global = np.asarray(kept_global[order_by_feature], dtype=int)
-    kept_priority = np.asarray(kept_priority[order_by_feature], dtype=float)
-    return kept_global, kept_priority
+    return RankedFeatureFilterResult(
+        selected=np.asarray(kept_global[order_by_feature], dtype=int),
+        priority_scores=np.asarray(kept_priority[order_by_feature], dtype=float),
+        score_rows=rows,
+    )
 
 
 def _select_feature_indices_with_counts(
@@ -1389,6 +1641,7 @@ def _select_feature_indices_with_counts(
     y_train: np.ndarray | None = None,
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
+    ranked_feature_score_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[np.ndarray, FeatureFilterCounts]:
     selected = np.arange(x_train_expr.shape[1], dtype=int)
     n_features_before = int(selected.size)
@@ -1431,20 +1684,19 @@ def _select_feature_indices_with_counts(
         selected = selected[variances >= float(min_variance)]
     n_features_after_low_variance = int(selected.size)
 
-    pair_aware_priority_scores: np.ndarray | None = None
-    if config.preprocess.pair_aware_filter.enabled and selected.size > 0:
-        if y_train is None or groups_train is None:
-            raise CVError("pair_aware_filter requires y_train and groups_train in preprocessing")
-        selected, pair_aware_priority_scores = _apply_pair_aware_filter(
-            config,
-            x_train_expr,
-            y_train,
-            groups_train,
-            selected,
-            feature_names,
-            warnings=warnings,
-        )
-    n_features_after_pair_aware = int(selected.size)
+    ranked_result = _apply_ranked_feature_filter(
+        config,
+        x_train_expr,
+        selected,
+        feature_names,
+        y_train=y_train,
+        groups_train=groups_train,
+        warnings=warnings,
+    )
+    selected = ranked_result.selected
+    if ranked_feature_score_rows is not None:
+        ranked_feature_score_rows.extend(ranked_result.score_rows)
+    n_features_after_ranked_feature_filter = int(selected.size)
 
     if config.preprocess.correlation_filter.enabled and selected.size > 1:
         selected = _apply_correlation_filter(
@@ -1452,7 +1704,7 @@ def _select_feature_indices_with_counts(
             x_train_expr,
             selected,
             feature_names,
-            priority_scores=pair_aware_priority_scores,
+            priority_scores=ranked_result.priority_scores,
         )
     n_features_after_correlation = int(selected.size)
 
@@ -1462,7 +1714,7 @@ def _select_feature_indices_with_counts(
         n_features_before=n_features_before,
         n_features_after_sparse_feature_filter=n_features_after_sparse_feature_filter,
         n_features_after_low_variance=n_features_after_low_variance,
-        n_features_after_pair_aware=n_features_after_pair_aware,
+        n_features_after_ranked_feature_filter=n_features_after_ranked_feature_filter,
         n_features_after_correlation=n_features_after_correlation,
         n_features_after_all=int(selected.size),
     )
@@ -1498,7 +1750,7 @@ def _apply_correlation_filter(
     if max_abs_corr is None:
         raise CVError("correlation_filter is enabled but max_abs_correlation is missing")
     if priority_scores is not None and priority_scores.shape[0] != selected.size:
-        raise CVError("pair-aware priority scores must align with the selected feature set")
+        raise CVError("ranked feature priority scores must align with the selected feature set")
 
     train_selected = x_train_log[:, selected]
     if config.preprocess.correlation_filter.method == "spearman":
@@ -1544,6 +1796,7 @@ def _preprocess_fold_with_counts(
     y_train: np.ndarray | None = None,
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
+    ranked_feature_score_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts]:
     x_train_expr = _apply_expression_transform_for_config(config, x_train_raw)
     x_valid_expr = _apply_expression_transform_for_config(config, x_valid_raw)
@@ -1556,6 +1809,7 @@ def _preprocess_fold_with_counts(
         y_train=y_train,
         groups_train=groups_train,
         warnings=warnings,
+        ranked_feature_score_rows=ranked_feature_score_rows,
     )
 
 
@@ -1567,6 +1821,7 @@ def _preprocess_transformed_fold_with_counts(
     y_train: np.ndarray | None = None,
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
+    ranked_feature_score_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts]:
     """Preprocess a fold whose row-local expression transform is already applied."""
 
@@ -1577,6 +1832,7 @@ def _preprocess_transformed_fold_with_counts(
         y_train=y_train,
         groups_train=groups_train,
         warnings=warnings,
+        ranked_feature_score_rows=ranked_feature_score_rows,
     )
     selected_features = [feature_names[idx] for idx in selected]
 
@@ -2859,8 +3115,11 @@ def _fold_ids(split_manifest: pl.DataFrame) -> list[str]:
 def _with_contrast_group_column(config: AppConfig, split_manifest: pl.DataFrame) -> pl.DataFrame:
     if "contrast_group_id" in split_manifest.columns:
         return split_manifest
-    if config.preprocess.pair_aware_filter.enabled:
-        raise CVError("split_manifest is missing contrast_group_id required by pair_aware_filter")
+    if config.preprocess.ranked_feature_filter.method == "pair_aware":
+        raise CVError(
+            "split_manifest is missing contrast_group_id required by "
+            "ranked_feature_filter method pair_aware"
+        )
     return split_manifest.with_columns(pl.lit(None, dtype=pl.String).alias("contrast_group_id"))
 
 
@@ -3045,6 +3304,7 @@ def _preprocess_train_and_target_with_counts(
     y_train: np.ndarray | None = None,
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
+    ranked_feature_score_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str], FeatureScaler, FeatureFilterCounts]:
     x_train_expr = _apply_expression_transform_for_config(config, x_train_raw)
     x_target_expr = _apply_expression_transform_for_config(config, x_target_raw)
@@ -3056,6 +3316,7 @@ def _preprocess_train_and_target_with_counts(
         y_train=y_train,
         groups_train=groups_train,
         warnings=warnings,
+        ranked_feature_score_rows=ranked_feature_score_rows,
     )
     selected_features = [feature_names[idx] for idx in selected]
 
@@ -3080,7 +3341,9 @@ def _counts_with_n_features_before(
         n_features_before=resolved,
         n_features_after_sparse_feature_filter=counts.n_features_after_sparse_feature_filter,
         n_features_after_low_variance=counts.n_features_after_low_variance,
-        n_features_after_pair_aware=counts.n_features_after_pair_aware,
+        n_features_after_ranked_feature_filter=(
+            counts.n_features_after_ranked_feature_filter
+        ),
         n_features_after_correlation=counts.n_features_after_correlation,
         n_features_after_all=counts.n_features_after_all,
     )
@@ -3094,6 +3357,7 @@ def _preprocess_train_only_with_counts(
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
     n_features_before_override: int | None = None,
+    ranked_feature_score_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[np.ndarray, list[str], FeatureScaler, FeatureFilterCounts]:
     x_train_expr = _apply_expression_transform_for_config(config, x_train_raw)
     selected, counts = _select_feature_indices_with_counts(
@@ -3103,6 +3367,7 @@ def _preprocess_train_only_with_counts(
         y_train=y_train,
         groups_train=groups_train,
         warnings=warnings,
+        ranked_feature_score_rows=ranked_feature_score_rows,
     )
     counts = _counts_with_n_features_before(counts, n_features_before_override)
     selected_features = [feature_names[idx] for idx in selected]
@@ -3229,6 +3494,7 @@ def _fit_outer_sample_set(
     if np.unique(y_sampled).size < 2:
         raise CVError(f"Fold {fold_id} sampled training set became single-class")
     preprocess_started = None if timing_recorder is None else timing_recorder.start()
+    ranked_feature_score_rows: list[dict[str, Any]] = []
     try:
         x_sampled, x_valid, selected_features, filter_counts = _preprocess_fold_with_counts(
             config,
@@ -3238,6 +3504,7 @@ def _fit_outer_sample_set(
             y_train=y_sampled,
             groups_train=contrast_groups_sampled,
             warnings=warnings,
+            ranked_feature_score_rows=ranked_feature_score_rows,
         )
     except CVError as exc:
         raise CVError(
@@ -3358,6 +3625,12 @@ def _fit_outer_sample_set(
         model_sparsity_rows=model_sparsity_rows,
         selected_features=selected_features,
         filter_counts=filter_counts,
+        ranked_feature_score_rows=_with_ranked_feature_score_context(
+            ranked_feature_score_rows,
+            scope="outer_fold",
+            fold_id=fold_id,
+            sample_set_id=sample_set_id,
+        ),
         model_count=len(source_result.selected_candidates),
         warnings=warnings,
         convergence_rows=convergence_rows,
@@ -3404,6 +3677,7 @@ def _fit_final_refit_sample_set(
     if np.unique(y_sampled).size < 2:
         raise CVError("Final refit sampled training set became single-class")
     preprocess_started = None if timing_recorder is None else timing_recorder.start()
+    ranked_feature_score_rows: list[dict[str, Any]] = []
     x_sampled, selected_features, scaler, filter_counts = _preprocess_train_only_with_counts(
         config,
         x_sampled_raw,
@@ -3412,6 +3686,7 @@ def _fit_final_refit_sample_set(
         groups_train=contrast_groups_sampled,
         warnings=warnings,
         n_features_before_override=n_features_before_override,
+        ranked_feature_score_rows=ranked_feature_score_rows,
     )
     x_target_scaled: np.ndarray | None = None
     if target_count > 0 and resolved_x_target_raw is not None:
@@ -3575,6 +3850,12 @@ def _fit_final_refit_sample_set(
         selected_features=selected_features,
         scaler=scaler,
         filter_counts=filter_counts,
+        ranked_feature_score_rows=_with_ranked_feature_score_context(
+            ranked_feature_score_rows,
+            scope="final_refit",
+            fold_id="NA",
+            sample_set_id=sample_set_id,
+        ),
         model_count=selected_count,
         warnings=warnings,
         convergence_rows=convergence_rows,
@@ -3678,7 +3959,10 @@ def _run_final_refit_impl(
     y_train = np.array(train_pool.select("label").to_series().to_list(), dtype=int)
     groups_train = np.array(train_pool.select("group_id").to_series().to_list(), dtype=str)
     contrast_groups_train: np.ndarray | None = None
-    if config.data.contrast_pair_col is not None or config.preprocess.pair_aware_filter.enabled:
+    if (
+        config.data.contrast_pair_col is not None
+        or config.preprocess.ranked_feature_filter.method == "pair_aware"
+    ):
         contrast_values = train_pool.select("contrast_group_id").to_series().to_list()
         contrast_groups_train = np.array(contrast_values, dtype=object)
     sampling_started = recorder.start()
@@ -3917,6 +4201,7 @@ def _run_final_refit_impl(
     postprocess_started = recorder.start()
     model_entries: list[FinalModelEntry] = []
     feature_filter_count_rows: list[dict[str, Any]] = []
+    ranked_feature_score_rows: list[dict[str, Any]] = []
     retained_feature_rows: list[dict[str, Any]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
     sampled_train_loss_values: list[float] = []
@@ -3931,6 +4216,7 @@ def _run_final_refit_impl(
                 counts=fit_result.filter_counts,
             )
         )
+        ranked_feature_score_rows.extend(fit_result.ranked_feature_score_rows)
         retained_feature_rows.extend(
             _retained_feature_rows(
                 scope="final_refit",
@@ -4045,6 +4331,7 @@ def _run_final_refit_impl(
         )
     feature_filter_counts = _build_feature_filter_counts(feature_filter_count_rows)
     feature_filter_counts_summary = _summarize_feature_filter_counts(feature_filter_counts)
+    ranked_feature_scores = _build_ranked_feature_scores(ranked_feature_score_rows)
     retained_features = _build_retained_features(retained_feature_rows)
     retained_features_summary = _summarize_retained_features(retained_features)
     model_sparsity = _build_model_sparsity(model_sparsity_rows)
@@ -4068,6 +4355,7 @@ def _run_final_refit_impl(
         model_selection_selected=model_selection_selected,
         feature_filter_counts=feature_filter_counts,
         feature_filter_counts_summary=feature_filter_counts_summary,
+        ranked_feature_scores=ranked_feature_scores,
         retained_features=retained_features,
         retained_features_summary=retained_features_summary,
         model_sparsity=model_sparsity,
@@ -4133,7 +4421,10 @@ def _run_outer_fold(
     y_valid = np.array(valid_df.select("label").to_series().to_list(), dtype=int)
     groups_train = np.array(train_df.select("group_id").to_series().to_list(), dtype=str)
     contrast_groups_train: np.ndarray | None = None
-    if config.data.contrast_pair_col is not None or config.preprocess.pair_aware_filter.enabled:
+    if (
+        config.data.contrast_pair_col is not None
+        or config.preprocess.ranked_feature_filter.method == "pair_aware"
+    ):
         contrast_values = train_df.select("contrast_group_id").to_series().to_list()
         contrast_groups_train = np.array(contrast_values, dtype=object)
     _emit_fold_progress(
@@ -4401,6 +4692,7 @@ def _run_outer_fold(
 
     sample_results: dict[int, OuterSampleSetFitResult] = {}
     feature_filter_count_rows: list[dict[str, Any]] = []
+    ranked_feature_score_rows: list[dict[str, Any]] = []
     retained_feature_rows: list[dict[str, Any]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
 
@@ -4415,6 +4707,7 @@ def _run_outer_fold(
                 counts=counts,
             )
         )
+        ranked_feature_score_rows.extend(fit_result.ranked_feature_score_rows)
         retained_feature_rows.extend(
             _retained_feature_rows(
                 scope="outer_fold",
@@ -4434,7 +4727,8 @@ def _run_outer_fold(
                 f"features_after_sparse_feature_filter="
                 f"{counts.n_features_after_sparse_feature_filter}, "
                 f"features_after_low_variance={counts.n_features_after_low_variance}, "
-                f"features_after_pair_aware={counts.n_features_after_pair_aware}, "
+                "features_after_ranked_feature_filter="
+                f"{counts.n_features_after_ranked_feature_filter}, "
                 f"features_after_correlation={counts.n_features_after_correlation}, "
                 f"features_after={counts.n_features_after_all}"
             ),
@@ -4464,7 +4758,9 @@ def _run_outer_fold(
         first_filter_counts.n_features_after_sparse_feature_filter
     )
     n_features_after_low_variance = first_filter_counts.n_features_after_low_variance
-    n_features_after_pair_aware = first_filter_counts.n_features_after_pair_aware
+    n_features_after_ranked_feature_filter = (
+        first_filter_counts.n_features_after_ranked_feature_filter
+    )
     n_features_after_correlation = first_filter_counts.n_features_after_correlation
     n_features_after_preprocess = first_filter_counts.n_features_after_all
     _emit_fold_progress("preprocess_done")
@@ -4591,13 +4887,16 @@ def _run_outer_fold(
         model_selection_selected_rows=model_selection_selected_rows,
         model_selection_trial_rows=model_selection_trial_rows,
         feature_filter_count_rows=feature_filter_count_rows,
+        ranked_feature_score_rows=ranked_feature_score_rows,
         retained_feature_rows=retained_feature_rows,
         model_sparsity_rows=model_sparsity_rows,
         fold_model_count=fold_model_count,
         n_features_before_preprocess=n_features_before_preprocess,
         n_features_after_sparse_feature_filter=n_features_after_sparse_feature_filter,
         n_features_after_low_variance=n_features_after_low_variance,
-        n_features_after_pair_aware=n_features_after_pair_aware,
+        n_features_after_ranked_feature_filter=(
+            n_features_after_ranked_feature_filter
+        ),
         n_features_after_correlation=n_features_after_correlation,
         n_features_after_preprocess=n_features_after_preprocess,
         warnings=warnings,
@@ -4640,6 +4939,7 @@ def _run_outer_cv_impl(
     model_selection_selected_rows: list[dict[str, Any]] = []
     model_selection_trial_rows: list[dict[str, Any]] = []
     feature_filter_count_rows: list[dict[str, Any]] = []
+    ranked_feature_score_rows: list[dict[str, Any]] = []
     retained_feature_rows: list[dict[str, Any]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
     convergence_rows: list[dict[str, Any]] = []
@@ -4683,6 +4983,7 @@ def _run_outer_cv_impl(
         model_selection_selected_rows.extend(fold_result.model_selection_selected_rows)
         model_selection_trial_rows.extend(fold_result.model_selection_trial_rows)
         feature_filter_count_rows.extend(fold_result.feature_filter_count_rows)
+        ranked_feature_score_rows.extend(fold_result.ranked_feature_score_rows)
         retained_feature_rows.extend(fold_result.retained_feature_rows)
         model_sparsity_rows.extend(fold_result.model_sparsity_rows)
         convergence_rows.extend(fold_result.convergence_rows)
@@ -4839,6 +5140,7 @@ def _run_outer_cv_impl(
         model_selection_trials_summary = _summarize_model_selection_trials(model_selection_trials)
     feature_filter_counts = _build_feature_filter_counts(feature_filter_count_rows)
     feature_filter_counts_summary = _summarize_feature_filter_counts(feature_filter_counts)
+    ranked_feature_scores = _build_ranked_feature_scores(ranked_feature_score_rows)
     retained_features = _build_retained_features(retained_feature_rows)
     retained_features_summary = _summarize_retained_features(retained_features)
     model_sparsity = _build_model_sparsity(model_sparsity_rows)
@@ -4884,6 +5186,7 @@ def _run_outer_cv_impl(
         model_selection_trials_summary=model_selection_trials_summary,
         feature_filter_counts=feature_filter_counts,
         feature_filter_counts_summary=feature_filter_counts_summary,
+        ranked_feature_scores=ranked_feature_scores,
         retained_features=retained_features,
         retained_features_summary=retained_features_summary,
         model_sparsity=model_sparsity,

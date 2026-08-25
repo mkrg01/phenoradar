@@ -28,6 +28,7 @@ SelectionRule = Literal["best", "one_se"]
 CorrelationMethod = Literal["pearson", "spearman"]
 ExpressionTransformMethod = Literal["none", "log1p", "sample_rank", "sample_percentile_rank"]
 FeatureScalingMethod = Literal["none", "standard"]
+RankedFeatureFilterMethod = Literal["none", "pair_aware", "unpaired", "variance"]
 
 
 class StrictModel(BaseModel):
@@ -228,18 +229,19 @@ class CorrelationFilterConfig(StrictModel):
         return self
 
 
-class PairAwareFilterConfig(StrictModel):
-    """Train-only group-contrast feature filter settings."""
+class RankedFeatureFilterConfig(StrictModel):
+    """Train-only ranked feature filter settings."""
 
-    enabled: bool = False
+    method: RankedFeatureFilterMethod = "none"
     max_features: PositiveInt | None = None
     min_contrast_pairs: PositiveInt = 1
 
     @model_validator(mode="after")
-    def validate_enabled_args(self) -> PairAwareFilterConfig:
-        if self.enabled and self.max_features is None:
+    def validate_method_args(self) -> RankedFeatureFilterConfig:
+        if self.method != "none" and self.max_features is None:
             raise ValueError(
-                "preprocess.pair_aware_filter.max_features is required when enabled=true"
+                "preprocess.ranked_feature_filter.max_features is required "
+                "when method is not none"
             )
         return self
 
@@ -267,7 +269,9 @@ class PreprocessConfig(StrictModel):
         default_factory=SparseFeatureFilterConfig
     )
     low_variance_filter: LowVarianceFilterConfig = Field(default_factory=LowVarianceFilterConfig)
-    pair_aware_filter: PairAwareFilterConfig = Field(default_factory=PairAwareFilterConfig)
+    ranked_feature_filter: RankedFeatureFilterConfig = Field(
+        default_factory=RankedFeatureFilterConfig
+    )
     correlation_filter: CorrelationFilterConfig = Field(default_factory=CorrelationFilterConfig)
     feature_scaling: FeatureScalingConfig = Field(default_factory=FeatureScalingConfig)
 
@@ -461,9 +465,13 @@ class AppConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_contrast_pair_dependencies(self) -> AppConfig:
-        if self.preprocess.pair_aware_filter.enabled and self.data.contrast_pair_col is None:
+        if (
+            self.preprocess.ranked_feature_filter.method == "pair_aware"
+            and self.data.contrast_pair_col is None
+        ):
             raise ValueError(
-                "preprocess.pair_aware_filter requires data.contrast_pair_col"
+                "preprocess.ranked_feature_filter.method=pair_aware requires "
+                "data.contrast_pair_col"
             )
         if self.model.logistic_solver == "liblinear":
             if self.model.name != "logistic_elasticnet":

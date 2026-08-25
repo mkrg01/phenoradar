@@ -178,8 +178,8 @@ split:
   group_col: order_id
   test_holdout_col: order_test_holdout
 preprocess:
-  pair_aware_filter:
-    enabled: true
+  ranked_feature_filter:
+    method: pair_aware
     max_features: 1
 """.strip()
         + "\n",

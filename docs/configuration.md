@@ -29,6 +29,43 @@ Use `config` to inspect resolved output:
 phenoradar config [--out resolved.yml]
 ```
 
+### Ordered multi-condition runs
+
+For `phenoradar run`, a list assigned to a field that is scalar in the schema
+creates one condition per value. No separate experiment section or reference
+condition is used. For example:
+
+```yaml
+preprocess:
+  ranked_feature_filter:
+    method: [none, pair_aware, unpaired, variance]
+    max_features: 100
+```
+
+Multiple scalar-list fields are expanded as a Cartesian product. Field order in
+the YAML and value order within each list determine `condition_index`; study
+tables and figures retain this order and are not sorted by value or performance.
+
+Lists that are already part of a field's schema remain ordinary single-run
+values. In particular, this remains one inner model-selection search space:
+
+```yaml
+model_selection:
+  search_space:
+    C: [0.01, 0.1, 1.0, 10.0]
+```
+
+Multi-condition runs share one realized outer split. Condition lists are
+therefore rejected for `data`, `split`, `runtime`, evaluation/report controls,
+inner-CV split controls, and operational preprocessing controls. Use a separate
+config and study when comparing generalization regimes or datasets.
+
+Resume an interrupted study with the same source config:
+
+```bash
+phenoradar run -c config.yml --resume runs/<study_id>
+```
+
 ## Default config
 
 Generate resolved defaults with:
@@ -69,9 +106,10 @@ preprocess:
   low_variance_filter:
     enabled: false
     min_variance: null
-  pair_aware_filter:
-    enabled: false
+  ranked_feature_filter:
+    method: none
     max_features: null
+    min_contrast_pairs: 1
   correlation_filter:
     enabled: false
     method: pearson
@@ -175,7 +213,8 @@ runtime:
   - type: `str | null`
   - default: `contrast_pair_id`
   - optional contrast-pair column used by contrast-specific features such as
-    `preprocess.pair_aware_filter` and tree contrast-pair QC. Set to `null`
+    `preprocess.ranked_feature_filter.method=pair_aware` and tree contrast-pair
+    QC. Set to `null`
     when the workflow does not use contrast pairs.
 
 ## `split`
@@ -282,29 +321,33 @@ Compatibility rules:
   - default: `null`
   - rule: required when `enabled=true`
 
-### `preprocess.pair_aware_filter`
+### `preprocess.ranked_feature_filter`
 
-- `enabled`
-  - type: `bool`
-  - default: `false`
+- `method`
+  - type: `none | pair_aware | unpaired | variance`
+  - default: `none`
 - `max_features`
   - type: `int >= 1 | null`
   - default: `null`
-  - rule: required when `enabled=true`
+  - rule: required when `method` is not `none`
 - `min_contrast_pairs`
   - type: `int >= 1`
   - default: `1`
 - behavior:
-  - computes train-only per-group label contrasts after `expression_transform`
-  - uses only `data.contrast_pair_col` groups in the training fold that contain
-    both labels
-  - ranks features by an internal paired t-like score when at least 2 valid
-    contrast pairs are available; with 1 valid pair, ranks by absolute mean
-    contrast
+  - all methods are fitted using training rows only, after sparse and
+    low-variance filtering and before correlation filtering
+  - `none` keeps all candidates and does not require `max_features`
+  - `pair_aware` ranks by a stabilized paired t-like score computed from
+    per-group label contrasts; with no usable standard errors it uses absolute
+    mean contrast
+  - `unpaired` ignores contrast groups and ranks by a stabilized label-mean
+    difference divided by its Welch standard error; with no usable standard
+    errors it uses absolute mean difference
+  - `variance` ranks by train-set sample variance without using labels
   - keeps the top `max_features`
   - when fewer than `min_contrast_pairs` valid contrast pairs are available in a
     split, the filter is skipped with a warning
-  - requires `data.contrast_pair_col`; this is independent from
+  - `pair_aware` requires `data.contrast_pair_col`; this is independent from
     `split.group_col`, so taxonomic-rank splits can still use contrast-pair
     feature scoring where contrast pairs are available.
 

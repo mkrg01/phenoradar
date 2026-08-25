@@ -319,8 +319,8 @@ sampling:
 preprocess:
   expression_transform:
     method: {rank_method}
-  pair_aware_filter:
-    enabled: true
+  ranked_feature_filter:
+    method: pair_aware
     max_features: 1
   feature_scaling:
     method: none

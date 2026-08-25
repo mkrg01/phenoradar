@@ -43,6 +43,7 @@ Run training/evaluation pipeline.
 
 ```bash
 phenoradar run -c config.yml [--execution-stage cv_only|full_run]
+phenoradar run -c config.yml --resume runs/<study_id>
 ```
 
 Options:
@@ -51,6 +52,13 @@ Options:
 - `--execution-stage`: temporary override of `runtime.execution_stage`
 - `--verbose`, `-v`: detailed stage-level logs
 - `--quiet`, `-q`: suppress progress logs
+- `--resume`: resume a multi-condition study directory generated from the same
+  ordered conditions
+
+When a schema-scalar config field contains a list, `run` expands the values into
+ordered conditions, reuses one outer split for every condition, and writes a
+study directory. All conditions are reported symmetrically; there is no default
+or reference condition.
 
 Always written:
 

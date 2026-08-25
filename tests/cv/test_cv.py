@@ -221,7 +221,7 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "n_features_before",
         "n_features_after_sparse_feature_filter",
         "n_features_after_low_variance",
-        "n_features_after_pair_aware",
+        "n_features_after_ranked_feature_filter",
         "n_features_after_correlation",
         "n_features_after_all",
     }.issubset(cv_artifacts.feature_filter_counts.columns)
@@ -237,6 +237,19 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "retained_ratio_median",
         "retained_ratio_q3",
     }.issubset(cv_artifacts.feature_filter_counts_summary.columns)
+    assert cv_artifacts.ranked_feature_scores.height > 0
+    assert {
+        "scope",
+        "fold_id",
+        "sample_set_id",
+        "method",
+        "feature",
+        "score",
+        "rank",
+        "retained",
+        "applied",
+        "skip_reason",
+    }.issubset(cv_artifacts.ranked_feature_scores.columns)
     assert cv_artifacts.retained_features.height > 0
     assert {
         "scope",
@@ -958,10 +971,11 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
         "fold_id",
         "sample_set_id",
         "n_features_before",
-        "n_features_after_pair_aware",
+        "n_features_after_ranked_feature_filter",
         "n_features_after_all",
     }.issubset(refit_artifacts.feature_filter_counts.columns)
     assert refit_artifacts.feature_filter_counts_summary.height > 0
+    assert refit_artifacts.ranked_feature_scores.height > 0
     assert refit_artifacts.retained_features.height > 0
     assert {
         "scope",
@@ -4130,8 +4144,8 @@ def test_select_feature_indices_pair_aware_filter_prefers_consistent_signal(
 preprocess:
   sparse_feature_filter:
     enabled: false
-  pair_aware_filter:
-    enabled: true
+  ranked_feature_filter:
+    method: pair_aware
     max_features: 1
 """.strip(),
             )
@@ -4178,8 +4192,8 @@ def test_pair_aware_filter_breaks_score_ties_by_feature_name(
 preprocess:
   sparse_feature_filter:
     enabled: false
-  pair_aware_filter:
-    enabled: true
+  ranked_feature_filter:
+    method: pair_aware
     max_features: 2
 """.strip(),
             )
@@ -4212,8 +4226,8 @@ def test_select_feature_indices_pair_aware_filter_uses_available_valid_contrast_
 preprocess:
   sparse_feature_filter:
     enabled: false
-  pair_aware_filter:
-    enabled: true
+  ranked_feature_filter:
+    method: pair_aware
     max_features: 1
     min_contrast_pairs: 2
 """.strip(),
@@ -4259,8 +4273,8 @@ def test_select_feature_indices_pair_aware_filter_uses_single_valid_pair_by_defa
 preprocess:
   sparse_feature_filter:
     enabled: false
-  pair_aware_filter:
-    enabled: true
+  ranked_feature_filter:
+    method: pair_aware
     max_features: 1
 """.strip(),
             )
@@ -4284,7 +4298,7 @@ preprocess:
     )
 
     assert selected.tolist() == [1]
-    assert any("one valid contrast pair" in item for item in warnings)
+    assert any("standard errors were unavailable" in item for item in warnings)
 
 
 def test_select_feature_indices_pair_aware_filter_skips_when_too_few_groups(
@@ -4301,8 +4315,8 @@ def test_select_feature_indices_pair_aware_filter_skips_when_too_few_groups(
 preprocess:
   sparse_feature_filter:
     enabled: false
-  pair_aware_filter:
-    enabled: true
+  ranked_feature_filter:
+    method: pair_aware
     max_features: 1
     min_contrast_pairs: 2
 """.strip(),
@@ -4328,6 +4342,122 @@ preprocess:
 
     assert selected.tolist() == [0, 1]
     assert any("too few valid contrast pairs" in item for item in warnings)
+
+
+def test_ranked_feature_filter_unpaired_uses_label_difference(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: unpaired
+    max_features: 1
+""".strip(),
+            )
+        ]
+    )
+    score_rows: list[dict[str, object]] = []
+
+    selected, counts = cv_mod._select_feature_indices_with_counts(
+        config,
+        np.array(
+            [
+                [0.0, 0.0],
+                [0.0, 10.0],
+                [2.0, 0.0],
+                [2.0, 10.0],
+            ],
+            dtype=float,
+        ),
+        ["label_signal", "within_label_variance"],
+        y_train=np.array([0, 0, 1, 1], dtype=int),
+        ranked_feature_score_rows=score_rows,
+    )
+
+    assert selected.tolist() == [0]
+    assert counts.n_features_after_ranked_feature_filter == 1
+    assert {row["method"] for row in score_rows} == {"unpaired"}
+    retained = {str(row["feature"]): bool(row["retained"]) for row in score_rows}
+    assert retained == {"label_signal": True, "within_label_variance": False}
+
+
+def test_ranked_feature_filter_variance_is_label_independent(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: variance
+    max_features: 1
+""".strip(),
+            )
+        ]
+    )
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [0.0, 0.0],
+                [0.0, 10.0],
+                [1.0, 0.0],
+                [1.0, 10.0],
+            ],
+            dtype=float,
+        ),
+        ["label_signal", "high_variance"],
+    )
+
+    assert selected.tolist() == [1]
+
+
+def test_ranked_feature_filter_none_keeps_all_candidates(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: none
+    max_features: 1
+""".strip(),
+            )
+        ]
+    )
+    score_rows: list[dict[str, object]] = []
+
+    selected, _counts = cv_mod._select_feature_indices_with_counts(
+        config,
+        np.array([[0.0, 2.0], [1.0, 3.0]], dtype=float),
+        ["OG1", "OG2"],
+        ranked_feature_score_rows=score_rows,
+    )
+
+    assert selected.tolist() == [0, 1]
+    assert all(row["retained"] is True for row in score_rows)
+    assert all(row["skip_reason"] == "method_none" for row in score_rows)
 
 
 def test_select_feature_indices_calls_correlation_filter_when_enabled(

@@ -119,6 +119,21 @@ This writes artifacts under a new run directory:
 runs/<timestamp>_run_<id>/
 ```
 
+To compare multiple values with the same split, replace a schema-scalar value
+with an ordered list, for example:
+
+```yaml
+preprocess:
+  ranked_feature_filter:
+    method: [none, pair_aware, unpaired, variance]
+    max_features: 100
+```
+
+The same `phenoradar run -c config.yml` command then writes
+`runs/<timestamp>_study_<id>/`, with one run per condition plus symmetric
+pairwise tables and publication-oriented SVG/PDF/PNG figures. Conditions retain
+their config order and no reference condition is selected.
+
 Core outputs include:
 
 - `resolved_config.yml`

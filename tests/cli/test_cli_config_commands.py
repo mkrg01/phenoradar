@@ -102,7 +102,7 @@ def _stub_resolved_config(
         preprocess=SimpleNamespace(
             sparse_feature_filter=SimpleNamespace(enabled=True),
             low_variance_filter=SimpleNamespace(enabled=True),
-            pair_aware_filter=SimpleNamespace(enabled=False),
+            ranked_feature_filter=SimpleNamespace(method="none"),
             correlation_filter=SimpleNamespace(enabled=False),
         ),
         data=SimpleNamespace(
@@ -684,6 +684,7 @@ evaluation:
     assert stability_summary.get_column("nonzero_tolerance").item() > 0.0
     assert (run_dirs[0] / "model" / "tables" / "feature_filter_counts.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "feature_filter_counts_summary.tsv").exists()
+    assert (run_dirs[0] / "model" / "tables" / "ranked_feature_scores.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "retained_features.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "retained_features_summary.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "model_sparsity.tsv").exists()
@@ -1009,6 +1010,7 @@ data:
     assert (run_dirs[0] / "cv" / "tables" / "coefficients_by_fold.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "feature_filter_counts.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "feature_filter_counts_summary.tsv").exists()
+    assert (run_dirs[0] / "model" / "tables" / "ranked_feature_scores.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "retained_features.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "retained_features_summary.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "model_sparsity.tsv").exists()
@@ -1740,6 +1742,105 @@ def test_run_fails_when_config_resolution_raises(
 
     assert result.exit_code != 0
     assert "config failure" in result.output
+
+
+def test_run_expands_scalar_lists_into_ordered_study_and_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    config = _write(
+        tmp_path / "config.yml",
+        """
+preprocess:
+  ranked_feature_filter:
+    method: [none, pair_aware]
+    max_features: 100
+sampling:
+  strategy: all_samples
+  max_samples_per_label_per_group: null
+  sampled_set_count: 1
+""".lstrip(),
+    )
+    split_artifacts = _stub_split_artifacts()
+    split_artifacts.split_manifest = pl.DataFrame(
+        {
+            "species": ["sp1"],
+            "pool": ["validation"],
+            "fold_id": ["0"],
+            "group_id": ["g1"],
+            "contrast_group_id": ["g1"],
+            "label": [1],
+        }
+    )
+    split_call_count = 0
+    cv_call_count = 0
+
+    def _split(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        nonlocal split_call_count
+        split_call_count += 1
+        return split_artifacts
+
+    def _cv(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        nonlocal cv_call_count
+        cv_call_count += 1
+        return _stub_cv_artifacts()
+
+    def _fingerprints(**kwargs: object) -> dict[str, object]:
+        payload = _stub_fingerprint_metadata()
+        split_manifest = kwargs["split_manifest"]
+        assert isinstance(split_manifest, pl.DataFrame)
+        payload["split_fingerprint"] = cli_mod.split_fingerprint(split_manifest)
+        return payload
+
+    monkeypatch.setattr("phenoradar.cli.build_split_artifacts", _split)
+    monkeypatch.setattr("phenoradar.cli.run_outer_cv", _cv)
+    monkeypatch.setattr("phenoradar.cli.collect_input_files", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("phenoradar.cli._build_run_fingerprint_metadata", _fingerprints)
+    monkeypatch.setattr("phenoradar.cli.write_run_figures", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "phenoradar.cli._write_group_summary_artifacts",
+        lambda *_args, **_kwargs: [],
+    )
+
+    result = runner.invoke(app, ["run", "-c", str(config), "--quiet"])
+
+    assert result.exit_code == 0, result.output
+    study_dirs = sorted((tmp_path / "runs").glob("*_study_*"))
+    assert len(study_dirs) == 1
+    study_dir = study_dirs[0]
+    manifest = pl.read_csv(
+        study_dir / "condition_manifest.tsv",
+        separator="\t",
+        null_values="NA",
+    ).sort("condition_index")
+    assert manifest.get_column("status").to_list() == ["completed", "completed"]
+    assert manifest.get_column("condition_index").to_list() == [1, 2]
+    assert [
+        json.loads(value)["preprocess.ranked_feature_filter.method"]
+        for value in manifest.get_column("varying_parameters_json")
+    ] == ["none", "pair_aware"]
+    assert split_call_count == 1
+    assert cv_call_count == 2
+    assert (study_dir / "tables" / "condition_metrics.tsv").exists()
+    assert (study_dir / "tables" / "pairwise_comparisons.tsv").exists()
+    differences = pl.read_csv(study_dir / "config_differences.tsv", separator="\t")
+    assert differences.get_column("preprocess.ranked_feature_filter.method").to_list() == [
+        "none",
+        "pair_aware",
+    ]
+    for extension in ("svg", "pdf", "png"):
+        assert (study_dir / "figures" / f"condition_metrics.{extension}").exists()
+        assert (study_dir / "figures" / f"pairwise_improvement.{extension}").exists()
+
+    resumed = runner.invoke(
+        app,
+        ["run", "-c", str(config), "--resume", str(study_dir), "--quiet"],
+    )
+
+    assert resumed.exit_code == 0, resumed.output
+    assert split_call_count == 2
+    assert cv_call_count == 2
 
 
 def test_run_fails_when_split_artifact_build_raises(

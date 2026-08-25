@@ -478,19 +478,56 @@ preprocess:
         load_and_resolve_config([cfg])
 
 
-def test_pair_aware_filter_requires_max_features_when_enabled(tmp_path: Path) -> None:
+def test_ranked_feature_filter_requires_max_features_for_ranked_method(
+    tmp_path: Path,
+) -> None:
     cfg = _write(
         tmp_path / "invalid.yml",
         """
 preprocess:
-  pair_aware_filter:
-    enabled: true
+  ranked_feature_filter:
+    method: pair_aware
 """.strip()
         + "\n",
     )
 
     with pytest.raises(ConfigError):
         load_and_resolve_config([cfg])
+
+
+def test_removed_pair_aware_filter_key_is_rejected(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+preprocess:
+  pair_aware_filter:
+    enabled: true
+    max_features: 10
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError, match="pair_aware_filter"):
+        load_and_resolve_config([cfg])
+
+
+def test_unpaired_ranked_filter_does_not_require_contrast_pair_col(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "valid.yml",
+        """
+data:
+  contrast_pair_col: null
+preprocess:
+  ranked_feature_filter:
+    method: unpaired
+    max_features: 10
+""".strip()
+        + "\n",
+    )
+
+    resolved = load_and_resolve_config([cfg])
+
+    assert resolved.preprocess.ranked_feature_filter.method == "unpaired"
 
 
 def test_generic_group_options_allow_null_contrast_pair_col(tmp_path: Path) -> None:
@@ -521,8 +558,8 @@ def test_pair_aware_filter_requires_contrast_pair_col(tmp_path: Path) -> None:
 data:
   contrast_pair_col: null
 preprocess:
-  pair_aware_filter:
-    enabled: true
+  ranked_feature_filter:
+    method: pair_aware
     max_features: 10
 """.strip()
         + "\n",
@@ -543,8 +580,8 @@ data:
 split:
   group_col: family_id
 preprocess:
-  pair_aware_filter:
-    enabled: true
+  ranked_feature_filter:
+    method: pair_aware
     max_features: 10
 """.strip()
         + "\n",
@@ -554,7 +591,7 @@ preprocess:
 
     assert resolved.data.contrast_pair_col == "contrast_pair_id"
     assert resolved.split.group_col == "family_id"
-    assert resolved.preprocess.pair_aware_filter.min_contrast_pairs == 1
+    assert resolved.preprocess.ranked_feature_filter.min_contrast_pairs == 1
 
 
 def test_pair_aware_filter_rejects_zero_min_contrast_pairs(tmp_path: Path) -> None:
@@ -562,8 +599,8 @@ def test_pair_aware_filter_rejects_zero_min_contrast_pairs(tmp_path: Path) -> No
         tmp_path / "invalid.yml",
         """
 preprocess:
-  pair_aware_filter:
-    enabled: true
+  ranked_feature_filter:
+    method: pair_aware
     max_features: 10
     min_contrast_pairs: 0
 """.strip()

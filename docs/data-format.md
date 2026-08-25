@@ -137,8 +137,8 @@ Rules:
 - `split.exclude_col`, when configured, accepts the same boolean values and
   removes matching species from CV, external test, and inference.
 - `data.contrast_pair_col` can be set to `null` for non-contrast-pair
-  workflows. Contrast-pair-specific features such as `pair_aware_filter` then
-  cannot be used.
+  workflows. `preprocess.ranked_feature_filter.method=pair_aware` then cannot
+  be used.
 
 Pool assignment is derived from `(trait, split.group_col, split.test_holdout_col,
 split.exclude_col)`:
@@ -183,7 +183,7 @@ Training preflight requirements:
 - the full `training_validation` pool must include both labels (`0` and `1`)
 - with `sampling.strategy: group_balanced`, each `split.group_col` group must
   include both labels before CV
-- with `preprocess.pair_aware_filter.enabled: true`, valid contrast pairs used
+- with `preprocess.ranked_feature_filter.method: pair_aware`, valid contrast pairs used
   for feature scoring must include both labels; species without a valid
   `data.contrast_pair_col` value remain eligible for model training when the
   split metadata assigns them to the training pool

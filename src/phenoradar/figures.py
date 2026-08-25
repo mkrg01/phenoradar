@@ -104,7 +104,7 @@ _FEATURE_FILTER_FIGURE_DEFAULT_STAGE_ORDER = (
     "n_features_before",
     "n_features_after_sparse_feature_filter",
     "n_features_after_low_variance",
-    "n_features_after_pair_aware",
+    "n_features_after_ranked_feature_filter",
     "n_features_after_correlation",
     "n_features_after_all",
 )
@@ -112,7 +112,7 @@ _FEATURE_FILTER_FIGURE_STAGE_LABELS = {
     "n_features_before": "Input",
     "n_features_after_sparse_feature_filter": "Sparse feature",
     "n_features_after_low_variance": "Low variance",
-    "n_features_after_pair_aware": "Pair aware",
+    "n_features_after_ranked_feature_filter": "Ranked filter",
     "n_features_after_correlation": "Correlation",
     "n_features_after_all": "Final",
 }

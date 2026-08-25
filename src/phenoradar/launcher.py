@@ -6,7 +6,12 @@ import os
 import sys
 from pathlib import Path
 
-from phenoradar.config import ConfigError, load_and_resolve_config
+from phenoradar.config import (
+    ConfigError,
+    has_condition_dimensions,
+    load_and_resolve_config,
+    load_config_conditions,
+)
 
 _COMMANDS_WITH_CONFIG = {"run", "predict", "config"}
 
@@ -58,7 +63,15 @@ def _maybe_set_polars_max_threads(argv: list[str]) -> None:
     try:
         resolved = load_and_resolve_config(config_paths, allow_empty=allow_empty)
     except (ConfigError, OSError, ValueError):
-        return
+        if command != "run":
+            return
+        try:
+            if not has_condition_dimensions(config_paths):
+                return
+            condition_set = load_config_conditions(config_paths)
+        except (ConfigError, OSError, ValueError):
+            return
+        resolved = condition_set.conditions[0].config
 
     runtime_n_jobs = int(resolved.runtime.n_jobs)
     if runtime_n_jobs >= 1:

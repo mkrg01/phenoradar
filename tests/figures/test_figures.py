@@ -272,7 +272,7 @@ def _minimal_feature_filter_counts_summary() -> pl.DataFrame:
                 "n_features_before",
                 "n_features_after_sparse_feature_filter",
                 "n_features_after_low_variance",
-                "n_features_after_pair_aware",
+                "n_features_after_ranked_feature_filter",
                 "n_features_after_correlation",
                 "n_features_after_all",
             ],
@@ -301,7 +301,7 @@ def _minimal_final_refit_feature_filter_counts_summary() -> pl.DataFrame:
                 "n_features_before",
                 "n_features_after_sparse_feature_filter",
                 "n_features_after_low_variance",
-                "n_features_after_pair_aware",
+                "n_features_after_ranked_feature_filter",
                 "n_features_after_correlation",
                 "n_features_after_all",
             ],
@@ -547,7 +547,7 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
         feature_filter_funnel_stage_order=[
             "n_features_before",
             "n_features_after_sparse_feature_filter",
-            "n_features_after_pair_aware",
+            "n_features_after_ranked_feature_filter",
         ],
         model_sparsity=_minimal_model_sparsity(),
     )
@@ -575,7 +575,7 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
     assert "outer_fold (median" not in funnel_svg
     assert "Input" in funnel_svg
     assert "Sparse feature" in funnel_svg
-    assert "Pair aware" in funnel_svg
+    assert "Ranked filter" in funnel_svg
     assert "sparse_feature" not in funnel_svg
     assert "Low variance" not in funnel_svg
     assert "Correlation" not in funnel_svg
