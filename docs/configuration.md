@@ -46,6 +46,13 @@ Multiple scalar-list fields are expanded as a Cartesian product. Field order in
 the YAML and value order within each list determine `condition_index`; study
 tables and figures retain this order and are not sorted by value or performance.
 
+There is one conditional exception: when
+`preprocess.ranked_feature_filter.method` is `none`, `max_features` is inactive.
+That condition is generated once with `max_features: null`, independently of a
+`max_features` list. Other varying fields are still expanded normally. Thus,
+`method: [none, pair_aware]` with seven `max_features` values generates eight
+conditions rather than fourteen.
+
 Lists that are already part of a field's schema remain ordinary single-run
 values. In particular, this remains one inner model-selection search space:
 

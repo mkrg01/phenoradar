@@ -60,6 +60,13 @@ _FORBIDDEN_DIMENSION_PREFIXES = (
     ("preprocess", "max_pivot_cells"),
 )
 
+_RANKED_MAX_FEATURES_PATH = (
+    "preprocess",
+    "ranked_feature_filter",
+    "max_features",
+)
+_RANKED_MAX_FEATURES_DOTTED_PATH = ".".join(_RANKED_MAX_FEATURES_PATH)
+
 
 def _merged_raw_config(
     config_paths: list[Path],
@@ -150,6 +157,46 @@ def _set_path(raw: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
     target[path[-1]] = value
 
 
+def _normalize_inactive_condition_fields(
+    raw: dict[str, Any],
+    values: list[tuple[str, Any]],
+) -> None:
+    """Canonicalize fields that are inactive for the selected condition."""
+    preprocess = raw.get("preprocess")
+    if not isinstance(preprocess, dict):
+        return
+    ranked_filter = preprocess.get("ranked_feature_filter")
+    if (
+        not isinstance(ranked_filter, dict)
+        or ranked_filter.get("method", "none") != "none"
+    ):
+        return
+
+    ranked_filter["max_features"] = None
+    for position, (path, _value) in enumerate(values):
+        if path == _RANKED_MAX_FEATURES_DOTTED_PATH:
+            values[position] = (path, None)
+
+
+def _differs_only_by_inactive_ranked_max_features(
+    previous_values: tuple[tuple[str, Any], ...],
+    current_values: tuple[tuple[str, Any], ...],
+    resolved: AppConfig,
+) -> bool:
+    if resolved.preprocess.ranked_feature_filter.method != "none":
+        return False
+    differing_paths = {
+        previous_path
+        for (previous_path, previous_value), (current_path, current_value) in zip(
+            previous_values,
+            current_values,
+            strict=True,
+        )
+        if previous_path != current_path or previous_value != current_value
+    }
+    return differing_paths == {_RANKED_MAX_FEATURES_DOTTED_PATH}
+
+
 def _config_sha256(config: AppConfig) -> str:
     canonical = json.dumps(
         config.model_dump(mode="json"),
@@ -193,26 +240,36 @@ def load_config_conditions(
 
     combinations = product(*(dimension.values for dimension in dimensions))
     conditions: list[ConfigCondition] = []
-    seen_hashes: dict[str, int] = {}
-    for index, combination in enumerate(combinations, start=1):
+    seen_hashes: dict[str, tuple[int, tuple[tuple[str, Any], ...]]] = {}
+    for combination in combinations:
         condition_raw = deepcopy(raw)
         values: list[tuple[str, Any]] = []
         for dimension, value in zip(dimensions, combination, strict=True):
             _set_path(condition_raw, dimension.path, value)
             values.append((dimension.dotted_path, value))
+        source_values = tuple(values)
+        _normalize_inactive_condition_fields(condition_raw, values)
+        index = len(conditions) + 1
         try:
             resolved = AppConfig.model_validate(condition_raw)
         except ValidationError as exc:
             details = ", ".join(f"{path}={_display_value(value)}" for path, value in values)
             raise ConfigError(f"Invalid generated condition {index} ({details}): {exc}") from exc
         digest = _config_sha256(resolved)
-        duplicate_index = seen_hashes.get(digest)
-        if duplicate_index is not None:
+        duplicate = seen_hashes.get(digest)
+        if duplicate is not None:
+            duplicate_index, duplicate_source_values = duplicate
+            if _differs_only_by_inactive_ranked_max_features(
+                duplicate_source_values,
+                source_values,
+                resolved,
+            ):
+                continue
             raise ConfigError(
                 f"Generated condition {index} duplicates condition {duplicate_index}; "
                 "remove repeated or inactive condition values"
             )
-        seen_hashes[digest] = index
+        seen_hashes[digest] = (index, source_values)
         label = "; ".join(f"{path}={_display_value(value)}" for path, value in values)
         conditions.append(
             ConfigCondition(

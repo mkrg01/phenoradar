@@ -53,6 +53,78 @@ preprocess:
     assert len({condition.condition_id for condition in condition_set.conditions}) == 4
 
 
+def test_none_method_is_independent_of_max_features_dimension(tmp_path: Path) -> None:
+    config_path = _write(
+        tmp_path / "config.yml",
+        """
+preprocess:
+  ranked_feature_filter:
+    method: [none, pair_aware]
+    max_features: [5000, 2500, 1000, 500, 250, 100, 50]
+    min_contrast_pairs: 1
+""".lstrip(),
+    )
+
+    condition_set = load_config_conditions([config_path])
+
+    assert len(condition_set.conditions) == 8
+    assert [
+        condition.config.preprocess.ranked_feature_filter.method
+        for condition in condition_set.conditions
+    ] == [
+        "none",
+        "pair_aware",
+        "pair_aware",
+        "pair_aware",
+        "pair_aware",
+        "pair_aware",
+        "pair_aware",
+        "pair_aware",
+    ]
+    assert [
+        condition.config.preprocess.ranked_feature_filter.max_features
+        for condition in condition_set.conditions
+    ] == [None, 5000, 2500, 1000, 500, 250, 100, 50]
+    assert condition_set.conditions[0].values == (
+        ("preprocess.ranked_feature_filter.method", "none"),
+        ("preprocess.ranked_feature_filter.max_features", None),
+    )
+    assert [condition.index for condition in condition_set.conditions] == list(range(1, 9))
+
+
+def test_none_method_still_expands_other_condition_dimensions(tmp_path: Path) -> None:
+    config_path = _write(
+        tmp_path / "config.yml",
+        """
+preprocess:
+  ranked_feature_filter:
+    method: [none, pair_aware]
+    max_features: [100, 50]
+  feature_scaling:
+    method: [standard, none]
+""".lstrip(),
+    )
+
+    condition_set = load_config_conditions([config_path])
+
+    assert len(condition_set.conditions) == 6
+    assert [
+        (
+            condition.config.preprocess.ranked_feature_filter.method,
+            condition.config.preprocess.ranked_feature_filter.max_features,
+            condition.config.preprocess.feature_scaling.method,
+        )
+        for condition in condition_set.conditions
+    ] == [
+        ("none", None, "standard"),
+        ("none", None, "none"),
+        ("pair_aware", 100, "standard"),
+        ("pair_aware", 100, "none"),
+        ("pair_aware", 50, "standard"),
+        ("pair_aware", 50, "none"),
+    ]
+
+
 def test_existing_search_space_lists_remain_one_config_value(tmp_path: Path) -> None:
     config_path = _write(
         tmp_path / "config.yml",
