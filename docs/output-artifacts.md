@@ -42,7 +42,11 @@ cross-condition outputs:
 - `split/tables/split_manifest.tsv`
 - `tables/condition_metrics.tsv`
 - `tables/pairwise_comparisons.tsv`
+- `tables/training_group_sensitivity.tsv` for a pure
+  `sampling.max_training_groups`/`group_subsample_repeat` sweep
 - `figures/condition_metrics.{svg,pdf,png}`
+- `figures/training_group_sensitivity.{svg,pdf,png}` for that training-group
+  sweep
 - `figures/ranked_feature_sensitivity.{svg,pdf,png}` when both ranked-filter
   method and `max_features` vary as a complete two-method grid
 - `figures/ranked_feature_method_difference.{svg,pdf,png}` for the matched
@@ -53,6 +57,10 @@ intervals for every condition. `pairwise_comparisons.tsv` contains every unorder
 condition pair. `improvement_a_over_b` is oriented so that positive values always
 favor condition A, including for loss metrics. Pairwise intervals use matched
 bootstrap replicate IDs generated from the shared groups and seed.
+`training_group_sensitivity.tsv` aggregates condition point estimates across
+group-subset repeats and reports their mean, standard deviation, quartiles, and
+range. The corresponding figure shows the mean and interquartile band against
+the effective mean number of training groups per fold.
 
 Run outputs use a stage-first layout. Stage-specific TSVs are placed in
 `<stage>/tables/`, and stage-specific SVGs are placed in `<stage>/figures/`.
@@ -93,6 +101,13 @@ Always written:
     `validation_label_profile`, and `two_class_validation_metrics_defined`
   - use this table with `fold_validation_groups.tsv` to audit taxonomic-block
     assignments and identify single-label validation folds
+- `model/tables/training_group_subsets.tsv`
+  - one audit row per available group in every outer fold, plus final-refit rows
+    during `full_run`
+  - records the requested and effective group counts, deterministic group rank,
+    selected flag, and per-group label/species counts
+  - `group_id` is a value of `split.group_col`; selection changes training rows
+    only and does not alter `split_manifest.tsv`
 - `cv/tables/metrics_cv.tsv`
   - columns: `aggregate_scope`, `fold_id`, `metric`, `metric_value`, `n_pos`, `n_neg`, `n_valid_folds`
   - `aggregate_scope`: per-fold rows use `NA`, aggregate rows use `macro`/`micro`

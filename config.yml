@@ -22,6 +22,8 @@ sampling:
   strategy: all_samples  # choices: all_samples, group_balanced
   max_samples_per_label_per_group: null
   sampled_set_count: 1
+  max_training_groups: null
+  group_subsample_repeat: 1
   weighting: group_label_inverse  # choices: none, group_label_inverse
 
 preprocess:

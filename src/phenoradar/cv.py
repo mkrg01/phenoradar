@@ -109,6 +109,7 @@ class CVArtifacts:
     feature_stability_by_fold_pair: pl.DataFrame
     feature_stability_summary: pl.DataFrame
     top_feature_expression: pl.DataFrame
+    training_group_subsets: pl.DataFrame
     timing: pl.DataFrame
     warnings: list[str]
     convergence_diagnostics: pl.DataFrame
@@ -129,6 +130,7 @@ class FinalRefitArtifacts:
     retained_features_summary: pl.DataFrame
     model_sparsity: pl.DataFrame
     model_sparsity_summary: pl.DataFrame
+    training_group_subsets: pl.DataFrame
     timing: pl.DataFrame
     warnings: list[str]
     ensemble_size: int
@@ -190,6 +192,7 @@ class OuterFoldResult:
     ranked_feature_score_rows: list[dict[str, Any]]
     retained_feature_rows: list[dict[str, Any]]
     model_sparsity_rows: list[dict[str, Any]]
+    training_group_subset_rows: list[dict[str, Any]]
     fold_model_count: int
     n_features_before_preprocess: int
     n_features_after_sparse_feature_filter: int
@@ -208,6 +211,14 @@ class OuterCvMatrixCache:
     matrix: np.ndarray
     feature_names: list[str]
     species_to_index: dict[str, int]
+
+
+@dataclass(frozen=True)
+class TrainingGroupSelection:
+    """One deterministic fold-local selection of training groups."""
+
+    group_ids: tuple[str, ...]
+    audit_rows: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -1866,21 +1877,136 @@ def _preprocess_fold(
     return x_train_scaled, x_valid_scaled, selected_features
 
 
+_TRAINING_GROUP_SUBSET_SCHEMA = {
+    "scope": pl.String,
+    "fold_id": pl.String,
+    "group_col": pl.String,
+    "group_subsample_repeat": pl.Int64,
+    "max_training_groups_requested": pl.Int64,
+    "n_training_groups_available": pl.Int64,
+    "n_training_groups_selected": pl.Int64,
+    "group_rank": pl.Int64,
+    "group_id": pl.String,
+    "selected": pl.Boolean,
+    "n_species": pl.Int64,
+    "n_label0": pl.Int64,
+    "n_label1": pl.Int64,
+}
+
+
+def _build_training_group_subsets(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    if not rows:
+        return pl.DataFrame(schema=_TRAINING_GROUP_SUBSET_SCHEMA)
+    return pl.DataFrame(rows, schema=_TRAINING_GROUP_SUBSET_SCHEMA).sort(
+        ["scope", "fold_id", "group_rank", "group_id"]
+    )
+
+
+def _select_training_groups(
+    config: AppConfig,
+    y_train: np.ndarray,
+    groups_train: np.ndarray,
+    *,
+    scope: str,
+    fold_id: str,
+    warnings: list[str],
+) -> TrainingGroupSelection:
+    """Select a reproducible nested subset of ``split.group_col`` training groups."""
+    if y_train.shape[0] != groups_train.shape[0]:
+        raise CVError("Training labels and groups have different row counts")
+
+    normalized_groups = groups_train.astype(str)
+    unique_groups = sorted(set(normalized_groups.tolist()))
+    if not unique_groups:
+        raise CVError(f"No training groups are available for scope={scope}, fold={fold_id}")
+
+    repeat = int(config.sampling.group_subsample_repeat)
+    ordered_groups = sorted(
+        unique_groups,
+        key=lambda group: (
+            _deterministic_int_seed(
+                f"{config.runtime.seed}|training_group_subset|{repeat}|{group}"
+            ),
+            group,
+        ),
+    )
+    requested = config.sampling.max_training_groups
+    effective_count = (
+        len(ordered_groups)
+        if requested is None
+        else min(int(requested), len(ordered_groups))
+    )
+    if requested is not None and int(requested) > len(ordered_groups):
+        warnings.append(
+            "sampling.max_training_groups exceeded the available training groups; "
+            f"capped from {requested} to {effective_count} for scope={scope}, fold={fold_id}"
+        )
+    selected_groups = tuple(ordered_groups[:effective_count])
+    selected_mask = np.isin(normalized_groups, np.asarray(selected_groups, dtype=str))
+    if np.unique(y_train[selected_mask]).size < 2:
+        raise CVError(
+            "Training-group subsampling produced fewer than two labels; "
+            f"scope={scope}, fold={fold_id}, max_training_groups={requested}, "
+            f"group_subsample_repeat={repeat}"
+        )
+
+    selected_set = set(selected_groups)
+    audit_rows: list[dict[str, Any]] = []
+    for rank, group in enumerate(ordered_groups, start=1):
+        group_mask = normalized_groups == group
+        group_labels = y_train[group_mask]
+        audit_rows.append(
+            {
+                "scope": scope,
+                "fold_id": fold_id,
+                "group_col": config.split.group_col,
+                "group_subsample_repeat": repeat,
+                "max_training_groups_requested": (
+                    None if requested is None else int(requested)
+                ),
+                "n_training_groups_available": len(ordered_groups),
+                "n_training_groups_selected": effective_count,
+                "group_rank": rank,
+                "group_id": group,
+                "selected": group in selected_set,
+                "n_species": int(group_labels.size),
+                "n_label0": int(np.sum(group_labels == 0)),
+                "n_label1": int(np.sum(group_labels == 1)),
+            }
+        )
+    return TrainingGroupSelection(group_ids=selected_groups, audit_rows=audit_rows)
+
+
 def _sample_training_sets(
     config: AppConfig,
     y_train: np.ndarray,
     groups_train: np.ndarray,
     training_scope_id: str,
     warnings: list[str],
+    selected_group_ids: tuple[str, ...] | None = None,
 ) -> list[np.ndarray]:
+    normalized_groups = groups_train.astype(str)
+    unique_groups = (
+        sorted(set(normalized_groups.tolist()))
+        if selected_group_ids is None
+        else list(selected_group_ids)
+    )
+    unknown_groups = sorted(set(unique_groups) - set(normalized_groups.tolist()))
+    if unknown_groups:
+        raise CVError(
+            "Selected training groups are absent from the training rows: "
+            + ", ".join(unknown_groups)
+        )
     if config.sampling.strategy == "all_samples":
-        return [np.arange(y_train.shape[0], dtype=int)]
+        selected = np.flatnonzero(
+            np.isin(normalized_groups, np.asarray(unique_groups, dtype=str))
+        )
+        return [selected.astype(int, copy=False)]
 
-    unique_groups = sorted(set(str(group) for group in groups_train.tolist()))
     group_specs: list[tuple[str, np.ndarray, np.ndarray, int]] = []
     max_sets = 1
     for group in unique_groups:
-        group_indices = np.where(groups_train.astype(str) == group)[0]
+        group_indices = np.where(normalized_groups == group)[0]
         label0_idx = group_indices[y_train[group_indices] == 0]
         label1_idx = group_indices[y_train[group_indices] == 1]
         if label0_idx.size == 0 or label1_idx.size == 0:
@@ -3966,12 +4092,21 @@ def _run_final_refit_impl(
         contrast_values = train_pool.select("contrast_group_id").to_series().to_list()
         contrast_groups_train = np.array(contrast_values, dtype=object)
     sampling_started = recorder.start()
+    training_group_selection = _select_training_groups(
+        config,
+        y_train,
+        groups_train,
+        scope="final_refit",
+        fold_id="NA",
+        warnings=warnings,
+    )
     sampled_sets = _sample_training_sets(
         config=config,
         y_train=y_train,
         groups_train=groups_train,
         training_scope_id="final_refit",
         warnings=warnings,
+        selected_group_ids=training_group_selection.group_ids,
     )
     recorder.record_since(
         sampling_started,
@@ -4360,6 +4495,9 @@ def _run_final_refit_impl(
         retained_features_summary=retained_features_summary,
         model_sparsity=model_sparsity,
         model_sparsity_summary=model_sparsity_summary,
+        training_group_subsets=_build_training_group_subsets(
+            training_group_selection.audit_rows
+        ),
         timing=timing,
         warnings=warnings,
         ensemble_size=len(model_probs),
@@ -4453,12 +4591,21 @@ def _run_outer_fold(
     _emit_fold_progress("matrix_ready", f"n_features_raw={len(feature_names)}")
 
     sampling_started = None if timing_recorder is None else timing_recorder.start()
+    training_group_selection = _select_training_groups(
+        config,
+        y_train,
+        groups_train,
+        scope="outer_fold",
+        fold_id=fold_id,
+        warnings=warnings,
+    )
     sampled_sets = _sample_training_sets(
         config=config,
         y_train=y_train,
         groups_train=groups_train,
         training_scope_id=f"fold_{fold_id}",
         warnings=warnings,
+        selected_group_ids=training_group_selection.group_ids,
     )
     if timing_recorder is not None and sampling_started is not None:
         timing_recorder.record_since(
@@ -4890,6 +5037,7 @@ def _run_outer_fold(
         ranked_feature_score_rows=ranked_feature_score_rows,
         retained_feature_rows=retained_feature_rows,
         model_sparsity_rows=model_sparsity_rows,
+        training_group_subset_rows=training_group_selection.audit_rows,
         fold_model_count=fold_model_count,
         n_features_before_preprocess=n_features_before_preprocess,
         n_features_after_sparse_feature_filter=n_features_after_sparse_feature_filter,
@@ -4942,6 +5090,7 @@ def _run_outer_cv_impl(
     ranked_feature_score_rows: list[dict[str, Any]] = []
     retained_feature_rows: list[dict[str, Any]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
+    training_group_subset_rows: list[dict[str, Any]] = []
     convergence_rows: list[dict[str, Any]] = []
     max_fold_ensemble_size = 0
 
@@ -4986,6 +5135,7 @@ def _run_outer_cv_impl(
         ranked_feature_score_rows.extend(fold_result.ranked_feature_score_rows)
         retained_feature_rows.extend(fold_result.retained_feature_rows)
         model_sparsity_rows.extend(fold_result.model_sparsity_rows)
+        training_group_subset_rows.extend(fold_result.training_group_subset_rows)
         convergence_rows.extend(fold_result.convergence_rows)
         max_fold_ensemble_size = max(max_fold_ensemble_size, fold_result.fold_model_count)
 
@@ -5195,6 +5345,9 @@ def _run_outer_cv_impl(
         feature_stability_by_fold_pair=feature_stability.by_fold_pair,
         feature_stability_summary=feature_stability.summary,
         top_feature_expression=top_feature_expression,
+        training_group_subsets=_build_training_group_subsets(
+            training_group_subset_rows
+        ),
         timing=timing,
         warnings=warnings,
         convergence_diagnostics=convergence_diagnostics,

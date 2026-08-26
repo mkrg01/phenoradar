@@ -46,12 +46,27 @@ Multiple scalar-list fields are expanded as a Cartesian product. Field order in
 the YAML and value order within each list determine `condition_index`; study
 tables and figures retain this order and are not sorted by value or performance.
 
-There is one conditional exception: when
+Inactive scalar fields are canonicalized instead of producing duplicate
+conditions. One such case is when
 `preprocess.ranked_feature_filter.method` is `none`, `max_features` is inactive.
 That condition is generated once with `max_features: null`, independently of a
 `max_features` list. Other varying fields are still expanded normally. Thus,
 `method: [none, pair_aware]` with seven `max_features` values generates eight
 conditions rather than fourteen.
+
+Training-group count sensitivity uses the same mechanism. The repeat value
+chooses a reproducible group ordering, and conditions with the same repeat are
+nested as the limit increases:
+
+```yaml
+sampling:
+  max_training_groups: [5, 10, 15, null]
+  group_subsample_repeat: [1, 2, 3]
+```
+
+Here `null` means all fold-local training groups. Because the repeat is inactive
+for that full-data condition, the full-data run is generated once rather than
+three times.
 
 Lists that are already part of a field's schema remain ordinary single-run
 values. In particular, this remains one inner model-selection search space:
@@ -102,6 +117,8 @@ sampling:
   strategy: group_balanced
   max_samples_per_label_per_group: 1
   sampled_set_count: 10
+  max_training_groups: null
+  group_subsample_repeat: 1
   weighting: none
 preprocess:
   max_pivot_cells: 50000000
@@ -269,6 +286,22 @@ runtime:
 - `sampling.sampled_set_count`
   - type: `int >= 1`
   - default: `10`
+- `sampling.max_training_groups`
+  - type: `int >= 1 | null`
+  - default: `null`
+  - maximum number of fold-local training groups retained before species-level
+    sample-set construction
+  - groups are values of `split.group_col`; validation groups are never removed
+    or changed by this setting
+  - `null` keeps every available training group
+- `sampling.group_subsample_repeat`
+  - type: `int >= 1`
+  - default: `1`
+  - reproducible group-subset repeat identifier, combined with `runtime.seed`
+  - for a fixed repeat, group rankings do not depend on
+    `max_training_groups`, so smaller limits are strict prefixes of larger
+    limits whenever enough groups are available
+  - inactive when `max_training_groups=null`
 - `sampling.weighting`
   - type: `none | group_label_inverse`
   - default: `none`
@@ -283,6 +316,13 @@ Compatibility rules:
   split execution.
 - `group_label_inverse` weights labels within `split.group_col` groups and does
   not require contrast-pair metadata.
+- training-group subsampling happens after the outer split and only on its
+  training side. Use multiple `group_subsample_repeat` values to measure
+  sensitivity to group composition; these are separate study conditions, not
+  members of the `sampled_set_count` ensemble.
+- when model selection is active, `max_training_groups` must be at least `2`
+  for inner `logo`, or at least `model_selection.inner_cv_n_splits` for inner
+  `group_kfold`/`stratified_group_kfold`.
 
 ## `preprocess`
 

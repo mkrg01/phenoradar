@@ -107,11 +107,15 @@ Before fold execution:
 For each outer fold:
 
 1. Slice shared matrix rows into fold-local train/valid arrays by species.
-2. Build one or more sampled training sets:
+2. Rank the fold-local `split.group_col` training groups reproducibly using
+   `runtime.seed` and `sampling.group_subsample_repeat`, then retain at most
+   `sampling.max_training_groups`. Validation rows remain unchanged. With a
+   fixed repeat, increasing limits produces nested training-group subsets.
+3. Build one or more sampled training sets from the retained groups:
   - `all_samples`: single full set
   - `group_balanced`: deterministic per-group balanced subsets
   - sampled sets can execute in parallel within each fold budget
-3. Candidate handling:
+4. Candidate handling:
   - when both `selected_candidate_count` and `selected_candidate_percent` are null:
     - generate candidates and fit them directly (no inner CV ranking)
   - when selection is active (`selected_candidate_count` or `selected_candidate_percent` is set):
@@ -125,7 +129,7 @@ For each outer fold:
     - during that parallel scoring, per-model `random_forest` threads are auto-limited so combined fold/candidate/model concurrency stays within `runtime.n_jobs`
     - NumPy/SciPy/scikit-learn native thread pools are also limited to the active runtime budget in these execution paths
     - `search_strategy=tpe` remains sequential
-4. For each sampled training set, preprocess sampled-train/valid and fit selected models:
+5. For each sampled training set, preprocess sampled-train/valid and fit selected models:
   - `preprocess.expression_transform` (`none`, `log1p`, `sample_rank`, or `sample_percentile_rank`)
   - optional sparse feature filter
   - optional low-variance filter
@@ -133,8 +137,8 @@ For each outer fold:
   - optional correlation filter (pearson/spearman)
   - `preprocess.feature_scaling` (`none` or train-fitted standard scaling)
   - fit selected model(s), predict fold-valid probabilities
-5. Aggregate model probabilities (`mean` or `median`).
-6. Compute fold metrics.
+6. Aggregate model probabilities (`mean` or `median`).
+7. Compute fold metrics.
 
 After all folds:
 
@@ -149,6 +153,9 @@ After all folds:
 ### 4) Final refit (`execution_stage=full_run`)
 
 - Training pool is `train + validation` species.
+- `sampling.max_training_groups` is applied again to this full refit pool using
+  the same reproducible group ranking. Thus a numeric limit also limits the
+  deployed refit model; use `cv_only` when the setting is only being explored.
 - Candidate generation/selection is repeated in `final_refit` scope.
 - sampled sets can run in parallel up to `runtime.n_jobs` budget.
 - each sampled set is preprocessed independently before fit:

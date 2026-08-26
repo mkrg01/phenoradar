@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from phenoradar.study import (
     _ranked_feature_sensitivity_figures,
@@ -229,3 +230,68 @@ def test_ranked_feature_sensitivity_figures_use_matched_feature_counts(
     assert "pair_aware" in sensitivity_svg
     assert "unpaired" in sensitivity_svg
     assert "unpaired improvement over pair_aware" in difference_svg
+
+
+def test_generate_study_report_aggregates_training_group_subsample_repeats(
+    tmp_path: Path,
+) -> None:
+    specs = [
+        (1, "limited_1", 2, 1, 0.60),
+        (2, "limited_2", 2, 2, 0.80),
+        (3, "full", None, 1, 0.90),
+    ]
+    manifest_rows: list[dict[str, object]] = []
+    for index, condition_id, max_groups, repeat, point in specs:
+        run_dir = tmp_path / "conditions" / condition_id
+        points = {metric: point for metric in _METRICS}
+        replicates = {metric: [point - 0.01, point, point + 0.01] for metric in _METRICS}
+        _write_condition(run_dir, points=points, replicates=replicates)
+        model_tables = run_dir / "model" / "tables"
+        model_tables.mkdir(parents=True)
+        effective_count = 4 if max_groups is None else max_groups
+        pl.DataFrame(
+            {
+                "scope": ["outer_fold", "outer_fold"],
+                "fold_id": ["1", "2"],
+                "group_subsample_repeat": [repeat, repeat],
+                "n_training_groups_selected": [effective_count, effective_count],
+            }
+        ).write_csv(
+            model_tables / "training_group_subsets.tsv",
+            separator="\t",
+        )
+        manifest_rows.append(
+            {
+                "condition_index": index,
+                "condition_id": condition_id,
+                "condition_label": condition_id,
+                "varying_parameters_json": json.dumps(
+                    {
+                        "sampling.max_training_groups": max_groups,
+                        "sampling.group_subsample_repeat": repeat,
+                    }
+                ),
+                "status": "completed",
+                "run_dir": str(run_dir),
+            }
+        )
+
+    artifacts = generate_study_report(tmp_path, manifest_rows)
+
+    assert artifacts.training_group_sensitivity is not None
+    sensitivity = artifacts.training_group_sensitivity
+    limited = sensitivity.filter(
+        (pl.col("max_training_groups") == 2) & (pl.col("metric") == "roc_auc")
+    ).row(0, named=True)
+    assert limited["n_subset_repeats"] == 2
+    assert limited["point_estimate_mean"] == pytest.approx(0.7)
+    assert limited["point_estimate_q1"] == pytest.approx(0.65)
+    assert limited["point_estimate_q3"] == pytest.approx(0.75)
+    full = sensitivity.filter(
+        pl.col("full_training_set") & (pl.col("metric") == "roc_auc")
+    ).row(0, named=True)
+    assert full["max_training_groups_label"] == "full"
+    assert full["effective_training_groups_mean"] == 4.0
+    assert (tmp_path / "tables" / "training_group_sensitivity.tsv").exists()
+    for extension in ("svg", "pdf", "png"):
+        assert (tmp_path / "figures" / f"training_group_sensitivity.{extension}").exists()

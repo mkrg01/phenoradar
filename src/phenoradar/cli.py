@@ -1192,6 +1192,26 @@ def _run_single(
             null_value="NA",
         )
 
+    training_group_subset_tables: list[pl.DataFrame] = []
+    cv_training_group_subsets = getattr(cv_artifacts, "training_group_subsets", None)
+    if isinstance(cv_training_group_subsets, pl.DataFrame):
+        training_group_subset_tables.append(cv_training_group_subsets)
+    final_training_group_subsets = (
+        None
+        if final_refit_artifacts is None
+        else getattr(final_refit_artifacts, "training_group_subsets", None)
+    )
+    if isinstance(final_training_group_subsets, pl.DataFrame):
+        training_group_subset_tables.append(final_training_group_subsets)
+    if training_group_subset_tables:
+        pl.concat(training_group_subset_tables, how="vertical").sort(
+            ["scope", "fold_id", "group_rank", "group_id"]
+        ).write_csv(
+            model_tables_dir / "training_group_subsets.tsv",
+            separator="\t",
+            null_value="NA",
+        )
+
     feature_filter_counts_tables: list[pl.DataFrame] = []
     cv_feature_filter_counts = getattr(cv_artifacts, "feature_filter_counts", None)
     if isinstance(cv_feature_filter_counts, pl.DataFrame):
@@ -1845,6 +1865,12 @@ def _run_condition_study(
     study_metadata["last_session_duration_sec"] = (end_time - session_start).total_seconds()
     study_metadata["condition_metrics_path"] = "tables/condition_metrics.tsv"
     study_metadata["pairwise_comparisons_path"] = "tables/pairwise_comparisons.tsv"
+    if report_artifacts.training_group_sensitivity is not None:
+        study_metadata["training_group_sensitivity_path"] = (
+            "tables/training_group_sensitivity.tsv"
+        )
+    else:
+        study_metadata.pop("training_group_sensitivity_path", None)
     study_metadata["config_differences_path"] = "config_differences.tsv"
     study_metadata["figure_paths"] = [
         str(path.relative_to(study_dir)) for path in report_artifacts.figure_paths

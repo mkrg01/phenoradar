@@ -44,6 +44,8 @@ _METRIC_LABELS = {
 _COMPLETED_RUN_STATUSES = {"cv_completed", "full_run_completed"}
 _RANKED_METHOD_PATH = "preprocess.ranked_feature_filter.method"
 _RANKED_MAX_FEATURES_PATH = "preprocess.ranked_feature_filter.max_features"
+_MAX_TRAINING_GROUPS_PATH = "sampling.max_training_groups"
+_GROUP_SUBSAMPLE_REPEAT_PATH = "sampling.group_subsample_repeat"
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,7 @@ class StudyReportArtifacts:
 
     condition_metrics: pl.DataFrame
     pairwise_comparisons: pl.DataFrame
+    training_group_sensitivity: pl.DataFrame | None
     figure_paths: tuple[Path, ...]
 
 
@@ -634,6 +637,210 @@ def _ranked_feature_sensitivity_figures(
     return tuple(paths)
 
 
+def _training_group_sensitivity_metadata(
+    manifest_rows: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Load condition axes and effective fold-local group counts for a pure group sweep."""
+    allowed_paths = {_MAX_TRAINING_GROUPS_PATH, _GROUP_SUBSAMPLE_REPEAT_PATH}
+    metadata: list[dict[str, Any]] = []
+    for row in manifest_rows:
+        raw_values = row.get("varying_parameters_json")
+        if not isinstance(raw_values, str):
+            return []
+        try:
+            values = json.loads(raw_values)
+        except json.JSONDecodeError:
+            return []
+        if (
+            not isinstance(values, dict)
+            or _MAX_TRAINING_GROUPS_PATH not in values
+            or not set(values).issubset(allowed_paths)
+        ):
+            return []
+        requested = values[_MAX_TRAINING_GROUPS_PATH]
+        configured_repeat = values.get(_GROUP_SUBSAMPLE_REPEAT_PATH)
+        if (requested is not None and not isinstance(requested, int)) or (
+            configured_repeat is not None and not isinstance(configured_repeat, int)
+        ):
+            return []
+
+        audit_path = (
+            Path(str(row["run_dir"]))
+            / "model"
+            / "tables"
+            / "training_group_subsets.tsv"
+        )
+        if not audit_path.exists():
+            return []
+        audit = pl.read_csv(audit_path, separator="\t", null_values="NA").filter(
+            pl.col("scope") == "outer_fold"
+        )
+        if audit.is_empty():
+            return []
+        audit_repeats = audit.get_column("group_subsample_repeat").unique().to_list()
+        if len(audit_repeats) != 1:
+            return []
+        repeat = int(audit_repeats[0])
+        if configured_repeat is not None and repeat != configured_repeat:
+            return []
+        per_fold = audit.select(
+            "fold_id", "n_training_groups_selected"
+        ).unique()
+        effective_counts = np.asarray(
+            per_fold.get_column("n_training_groups_selected").to_list(),
+            dtype=float,
+        )
+        metadata.append(
+            {
+                "condition_id": str(row["condition_id"]),
+                "condition_index": int(row["condition_index"]),
+                "max_training_groups": requested,
+                "full_training_set": requested is None,
+                "group_subsample_repeat": int(repeat),
+                "effective_training_groups_mean": float(np.mean(effective_counts)),
+                "effective_training_groups_min": int(np.min(effective_counts)),
+                "effective_training_groups_max": int(np.max(effective_counts)),
+            }
+        )
+
+    group_settings = {
+        (bool(row["full_training_set"]), row["max_training_groups"])
+        for row in metadata
+    }
+    return metadata if len(group_settings) >= 2 else []
+
+
+def _build_training_group_sensitivity(
+    condition_metrics: pl.DataFrame,
+    manifest_rows: Sequence[dict[str, Any]],
+) -> pl.DataFrame | None:
+    metadata_rows = _training_group_sensitivity_metadata(manifest_rows)
+    if not metadata_rows:
+        return None
+
+    grouped_metadata: dict[tuple[bool, int | None], list[dict[str, Any]]] = {}
+    for row in metadata_rows:
+        key = (bool(row["full_training_set"]), row["max_training_groups"])
+        grouped_metadata.setdefault(key, []).append(row)
+
+    output: list[dict[str, Any]] = []
+    for (full_training_set, requested), group_rows in grouped_metadata.items():
+        condition_ids = [str(row["condition_id"]) for row in group_rows]
+        effective_means = np.asarray(
+            [float(row["effective_training_groups_mean"]) for row in group_rows],
+            dtype=float,
+        )
+        effective_min = min(int(row["effective_training_groups_min"]) for row in group_rows)
+        effective_max = max(int(row["effective_training_groups_max"]) for row in group_rows)
+        repeats = {int(row["group_subsample_repeat"]) for row in group_rows}
+        for metric in _METRIC_ORDER:
+            values = np.asarray(
+                condition_metrics.filter(
+                    pl.col("condition_id").is_in(condition_ids)
+                    & (pl.col("metric") == metric)
+                )
+                .sort("condition_index")
+                .get_column("point_estimate")
+                .to_list(),
+                dtype=float,
+            )
+            finite = values[np.isfinite(values)]
+            output.append(
+                {
+                    "max_training_groups": requested,
+                    "max_training_groups_label": (
+                        "full" if full_training_set else str(requested)
+                    ),
+                    "full_training_set": full_training_set,
+                    "effective_training_groups_mean": float(np.mean(effective_means)),
+                    "effective_training_groups_min": effective_min,
+                    "effective_training_groups_max": effective_max,
+                    "n_subset_repeats": len(repeats),
+                    "n_conditions": len(group_rows),
+                    "metric": metric,
+                    "n_valid_conditions": int(finite.size),
+                    "point_estimate_mean": (
+                        None if finite.size == 0 else float(np.mean(finite))
+                    ),
+                    "point_estimate_std": (
+                        None if finite.size < 2 else float(np.std(finite, ddof=1))
+                    ),
+                    "point_estimate_min": (
+                        None if finite.size == 0 else float(np.min(finite))
+                    ),
+                    "point_estimate_q1": (
+                        None if finite.size == 0 else float(np.quantile(finite, 0.25))
+                    ),
+                    "point_estimate_median": (
+                        None if finite.size == 0 else float(np.median(finite))
+                    ),
+                    "point_estimate_q3": (
+                        None if finite.size == 0 else float(np.quantile(finite, 0.75))
+                    ),
+                    "point_estimate_max": (
+                        None if finite.size == 0 else float(np.max(finite))
+                    ),
+                }
+            )
+    return pl.DataFrame(output).sort(
+        ["effective_training_groups_mean", "full_training_set", "metric"]
+    )
+
+
+def _training_group_sensitivity_figure(
+    sensitivity: pl.DataFrame,
+    *,
+    output_dir: Path,
+) -> tuple[Path, ...]:
+    settings = (
+        sensitivity.select(
+            "effective_training_groups_mean", "max_training_groups_label"
+        )
+        .unique()
+        .sort("effective_training_groups_mean")
+    )
+    x_ticks = np.asarray(
+        settings.get_column("effective_training_groups_mean").to_list(), dtype=float
+    )
+    x_labels = [str(value) for value in settings.get_column("max_training_groups_label")]
+    fig, axes = plt.subplots(2, 3, figsize=(10.5, 7.2), squeeze=False)
+    for axis, metric in zip(axes.flat, _METRIC_ORDER, strict=True):
+        rows = sensitivity.filter(pl.col("metric") == metric).sort(
+            "effective_training_groups_mean"
+        )
+        x = np.asarray(rows.get_column("effective_training_groups_mean").to_list(), dtype=float)
+        points = np.asarray(rows.get_column("point_estimate_mean").to_list(), dtype=float)
+        lower = np.asarray(rows.get_column("point_estimate_q1").to_list(), dtype=float)
+        upper = np.asarray(rows.get_column("point_estimate_q3").to_list(), dtype=float)
+        finite = np.isfinite(points)
+        if np.any(finite):
+            axis.plot(
+                x[finite],
+                points[finite],
+                marker="o",
+                markersize=4,
+                linewidth=1.2,
+                color="#4C72B0",
+            )
+            interval = finite & np.isfinite(lower) & np.isfinite(upper)
+            if np.any(interval):
+                axis.fill_between(
+                    x[interval],
+                    lower[interval],
+                    upper[interval],
+                    color="#4C72B0",
+                    alpha=0.18,
+                    linewidth=0,
+                )
+        axis.set_title(_METRIC_LABELS[metric])
+        axis.set_xticks(x_ticks, labels=x_labels)
+        axis.set_xlabel("Maximum training groups (full = all available)")
+        axis.grid(alpha=0.25)
+    fig.suptitle("Training-group count sensitivity")
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    return _save_figure_formats(fig, output_dir / "training_group_sensitivity")
+
+
 def generate_study_report(
     study_dir: Path,
     manifest_rows: Sequence[dict[str, Any]],
@@ -683,6 +890,22 @@ def generate_study_report(
         float_precision=10,
         null_value="NA",
     )
+    training_group_sensitivity = _build_training_group_sensitivity(
+        condition_metrics,
+        ordered_rows,
+    )
+    training_group_figure_paths: tuple[Path, ...] = ()
+    if training_group_sensitivity is not None:
+        training_group_sensitivity.write_csv(
+            tables_dir / "training_group_sensitivity.tsv",
+            separator="\t",
+            float_precision=10,
+            null_value="NA",
+        )
+        training_group_figure_paths = _training_group_sensitivity_figure(
+            training_group_sensitivity,
+            output_dir=figures_dir,
+        )
     figure_paths = (
         *_condition_metric_figure(condition_metrics, output_dir=figures_dir),
         *_ranked_feature_sensitivity_figures(
@@ -691,9 +914,11 @@ def generate_study_report(
             ordered_rows,
             output_dir=figures_dir,
         ),
+        *training_group_figure_paths,
     )
     return StudyReportArtifacts(
         condition_metrics=condition_metrics,
         pairwise_comparisons=pairwise,
+        training_group_sensitivity=training_group_sensitivity,
         figure_paths=figure_paths,
     )

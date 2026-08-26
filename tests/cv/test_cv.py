@@ -213,6 +213,23 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
     assert cv_artifacts.model_selection_selected is None
     assert cv_artifacts.model_selection_trials is None
     assert cv_artifacts.model_selection_trials_summary is None
+    assert cv_artifacts.training_group_subsets.height == 2
+    assert {
+        "scope",
+        "fold_id",
+        "group_col",
+        "group_subsample_repeat",
+        "max_training_groups_requested",
+        "n_training_groups_available",
+        "n_training_groups_selected",
+        "group_rank",
+        "group_id",
+        "selected",
+        "n_species",
+        "n_label0",
+        "n_label1",
+    }.issubset(cv_artifacts.training_group_subsets.columns)
+    assert cv_artifacts.training_group_subsets.get_column("selected").all()
     assert cv_artifacts.feature_filter_counts.height > 0
     assert {
         "scope",
@@ -1002,6 +1019,10 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
         "n_nonzero_features",
     }.issubset(refit_artifacts.model_sparsity.columns)
     assert refit_artifacts.model_sparsity_summary.height > 0
+    assert refit_artifacts.training_group_subsets.height == 2
+    assert refit_artifacts.training_group_subsets.get_column("scope").unique().to_list() == [
+        "final_refit"
+    ]
     timing_stages = set(refit_artifacts.timing.get_column("stage"))
     assert {
         "pool_preparation",
@@ -4584,6 +4605,92 @@ sampling:
             training_scope_id="fold_0",
             warnings=[],
         )
+
+
+def test_training_group_subsets_are_reproducible_and_nested(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    y_train = np.array([0, 1] * 4, dtype=int)
+    groups_train = np.array(
+        ["g1", "g1", "g2", "g2", "g3", "g3", "g4", "g4"],
+        dtype=str,
+    )
+    config_two = config.model_copy(
+        update={
+            "sampling": config.sampling.model_copy(
+                update={"max_training_groups": 2, "group_subsample_repeat": 3}
+            )
+        }
+    )
+    config_three = config.model_copy(
+        update={
+            "sampling": config.sampling.model_copy(
+                update={"max_training_groups": 3, "group_subsample_repeat": 3}
+            )
+        }
+    )
+
+    selected_two = cv_mod._select_training_groups(
+        config_two,
+        y_train,
+        groups_train,
+        scope="outer_fold",
+        fold_id="1",
+        warnings=[],
+    )
+    selected_two_again = cv_mod._select_training_groups(
+        config_two,
+        y_train,
+        groups_train,
+        scope="outer_fold",
+        fold_id="1",
+        warnings=[],
+    )
+    selected_three = cv_mod._select_training_groups(
+        config_three,
+        y_train,
+        groups_train,
+        scope="outer_fold",
+        fold_id="1",
+        warnings=[],
+    )
+
+    assert selected_two.group_ids == selected_two_again.group_ids
+    assert set(selected_two.group_ids) < set(selected_three.group_ids)
+    assert [row["group_rank"] for row in selected_three.audit_rows] == [1, 2, 3, 4]
+    assert sum(bool(row["selected"]) for row in selected_two.audit_rows) == 2
+
+
+def test_sample_training_sets_uses_only_selected_groups(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+sampling:
+  strategy: all_samples
+  max_samples_per_label_per_group: null
+  sampled_set_count: 1
+  max_training_groups: 1
+""".strip(),
+            )
+        ]
+    )
+
+    sampled_sets = cv_mod._sample_training_sets(
+        config=config,
+        y_train=np.array([0, 1, 0, 1], dtype=int),
+        groups_train=np.array(["g1", "g1", "g2", "g2"], dtype=str),
+        training_scope_id="fold_1",
+        warnings=[],
+        selected_group_ids=("g2",),
+    )
+
+    assert len(sampled_sets) == 1
+    assert sampled_sets[0].tolist() == [2, 3]
 
 
 def test_sample_training_sets_rejects_k_zero_when_mutated(tmp_path: Path) -> None:

@@ -882,6 +882,18 @@ evaluation:
     }
     assert thresholds.row(0, named=True)["policy"] == "fixed_constant"
     assert thresholds.row(0, named=True)["derived_from_cv"] is False
+    training_group_subsets = pl.read_csv(
+        run_dirs[0] / "model" / "tables" / "training_group_subsets.tsv",
+        separator="\t",
+        null_values="NA",
+    )
+    assert set(training_group_subsets.get_column("scope")) == {
+        "outer_fold",
+        "final_refit",
+    }
+    assert training_group_subsets.get_column("group_col").unique().to_list() == [
+        "contrast_pair_id"
+    ]
     evaluation_contract = pl.read_csv(
         run_dirs[0] / "model" / "tables" / "evaluation_contract.tsv",
         separator="\t",

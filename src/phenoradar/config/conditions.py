@@ -66,6 +66,8 @@ _RANKED_MAX_FEATURES_PATH = (
     "max_features",
 )
 _RANKED_MAX_FEATURES_DOTTED_PATH = ".".join(_RANKED_MAX_FEATURES_PATH)
+_GROUP_SUBSAMPLE_REPEAT_PATH = ("sampling", "group_subsample_repeat")
+_GROUP_SUBSAMPLE_REPEAT_DOTTED_PATH = ".".join(_GROUP_SUBSAMPLE_REPEAT_PATH)
 
 
 def _merged_raw_config(
@@ -163,28 +165,35 @@ def _normalize_inactive_condition_fields(
 ) -> None:
     """Canonicalize fields that are inactive for the selected condition."""
     preprocess = raw.get("preprocess")
-    if not isinstance(preprocess, dict):
-        return
-    ranked_filter = preprocess.get("ranked_feature_filter")
-    if (
-        not isinstance(ranked_filter, dict)
-        or ranked_filter.get("method", "none") != "none"
-    ):
-        return
+    ranked_filter = (
+        preprocess.get("ranked_feature_filter")
+        if isinstance(preprocess, dict)
+        else None
+    )
+    if isinstance(ranked_filter, dict) and ranked_filter.get("method", "none") == "none":
+        ranked_filter["max_features"] = None
+        for position, (path, _value) in enumerate(values):
+            if path == _RANKED_MAX_FEATURES_DOTTED_PATH:
+                values[position] = (path, None)
 
-    ranked_filter["max_features"] = None
-    for position, (path, _value) in enumerate(values):
-        if path == _RANKED_MAX_FEATURES_DOTTED_PATH:
-            values[position] = (path, None)
+    sampling = raw.get("sampling")
+    if isinstance(sampling, dict) and sampling.get("max_training_groups") is None:
+        sampling["group_subsample_repeat"] = 1
+        for position, (path, _value) in enumerate(values):
+            if path == _GROUP_SUBSAMPLE_REPEAT_DOTTED_PATH:
+                values[position] = (path, 1)
 
 
-def _differs_only_by_inactive_ranked_max_features(
+def _differs_only_by_inactive_fields(
     previous_values: tuple[tuple[str, Any], ...],
     current_values: tuple[tuple[str, Any], ...],
     resolved: AppConfig,
 ) -> bool:
-    if resolved.preprocess.ranked_feature_filter.method != "none":
-        return False
+    inactive_paths: set[str] = set()
+    if resolved.preprocess.ranked_feature_filter.method == "none":
+        inactive_paths.add(_RANKED_MAX_FEATURES_DOTTED_PATH)
+    if resolved.sampling.max_training_groups is None:
+        inactive_paths.add(_GROUP_SUBSAMPLE_REPEAT_DOTTED_PATH)
     differing_paths = {
         previous_path
         for (previous_path, previous_value), (current_path, current_value) in zip(
@@ -194,7 +203,7 @@ def _differs_only_by_inactive_ranked_max_features(
         )
         if previous_path != current_path or previous_value != current_value
     }
-    return differing_paths == {_RANKED_MAX_FEATURES_DOTTED_PATH}
+    return bool(differing_paths) and differing_paths <= inactive_paths
 
 
 def _config_sha256(config: AppConfig) -> str:
@@ -259,7 +268,7 @@ def load_config_conditions(
         duplicate = seen_hashes.get(digest)
         if duplicate is not None:
             duplicate_index, duplicate_source_values = duplicate
-            if _differs_only_by_inactive_ranked_max_features(
+            if _differs_only_by_inactive_fields(
                 duplicate_source_values,
                 source_values,
                 resolved,

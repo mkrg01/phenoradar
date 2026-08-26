@@ -190,3 +190,31 @@ preprocess:
 
     with pytest.raises(ConfigError, match="duplicates condition 1"):
         load_config_conditions([config_path])
+
+
+def test_training_group_count_and_repeat_expand_with_full_set_deduplicated(
+    tmp_path: Path,
+) -> None:
+    config_path = _write(
+        tmp_path / "config.yml",
+        """
+sampling:
+  max_training_groups: [5, null]
+  group_subsample_repeat: [1, 2]
+""".lstrip(),
+    )
+
+    condition_set = load_config_conditions([config_path])
+
+    assert [
+        (
+            condition.config.sampling.max_training_groups,
+            condition.config.sampling.group_subsample_repeat,
+        )
+        for condition in condition_set.conditions
+    ] == [(5, 1), (5, 2), (None, 1)]
+    assert [condition.index for condition in condition_set.conditions] == [1, 2, 3]
+    assert condition_set.conditions[-1].values == (
+        ("sampling.max_training_groups", None),
+        ("sampling.group_subsample_repeat", 1),
+    )

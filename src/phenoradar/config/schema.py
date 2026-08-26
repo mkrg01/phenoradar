@@ -290,6 +290,8 @@ class SamplingConfig(StrictModel):
     strategy: SamplingStrategy = "group_balanced"
     max_samples_per_label_per_group: PositiveInt | None = 1
     sampled_set_count: PositiveInt = 10
+    max_training_groups: PositiveInt | None = None
+    group_subsample_repeat: PositiveInt = 1
     weighting: WeightingMode = "none"
 
     @model_validator(mode="after")
@@ -473,6 +475,24 @@ class AppConfig(StrictModel):
                 "preprocess.ranked_feature_filter.method=pair_aware requires "
                 "data.contrast_pair_col"
             )
+        selection_active = (
+            self.model_selection.selected_candidate_count is not None
+            or self.model_selection.selected_candidate_percent is not None
+        )
+        max_training_groups = self.sampling.max_training_groups
+        if selection_active and max_training_groups is not None:
+            inner_strategy = self.model_selection.inner_cv_strategy
+            required_groups = (
+                2
+                if inner_strategy == "logo"
+                else self.model_selection.inner_cv_n_splits
+            )
+            if required_groups is not None and max_training_groups < required_groups:
+                raise ValueError(
+                    "sampling.max_training_groups must be at least the number of "
+                    "groups required by model-selection inner CV; "
+                    f"required={required_groups}"
+                )
         if self.model.logistic_solver == "liblinear":
             if self.model.name != "logistic_elasticnet":
                 raise ValueError(
