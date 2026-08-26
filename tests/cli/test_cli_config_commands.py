@@ -1840,7 +1840,7 @@ sampling:
     ]
     for extension in ("svg", "pdf", "png"):
         assert (study_dir / "figures" / f"condition_metrics.{extension}").exists()
-        assert (study_dir / "figures" / f"pairwise_improvement.{extension}").exists()
+        assert not (study_dir / "figures" / f"pairwise_improvement.{extension}").exists()
 
     resumed = runner.invoke(
         app,

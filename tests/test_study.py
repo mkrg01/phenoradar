@@ -151,8 +151,9 @@ def test_generate_study_report_preserves_order_and_uses_paired_replicates(
     assert comparisons.filter(pl.col("ci_lower") <= 0).height == 0
     assert comparisons.get_column("probability_a_better").unique().to_list() == [1.0]
     assert comparisons.get_column("n_valid_resamples").unique().to_list() == [3]
-    assert len(artifacts.figure_paths) == 6
+    assert len(artifacts.figure_paths) == 3
     assert all(path.exists() for path in artifacts.figure_paths)
+    assert not (tmp_path / "figures" / "pairwise_improvement.svg").exists()
     condition_svg = (tmp_path / "figures" / "condition_metrics.svg").read_text(
         encoding="utf-8"
     )

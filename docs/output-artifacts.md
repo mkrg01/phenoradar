@@ -43,7 +43,6 @@ cross-condition outputs:
 - `tables/condition_metrics.tsv`
 - `tables/pairwise_comparisons.tsv`
 - `figures/condition_metrics.{svg,pdf,png}`
-- `figures/pairwise_improvement.{svg,pdf,png}`
 - `figures/ranked_feature_sensitivity.{svg,pdf,png}` when both ranked-filter
   method and `max_features` vary as a complete two-method grid
 - `figures/ranked_feature_method_difference.{svg,pdf,png}` for the matched

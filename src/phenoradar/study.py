@@ -458,49 +458,6 @@ def _condition_metric_figure(
     return _save_figure_formats(fig, output_dir / "condition_metrics")
 
 
-def _pairwise_figure(
-    condition_metrics: pl.DataFrame,
-    pairwise: pl.DataFrame,
-    *,
-    output_dir: Path,
-) -> tuple[Path, ...]:
-    condition_rows = condition_metrics.select(
-        "condition_index", "condition_id", "condition_label"
-    ).unique(maintain_order=True).sort("condition_index")
-    condition_ids = [str(value) for value in condition_rows.get_column("condition_id")]
-    labels = [
-        _condition_figure_label(str(value))
-        for value in condition_rows.get_column("condition_label")
-    ]
-    id_to_position = {condition_id: position for position, condition_id in enumerate(condition_ids)}
-    size = len(condition_ids)
-    fig, axes = plt.subplots(2, 3, figsize=(10.5, 7.2), squeeze=False)
-    for axis, metric in zip(axes.flat, _METRIC_ORDER, strict=True):
-        matrix = np.zeros((size, size), dtype=float)
-        matrix[:] = np.nan
-        np.fill_diagonal(matrix, 0.0)
-        for row in pairwise.filter(pl.col("metric") == metric).iter_rows(named=True):
-            a = id_to_position[str(row["condition_a_id"])]
-            b = id_to_position[str(row["condition_b_id"])]
-            value = row["improvement_a_over_b"]
-            if value is None:
-                continue
-            matrix[a, b] = float(value)
-            matrix[b, a] = -float(value)
-        finite = np.abs(matrix[np.isfinite(matrix)])
-        limit = float(np.max(finite)) if finite.size and np.max(finite) > 0 else 1.0
-        image = axis.imshow(matrix, cmap="coolwarm", vmin=-limit, vmax=limit)
-        axis.set_title(_METRIC_LABELS[metric])
-        axis.set_xticks(np.arange(size), labels=labels, rotation=45, ha="right")
-        axis.set_yticks(np.arange(size), labels=labels)
-        axis.set_xlabel("Condition")
-        axis.set_ylabel("Condition")
-        fig.colorbar(image, ax=axis, fraction=0.046, pad=0.04, label="Row improvement")
-    fig.suptitle("All pairwise OOF differences (positive = row condition better)")
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
-    return _save_figure_formats(fig, output_dir / "pairwise_improvement")
-
-
 def _ranked_sensitivity_metadata(
     manifest_rows: Sequence[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -728,7 +685,6 @@ def generate_study_report(
     )
     figure_paths = (
         *_condition_metric_figure(condition_metrics, output_dir=figures_dir),
-        *_pairwise_figure(condition_metrics, pairwise, output_dir=figures_dir),
         *_ranked_feature_sensitivity_figures(
             condition_metrics,
             pairwise,
