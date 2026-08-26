@@ -161,6 +161,9 @@ def test_generate_study_report_preserves_order_and_uses_paired_replicates(
     )
     assert "first" in condition_svg
     assert "second" in condition_svg
+    assert "Condition" in condition_svg
+    assert "ROC AUC" in condition_svg
+    assert "Multi-condition OOF performance" not in condition_svg
 
 
 def test_ranked_feature_sensitivity_figures_use_matched_feature_counts(

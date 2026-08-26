@@ -422,10 +422,9 @@ def _condition_metric_figure(
         _condition_figure_label(str(value))
         for value in condition_rows.get_column("condition_label")
     ]
-    figure_height = max(5.5, 2.4 + 0.28 * len(indices) * 2)
-    fig, axes = plt.subplots(2, 3, figsize=(10.5, figure_height), squeeze=False)
-    colors = plt.get_cmap("tab20")(np.linspace(0.05, 0.95, max(1, len(indices))))
-    y = np.arange(len(indices), dtype=float)
+    figure_width = max(10.5, 6.0 + 0.5 * len(indices))
+    fig, axes = plt.subplots(2, 3, figsize=(figure_width, 6.5), squeeze=False)
+    x = np.arange(len(indices), dtype=float)
     for axis, metric in zip(axes.flat, _METRIC_ORDER, strict=True):
         metric_rows = condition_metrics.filter(pl.col("metric") == metric).sort(
             "condition_index"
@@ -438,26 +437,24 @@ def _condition_metric_figure(
                 continue
             if np.isfinite(lower[position]) and np.isfinite(upper[position]):
                 axis.errorbar(
+                    x[position],
                     point,
-                    y[position],
-                    xerr=np.asarray(
+                    yerr=np.asarray(
                         [[point - lower[position]], [upper[position] - point]], dtype=float
                     ),
                     fmt="o",
-                    color=colors[position],
+                    color="C0",
                     capsize=2,
                     markersize=4,
                     linewidth=1,
                 )
             else:
-                axis.scatter(point, y[position], color=colors[position], s=18)
-        axis.set_title(_METRIC_LABELS[metric])
-        axis.set_yticks(y, labels=labels)
-        axis.set_ylabel("Condition")
-        axis.grid(axis="x", alpha=0.3)
-        axis.invert_yaxis()
-    fig.suptitle("Multi-condition OOF performance")
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+                axis.scatter(x[position], point, color="C0", s=18)
+        axis.set_xticks(x, labels=labels, rotation=45, ha="right")
+        axis.set_xlabel("Condition")
+        axis.set_ylabel(_METRIC_LABELS[metric])
+        axis.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
     return _save_figure_formats(fig, output_dir / "condition_metrics")
 
 
