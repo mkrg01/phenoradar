@@ -714,6 +714,9 @@ evaluation:
     }.issubset(pl.read_csv(convergence_path, separator="\t").columns)
     assert (run_dirs[0] / "external_test" / "tables" / "prediction_external_test.tsv").exists()
     assert (run_dirs[0] / "inference" / "tables" / "prediction_inference.tsv").exists()
+    assert (
+        run_dirs[0] / "inference" / "tables" / "prediction_inference_by_fold.tsv"
+    ).exists()
     assert (run_dirs[0] / "external_test" / "tables" / "loss_by_split_final_refit.tsv").exists()
     assert (run_dirs[0] / "summary" / "tables" / "classification_summary.tsv").exists()
     assert (run_dirs[0] / "runtime" / "tables" / "timing.tsv").exists()

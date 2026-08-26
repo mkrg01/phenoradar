@@ -90,6 +90,7 @@ class CVArtifacts:
     loss_by_split_cv: pl.DataFrame
     thresholds: pl.DataFrame
     oof_predictions: pl.DataFrame
+    inference_predictions_by_fold: pl.DataFrame | None
     feature_importance: pl.DataFrame
     coefficients: pl.DataFrame
     feature_importance_by_fold: pl.DataFrame
@@ -184,6 +185,7 @@ class OuterFoldResult:
     metric_rows: list[dict[str, float | int | str | None]]
     loss_rows: list[dict[str, float | str]]
     oof_rows: list[dict[str, float | int | str]]
+    inference_prediction_rows: list[dict[str, float | str]]
     interpretation_entries: list[ModelFeatureEntry]
     ensemble_model_prob_rows: list[dict[str, float | int | str]]
     model_selection_selected_rows: list[dict[str, Any]]
@@ -239,6 +241,7 @@ class OuterSampleSetFitResult:
 
     model_probs: list[np.ndarray]
     train_model_probs: list[np.ndarray]
+    inference_model_probs: list[np.ndarray]
     fold_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
     interpretation_entries: list[ModelFeatureEntry]
     ensemble_model_prob_rows: list[dict[str, float | int | str]]
@@ -556,9 +559,13 @@ def _summarize_feature_filter_counts(feature_filter_counts: pl.DataFrame) -> pl.
             pl.col("retained_ratio").max().alias("retained_ratio_max"),
         ]
     )
-    return summary.with_columns(
-        pl.col("stage").replace(_FEATURE_FILTER_STAGE_ORDER).alias("_stage_order"),
-    ).sort(["scope", "_stage_order"]).drop("_stage_order")
+    return (
+        summary.with_columns(
+            pl.col("stage").replace(_FEATURE_FILTER_STAGE_ORDER).alias("_stage_order"),
+        )
+        .sort(["scope", "_stage_order"])
+        .drop("_stage_order")
+    )
 
 
 def _retained_feature_rows(
@@ -732,20 +739,24 @@ def _build_model_sparsity(rows: list[dict[str, Any]]) -> pl.DataFrame:
 def _summarize_model_sparsity(model_sparsity: pl.DataFrame) -> pl.DataFrame:
     if model_sparsity.height == 0:
         return _empty_model_sparsity_summary()
-    return model_sparsity.group_by(["scope", "model_name"]).agg(
-        [
-            pl.len().alias("n_models"),
-            pl.col("n_nonzero_features").count().alias("n_models_with_nonzero_count"),
-            pl.col("n_nonzero_features").min().alias("n_nonzero_min"),
-            pl.col("n_nonzero_features").median().alias("n_nonzero_median"),
-            pl.col("n_nonzero_features").mean().alias("n_nonzero_mean"),
-            pl.col("n_nonzero_features").max().alias("n_nonzero_max"),
-            pl.col("nonzero_ratio").min().alias("nonzero_ratio_min"),
-            pl.col("nonzero_ratio").median().alias("nonzero_ratio_median"),
-            pl.col("nonzero_ratio").mean().alias("nonzero_ratio_mean"),
-            pl.col("nonzero_ratio").max().alias("nonzero_ratio_max"),
-        ]
-    ).sort(["scope", "model_name"])
+    return (
+        model_sparsity.group_by(["scope", "model_name"])
+        .agg(
+            [
+                pl.len().alias("n_models"),
+                pl.col("n_nonzero_features").count().alias("n_models_with_nonzero_count"),
+                pl.col("n_nonzero_features").min().alias("n_nonzero_min"),
+                pl.col("n_nonzero_features").median().alias("n_nonzero_median"),
+                pl.col("n_nonzero_features").mean().alias("n_nonzero_mean"),
+                pl.col("n_nonzero_features").max().alias("n_nonzero_max"),
+                pl.col("nonzero_ratio").min().alias("nonzero_ratio_min"),
+                pl.col("nonzero_ratio").median().alias("nonzero_ratio_median"),
+                pl.col("nonzero_ratio").mean().alias("nonzero_ratio_mean"),
+                pl.col("nonzero_ratio").max().alias("nonzero_ratio_max"),
+            ]
+        )
+        .sort(["scope", "model_name"])
+    )
 
 
 def _deterministic_int_seed(seed_text: str) -> int:
@@ -974,8 +985,7 @@ class ExpressionMatrixBuilder:
             raise CVError(f"Missing required columns in expression data: {missing_str}")
         if self._SOURCE_LINE_COL in schema_columns:
             raise CVError(
-                "Expression data uses a reserved internal column name: "
-                f"{self._SOURCE_LINE_COL}"
+                f"Expression data uses a reserved internal column name: {self._SOURCE_LINE_COL}"
             )
 
         # Read the value column as text so validation does not depend on the CSV
@@ -999,12 +1009,8 @@ class ExpressionMatrixBuilder:
             raise CVError(f"Failed to read expression data: {self._tpm_path}: {exc}") from exc
 
     def _raw_long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
-        raw_value = (
-            pl.col(self._value_col).cast(pl.String, strict=False).str.strip_chars()
-        )
-        feature_value = (
-            pl.col(self._feature_col).cast(pl.String, strict=False).str.strip_chars()
-        )
+        raw_value = pl.col(self._value_col).cast(pl.String, strict=False).str.strip_chars()
+        feature_value = pl.col(self._feature_col).cast(pl.String, strict=False).str.strip_chars()
         parsed_value = raw_value.cast(pl.Float64, strict=False)
         invalid_value_reason_mask = (
             pl.when(raw_value.is_null() | (raw_value == ""))
@@ -1026,9 +1032,10 @@ class ExpressionMatrixBuilder:
 
         normalized = (
             self._scan.filter(
-                pl.col(self._species_col).cast(pl.String, strict=False).str.strip_chars().is_in(
-                    unique_species
-                )
+                pl.col(self._species_col)
+                .cast(pl.String, strict=False)
+                .str.strip_chars()
+                .is_in(unique_species)
             )
             .select(
                 pl.col(self._species_col)
@@ -1042,10 +1049,7 @@ class ExpressionMatrixBuilder:
                 invalid_reason_mask.alias("__invalid_reason_mask"),
                 pl.col(self._SOURCE_LINE_COL).alias("__source_line"),
             )
-            .filter(
-                pl.col("__species").is_not_null()
-                & (pl.col("__species") != "")
-            )
+            .filter(pl.col("__species").is_not_null() & (pl.col("__species") != ""))
             .with_columns(
                 pl.when(pl.col("__invalid_reason_mask") == 0)
                 .then(pl.col("__parsed_value"))
@@ -1054,36 +1058,28 @@ class ExpressionMatrixBuilder:
             )
         )
         invalid = pl.col("__invalid_reason_mask") != 0
-        aggregated = (
-            normalized
-            .group_by(["__species", "__feature"])
-            .agg(
-                pl.col("__value").sum(),
-                invalid.sum().alias("__invalid_count"),
-                pl.col("__source_line").min().alias("__group_first_line"),
-                pl.col("__source_line").filter(invalid).min().alias("__invalid_line"),
-                pl.col("__invalid_reason_mask").max().alias("__invalid_reason_mask"),
-            )
+        aggregated = normalized.group_by(["__species", "__feature"]).agg(
+            pl.col("__value").sum(),
+            invalid.sum().alias("__invalid_count"),
+            pl.col("__source_line").min().alias("__group_first_line"),
+            pl.col("__source_line").filter(invalid).min().alias("__invalid_line"),
+            pl.col("__invalid_reason_mask").max().alias("__invalid_reason_mask"),
         )
-        aggregate_overflow = (pl.col("__invalid_count") == 0) & ~pl.col(
-            "__value"
-        ).is_finite()
-        return (
-            aggregated.with_columns(
-                pl.when(aggregate_overflow)
-                .then(pl.lit(1, dtype=pl.UInt32))
-                .otherwise(pl.col("__invalid_count"))
-                .alias("__invalid_count"),
-                pl.when(aggregate_overflow)
-                .then(pl.col("__group_first_line"))
-                .otherwise(pl.col("__invalid_line"))
-                .alias("__invalid_line"),
-                pl.when(aggregate_overflow)
-                .then(pl.lit(16, dtype=pl.UInt8))
-                .otherwise(pl.col("__invalid_reason_mask"))
-                .alias("__invalid_reason_mask"),
-            ).drop("__group_first_line")
-        )
+        aggregate_overflow = (pl.col("__invalid_count") == 0) & ~pl.col("__value").is_finite()
+        return aggregated.with_columns(
+            pl.when(aggregate_overflow)
+            .then(pl.lit(1, dtype=pl.UInt32))
+            .otherwise(pl.col("__invalid_count"))
+            .alias("__invalid_count"),
+            pl.when(aggregate_overflow)
+            .then(pl.col("__group_first_line"))
+            .otherwise(pl.col("__invalid_line"))
+            .alias("__invalid_line"),
+            pl.when(aggregate_overflow)
+            .then(pl.lit(16, dtype=pl.UInt8))
+            .otherwise(pl.col("__invalid_reason_mask"))
+            .alias("__invalid_reason_mask"),
+        ).drop("__group_first_line")
 
     @classmethod
     def _raise_invalid_tpm_values(cls, invalid_rows: pl.DataFrame, total: int) -> None:
@@ -1124,15 +1120,12 @@ class ExpressionMatrixBuilder:
     def _validate_tpm_scan(self, long_scan: pl.LazyFrame) -> None:
         invalid_scan = long_scan.filter(pl.col("__invalid_count") > 0)
         invalid_rows = self._collect_expression(
-            invalid_scan.sort("__invalid_line")
-            .head(self._INVALID_TPM_PREVIEW_LIMIT)
+            invalid_scan.sort("__invalid_line").head(self._INVALID_TPM_PREVIEW_LIMIT)
         )
         if invalid_rows.height == 0:
             return
         total = int(
-            self._collect_expression(
-                invalid_scan.select(pl.col("__invalid_count").sum())
-            ).item()
+            self._collect_expression(invalid_scan.select(pl.col("__invalid_count").sum())).item()
         )
         self._raise_invalid_tpm_values(invalid_rows, total)
 
@@ -1206,9 +1199,7 @@ class ExpressionMatrixBuilder:
             .unique(maintain_order=True)
             .with_row_index("__matrix_row")
         )
-        feature_index = pl.DataFrame({"__feature": feature_names}).with_row_index(
-            "__matrix_col"
-        )
+        feature_index = pl.DataFrame({"__feature": feature_names}).with_row_index("__matrix_col")
         coordinates = (
             long_df.select("__species", "__feature", "__value")
             .join(species_index, on="__species", how="inner")
@@ -1241,9 +1232,9 @@ class ExpressionMatrixBuilder:
         long_scan = self._long_scan_for_species(unique_species)
         present_species = {
             str(value)
-            for value in self._collect_expression(
-                long_scan.select("__species").unique()
-            ).to_series().to_list()
+            for value in self._collect_expression(long_scan.select("__species").unique())
+            .to_series()
+            .to_list()
         }
         if not present_species:
             raise CVError("Expression matrix is empty for the selected species")
@@ -1255,9 +1246,7 @@ class ExpressionMatrixBuilder:
         feature_names = [
             str(value)
             for value in (
-                self._collect_expression(
-                    long_scan.select("__feature").unique().sort("__feature")
-                )
+                self._collect_expression(long_scan.select("__feature").unique().sort("__feature"))
                 .to_series()
                 .to_list()
             )
@@ -1282,9 +1271,9 @@ class ExpressionMatrixBuilder:
 
         present_species = {
             str(value)
-            for value in self._collect_expression(
-                long_scan.select("__species").unique()
-            ).to_series().to_list()
+            for value in self._collect_expression(long_scan.select("__species").unique())
+            .to_series()
+            .to_list()
         }
         if not present_species:
             raise CVError("Expression matrix is empty for the selected species")
@@ -1476,9 +1465,7 @@ def _apply_ranked_feature_filter(
         return RankedFeatureFilterResult(selected=selected, priority_scores=None, score_rows=rows)
 
     if max_features is None:
-        raise CVError(
-            "ranked_feature_filter max_features is missing for method " f"{method}"
-        )
+        raise CVError(f"ranked_feature_filter max_features is missing for method {method}")
 
     effect = empty_values.copy()
     standard_error = empty_values.copy()
@@ -1524,9 +1511,9 @@ def _apply_ranked_feature_filter(
             )
         effect = np.asarray(np.mean(contrasts, axis=0), dtype=float)
         if n_valid_contrast_pairs > 1:
-            standard_error = np.asarray(
-                np.std(contrasts, axis=0, ddof=1), dtype=float
-            ) / np.sqrt(float(n_valid_contrast_pairs))
+            standard_error = np.asarray(np.std(contrasts, axis=0, ddof=1), dtype=float) / np.sqrt(
+                float(n_valid_contrast_pairs)
+            )
         else:
             fallback_to_absolute_effect = True
     elif method == "unpaired":
@@ -1551,18 +1538,14 @@ def _apply_ranked_feature_filter(
             fallback_to_absolute_effect = True
     elif method == "variance":
         if x_train_expr.shape[0] > 1:
-            score = np.asarray(
-                np.var(x_train_expr[:, selected], axis=0, ddof=1), dtype=float
-            )
+            score = np.asarray(np.var(x_train_expr[:, selected], axis=0, ddof=1), dtype=float)
         else:
             score = np.zeros(candidate_count, dtype=float)
     else:  # pragma: no cover - guarded by config validation.
         raise CVError(f"Unsupported ranked_feature_filter method: {method}")
 
     if method in {"pair_aware", "unpaired"}:
-        positive_se = standard_error[
-            np.isfinite(standard_error) & (standard_error > 0.0)
-        ]
+        positive_se = standard_error[np.isfinite(standard_error) & (standard_error > 0.0)]
         if positive_se.size == 0:
             fallback_to_absolute_effect = True
             score = np.abs(effect)
@@ -1679,10 +1662,13 @@ def _select_feature_indices_with_counts(
             trait_count = int(np.count_nonzero(trait_mask))
             if trait_count == 0:
                 continue
-            trait_nonzero_fraction = np.count_nonzero(
-                nonzero_mask[trait_mask, :],
-                axis=0,
-            ) / trait_count
+            trait_nonzero_fraction = (
+                np.count_nonzero(
+                    nonzero_mask[trait_mask, :],
+                    axis=0,
+                )
+                / trait_count
+            )
             max_nonzero_fraction = np.maximum(max_nonzero_fraction, trait_nonzero_fraction)
         selected = selected[max_nonzero_fraction >= float(min_fraction)]
     n_features_after_sparse_feature_filter = int(selected.size)
@@ -1775,11 +1761,7 @@ def _apply_correlation_filter(
     order = sorted(
         range(selected.size),
         key=lambda idx: (
-            -(
-                0.0
-                if priority_scores is None
-                else float(priority_scores[idx])
-            ),
+            -(0.0 if priority_scores is None else float(priority_scores[idx])),
             -local_variances[idx],
             feature_names[selected[idx]],
         ),
@@ -1808,7 +1790,7 @@ def _preprocess_fold_with_counts(
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
     ranked_feature_score_rows: list[dict[str, Any]] | None = None,
-) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts]:
+) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts, FeatureScaler]:
     x_train_expr = _apply_expression_transform_for_config(config, x_train_raw)
     x_valid_expr = _apply_expression_transform_for_config(config, x_valid_raw)
 
@@ -1833,7 +1815,7 @@ def _preprocess_transformed_fold_with_counts(
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
     ranked_feature_score_rows: list[dict[str, Any]] | None = None,
-) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts]:
+) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts, FeatureScaler]:
     """Preprocess a fold whose row-local expression transform is already applied."""
 
     selected, counts = _select_feature_indices_with_counts(
@@ -1850,10 +1832,10 @@ def _preprocess_transformed_fold_with_counts(
     x_train_selected = x_train_expr[:, selected]
     x_valid_selected = x_valid_expr[:, selected]
 
-    x_train_scaled, x_valid_scaled, _scaler = fit_feature_scaling(
+    x_train_scaled, x_valid_scaled, scaler = fit_feature_scaling(
         config, x_train_selected, x_valid_selected
     )
-    return x_train_scaled, x_valid_scaled, selected_features, counts
+    return x_train_scaled, x_valid_scaled, selected_features, counts, scaler
 
 
 def _preprocess_fold(
@@ -1865,14 +1847,16 @@ def _preprocess_fold(
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    x_train_scaled, x_valid_scaled, selected_features, _counts = _preprocess_fold_with_counts(
-        config,
-        x_train_raw,
-        x_valid_raw,
-        feature_names,
-        y_train=y_train,
-        groups_train=groups_train,
-        warnings=warnings,
+    x_train_scaled, x_valid_scaled, selected_features, _counts, _scaler = (
+        _preprocess_fold_with_counts(
+            config,
+            x_train_raw,
+            x_valid_raw,
+            feature_names,
+            y_train=y_train,
+            groups_train=groups_train,
+            warnings=warnings,
+        )
     )
     return x_train_scaled, x_valid_scaled, selected_features
 
@@ -1957,9 +1941,7 @@ def _select_training_groups(
                 "fold_id": fold_id,
                 "group_col": config.split.group_col,
                 "group_subsample_repeat_index": repeat_index,
-                "training_group_count_requested": (
-                    None if requested is None else int(requested)
-                ),
+                "training_group_count_requested": (None if requested is None else int(requested)),
                 "n_training_groups_available": len(ordered_groups),
                 "n_training_groups_selected": effective_count,
                 "group_rank": rank,
@@ -1994,9 +1976,7 @@ def _sample_training_sets(
             + ", ".join(unknown_groups)
         )
     if config.sampling.strategy == "all_samples":
-        selected = np.flatnonzero(
-            np.isin(normalized_groups, np.asarray(unique_groups, dtype=str))
-        )
+        selected = np.flatnonzero(np.isin(normalized_groups, np.asarray(unique_groups, dtype=str)))
         return [selected.astype(int, copy=False)]
 
     group_specs: list[tuple[str, np.ndarray, np.ndarray, int]] = []
@@ -2007,8 +1987,7 @@ def _sample_training_sets(
         label1_idx = group_indices[y_train[group_indices] == 1]
         if label0_idx.size == 0 or label1_idx.size == 0:
             raise CVError(
-                "group_balanced sampling requires both labels per group; "
-                f"offending group={group}"
+                f"group_balanced sampling requires both labels per group; offending group={group}"
             )
 
         if config.sampling.max_samples_per_label_per_group is None:
@@ -2132,8 +2111,7 @@ def _build_estimator(
         min_class_count = int(class_counts.min())
         if min_class_count < 2:
             raise CVError(
-                "linear_svm calibration requires at least 2 "
-                "samples per class in train fold"
+                "linear_svm calibration requires at least 2 samples per class in train fold"
             )
         calibrate_cv = 3 if min_class_count >= 3 else 2
         base_estimator = LinearSVC(C=c_value, max_iter=max_iter, random_state=model_seed)
@@ -2223,10 +2201,14 @@ def _fit_estimator(
     convergence_applicable = bool(iterative_estimators)
     convergence_messages = (
         (
-            "Iteration limit reached (observed n_iter_ >= configured max_iter); "
-            "coefficients may not have converged"
-        ),
-    ) if iteration_limit_reached_count > 0 else ()
+            (
+                "Iteration limit reached (observed n_iter_ >= configured max_iter); "
+                "coefficients may not have converged"
+            ),
+        )
+        if iteration_limit_reached_count > 0
+        else ()
+    )
     return EstimatorFitDiagnostic(
         estimator_class=type(estimator).__name__,
         convergence_applicable=convergence_applicable,
@@ -2269,9 +2251,7 @@ def _convergence_diagnostic_row(
         "n_iter_values_json": json.dumps(diagnostic.n_iter_values),
         "max_iter": diagnostic.max_iter,
         "convergence_warning_count": diagnostic.convergence_warning_count,
-        "convergence_warning_message": " | ".join(
-            diagnostic.convergence_warning_messages
-        ),
+        "convergence_warning_message": " | ".join(diagnostic.convergence_warning_messages),
         "params_json": params_json,
     }
 
@@ -2391,9 +2371,7 @@ def _rank_candidates_by_metric(
     )
 
 
-def _numeric_candidate_param(
-    candidate: Candidate, name: str, default: float
-) -> float:
+def _numeric_candidate_param(candidate: Candidate, name: str, default: float) -> float:
     value = candidate.params.get(name)
     if value is None:
         return default
@@ -2406,9 +2384,7 @@ def _numeric_candidate_param(
     return numeric
 
 
-def _candidate_simplicity_sort_key(
-    candidate: Candidate, model_name: str
-) -> tuple[float, ...]:
+def _candidate_simplicity_sort_key(candidate: Candidate, model_name: str) -> tuple[float, ...]:
     if model_name in {"logistic_elasticnet", "linear_svm"}:
         c_value = _numeric_candidate_param(candidate, "C", np.inf)
         if model_name == "logistic_elasticnet":
@@ -2418,8 +2394,10 @@ def _candidate_simplicity_sort_key(
 
     if model_name == "random_forest":
         max_depth_raw = candidate.params.get("max_depth")
-        max_depth = np.inf if max_depth_raw is None else _numeric_candidate_param(
-            candidate, "max_depth", np.inf
+        max_depth = (
+            np.inf
+            if max_depth_raw is None
+            else _numeric_candidate_param(candidate, "max_depth", np.inf)
         )
         min_samples_leaf = _numeric_candidate_param(candidate, "min_samples_leaf", 1.0)
         min_samples_split = _numeric_candidate_param(candidate, "min_samples_split", 2.0)
@@ -2631,14 +2609,16 @@ def _build_inner_cv_preprocessed_folds(
                 None if contrast_groups_source is None else contrast_groups_source[train_idx]
             )
 
-            x_train, x_valid, _selected, _counts = _preprocess_transformed_fold_with_counts(
-                config,
-                x_train_expr,
-                x_valid_expr,
-                feature_names,
-                y_train=y_train,
-                groups_train=contrast_groups_train,
-                warnings=warnings,
+            x_train, x_valid, _selected, _counts, _scaler = (
+                _preprocess_transformed_fold_with_counts(
+                    config,
+                    x_train_expr,
+                    x_valid_expr,
+                    feature_names,
+                    y_train=y_train,
+                    groups_train=contrast_groups_train,
+                    warnings=warnings,
+                )
             )
             sample_weight = _fit_sample_weights(config, y_train, groups_train)
             preprocessed_folds.append(
@@ -2751,9 +2731,7 @@ def _score_candidate_inner_cv(
 
 def _score_std_error_from_trial_rows(trial_rows: list[dict[str, Any]]) -> float | None:
     values = [
-        score
-        for row in trial_rows
-        if (score := _finite_score(row.get("metric_value"))) is not None
+        score for row in trial_rows if (score := _finite_score(row.get("metric_value"))) is not None
     ]
     if not values:
         return None
@@ -2814,8 +2792,7 @@ def _prepare_source_selection_tpe(
 ) -> SourceSelectionResult:
     if not _selection_is_active(config):
         raise CVError(
-            "selected_candidate_count/selected_candidate_percent is required "
-            "for TPE selection flow"
+            "selected_candidate_count/selected_candidate_percent is required for TPE selection flow"
         )
     if config.model_selection.trial_count is None:
         raise CVError("trial_count is required for TPE strategy")
@@ -3214,10 +3191,7 @@ def _summarize_model_selection_trials(model_selection_trials: pl.DataFrame) -> p
     )
     return summary.with_columns(
         pl.when(pl.col("n_valid_inner_folds") > 0)
-        .then(
-            pl.col("metric_value_std")
-            / pl.col("n_valid_inner_folds").cast(pl.Float64).sqrt()
-        )
+        .then(pl.col("metric_value_std") / pl.col("n_valid_inner_folds").cast(pl.Float64).sqrt())
         .otherwise(pl.lit(None, dtype=pl.Float64))
         .alias("metric_value_se")
     ).sort(["fold_id", "sample_set_id", "candidate_index"])
@@ -3257,12 +3231,28 @@ def _outer_cv_species(split_manifest: pl.DataFrame) -> list[str]:
     return [str(value) for value in species_values]
 
 
+def _outer_cv_inference_species(config: AppConfig, split_manifest: pl.DataFrame) -> list[str]:
+    if config.runtime.execution_stage != "full_run":
+        return []
+    species_values = (
+        split_manifest.filter(pl.col("pool") == "discovery_inference")
+        .select("species")
+        .unique()
+        .sort("species")
+        .to_series()
+        .to_list()
+    )
+    return [str(value) for value in species_values]
+
+
 def _build_outer_cv_matrix_cache(
     config: AppConfig, split_manifest: pl.DataFrame
 ) -> OuterCvMatrixCache:
-    species_order = _outer_cv_species(split_manifest)
-    if not species_order:
+    cv_species = _outer_cv_species(split_manifest)
+    if not cv_species:
         raise CVError("No species available for outer CV train/validation pool")
+    inference_species = _outer_cv_inference_species(config, split_manifest)
+    species_order = [*cv_species, *inference_species]
 
     matrix_builder = ExpressionMatrixBuilder(config)
     _with_native_thread_limit_for_config(
@@ -3270,11 +3260,21 @@ def _build_outer_cv_matrix_cache(
         matrix_builder.cache_species,
         species_order,
     )
-    matrix, feature_names = _with_native_thread_limit_for_config(
+    cv_matrix, feature_names = _with_native_thread_limit_for_config(
         config,
         matrix_builder.build_matrix,
-        species_order,
+        cv_species,
     )
+    if inference_species:
+        inference_matrix, _ = _with_native_thread_limit_for_config(
+            config,
+            matrix_builder.build_matrix,
+            inference_species,
+            feature_names,
+        )
+        matrix = np.vstack([cv_matrix, inference_matrix])
+    else:
+        matrix = cv_matrix
     matrix.setflags(write=False)
     species_to_index = {species: idx for idx, species in enumerate(species_order)}
     if len(species_to_index) != len(species_order):
@@ -3284,6 +3284,23 @@ def _build_outer_cv_matrix_cache(
         feature_names=feature_names,
         species_to_index=species_to_index,
     )
+
+
+def _slice_outer_cv_inference_matrix(
+    cache: OuterCvMatrixCache,
+    *,
+    species: list[str],
+) -> np.ndarray:
+    if not species:
+        return np.empty((0, len(cache.feature_names)), dtype=float)
+    try:
+        row_idx = np.array([cache.species_to_index[value] for value in species], dtype=int)
+    except KeyError as exc:
+        raise CVError(
+            "Inference target references species absent from shared outer-CV matrix; "
+            f"species={exc.args[0]}"
+        ) from exc
+    return cache.matrix[row_idx, :]
 
 
 def _slice_outer_cv_matrix(
@@ -3341,9 +3358,7 @@ def _build_top_feature_expression(
         return pl.DataFrame(schema=schema)
     species_order = [
         species
-        for species, _index in sorted(
-            cache.species_to_index.items(), key=lambda row: row[1]
-        )
+        for species, _index in sorted(cache.species_to_index.items(), key=lambda row: row[1])
     ]
     feature_indices = [feature_to_index[feature] for feature in selected_features]
     values = cache.matrix[:, feature_indices]
@@ -3463,9 +3478,7 @@ def _counts_with_n_features_before(
         n_features_before=resolved,
         n_features_after_sparse_feature_filter=counts.n_features_after_sparse_feature_filter,
         n_features_after_low_variance=counts.n_features_after_low_variance,
-        n_features_after_ranked_feature_filter=(
-            counts.n_features_after_ranked_feature_filter
-        ),
+        n_features_after_ranked_feature_filter=(counts.n_features_after_ranked_feature_filter),
         n_features_after_correlation=counts.n_features_after_correlation,
         n_features_after_all=counts.n_features_after_all,
     )
@@ -3551,11 +3564,7 @@ def _final_refit_can_prune_target_matrix(config: AppConfig) -> bool:
         return False
     sparse_filter = config.preprocess.sparse_feature_filter
     min_fraction = sparse_filter.min_nonzero_fraction_in_at_least_one_trait
-    return bool(
-        sparse_filter.enabled
-        and min_fraction is not None
-        and float(min_fraction) > 0.0
-    )
+    return bool(sparse_filter.enabled and min_fraction is not None and float(min_fraction) > 0.0)
 
 
 def _build_prediction_table(
@@ -3603,6 +3612,7 @@ def _fit_outer_sample_set(
     contrast_groups_train: np.ndarray | None,
     x_valid_raw: np.ndarray,
     valid_species: list[str],
+    x_inference_raw: np.ndarray,
     feature_names: list[str],
     timing_recorder: TimingRecorder | None = None,
 ) -> OuterSampleSetFitResult:
@@ -3618,7 +3628,7 @@ def _fit_outer_sample_set(
     preprocess_started = None if timing_recorder is None else timing_recorder.start()
     ranked_feature_score_rows: list[dict[str, Any]] = []
     try:
-        x_sampled, x_valid, selected_features, filter_counts = _preprocess_fold_with_counts(
+        x_sampled, x_valid, selected_features, filter_counts, scaler = _preprocess_fold_with_counts(
             config,
             x_sampled_raw,
             x_valid_raw,
@@ -3642,8 +3652,23 @@ def _fit_outer_sample_set(
         )
     sample_weight = _fit_sample_weights(config, y_sampled, groups_sampled)
 
+    selected_feature_index = {feature: idx for idx, feature in enumerate(feature_names)}
+    selected_indices = np.array(
+        [selected_feature_index[feature] for feature in selected_features], dtype=int
+    )
+    if x_inference_raw.shape[0] == 0:
+        x_inference = np.empty((0, len(selected_features)), dtype=float)
+    else:
+        x_inference_expr = _apply_expression_transform_for_config(config, x_inference_raw)
+        x_inference = apply_feature_scaling(
+            x_inference_expr[:, selected_indices],
+            scaler,
+            config.preprocess.feature_scaling.method,
+        )
+
     model_probs: list[np.ndarray] = []
     train_model_probs: list[np.ndarray] = []
+    inference_model_probs: list[np.ndarray] = []
     fold_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
     interpretation_entries: list[ModelFeatureEntry] = []
     ensemble_model_prob_rows: list[dict[str, float | int | str]] = []
@@ -3706,6 +3731,10 @@ def _fit_outer_sample_set(
         )
         prediction_started = None if timing_recorder is None else timing_recorder.start()
         train_model_probs.append(_predict_positive_probability(estimator, x_sampled))
+        if x_inference.shape[0] == 0:
+            inference_model_probs.append(np.empty(0, dtype=float))
+        else:
+            inference_model_probs.append(_predict_positive_probability(estimator, x_inference))
         interpretation_entries.append(
             ModelFeatureEntry(
                 feature_names=selected_features,
@@ -3741,6 +3770,7 @@ def _fit_outer_sample_set(
     return OuterSampleSetFitResult(
         model_probs=model_probs,
         train_model_probs=train_model_probs,
+        inference_model_probs=inference_model_probs,
         fold_models=fold_models,
         interpretation_entries=interpretation_entries,
         ensemble_model_prob_rows=ensemble_model_prob_rows,
@@ -3832,9 +3862,7 @@ def _fit_final_refit_sample_set(
     model_workers, per_model_n_jobs = _sample_set_parallel_plan(config, selected_count)
     model_config = _config_with_runtime_n_jobs(config, per_model_n_jobs)
     resolved_selection_source_sample_set_id = (
-        sample_set_id
-        if selection_source_sample_set_id is None
-        else selection_source_sample_set_id
+        sample_set_id if selection_source_sample_set_id is None else selection_source_sample_set_id
     )
 
     def _fit_one(
@@ -3863,9 +3891,7 @@ def _fit_final_refit_sample_set(
                 model_params=selected.candidate.params,
             )
             fit_started = None if timing_recorder is None else timing_recorder.start()
-            fit_diagnostic = _fit_estimator(
-                estimator, x_sampled, y_sampled, sample_weight
-            )
+            fit_diagnostic = _fit_estimator(estimator, x_sampled, y_sampled, sample_weight)
             if timing_recorder is not None and fit_started is not None:
                 timing_recorder.record_since(
                     fit_started,
@@ -3936,9 +3962,7 @@ def _fit_final_refit_sample_set(
                 fit_scope="selected_model",
                 fold_id="NA",
                 sample_set_id=sample_set_id,
-                selection_source_sample_set_id=(
-                    resolved_selection_source_sample_set_id
-                ),
+                selection_source_sample_set_id=(resolved_selection_source_sample_set_id),
                 candidate_index=selected.candidate.candidate_index,
                 inner_fold_id="NA",
                 model_index=model_index,
@@ -4030,9 +4054,7 @@ def _run_final_refit_impl(
 
     train_species = [str(v) for v in train_pool.select("species").to_series().to_list()]
     external_species = [str(v) for v in external_pool.select("species").to_series().to_list()]
-    external_true_label = np.array(
-        external_pool.select("label").to_series().to_list(), dtype=int
-    )
+    external_true_label = np.array(external_pool.select("label").to_series().to_list(), dtype=int)
     inference_species = [str(v) for v in inference_pool.select("species").to_series().to_list()]
     target_species = external_species + inference_species
     recorder.record_since(
@@ -4192,9 +4214,7 @@ def _run_final_refit_impl(
             for rank, selected in enumerate(source_result.selected_candidates, start=1):
                 score_value = np.nan if selected.score is None else float(selected.score)
                 score_std_error = (
-                    np.nan
-                    if selected.score_std_error is None
-                    else float(selected.score_std_error)
+                    np.nan if selected.score_std_error is None else float(selected.score_std_error)
                 )
                 model_selection_selected_rows.append(
                     {
@@ -4425,12 +4445,8 @@ def _run_final_refit_impl(
 
     external_prob = mean_prob[:external_count]
     inference_prob = mean_prob[external_count:]
-    external_uncertainty = (
-        None if uncertainty_std is None else uncertainty_std[:external_count]
-    )
-    inference_uncertainty = (
-        None if uncertainty_std is None else uncertainty_std[external_count:]
-    )
+    external_uncertainty = None if uncertainty_std is None else uncertainty_std[:external_count]
+    inference_uncertainty = None if uncertainty_std is None else uncertainty_std[external_count:]
 
     fixed_threshold = FIXED_PROBABILITY_THRESHOLD_VALUE
     pred_external = _build_prediction_table(
@@ -4490,9 +4506,7 @@ def _run_final_refit_impl(
         retained_features_summary=retained_features_summary,
         model_sparsity=model_sparsity,
         model_sparsity_summary=model_sparsity_summary,
-        training_group_subsets=_build_training_group_subsets(
-            training_group_selection.audit_rows
-        ),
+        training_group_subsets=_build_training_group_subsets(training_group_selection.audit_rows),
         timing=timing,
         warnings=warnings,
         ensemble_size=len(model_probs),
@@ -4535,9 +4549,7 @@ def _run_outer_fold(
         if details is None:
             progress_callback(f"Outer CV fold stage (fold_id={fold_id}, stage={stage}).")
             return
-        progress_callback(
-            f"Outer CV fold stage (fold_id={fold_id}, stage={stage}, {details})."
-        )
+        progress_callback(f"Outer CV fold stage (fold_id={fold_id}, stage={stage}, {details}).")
 
     train_df = split_manifest.filter(
         (pl.col("pool") == "train") & (pl.col("fold_id") == fold_id)
@@ -4550,6 +4562,7 @@ def _run_outer_fold(
 
     train_species = [str(v) for v in train_df.select("species").to_series().to_list()]
     valid_species = [str(v) for v in valid_df.select("species").to_series().to_list()]
+    inference_species = _outer_cv_inference_species(config, split_manifest)
     y_train = np.array(train_df.select("label").to_series().to_list(), dtype=int)
     y_valid = np.array(valid_df.select("label").to_series().to_list(), dtype=int)
     groups_train = np.array(train_df.select("group_id").to_series().to_list(), dtype=str)
@@ -4562,10 +4575,7 @@ def _run_outer_fold(
         contrast_groups_train = np.array(contrast_values, dtype=object)
     _emit_fold_progress(
         "start",
-        (
-            f"n_train_species={len(train_species)}, "
-            f"n_valid_species={len(valid_species)}"
-        ),
+        (f"n_train_species={len(train_species)}, n_valid_species={len(valid_species)}"),
     )
 
     matrix_slice_started = None if timing_recorder is None else timing_recorder.start()
@@ -4574,6 +4584,10 @@ def _run_outer_fold(
         fold_id=fold_id,
         train_species=train_species,
         valid_species=valid_species,
+    )
+    x_inference_raw = _slice_outer_cv_inference_matrix(
+        outer_matrix_cache,
+        species=inference_species,
     )
     if timing_recorder is not None and matrix_slice_started is not None:
         timing_recorder.record_since(
@@ -4749,15 +4763,13 @@ def _run_outer_fold(
         source_result = source_results[source_sample_set_id]
         if not source_result.selected_candidates:
             raise CVError(
-                "No candidates were selected for " f"fold={fold_id}, sample_set_id={sample_set_id}"
+                f"No candidates were selected for fold={fold_id}, sample_set_id={sample_set_id}"
             )
         if selection_active:
             for rank, selected in enumerate(source_result.selected_candidates, start=1):
                 selected_score = np.nan if selected.score is None else float(selected.score)
                 selected_score_std_error = (
-                    np.nan
-                    if selected.score_std_error is None
-                    else float(selected.score_std_error)
+                    np.nan if selected.score_std_error is None else float(selected.score_std_error)
                 )
                 model_selection_selected_rows.append(
                     {
@@ -4818,6 +4830,7 @@ def _run_outer_fold(
             contrast_groups_train=contrast_groups_train,
             x_valid_raw=x_valid_raw,
             valid_species=valid_species,
+            x_inference_raw=x_inference_raw,
             feature_names=feature_names,
             timing_recorder=timing_recorder,
         )
@@ -4907,6 +4920,7 @@ def _run_outer_fold(
     _emit_fold_progress("preprocess_done")
 
     model_probs: list[np.ndarray] = []
+    inference_model_probs: list[np.ndarray] = []
     fold_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
     interpretation_entries: list[ModelFeatureEntry] = []
     ensemble_model_prob_rows: list[dict[str, float | int | str]] = []
@@ -4914,6 +4928,7 @@ def _run_outer_fold(
     for sample_set_id in range(len(sampled_sets)):
         fit_result = sample_results[sample_set_id]
         model_probs.extend(fit_result.model_probs)
+        inference_model_probs.extend(fit_result.inference_model_probs)
         fold_models.extend(fit_result.fold_models)
         interpretation_entries.extend(fit_result.interpretation_entries)
         ensemble_model_prob_rows.extend(fit_result.ensemble_model_prob_rows)
@@ -4929,6 +4944,16 @@ def _run_outer_fold(
         aggregation=config.ensemble.probability_aggregation,
     )
     uncertainty_std = _population_std_probability(model_probs)
+    inference_prediction_rows: list[dict[str, float | str]] = []
+    if inference_species:
+        inference_prob = _aggregate_probabilities(
+            probs=inference_model_probs,
+            aggregation=config.ensemble.probability_aggregation,
+        )
+        for species, prob in zip(inference_species, inference_prob.tolist(), strict=True):
+            inference_prediction_rows.append(
+                {"fold_id": fold_id, "species": species, "prob": float(prob)}
+            )
     fold_metrics = _compute_fold_metrics(y_valid, mean_prob, fixed_threshold)
     sampled_train_loss_values: list[float] = []
     sampled_valid_loss_values: list[float] = []
@@ -5023,6 +5048,7 @@ def _run_outer_fold(
         metric_rows=metric_rows,
         loss_rows=loss_rows,
         oof_rows=oof_rows,
+        inference_prediction_rows=inference_prediction_rows,
         interpretation_entries=interpretation_entries,
         ensemble_model_prob_rows=ensemble_model_prob_rows,
         model_selection_selected_rows=model_selection_selected_rows,
@@ -5036,9 +5062,7 @@ def _run_outer_fold(
         n_features_before_preprocess=n_features_before_preprocess,
         n_features_after_sparse_feature_filter=n_features_after_sparse_feature_filter,
         n_features_after_low_variance=n_features_after_low_variance,
-        n_features_after_ranked_feature_filter=(
-            n_features_after_ranked_feature_filter
-        ),
+        n_features_after_ranked_feature_filter=(n_features_after_ranked_feature_filter),
         n_features_after_correlation=n_features_after_correlation,
         n_features_after_preprocess=n_features_after_preprocess,
         warnings=warnings,
@@ -5076,6 +5100,7 @@ def _run_outer_cv_impl(
     metric_rows: list[dict[str, float | int | str | None]] = []
     loss_rows: list[dict[str, float | str]] = []
     oof_rows: list[dict[str, float | int | str]] = []
+    inference_prediction_rows: list[dict[str, float | str]] = []
     interpretation_entries: list[ModelFeatureEntry] = []
     ensemble_model_prob_rows: list[dict[str, float | int | str]] = []
     model_selection_selected_rows: list[dict[str, Any]] = []
@@ -5121,6 +5146,7 @@ def _run_outer_cv_impl(
         metric_rows.extend(fold_result.metric_rows)
         loss_rows.extend(fold_result.loss_rows)
         oof_rows.extend(fold_result.oof_rows)
+        inference_prediction_rows.extend(fold_result.inference_prediction_rows)
         interpretation_entries.extend(fold_result.interpretation_entries)
         ensemble_model_prob_rows.extend(fold_result.ensemble_model_prob_rows)
         model_selection_selected_rows.extend(fold_result.model_selection_selected_rows)
@@ -5264,6 +5290,11 @@ def _run_outer_cv_impl(
         ensemble_model_probs = pl.DataFrame(ensemble_model_prob_rows).sort(
             ["fold_id", "model_index", "species"]
         )
+    inference_predictions_by_fold: pl.DataFrame | None = None
+    if inference_prediction_rows:
+        inference_predictions_by_fold = pl.DataFrame(inference_prediction_rows).sort(
+            ["fold_id", "species"]
+        )
     model_selection_selected: pl.DataFrame | None = None
     if model_selection_selected_rows:
         model_selection_selected = pl.DataFrame(model_selection_selected_rows).sort(
@@ -5320,6 +5351,7 @@ def _run_outer_cv_impl(
         loss_by_split_cv=loss_by_split_df,
         thresholds=thresholds_df,
         oof_predictions=oof_df,
+        inference_predictions_by_fold=inference_predictions_by_fold,
         feature_importance=interpretation_artifacts.feature_importance,
         coefficients=interpretation_artifacts.coefficients,
         feature_importance_by_fold=interpretation_artifacts.feature_importance_by_fold,
@@ -5339,9 +5371,7 @@ def _run_outer_cv_impl(
         feature_stability_by_fold_pair=feature_stability.by_fold_pair,
         feature_stability_summary=feature_stability.summary,
         top_feature_expression=top_feature_expression,
-        training_group_subsets=_build_training_group_subsets(
-            training_group_subset_rows
-        ),
+        training_group_subsets=_build_training_group_subsets(training_group_subset_rows),
         timing=timing,
         warnings=warnings,
         convergence_diagnostics=convergence_diagnostics,

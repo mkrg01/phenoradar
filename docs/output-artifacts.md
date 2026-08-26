@@ -274,6 +274,8 @@ Always written:
     - `external_test/figures/external_pr_curve.svg` (attempted in `full_run`; may be skipped with warning when external test labels are single-class)
     - `inference/figures/inference_probability_distribution.svg` (attempted in `full_run`; may be skipped with warning when inference set is empty)
     - `inference/figures/species_probability_cv_and_inference.svg` (attempted in `full_run`; may be skipped with warning when inference set is empty)
+    - `inference/figures/candidate_evidence/candidate_manifest.tsv` and one vector PDF
+      per positive inference candidate (attempted in `full_run` for linear final models)
     - `<stage>/figures/probability_by_<group>.svg` (attempted for non-empty prediction stages when `summary.group_col` is present in metadata)
 
 Conditionally written:
@@ -305,6 +307,24 @@ Conditionally written:
     - `pred_label_fixed_threshold`
     - optional `uncertainty_std`
   - `true_label` values are `NA` because inference labels are unknown
+- `inference/tables/prediction_inference_by_fold.tsv` (`full_run` with inference samples)
+  - columns: `fold_id`, `species`, `prob`
+  - applies every fitted outer-fold predictor to the same discovery-inference species
+  - each `prob` is aggregated within that fold using `ensemble.probability_aggregation`
+  - this is a sensitivity diagnostic for training-set composition, not an OOF estimate or
+    a formal confidence interval for the inference species
+- `inference/tables/candidate_evidence_candidates.tsv` (`full_run`, linear final model,
+  and at least one inference species predicted as `1`)
+  - one row per plotted candidate with `species`, `prob`, `family_id`, and `family_name`
+- `inference/tables/candidate_feature_evidence.tsv` (same condition)
+  - one row per candidate-local top feature, ordered by mean absolute local contribution
+  - the maximum features per candidate is `figures.top_features`
+  - columns include signed/absolute contribution summaries, candidate TPM,
+    `log2(TPM + 1)`, local rank, and final-model count
+- `inference/tables/candidate_reference_expression.tsv` (same condition)
+  - expression reference for the unique labeled species in the internal
+    train/validation pool and the features used in candidate evidence figures
+  - columns: `species`, `label`, `feature`, `tpm`, `log2_tpm_plus1`
 - `external_test/tables/loss_by_split_final_refit.tsv` (`full_run` only)
   - columns: `split`, `metric`, `metric_value`
   - current `split` values: `train`, `external_test` (external row is omitted when external pool is empty)
@@ -832,6 +852,24 @@ when individual folds are single-label.
     plus unannotated inference probabilities.
   - The x-axis label uses the configured trait name, and the dashed horizontal line
     marks the fixed probability threshold at `0.5`.
+- `inference/figures/candidate_evidence/` (`full_run`, linear final model, and positive candidates)
+  - contains one publication-oriented PDF per inference species predicted as `1`
+  - PDFs are grouped into `p_095_100`, `p_090_095`, `p_085_090`, `p_080_085`,
+    and `p_050_080` subdirectories using the final-refit probability
+  - panel A shows the unlabeled distribution of probabilities obtained by applying
+    each outer-fold predictor to the same candidate, with the final-refit probability
+    as a diamond
+  - panel B shows signed candidate-local linear contributions, ranked by mean absolute
+    contribution across final models; absent model-local features contribute zero
+  - panel C shows known label-0 and label-1 internal-CV expression values as
+    semi-transparent species points with 10--90% ranges, IQRs, and medians, plus the
+    candidate as a diamond on a shared `log2(TPM + 1)` axis
+  - OrthoDB annotation is the primary feature label when
+    `data.orthogroup_annotation_path` is configured; the orthogroup ID is retained
+  - `candidate_manifest.tsv` records family, final probability, cross-fold probability
+    summaries, feature count, probability bin, and relative PDF path
+  - local contribution is unavailable for non-linear final models; PhenoRadar skips
+    these candidate PDFs with a warning rather than substituting a different explainer
 - `external_test/figures/final_refit_loss_by_split.svg` (`full_run`)
   - Final-refit `log_loss` comparison of `train` and `external_test`.
   - Useful for quick train-vs-external generalization diagnostics.

@@ -128,9 +128,7 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "metric_value",
     }.issubset(cv_artifacts.loss_by_split_cv.columns)
     assert cv_artifacts.loss_by_split_cv.height > 0
-    assert set(cv_artifacts.loss_by_split_cv.select("metric").to_series().to_list()) == {
-        "log_loss"
-    }
+    assert set(cv_artifacts.loss_by_split_cv.select("metric").to_series().to_list()) == {"log_loss"}
     assert set(cv_artifacts.loss_by_split_cv.select("split").to_series().to_list()) == {
         "train",
         "validation",
@@ -311,7 +309,9 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
     assert (
         cv_artifacts.top_feature_expression.filter(
             (pl.col("species") == "sp1") & (pl.col("feature") == "OG1")
-        ).get_column("tpm").item()
+        )
+        .get_column("tpm")
+        .item()
         == 1.0
     )
     assert {
@@ -337,6 +337,34 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         ("outer_fold", "total"),
     }.issubset(timing_pairs)
     assert cv_artifacts.timing.filter(pl.col("duration_sec") < 0.0).height == 0
+
+
+def test_run_outer_cv_predicts_inference_species_with_each_fold_model(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+runtime:
+  execution_stage: full_run
+""".strip(),
+            )
+        ]
+    )
+    split_artifacts = build_split_artifacts(config)
+
+    cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
+
+    predictions = cv_artifacts.inference_predictions_by_fold
+    assert predictions is not None
+    assert predictions.get_column("species").unique().to_list() == ["sp6"]
+    assert predictions.get_column("fold_id").n_unique() == split_artifacts.fold_count
+    assert predictions.filter((pl.col("prob") < 0.0) | (pl.col("prob") > 1.0)).height == 0
 
 
 def test_metrics_dataframe_handles_valid_fold_counts_after_schema_inference_limit() -> None:
@@ -447,12 +475,18 @@ sampling:
     assert artifacts.oof_predictions.height == 6
     per_fold = artifacts.metrics_cv.filter(pl.col("aggregate_scope") == "NA")
     single_class_folds = per_fold.filter(pl.col("fold_id").is_in(["1", "2"]))
-    assert single_class_folds.filter(pl.col("metric") == "brier").select(
-        pl.col("metric_value").is_finite().all()
-    ).item()
-    assert single_class_folds.filter(
-        pl.col("metric").is_in(["roc_auc", "pr_auc", "balanced_accuracy", "mcc"])
-    ).select(pl.col("metric_value").is_nan().all()).item()
+    assert (
+        single_class_folds.filter(pl.col("metric") == "brier")
+        .select(pl.col("metric_value").is_finite().all())
+        .item()
+    )
+    assert (
+        single_class_folds.filter(
+            pl.col("metric").is_in(["roc_auc", "pr_auc", "balanced_accuracy", "mcc"])
+        )
+        .select(pl.col("metric_value").is_nan().all())
+        .item()
+    )
 
     macro = artifacts.metrics_cv.filter(pl.col("aggregate_scope") == "macro")
     valid_counts = dict(macro.select("metric", "n_valid_folds").iter_rows())
@@ -642,9 +676,7 @@ sampling:
     )
     assert "uncertainty_std" in cv_artifacts.oof_predictions.columns
     assert cv_artifacts.oof_predictions.filter(pl.col("uncertainty_std").is_null()).height == 0
-    assert (
-        cv_artifacts.oof_predictions.filter(pl.col("uncertainty_std") < 0.0).height == 0
-    )
+    assert cv_artifacts.oof_predictions.filter(pl.col("uncertainty_std") < 0.0).height == 0
 
 
 def test_outer_cv_selection_active_emits_selected_and_trials_tables(tmp_path: Path) -> None:
@@ -725,9 +757,7 @@ model_selection:
         "candidate_evaluation",
         "selected_model",
     }
-    assert set(cv_artifacts.convergence_diagnostics.get_column("training_scope")) == {
-        "outer_fold"
-    }
+    assert set(cv_artifacts.convergence_diagnostics.get_column("training_scope")) == {"outer_fold"}
     assert cv_artifacts.convergence_diagnostics.filter(~pl.col("converged")).height > 0
     assert any("non-converged fit(s)" in warning for warning in cv_artifacts.warnings)
     assert {
@@ -958,9 +988,7 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
         "true_label",
         "prob",
         "pred_label_fixed_threshold",
-    }.issubset(
-        refit_artifacts.pred_external_test.columns
-    )
+    }.issubset(refit_artifacts.pred_external_test.columns)
     assert {
         "split",
         "metric",
@@ -969,17 +997,16 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
     assert set(
         refit_artifacts.loss_by_split_final_refit.select("metric").to_series().to_list()
     ) == {"log_loss"}
-    assert set(
-        refit_artifacts.loss_by_split_final_refit.select("split").to_series().to_list()
-    ) == {"train", "external_test"}
+    assert set(refit_artifacts.loss_by_split_final_refit.select("split").to_series().to_list()) == {
+        "train",
+        "external_test",
+    }
     assert {
         "species",
         "prob",
         "pred_label_fixed_threshold",
         "true_label",
-    }.issubset(
-        refit_artifacts.pred_inference.columns
-    )
+    }.issubset(refit_artifacts.pred_inference.columns)
     assert refit_artifacts.pred_inference.get_column("true_label").null_count() == 1
     assert refit_artifacts.model_selection_selected is None
     assert refit_artifacts.feature_filter_counts.height > 0
@@ -1036,9 +1063,7 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
         "postprocess",
         "total",
     }.issubset(timing_stages)
-    assert refit_artifacts.timing.get_column("scope").unique().to_list() == [
-        "final_refit"
-    ]
+    assert refit_artifacts.timing.get_column("scope").unique().to_list() == ["final_refit"]
 
 
 def test_run_final_refit_prunes_target_matrix_without_changing_outputs(
@@ -1123,8 +1148,7 @@ def test_run_final_refit_prunes_target_matrix_without_changing_outputs(
         == full_matrix.loss_by_split_final_refit.to_dicts()
     )
     assert (
-        optimized.feature_filter_counts.to_dicts()
-        == full_matrix.feature_filter_counts.to_dicts()
+        optimized.feature_filter_counts.to_dicts() == full_matrix.feature_filter_counts.to_dicts()
     )
 
 
@@ -2614,9 +2638,7 @@ def test_inner_cv_splits_wraps_value_error_from_splitter(
         )
 
 
-@pytest.mark.parametrize(
-    "method", ["none", "log1p", "sample_rank", "sample_percentile_rank"]
-)
+@pytest.mark.parametrize("method", ["none", "log1p", "sample_rank", "sample_percentile_rank"])
 def test_inner_cv_preprocessing_applies_row_local_expression_transform_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3302,9 +3324,7 @@ model_selection:
     folds = [
         cv_mod.InnerCvPreprocessedFold(
             inner_fold_id="0",
-            x_train=np.array(
-                [[0.0, 0.0], [0.2, 1.0], [1.0, 0.2], [1.2, 1.0]], dtype=float
-            ),
+            x_train=np.array([[0.0, 0.0], [0.2, 1.0], [1.0, 0.2], [1.2, 1.0]], dtype=float),
             x_valid=np.array([[0.1, 0.1], [1.1, 0.9]], dtype=float),
             y_train=np.array([0, 0, 1, 1], dtype=int),
             y_valid=np.array([0, 1], dtype=int),
@@ -3312,9 +3332,7 @@ model_selection:
         ),
         cv_mod.InnerCvPreprocessedFold(
             inner_fold_id="1",
-            x_train=np.array(
-                [[0.0, 1.0], [0.3, 0.0], [1.0, 1.0], [1.3, 0.0]], dtype=float
-            ),
+            x_train=np.array([[0.0, 1.0], [0.3, 0.0], [1.0, 1.0], [1.3, 0.0]], dtype=float),
             x_valid=np.array([[0.2, 0.8], [1.2, 0.2]], dtype=float),
             y_train=np.array([0, 0, 1, 1], dtype=int),
             y_valid=np.array([0, 1], dtype=int),
@@ -3969,9 +3987,7 @@ def test_expression_matrix_builder_rejects_empty_matrix_for_selected_species(
 ) -> None:
     metadata = _write(
         tmp_path / "species_metadata.tsv",
-        "\n".join(
-            ["species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout", "sp1\t1\tg1\tno"]
-        )
+        "\n".join(["species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout", "sp1\t1\tg1\tno"])
         + "\n",
     )
     tpm = _write(
@@ -4051,9 +4067,7 @@ def test_select_feature_indices_rejects_missing_sparse_feature_threshold_when_mu
         }
     )
 
-    with pytest.raises(
-        CVError, match="min_nonzero_fraction_in_at_least_one_trait is missing"
-    ):
+    with pytest.raises(CVError, match="min_nonzero_fraction_in_at_least_one_trait is missing"):
         _select_feature_indices(
             config_bad,
             np.array([[0.0, 0.1], [0.2, 0.3]], dtype=float),
@@ -4102,7 +4116,7 @@ def test_select_feature_indices_rejects_missing_low_variance_threshold_when_muta
                     ),
                     "low_variance_filter": config.preprocess.low_variance_filter.model_copy(
                         update={"enabled": True, "min_variance": None}
-                    )
+                    ),
                 }
             )
         }
@@ -4662,11 +4676,7 @@ def test_training_group_count_rejects_fewer_available_groups(tmp_path: Path) -> 
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     strict_config = config.model_copy(
-        update={
-            "sampling": config.sampling.model_copy(
-                update={"training_group_count": 5}
-            )
-        }
+        update={"sampling": config.sampling.model_copy(update={"training_group_count": 5})}
     )
 
     with pytest.raises(

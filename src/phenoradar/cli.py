@@ -21,6 +21,11 @@ from phenoradar.bundle import (
     load_model_bundle,
     predict_with_bundle,
 )
+from phenoradar.candidate_evidence import (
+    CandidateEvidenceArtifacts,
+    CandidateEvidenceError,
+    build_candidate_evidence_artifacts,
+)
 from phenoradar.config import (
     AppConfig,
     ConfigConditionSet,
@@ -35,6 +40,7 @@ from phenoradar.cv import CVError, run_final_refit, run_outer_cv
 from phenoradar.figures import (
     FigureError,
     figure_annotation_features,
+    write_candidate_evidence_figures,
     write_group_probability_figure,
     write_predict_figures,
     write_run_figures,
@@ -178,11 +184,7 @@ def _prepare_run_inputs(
         Path(config.data.metadata_path),
         Path(config.data.tpm_path),
         *([] if tree_path is None else [Path(tree_path)]),
-        *(
-            []
-            if orthogroup_annotation_path is None
-            else [Path(orthogroup_annotation_path)]
-        ),
+        *([] if orthogroup_annotation_path is None else [Path(orthogroup_annotation_path)]),
     ]
 
     def _collect_provenance() -> list[dict[str, Any]]:
@@ -1144,6 +1146,7 @@ def _run_single(
             null_value="NA",
         )
     bundle_export_result = None
+    candidate_evidence_artifacts: CandidateEvidenceArtifacts | None = None
     selected_tables: list[pl.DataFrame] = []
     if cv_artifacts.model_selection_selected is not None:
         selected_tables.append(cv_artifacts.model_selection_selected)
@@ -1160,6 +1163,48 @@ def _run_single(
             float_precision=8,
             null_value="NA",
         )
+        inference_predictions_by_fold = getattr(cv_artifacts, "inference_predictions_by_fold", None)
+        if isinstance(inference_predictions_by_fold, pl.DataFrame):
+            inference_predictions_by_fold.write_csv(
+                inference_tables_dir / "prediction_inference_by_fold.tsv",
+                separator="\t",
+                float_precision=8,
+                null_value="NA",
+            )
+        try:
+            candidate_evidence_artifacts = build_candidate_evidence_artifacts(
+                config=resolved,
+                split_manifest=split_artifacts.split_manifest,
+                final_refit=final_refit_artifacts,
+                cross_fold_predictions=(
+                    inference_predictions_by_fold
+                    if isinstance(inference_predictions_by_fold, pl.DataFrame)
+                    else None
+                ),
+                top_features=resolved.figures.top_features,
+            )
+        except CandidateEvidenceError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        warnings.extend(candidate_evidence_artifacts.warnings)
+        if candidate_evidence_artifacts.features.height > 0:
+            candidate_evidence_artifacts.candidates.write_csv(
+                inference_tables_dir / "candidate_evidence_candidates.tsv",
+                separator="\t",
+                float_precision=8,
+                null_value="NA",
+            )
+            candidate_evidence_artifacts.features.write_csv(
+                inference_tables_dir / "candidate_feature_evidence.tsv",
+                separator="\t",
+                float_precision=8,
+                null_value="NA",
+            )
+            candidate_evidence_artifacts.reference_expression.write_csv(
+                inference_tables_dir / "candidate_reference_expression.tsv",
+                separator="\t",
+                float_precision=8,
+                null_value="NA",
+            )
         final_refit_artifacts.loss_by_split_final_refit.write_csv(
             external_test_tables_dir / "loss_by_split_final_refit.tsv",
             separator="\t",
@@ -1466,6 +1511,21 @@ def _run_single(
             coefficients=cv_artifacts.coefficients,
             top_features=resolved.figures.top_features,
         )
+        if (
+            candidate_evidence_artifacts is not None
+            and candidate_evidence_artifacts.features.height > 0
+        ):
+            annotation_features = sorted(
+                {
+                    *annotation_features,
+                    *[
+                        str(value)
+                        for value in candidate_evidence_artifacts.features.get_column(
+                            "feature"
+                        ).unique()
+                    ],
+                }
+            )
         orthogroup_annotations = load_orthogroup_annotations(
             None if orthogroup_annotation_path is None else Path(orthogroup_annotation_path),
             feature_names=annotation_features,
@@ -1511,13 +1571,29 @@ def _run_single(
             orthogroup_annotations=orthogroup_annotations,
             parallel_workers=_artifact_parallel_workers(resolved),
             group_bootstrap_metrics=(
-                None
-                if group_bootstrap_artifacts is None
-                else group_bootstrap_artifacts.summary
+                None if group_bootstrap_artifacts is None else group_bootstrap_artifacts.summary
             ),
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    if (
+        candidate_evidence_artifacts is not None
+        and candidate_evidence_artifacts.features.height > 0
+    ):
+        try:
+            _candidate_manifest, candidate_figure_warnings = write_candidate_evidence_figures(
+                run_dir=run_dir,
+                candidates=candidate_evidence_artifacts.candidates,
+                features=candidate_evidence_artifacts.features,
+                reference_expression=(candidate_evidence_artifacts.reference_expression),
+                cross_fold_predictions=(candidate_evidence_artifacts.cross_fold_predictions),
+                trait_name=resolved.data.trait_col,
+                orthogroup_annotations=orthogroup_annotations,
+                parallel_workers=_artifact_parallel_workers(resolved),
+            )
+        except FigureError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        figure_warnings.extend(candidate_figure_warnings)
     contrast_pair_col = resolved.data.contrast_pair_col
     if tree_path is not None and contrast_pair_col is not None:
         try:
@@ -1540,9 +1616,7 @@ def _run_single(
                     if final_refit_artifacts is None
                     else final_refit_artifacts.pred_external_test
                 ),
-                top_feature_expression=getattr(
-                    cv_artifacts, "top_feature_expression", None
-                ),
+                top_feature_expression=getattr(cv_artifacts, "top_feature_expression", None),
                 feature_limit=resolved.figures.top_features,
                 orthogroup_annotations=orthogroup_annotations,
                 parallel_workers=_artifact_parallel_workers(resolved),
@@ -1700,9 +1774,7 @@ def _study_split_artifacts(
     shared_manifest_path = study_dir / "split" / "tables" / "split_manifest.tsv"
     if resume:
         if not shared_manifest_path.exists():
-            raise typer.BadParameter(
-                f"Study split manifest was not found: {shared_manifest_path}"
-            )
+            raise typer.BadParameter(f"Study split manifest was not found: {shared_manifest_path}")
     else:
         _write_study_split_artifacts(study_dir, split_artifacts)
     return split_artifacts, split_sha256
@@ -1773,9 +1845,7 @@ def _run_condition_study(
     study_metadata["split_fingerprint"] = split_sha256
     _write_study_metadata(study_dir, study_metadata)
 
-    condition_by_id = {
-        condition.condition_id: condition for condition in condition_set.conditions
-    }
+    condition_by_id = {condition.condition_id: condition for condition in condition_set.conditions}
     _progress_log(
         "run",
         f"Run multi-condition study ({len(manifest_rows)} conditions, study_dir={study_dir}).",
@@ -1825,13 +1895,9 @@ def _run_condition_study(
                     "condition_label": condition.label,
                 },
             )
-            metadata = json.loads(
-                (completed_dir / "run_metadata.json").read_text(encoding="utf-8")
-            )
+            metadata = json.loads((completed_dir / "run_metadata.json").read_text(encoding="utf-8"))
             if metadata.get("split_fingerprint") != split_sha256:
-                raise StudyError(
-                    f"Condition {condition_id} did not use the shared study split"
-                )
+                raise StudyError(f"Condition {condition_id} did not use the shared study split")
         except Exception as exc:
             row["status"] = "failed"
             row["ended_at"] = datetime.now(UTC).isoformat()
@@ -1866,9 +1932,7 @@ def _run_condition_study(
     study_metadata["condition_metrics_path"] = "tables/condition_metrics.tsv"
     study_metadata["pairwise_comparisons_path"] = "tables/pairwise_comparisons.tsv"
     if report_artifacts.training_group_sensitivity is not None:
-        study_metadata["training_group_sensitivity_path"] = (
-            "tables/training_group_sensitivity.tsv"
-        )
+        study_metadata["training_group_sensitivity_path"] = "tables/training_group_sensitivity.tsv"
     else:
         study_metadata.pop("training_group_sensitivity_path", None)
     study_metadata["config_differences_path"] = "config_differences.tsv"
@@ -2496,9 +2560,7 @@ def predict(
             "bundle_source_provenance_schema_version": bundle.manifest.get(
                 "source_provenance_schema_version"
             ),
-            "bundle_source_phenoradar_version": bundle.manifest.get(
-                "source_phenoradar_version"
-            ),
+            "bundle_source_phenoradar_version": bundle.manifest.get("source_phenoradar_version"),
             "bundle_source_git_commit": bundle.manifest.get("source_git_commit"),
             "input_files": input_files,
             "environment": environment,

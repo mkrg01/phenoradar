@@ -739,6 +739,9 @@ derived deterministically from `runtime.seed`.
       `cv/figures/coefficients_signed_top.svg`,
       `cv/figures/feature_stability_top.svg`, and tree feature heatmaps when
       `data.tree_path` is set.
+    - also limits the candidate-local features in each
+      `inference/figures/candidate_evidence/**/*.pdf`; candidate features are ranked
+      separately for each species by mean absolute local contribution.
 
 ## `report`
 

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 import textwrap
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from hashlib import sha256
 from multiprocessing import get_context
 from pathlib import Path
 from typing import Any, cast
@@ -250,6 +252,21 @@ def _save_svg_figure(fig: Figure, out_path: Path) -> None:
     plt.close(fig)
 
 
+def _save_pdf_figure(fig: Figure, out_path: Path, *, title: str) -> None:
+    fig.savefig(
+        out_path,
+        format="pdf",
+        dpi=_FIG_DPI,
+        metadata={
+            "Title": title,
+            "Creator": "PhenoRadar",
+            "CreationDate": None,
+            "ModDate": None,
+        },
+    )
+    plt.close(fig)
+
+
 def _stage_figure_dirs(run_dir: Path) -> dict[str, Path]:
     figure_dirs = {stage: run_dir / stage / "figures" for stage in _RUN_FIGURE_STAGES}
     for figures_dir in figure_dirs.values():
@@ -455,6 +472,7 @@ def _plot_horizontal_values(
     value_formatter: Callable[[float], str] | None = None,
 ) -> None:
     if value_formatter is None:
+
         def value_formatter(value: float) -> str:
             return f"{value:.8f}"
 
@@ -688,8 +706,7 @@ def _group_bootstrap_metrics_figure(
     }
     if not required_columns.issubset(group_bootstrap_metrics.columns):
         raise FigureError(
-            "group_bootstrap_metrics.tsv schema is invalid for "
-            "group_bootstrap_metrics.svg"
+            "group_bootstrap_metrics.tsv schema is invalid for group_bootstrap_metrics.svg"
         )
     data = group_bootstrap_metrics.filter(
         pl.col("point_estimate").is_not_null()
@@ -710,9 +727,7 @@ def _group_bootstrap_metrics_figure(
         "brier",
         "log_loss",
     ]
-    rows_by_metric = {
-        str(row["metric"]): row for row in data.iter_rows(named=True)
-    }
+    rows_by_metric = {str(row["metric"]): row for row in data.iter_rows(named=True)}
     metric_names = [name for name in preferred_order if name in rows_by_metric] + sorted(
         set(rows_by_metric) - set(preferred_order)
     )
@@ -973,17 +988,14 @@ def _feature_importance_top(
             raise FigureError(
                 "feature_importance_by_fold.tsv schema is invalid for feature_importance_top.svg"
             )
-        fold_data = (
-            feature_importance_by_fold.select(
-                pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
-                pl.col("feature").cast(pl.String, strict=False).alias("__feature"),
-                pl.col("importance_mean").cast(pl.Float64, strict=False).alias("__value"),
-            )
-            .filter(
-                pl.col("__feature").is_in(features)
-                & pl.col("__value").is_not_null()
-                & pl.col("__value").is_finite()
-            )
+        fold_data = feature_importance_by_fold.select(
+            pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
+            pl.col("feature").cast(pl.String, strict=False).alias("__feature"),
+            pl.col("importance_mean").cast(pl.Float64, strict=False).alias("__value"),
+        ).filter(
+            pl.col("__feature").is_in(features)
+            & pl.col("__value").is_not_null()
+            & pl.col("__value").is_finite()
         )
         if fold_data.height > 0:
             feature_to_values = {
@@ -1063,7 +1075,7 @@ def _feature_importance_top(
                     linewidths=0.5,
                     alpha=0.78,
                     zorder=4,
-            )
+                )
             ax.set_yticks(y_pos)
             ax.set_yticklabels(feature_labels, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
             ax.set_ylabel(
@@ -1225,9 +1237,7 @@ def _feature_importance_by_fold_heatmap(
     for row in data.iter_rows(named=True):
         feature_name = str(row["__feature"])
         fold_id = str(row["__fold_id"])
-        importance_matrix[feature_index[feature_name], fold_index[fold_id]] = float(
-            row["__value"]
-        )
+        importance_matrix[feature_index[feature_name], fold_index[fold_id]] = float(row["__value"])
 
     finite_values = importance_matrix[np.isfinite(importance_matrix)]
     max_value = float(np.max(finite_values)) if finite_values.size > 0 else 1.0
@@ -1324,10 +1334,14 @@ def _coefficients_signed_top(
     if linear.height == 0:
         return
 
-    top = linear.with_columns(pl.col("coef_mean").abs().alias("__abs_coef")).sort(
-        by=["__abs_coef", "feature"],
-        descending=[True, False],
-    ).head(top_features)
+    top = (
+        linear.with_columns(pl.col("coef_mean").abs().alias("__abs_coef"))
+        .sort(
+            by=["__abs_coef", "feature"],
+            descending=[True, False],
+        )
+        .head(top_features)
+    )
 
     features = [str(v) for v in top.select("feature").to_series().to_list()]
     feature_labels = _feature_axis_labels(features, orthogroup_annotations)
@@ -1437,7 +1451,7 @@ def _coefficients_signed_top(
                     linewidths=0.5,
                     alpha=0.78,
                     zorder=4,
-            )
+                )
             ax.set_yticks(y_pos)
             ax.set_yticklabels(feature_labels, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
             ax.set_ylabel(feature_axis_title, fontsize=_COEFFICIENTS_AXIS_LABEL_FONTSIZE)
@@ -1797,15 +1811,11 @@ def _predict_probability_distribution(
     figure_name: str = "predict_probability_distribution.svg",
 ) -> None:
     if "prob" not in pred_predict.columns:
-        raise FigureError(
-            f"prediction_inference.tsv schema is invalid for {figure_name}"
-        )
+        raise FigureError(f"prediction_inference.tsv schema is invalid for {figure_name}")
 
     probs = np.array(pred_predict.select("prob").to_series().to_list(), dtype=float)
     if probs.size == 0:
-        raise FigureError(
-            f"prediction_inference.tsv is empty; cannot draw {figure_name}"
-        )
+        raise FigureError(f"prediction_inference.tsv is empty; cannot draw {figure_name}")
 
     fig, ax = plt.subplots(
         figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 320),
@@ -1863,10 +1873,14 @@ def _predict_uncertainty(pred_predict: pl.DataFrame, out_path: Path, *, required
             )
         return
 
-    data = pred_predict.select("species", "uncertainty_std").sort(
-        by=["uncertainty_std", "species"],
-        descending=[True, False],
-    ).head(30)
+    data = (
+        pred_predict.select("species", "uncertainty_std")
+        .sort(
+            by=["uncertainty_std", "species"],
+            descending=[True, False],
+        )
+        .head(30)
+    )
     if data.height == 0:
         if required:
             raise FigureError(
@@ -2593,16 +2607,13 @@ def _binary_prediction_curve_inputs(
     if predictions.height == 0:
         raise FigureError(empty_message)
 
-    data = (
-        predictions.select(
-            pl.col(label_col).cast(pl.Int64, strict=False).alias("__label"),
-            pl.col("prob").cast(pl.Float64, strict=False).alias("__prob"),
-        )
-        .filter(
-            pl.col("__label").is_not_null()
-            & pl.col("__prob").is_not_null()
-            & pl.col("__prob").is_finite()
-        )
+    data = predictions.select(
+        pl.col(label_col).cast(pl.Int64, strict=False).alias("__label"),
+        pl.col("prob").cast(pl.Float64, strict=False).alias("__prob"),
+    ).filter(
+        pl.col("__label").is_not_null()
+        & pl.col("__prob").is_not_null()
+        & pl.col("__prob").is_finite()
     )
     if data.height == 0:
         raise FigureError(empty_message)
@@ -2796,8 +2807,7 @@ def _external_roc_pr_curves(
             "prediction_external_test.tsv is empty; cannot draw external ROC/PR curve figures"
         ),
         degenerate_message=(
-            "External ROC/PR curve figures could not be drawn "
-            "(external_test requires both labels)"
+            "External ROC/PR curve figures could not be drawn (external_test requires both labels)"
         ),
     )
     _roc_curve_external(y_true, prob, roc_out_path)
@@ -2850,15 +2860,10 @@ def _external_confusion_matrix(pred_external_test: pl.DataFrame, out_path: Path)
             "prediction_external_test.tsv schema is invalid for external_confusion_matrix.svg"
         )
 
-    data = (
-        pred_external_test.select(
-            pl.col("true_label").cast(pl.Int64, strict=False).alias("__true_label"),
-            pl.col("pred_label_fixed_threshold")
-            .cast(pl.Int64, strict=False)
-            .alias("__pred_label"),
-        )
-        .filter(pl.col("__true_label").is_not_null() & pl.col("__pred_label").is_not_null())
-    )
+    data = pred_external_test.select(
+        pl.col("true_label").cast(pl.Int64, strict=False).alias("__true_label"),
+        pl.col("pred_label_fixed_threshold").cast(pl.Int64, strict=False).alias("__pred_label"),
+    ).filter(pl.col("__true_label").is_not_null() & pl.col("__pred_label").is_not_null())
     if data.height == 0:
         raise FigureError(
             "prediction_external_test.tsv is empty; cannot draw external_confusion_matrix.svg"
@@ -2866,9 +2871,7 @@ def _external_confusion_matrix(pred_external_test: pl.DataFrame, out_path: Path)
 
     true_labels = [int(v) for v in data.select("__true_label").to_series().to_list()]
     pred_labels = [int(v) for v in data.select("__pred_label").to_series().to_list()]
-    non_binary = sorted(
-        {value for value in [*true_labels, *pred_labels] if value not in (0, 1)}
-    )
+    non_binary = sorted({value for value in [*true_labels, *pred_labels] if value not in (0, 1)})
     if non_binary:
         values = ", ".join(str(value) for value in non_binary)
         raise FigureError(
@@ -2968,8 +2971,7 @@ def _cv_external_metric_comparison(
     required = {"pool", "fold_id", "threshold_name", *metric_columns}
     if not required.issubset(classification_summary.columns):
         raise FigureError(
-            "classification_summary.tsv schema is invalid for "
-            "cv_external_metric_comparison.svg"
+            "classification_summary.tsv schema is invalid for cv_external_metric_comparison.svg"
         )
 
     data = classification_summary.select(
@@ -2992,9 +2994,7 @@ def _cv_external_metric_comparison(
             "cv_external_metric_comparison.svg"
         )
 
-    fixed_threshold = data.filter(
-        pl.col("__threshold_name") == FIXED_PROBABILITY_THRESHOLD_NAME
-    )
+    fixed_threshold = data.filter(pl.col("__threshold_name") == FIXED_PROBABILITY_THRESHOLD_NAME)
     if fixed_threshold.height > 0:
         data = fixed_threshold
     else:
@@ -3142,8 +3142,7 @@ def _single_report_metric_name(
     artifact_name: str,
 ) -> str:
     metric_names = [
-        str(value)
-        for value in data.select(column).drop_nulls().unique().to_series().to_list()
+        str(value) for value in data.select(column).drop_nulls().unique().to_series().to_list()
     ]
     if len(metric_names) != 1:
         raise FigureError(f"{artifact_name} must contain exactly one metric name")
@@ -3155,15 +3154,11 @@ def _single_report_metric_name(
     return metric_name
 
 
-def _report_metric_axis_label(
-    metric_name: str, metric_display_name: str | None = None
-) -> str:
+def _report_metric_axis_label(metric_name: str, metric_display_name: str | None = None) -> str:
     direction = metric_direction(metric_name)
     direction_label = "higher is better" if direction == "maximize" else "lower is better"
     metric_label = (
-        metric_name
-        if metric_display_name is None
-        else f"{metric_display_name} [{metric_name}]"
+        metric_name if metric_display_name is None else f"{metric_display_name} [{metric_name}]"
     )
     return f"{metric_label} ({direction_label})"
 
@@ -3279,9 +3274,7 @@ def _report_metric_comparison(report_runs: pl.DataFrame, out_path: Path) -> None
             fontsize_px=_MONO_FONTSIZE,
         ),
         right_margin=0.96,
-        x_label=_report_metric_axis_label(
-            metric_name, _report_metric_display_name(comparable)
-        ),
+        x_label=_report_metric_axis_label(metric_name, _report_metric_display_name(comparable)),
         y_tick_fontsize=_MONO_FONTSIZE,
     )
 
@@ -3366,10 +3359,7 @@ def _summarize_model_selection_trials_for_figure(
     )
     return summary.with_columns(
         pl.when(pl.col("n_valid_inner_folds") > 0)
-        .then(
-            pl.col("metric_value_std")
-            / pl.col("n_valid_inner_folds").cast(pl.Float64).sqrt()
-        )
+        .then(pl.col("metric_value_std") / pl.col("n_valid_inner_folds").cast(pl.Float64).sqrt())
         .otherwise(pl.lit(None, dtype=pl.Float64))
         .alias("metric_value_se")
     ).sort(["fold_id", "sample_set_id", "candidate_index"])
@@ -3427,11 +3417,7 @@ def _compact_params_label(
         return raw
     if isinstance(parsed, dict):
         if include_keys is not None:
-            parsed = {
-                key: value
-                for key, value in sorted(parsed.items())
-                if key in include_keys
-            }
+            parsed = {key: value for key, value in sorted(parsed.items()) if key in include_keys}
         if not parsed:
             return "{}"
         return json.dumps(parsed, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
@@ -3525,9 +3511,7 @@ def _model_selection_trials_summary_panels(
             pl.col("params_json").cast(pl.String, strict=False).alias("__params_json"),
         )
         .with_columns(
-            pl.when(
-                pl.col("__se").is_null() | pl.col("__se").is_nan() | (pl.col("__se") < 0.0)
-            )
+            pl.when(pl.col("__se").is_null() | pl.col("__se").is_nan() | (pl.col("__se") < 0.0))
             .then(0.0)
             .otherwise(pl.col("__se"))
             .alias("__se_plot")
@@ -3598,8 +3582,7 @@ def _model_selection_trials_summary_panels(
         ]
         varying_keys = _varying_param_keys(params_json_values)
         params_labels = [
-            _compact_params_label(value, include_keys=varying_keys)
-            for value in params_json_values
+            _compact_params_label(value, include_keys=varying_keys) for value in params_json_values
         ]
         y_labels = [
             _ellipsize_label(f"{candidate}: {params_label}", max_chars=72)
@@ -3658,9 +3641,7 @@ def _model_selection_trials_summary_panels(
     )
     fig.patch.set_facecolor("white")
 
-    metric_names = [
-        str(v) for v in data.select("__metric_name").unique().to_series().to_list()
-    ]
+    metric_names = [str(v) for v in data.select("__metric_name").unique().to_series().to_list()]
     metric_axis_label = f"{_model_selection_metric_axis_label(metric_names)} mean +/- SE"
     for panel_index, panel in enumerate(panels):
         row_index, col_index = divmod(panel_index, n_cols)
@@ -4866,6 +4847,521 @@ def write_run_figures(
             catch_figure_error=True,
         )
     return _run_figure_jobs(jobs, parallel_workers=parallel_workers)
+
+
+_CANDIDATE_MANIFEST_SCHEMA = {
+    "species": pl.String,
+    "family_id": pl.String,
+    "family_name": pl.String,
+    "prob": pl.Float64,
+    "probability_bin": pl.String,
+    "n_cross_fold_predictions": pl.Int64,
+    "cross_fold_prob_min": pl.Float64,
+    "cross_fold_prob_q1": pl.Float64,
+    "cross_fold_prob_median": pl.Float64,
+    "cross_fold_prob_q3": pl.Float64,
+    "cross_fold_prob_max": pl.Float64,
+    "n_features": pl.Int64,
+    "figure_path": pl.String,
+}
+
+
+def _candidate_probability_bin(probability: float) -> str:
+    if not np.isfinite(probability) or probability < 0.0 or probability > 1.0:
+        raise FigureError("Candidate probability must be finite and within [0, 1]")
+    if probability >= 0.95:
+        return "p_095_100"
+    if probability >= 0.90:
+        return "p_090_095"
+    if probability >= 0.85:
+        return "p_085_090"
+    if probability >= 0.80:
+        return "p_080_085"
+    return "p_050_080"
+
+
+def _candidate_filename(species: str, *, used_names: set[str]) -> str:
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", species.strip()).strip("._-")
+    if not stem:
+        stem = "candidate"
+    filename = f"{stem}.pdf"
+    if filename in used_names:
+        digest = sha256(species.encode("utf-8")).hexdigest()[:8]
+        filename = f"{stem}_{digest}.pdf"
+    used_names.add(filename)
+    return filename
+
+
+def _candidate_feature_labels(
+    features: list[str],
+    orthogroup_annotations: pl.DataFrame | None,
+) -> list[str]:
+    annotation_lookup: dict[str, str] = {}
+    if orthogroup_annotations is not None and {
+        "feature",
+        "orthogroup_annotation",
+    }.issubset(orthogroup_annotations.columns):
+        for row in orthogroup_annotations.select("feature", "orthogroup_annotation").iter_rows(
+            named=True
+        ):
+            feature = str(row["feature"]).strip()
+            annotation = row["orthogroup_annotation"]
+            if annotation is None:
+                continue
+            annotation_text = str(annotation).strip()
+            if annotation_text:
+                annotation_lookup[feature] = annotation_text
+
+    labels: list[str] = []
+    for feature in features:
+        annotation = annotation_lookup.get(feature, "Unannotated orthogroup")
+        shortened = textwrap.shorten(annotation, width=58, placeholder="…")
+        wrapped = textwrap.fill(shortened, width=31)
+        labels.append(f"{wrapped}\n({feature})")
+    return labels
+
+
+def _finite_distribution_summary(values: np.ndarray) -> tuple[float, float, float, float, float]:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        raise FigureError("Candidate evidence distribution contains no finite values")
+    q10, q25, median, q75, q90 = np.quantile(finite, [0.10, 0.25, 0.50, 0.75, 0.90])
+    return float(q10), float(q25), float(median), float(q75), float(q90)
+
+
+def _candidate_evidence_figure(
+    *,
+    candidate: dict[str, Any],
+    candidate_features: pl.DataFrame,
+    reference_expression: pl.DataFrame,
+    cross_fold_predictions: pl.DataFrame,
+    orthogroup_annotations: pl.DataFrame | None,
+    trait_name: str,
+    out_path: Path,
+) -> None:
+    required_features = {
+        "feature",
+        "local_rank",
+        "contribution_mean",
+        "candidate_log2_tpm_plus1",
+    }
+    missing_features = sorted(required_features - set(candidate_features.columns))
+    if missing_features:
+        raise FigureError(
+            "Candidate feature evidence schema is invalid: " + ", ".join(missing_features)
+        )
+    if candidate_features.height == 0:
+        raise FigureError("Candidate feature evidence is empty")
+    required_reference = {"feature", "label", "log2_tpm_plus1"}
+    missing_reference = sorted(required_reference - set(reference_expression.columns))
+    if missing_reference:
+        raise FigureError(
+            "Candidate reference expression schema is invalid: " + ", ".join(missing_reference)
+        )
+
+    ordered = candidate_features.sort("local_rank")
+    features = [str(value) for value in ordered.get_column("feature").to_list()]
+    labels = _candidate_feature_labels(features, orthogroup_annotations)
+    contributions = np.asarray(ordered.get_column("contribution_mean").to_list(), dtype=float)
+    candidate_expression = np.asarray(
+        ordered.get_column("candidate_log2_tpm_plus1").to_list(), dtype=float
+    )
+    species = str(candidate["species"])
+    probability = float(candidate["prob"])
+    family_id = str(candidate.get("family_id") or "unassigned")
+    family_name = str(candidate.get("family_name") or family_id)
+    family_text = family_name
+    if family_id not in {"", "unassigned", family_name}:
+        family_text = f"{family_name} ({family_id})"
+
+    feature_count = len(features)
+    figure_height = max(4.8, 1.85 + 0.39 * feature_count)
+    fig = plt.figure(
+        figsize=(_NATURE_DOUBLE_COLUMN_WIDTH_PX / _FIG_DPI, figure_height),
+        dpi=_FIG_DPI,
+    )
+    fig.patch.set_facecolor("white")
+    grid = fig.add_gridspec(
+        nrows=2,
+        ncols=2,
+        height_ratios=[0.75, max(2.4, 0.32 * feature_count)],
+        width_ratios=[0.43, 0.57],
+        left=0.285,
+        right=0.98,
+        top=0.81,
+        bottom=max(0.08, 0.36 / figure_height),
+        hspace=0.54,
+        wspace=0.22,
+    )
+    ax_stability = fig.add_subplot(grid[0, :])
+    ax_contribution = fig.add_subplot(grid[1, 0])
+    ax_expression = fig.add_subplot(grid[1, 1], sharey=ax_contribution)
+
+    fig.text(
+        0.025,
+        0.955,
+        species,
+        ha="left",
+        va="top",
+        fontsize=10,
+        fontstyle="italic",
+        color=_AXIS_COLOR,
+    )
+    fig.text(
+        0.025,
+        0.905,
+        f"Family: {family_text}",
+        ha="left",
+        va="top",
+        fontsize=7,
+        color=_MUTED_TEXT_COLOR,
+    )
+    fig.text(
+        0.98,
+        0.947,
+        f"P({trait_name} = 1) = {probability:.3f}",
+        ha="right",
+        va="top",
+        fontsize=9,
+        color=_AXIS_COLOR,
+    )
+
+    ax_stability.set_title(
+        "A   Prediction stability across outer-CV models",
+        loc="left",
+        fontsize=8,
+        pad=6,
+    )
+    fold_values = np.asarray(
+        cross_fold_predictions.get_column("prob").to_list()
+        if "prob" in cross_fold_predictions.columns
+        else [],
+        dtype=float,
+    )
+    fold_values = fold_values[np.isfinite(fold_values)]
+    if fold_values.size > 0:
+        q1, median, q3 = np.quantile(fold_values, [0.25, 0.50, 0.75])
+        ax_stability.hlines(
+            0.0,
+            float(np.min(fold_values)),
+            float(np.max(fold_values)),
+            color="#7a7a7a",
+            linewidth=0.9,
+            zorder=1,
+        )
+        ax_stability.hlines(
+            0.0,
+            float(q1),
+            float(q3),
+            color="#4d4d4d",
+            linewidth=4.0,
+            zorder=2,
+        )
+        jitter = np.linspace(-0.045, 0.045, fold_values.size)
+        ax_stability.scatter(
+            fold_values,
+            jitter,
+            s=13,
+            color="#777777",
+            alpha=0.72,
+            linewidths=0,
+            zorder=3,
+        )
+        ax_stability.scatter(
+            [float(median)],
+            [0.0],
+            s=24,
+            color="#222222",
+            edgecolors="white",
+            linewidths=0.5,
+            zorder=4,
+        )
+        summary_text = (
+            f"Outer-CV median {float(median):.3f} "
+            f"(range {float(np.min(fold_values)):.3f}–{float(np.max(fold_values)):.3f})"
+        )
+        ax_stability.text(
+            0.995,
+            0.96,
+            summary_text,
+            transform=ax_stability.transAxes,
+            ha="right",
+            va="top",
+            fontsize=6,
+            color=_MUTED_TEXT_COLOR,
+        )
+    ax_stability.scatter(
+        [probability],
+        [0.12],
+        marker="D",
+        s=31,
+        color="#111111",
+        edgecolors="white",
+        linewidths=0.55,
+        zorder=5,
+        label="Final refit",
+    )
+    ax_stability.set_xlim(0.0, 1.0)
+    ax_stability.set_ylim(-0.14, 0.22)
+    ax_stability.set_yticks([])
+    ax_stability.set_xlabel(f"Predicted probability of {trait_name} = 1", labelpad=2)
+    ax_stability.grid(axis="x", alpha=0.7)
+    ax_stability.spines["left"].set_visible(False)
+    ax_stability.legend(loc="upper left", frameon=False, fontsize=6, handletextpad=0.3)
+
+    y_positions = np.arange(feature_count, dtype=float)
+    bar_colors = np.where(
+        contributions >= 0.0,
+        _TRAIT_POSITIVE_COLOR,
+        "#D55E00",
+    )
+    ax_contribution.barh(
+        y_positions,
+        contributions,
+        height=0.58,
+        color=bar_colors.tolist(),
+        edgecolor="none",
+    )
+    contribution_limit = max(float(np.max(np.abs(contributions))), 1e-9) * 1.12
+    ax_contribution.set_xlim(-contribution_limit, contribution_limit)
+    ax_contribution.axvline(0.0, color=_AXIS_COLOR, linewidth=0.65)
+    ax_contribution.set_yticks(y_positions, labels=labels)
+    ax_contribution.tick_params(axis="y", length=0, pad=5, labelsize=6)
+    ax_contribution.invert_yaxis()
+    ax_contribution.set_xlabel(f"Contribution to {trait_name} = 1 linear score")
+    ax_contribution.set_title("B   Local contribution", loc="left", fontsize=8, pad=7)
+    ax_contribution.grid(axis="x", alpha=0.55)
+    ax_contribution.spines["left"].set_visible(False)
+
+    reference = reference_expression.filter(pl.col("feature").is_in(features))
+    reference_values: list[float] = []
+    label_counts: dict[int, int] = {}
+    for label in (0, 1):
+        label_counts[label] = (
+            reference.filter(pl.col("label") == label).get_column("species").n_unique()
+        )
+    expression_colors = {0: "#D55E00", 1: _TRAIT_POSITIVE_COLOR}
+    offsets = {0: -0.14, 1: 0.14}
+    for feature_idx, feature in enumerate(features):
+        for label in (0, 1):
+            values = np.asarray(
+                reference.filter((pl.col("feature") == feature) & (pl.col("label") == label))
+                .get_column("log2_tpm_plus1")
+                .to_list(),
+                dtype=float,
+            )
+            values = values[np.isfinite(values)]
+            if values.size == 0:
+                continue
+            reference_values.extend(values.tolist())
+            y_value = float(feature_idx) + offsets[label]
+            ax_expression.scatter(
+                values,
+                np.full(values.size, y_value),
+                s=8,
+                color=expression_colors[label],
+                alpha=0.25,
+                linewidths=0,
+                zorder=1,
+            )
+            q10, q25, median, q75, q90 = _finite_distribution_summary(values)
+            ax_expression.hlines(
+                y_value,
+                q10,
+                q90,
+                color=expression_colors[label],
+                linewidth=0.75,
+                zorder=2,
+            )
+            ax_expression.hlines(
+                y_value,
+                q25,
+                q75,
+                color=expression_colors[label],
+                linewidth=2.7,
+                zorder=3,
+            )
+            ax_expression.scatter(
+                [median],
+                [y_value],
+                s=13,
+                color=expression_colors[label],
+                edgecolors="white",
+                linewidths=0.35,
+                zorder=4,
+            )
+        ax_expression.scatter(
+            [candidate_expression[feature_idx]],
+            [float(feature_idx)],
+            marker="D",
+            s=24,
+            color="#111111",
+            edgecolors="white",
+            linewidths=0.5,
+            zorder=5,
+        )
+
+    all_expression = np.asarray([*reference_values, *candidate_expression.tolist()], dtype=float)
+    finite_expression = all_expression[np.isfinite(all_expression)]
+    expression_max = max(float(np.max(finite_expression)), 1.0) if finite_expression.size else 1.0
+    ax_expression.set_xlim(0.0, expression_max * 1.04)
+    ax_expression.set_ylim(ax_contribution.get_ylim())
+    ax_expression.tick_params(axis="y", left=False, labelleft=False)
+    ax_expression.set_xlabel(r"Expression, $\log_2(\mathrm{TPM} + 1)$")
+    ax_expression.set_title("C   Expression evidence", loc="left", fontsize=8, pad=7)
+    ax_expression.grid(axis="x", alpha=0.55)
+    ax_expression.spines["left"].set_visible(False)
+    legend_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="-",
+            color=expression_colors[0],
+            markersize=3.5,
+            linewidth=1.5,
+            label=f"Known 0 (n={label_counts[0]})",
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="-",
+            color=expression_colors[1],
+            markersize=3.5,
+            linewidth=1.5,
+            label=f"Known 1 (n={label_counts[1]})",
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker="D",
+            linestyle="none",
+            color="#111111",
+            markersize=4,
+            label="Candidate",
+        ),
+    ]
+    ax_expression.legend(
+        handles=legend_handles,
+        loc="lower right",
+        bbox_to_anchor=(1.0, 1.10),
+        frameon=False,
+        ncol=3,
+        fontsize=5.8,
+        handlelength=1.5,
+        columnspacing=0.9,
+        handletextpad=0.35,
+        borderaxespad=0.0,
+    )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _save_pdf_figure(fig, out_path, title=f"Candidate evidence: {species}")
+
+
+def write_candidate_evidence_figures(
+    *,
+    run_dir: Path,
+    candidates: pl.DataFrame,
+    features: pl.DataFrame,
+    reference_expression: pl.DataFrame,
+    cross_fold_predictions: pl.DataFrame,
+    trait_name: str,
+    orthogroup_annotations: pl.DataFrame | None = None,
+    parallel_workers: int = 1,
+) -> tuple[pl.DataFrame, list[str]]:
+    """Write one publication-oriented candidate-evidence PDF per positive species."""
+    if candidates.height == 0 or features.height == 0:
+        return pl.DataFrame(schema=_CANDIDATE_MANIFEST_SCHEMA), []
+    required_candidates = {"species", "prob", "family_id", "family_name"}
+    missing_candidates = sorted(required_candidates - set(candidates.columns))
+    if missing_candidates:
+        raise FigureError(
+            "Candidate evidence candidates schema is invalid: " + ", ".join(missing_candidates)
+        )
+
+    output_root = run_dir / "inference" / "figures" / "candidate_evidence"
+    output_root.mkdir(parents=True, exist_ok=True)
+    jobs: list[_FigureJob] = []
+    manifest_rows: list[dict[str, Any]] = []
+    used_names_by_bin: dict[str, set[str]] = {}
+    ordered_candidates = candidates.sort(["prob", "species"], descending=[True, False])
+    for candidate in ordered_candidates.iter_rows(named=True):
+        species = str(candidate["species"])
+        probability = float(candidate["prob"])
+        bin_name = _candidate_probability_bin(probability)
+        used_names = used_names_by_bin.setdefault(bin_name, set())
+        filename = _candidate_filename(species, used_names=used_names)
+        relative_path = Path(bin_name) / filename
+        out_path = output_root / relative_path
+        candidate_features = features.filter(pl.col("species") == species).sort("local_rank")
+        if candidate_features.height == 0:
+            continue
+        feature_names = candidate_features.get_column("feature").to_list()
+        reference_subset = reference_expression.filter(pl.col("feature").is_in(feature_names))
+        cross_fold_subset = cross_fold_predictions.filter(pl.col("species") == species)
+        jobs.append(
+            (
+                f"candidate_evidence_{species}",
+                _candidate_evidence_figure,
+                (),
+                {
+                    "candidate": candidate,
+                    "candidate_features": candidate_features,
+                    "reference_expression": reference_subset,
+                    "cross_fold_predictions": cross_fold_subset,
+                    "orthogroup_annotations": orthogroup_annotations,
+                    "trait_name": trait_name,
+                    "out_path": out_path,
+                },
+                False,
+            )
+        )
+        fold_values = np.asarray(
+            cross_fold_subset.get_column("prob").to_list()
+            if "prob" in cross_fold_subset.columns
+            else [],
+            dtype=float,
+        )
+        fold_values = fold_values[np.isfinite(fold_values)]
+        if fold_values.size:
+            q1, median, q3 = np.quantile(fold_values, [0.25, 0.50, 0.75])
+            fold_min: float | None = float(np.min(fold_values))
+            fold_max: float | None = float(np.max(fold_values))
+            fold_q1: float | None = float(q1)
+            fold_median: float | None = float(median)
+            fold_q3: float | None = float(q3)
+        else:
+            fold_min = fold_q1 = fold_median = fold_q3 = fold_max = None
+        manifest_rows.append(
+            {
+                "species": species,
+                "family_id": str(candidate["family_id"]),
+                "family_name": str(candidate["family_name"]),
+                "prob": probability,
+                "probability_bin": bin_name,
+                "n_cross_fold_predictions": int(fold_values.size),
+                "cross_fold_prob_min": fold_min,
+                "cross_fold_prob_q1": fold_q1,
+                "cross_fold_prob_median": fold_median,
+                "cross_fold_prob_q3": fold_q3,
+                "cross_fold_prob_max": fold_max,
+                "n_features": candidate_features.height,
+                "figure_path": relative_path.as_posix(),
+            }
+        )
+
+    warnings = _run_figure_jobs(jobs, parallel_workers=parallel_workers)
+    manifest = pl.DataFrame(manifest_rows, schema=_CANDIDATE_MANIFEST_SCHEMA).sort(
+        ["prob", "species"], descending=[True, False]
+    )
+    manifest.write_csv(
+        output_root / "candidate_manifest.tsv",
+        separator="\t",
+        float_precision=8,
+        null_value="NA",
+    )
+    return manifest, warnings
 
 
 def write_predict_figures(
