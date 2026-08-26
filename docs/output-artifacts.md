@@ -854,6 +854,9 @@ when individual folds are single-label.
     `orthogroup ID: full annotation` instead of ID-only labels.
   - The z-score figure emphasizes relative per-feature expression patterns; the
     log2-TPM figure preserves absolute expression scale after `log2(TPM + 1)`.
+  - Species labels are colored by OOF `TP`, `FN`, `TN`, and `FP` status using the
+    same palette as `top_feature_expression_by_confusion.svg`; an in-figure legend
+    defines the four colors.
 
 ## `predict` artifacts (schemas and interpretation)
 

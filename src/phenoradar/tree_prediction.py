@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import suppress
@@ -15,7 +16,15 @@ import matplotlib
 import matplotlib.colors
 import polars as pl
 
-from phenoradar.metrics import FIXED_PROBABILITY_THRESHOLD_NAME
+from phenoradar.colors import (
+    CONFUSION_GROUP_COLORS,
+    CONFUSION_GROUP_LABELS,
+    CONFUSION_GROUP_ORDER,
+)
+from phenoradar.metrics import (
+    FIXED_PROBABILITY_THRESHOLD_NAME,
+    FIXED_PROBABILITY_THRESHOLD_VALUE,
+)
 
 
 class TreePredictionError(ValueError):
@@ -1273,6 +1282,10 @@ def _draw_toytree_feature_heatmap(
         value_lookup[(species, str(row["feature"]))] = row.get(value_col)
         trait_lookup.setdefault(species, row.get("true_label"))
         prob_lookup.setdefault(species, row.get("prob"))
+    confusion_groups = [
+        _oof_confusion_group(trait_lookup.get(species), prob_lookup.get(species))
+        for species in tip_labels
+    ]
     finite_values = _finite_values(annotation, value_col)
     vmin, vmax = _heatmap_domain(value_col, finite_values)
     trait_values = [
@@ -1348,8 +1361,18 @@ def _draw_toytree_feature_heatmap(
         [species_x] * len(tip_labels),
         list(range(len(tip_labels))),
         tip_labels,
-        color=_TEXT_COLOR,
-        title=tip_labels,
+        color=[
+            CONFUSION_GROUP_COLORS[group] if group is not None else _TEXT_COLOR
+            for group in confusion_groups
+        ],
+        title=[
+            (
+                f"{species} OOF confusion group={group}"
+                if group is not None
+                else species
+            )
+            for species, group in zip(tip_labels, confusion_groups, strict=True)
+        ],
         style={"font-size": "9px", "text-anchor": "start"},
     )
     _draw_heatmap_legend(
@@ -1360,6 +1383,7 @@ def _draw_toytree_feature_heatmap(
         vmax=vmax,
         cmap_name=cmap_name,
     )
+    _draw_confusion_group_legend(canvas=canvas, width=width)
     if title:
         axes.text(
             -0.05,
@@ -1476,6 +1500,61 @@ def _draw_heatmap_legend(
         color=_TEXT_COLOR,
         style={"font-size": "7px", "text-anchor": "start"},
     )
+
+
+def _draw_confusion_group_legend(*, canvas: Any, width: int) -> None:
+    legend_axes = canvas.cartesian(
+        bounds=(width - 270, width - 35, 122, 238),
+        show=False,
+        xmin=0,
+        xmax=1,
+        ymin=0,
+        ymax=1,
+    )
+    legend_axes.show = False
+    legend_axes.text(
+        0.02,
+        0.92,
+        "OOF confusion group",
+        color=_TEXT_COLOR,
+        style={"font-size": "8px", "font-weight": "bold", "text-anchor": "start"},
+    )
+    y_positions = [0.70, 0.51, 0.32, 0.13]
+    for group, y in zip(CONFUSION_GROUP_ORDER, y_positions, strict=True):
+        color = CONFUSION_GROUP_COLORS[group]
+        legend_axes.rectangle(
+            [0.03],
+            [0.09],
+            [y - 0.055],
+            [y + 0.055],
+            color=[color],
+            title=[f"{group}: {CONFUSION_GROUP_LABELS[group]}"],
+            style={"stroke": "none"},
+        )
+        legend_axes.text(
+            0.13,
+            y,
+            f"{group}: {CONFUSION_GROUP_LABELS[group]}",
+            color=color,
+            style={"font-size": "7px", "text-anchor": "start"},
+        )
+
+
+def _oof_confusion_group(true_label: object, probability: object) -> str | None:
+    try:
+        label_value = float(true_label)  # type: ignore[arg-type]
+        probability_value = float(probability)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if label_value not in {0.0, 1.0} or not math.isfinite(probability_value):
+        return None
+    predicted_label = int(probability_value >= FIXED_PROBABILITY_THRESHOLD_VALUE)
+    return {
+        (1, 1): "TP",
+        (1, 0): "FN",
+        (0, 0): "TN",
+        (0, 1): "FP",
+    }[(int(label_value), predicted_label)]
 
 
 def _heatmap_legend_label(value_col: str) -> str:

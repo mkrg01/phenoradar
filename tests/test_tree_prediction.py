@@ -10,6 +10,7 @@ from phenoradar.tree_prediction import (
     TreePredictionError,
     _ensure_svg_white_background,
     _load_expression_for_heatmap,
+    _oof_confusion_group,
     build_contrast_pair_tree_annotation,
     build_cv_tree_prediction_annotation,
     build_external_tree_prediction_annotation,
@@ -84,6 +85,25 @@ def _write_tpm(path: Path) -> None:
             "tpm": [0.0, 3.0, 3.0, 15.0, 7.0, 0.0],
         }
     ).write_csv(path, separator="\t")
+
+
+@pytest.mark.parametrize(
+    ("true_label", "probability", "expected"),
+    [
+        (1, 0.8, "TP"),
+        (1, 0.2, "FN"),
+        (0, 0.2, "TN"),
+        (0, 0.8, "FP"),
+        (None, 0.8, None),
+        (1, float("nan"), None),
+    ],
+)
+def test_oof_confusion_group(
+    true_label: object,
+    probability: object,
+    expected: str | None,
+) -> None:
+    assert _oof_confusion_group(true_label, probability) == expected
 
 
 @pytest.mark.parametrize(
@@ -571,6 +591,25 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
         assert ">4.00<" in svg_text
         assert "Missing value" in svg_text
         assert ">NA<" in svg_text
+        assert "OOF confusion group" in svg_text
+        assert "TP: true positive" in svg_text
+        assert "FN: false negative" in svg_text
+        assert "TN: true negative" in svg_text
+        assert "FP: false positive" in svg_text
+        assert "sp1 OOF confusion group=TN" in svg_text
+        assert "sp2 OOF confusion group=TP" in svg_text
+        svg_root = ET.fromstring(svg_text)
+        text_styles = {
+            element.text: element.get("style", "")
+            for element in svg_root.iter()
+            if element.tag.endswith("text") and element.text is not None
+        }
+        assert "fill:rgb(0%,62%,45.1%)" in text_styles["sp1"]
+        assert "fill:rgb(0%,44.7%,69.8%)" in text_styles["sp2"]
+        assert "fill:rgb(0%,44.7%,69.8%)" in text_styles["TP: true positive"]
+        assert "fill:rgb(80%,47.5%,65.5%)" in text_styles["FN: false negative"]
+        assert "fill:rgb(0%,62%,45.1%)" in text_styles["TN: true negative"]
+        assert "fill:rgb(90.2%,62.4%,0%)" in text_styles["FP: false positive"]
     else:
         assert any("Toytree is unavailable" in warning for warning in warnings)
 
