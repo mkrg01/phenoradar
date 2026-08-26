@@ -367,6 +367,125 @@ runtime:
     assert predictions.filter((pl.col("prob") < 0.0) | (pl.col("prob") > 1.0)).height == 0
 
 
+@pytest.mark.parametrize(
+    ("method", "expected", "transform_applied"),
+    [
+        ("none", [6.0, 0.2], False),
+        ("log1p", [6.0, 0.2], False),
+        ("sample_rank", [2.0, 1.0], True),
+        ("sample_percentile_rank", [1.0, 0.5], True),
+    ],
+)
+def test_outer_cv_inference_matrix_is_a_shared_read_only_view(
+    tmp_path: Path,
+    method: str,
+    expected: list[float],
+    transform_applied: bool,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra=f"""
+preprocess:
+  expression_transform:
+    method: {method}
+runtime:
+  execution_stage: full_run
+""".strip(),
+            )
+        ]
+    )
+    split_artifacts = build_split_artifacts(config)
+
+    cache = cv_mod._build_outer_cv_matrix_cache(config, split_artifacts.split_manifest)
+    inference_matrix = cv_mod._slice_outer_cv_inference_matrix(cache, species=["sp6"])
+
+    assert cache.inference_transform_applied is transform_applied
+    assert cache.inference_matrix.flags.c_contiguous
+    assert not cache.inference_matrix.flags.writeable
+    assert not inference_matrix.flags.writeable
+    assert np.shares_memory(inference_matrix, cache.inference_matrix)
+    if not transform_applied:
+        assert np.shares_memory(cache.inference_matrix, cache.matrix)
+    assert cache.matrix[cache.species_to_index["sp6"], :] == pytest.approx(
+        np.array([6.0, 0.2], dtype=float)
+    )
+    assert inference_matrix == pytest.approx(np.array([expected], dtype=float))
+
+
+@pytest.mark.parametrize(
+    ("method", "expected_shapes"),
+    [
+        ("log1p", [(1, 1), (1, 1)]),
+        ("sample_percentile_rank", [(1, 2)]),
+    ],
+)
+def test_outer_cv_avoids_full_inference_transform_per_fold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    expected_shapes: list[tuple[int, int]],
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  expression_transform:
+    method: {method}
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: variance
+    max_features: 1
+runtime:
+  n_jobs: 2
+  execution_stage: full_run
+""".strip().format(method=method),
+            )
+        ]
+    )
+    split_artifacts = build_split_artifacts(config)
+    original_transform = cv_mod._apply_expression_transform_for_config
+    original_fit_outer_sample_set = cv_mod._fit_outer_sample_set
+    inference_transform_shapes: list[tuple[int, int]] = []
+    shared_inference_matrices: list[np.ndarray] = []
+
+    def _tracked_transform(config_arg: object, matrix: np.ndarray) -> np.ndarray:
+        if matrix.shape[0] == 1:
+            inference_transform_shapes.append(matrix.shape)
+        return original_transform(config_arg, matrix)  # type: ignore[arg-type]
+
+    def _tracked_fit_outer_sample_set(*args: object, **kwargs: object) -> object:
+        inference_matrix = kwargs["x_inference_matrix"]
+        assert isinstance(inference_matrix, np.ndarray)
+        shared_inference_matrices.append(inference_matrix)
+        return original_fit_outer_sample_set(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cv_mod, "_apply_expression_transform_for_config", _tracked_transform)
+    monkeypatch.setattr(cv_mod, "_fit_outer_sample_set", _tracked_fit_outer_sample_set)
+
+    cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
+
+    assert cv_artifacts.inference_predictions_by_fold is not None
+    assert sorted(inference_transform_shapes) == sorted(expected_shapes)
+    assert len(shared_inference_matrices) == split_artifacts.fold_count
+    assert all(matrix.flags.c_contiguous for matrix in shared_inference_matrices)
+    assert all(not matrix.flags.writeable for matrix in shared_inference_matrices)
+    assert all(
+        np.shares_memory(shared_inference_matrices[0], matrix)
+        for matrix in shared_inference_matrices[1:]
+    )
+
+
 def test_metrics_dataframe_handles_valid_fold_counts_after_schema_inference_limit() -> None:
     fold_metrics = {f"metric_{index}": float(index) for index in range(5)}
     metric_rows = [

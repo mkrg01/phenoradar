@@ -76,6 +76,7 @@ except ImportError:  # pragma: no cover - available via scikit-learn dependency.
 
 _THREADPOOL_CONTROLLER: ThreadpoolController | None = None
 _THREADPOOL_CONTROLLER_LOCK = Lock()
+_CONTEXTUAL_EXPRESSION_TRANSFORMS = frozenset({"sample_rank", "sample_percentile_rank"})
 
 
 class CVError(ValueError):
@@ -208,11 +209,19 @@ class OuterFoldResult:
 
 @dataclass(frozen=True)
 class OuterCvMatrixCache:
-    """Shared raw expression matrix for all outer-CV folds."""
+    """Shared expression matrices for all outer-CV folds.
+
+    ``matrix`` always contains raw TPM values. ``inference_matrix`` is a raw
+    view for column-local transforms and a once-transformed read-only array for
+    transforms whose result depends on the complete feature row.
+    """
 
     matrix: np.ndarray
+    inference_matrix: np.ndarray
+    inference_transform_applied: bool
     feature_names: list[str]
     species_to_index: dict[str, int]
+    inference_species_to_index: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -3266,23 +3275,50 @@ def _build_outer_cv_matrix_cache(
         cv_species,
     )
     if inference_species:
-        inference_matrix, _ = _with_native_thread_limit_for_config(
+        raw_inference_matrix, _ = _with_native_thread_limit_for_config(
             config,
             matrix_builder.build_matrix,
             inference_species,
             feature_names,
         )
-        matrix = np.vstack([cv_matrix, inference_matrix])
+        matrix = np.vstack([cv_matrix, raw_inference_matrix])
+        del cv_matrix, raw_inference_matrix
     else:
         matrix = cv_matrix
     matrix.setflags(write=False)
+
+    inference_row_start = len(cv_species)
+    raw_inference_view = matrix[inference_row_start:, :]
+    transform_method = _validate_expression_transform_method(
+        config.preprocess.expression_transform.method
+    )
+    inference_transform_applied = bool(
+        inference_species and transform_method in _CONTEXTUAL_EXPRESSION_TRANSFORMS
+    )
+    if inference_transform_applied:
+        # Rank-based transforms depend on every feature in a sample. Compute
+        # them once before fold concurrency rather than once per outer fold.
+        inference_matrix = _with_native_thread_limit_for_config(
+            config,
+            _apply_expression_transform_for_config,
+            config,
+            raw_inference_view,
+        )
+    else:
+        inference_matrix = raw_inference_view
+    inference_matrix.setflags(write=False)
+
     species_to_index = {species: idx for idx, species in enumerate(species_order)}
     if len(species_to_index) != len(species_order):
         raise CVError("Outer CV species list contains duplicate identifiers")
+    inference_species_to_index = {species: idx for idx, species in enumerate(inference_species)}
     return OuterCvMatrixCache(
         matrix=matrix,
+        inference_matrix=inference_matrix,
+        inference_transform_applied=inference_transform_applied,
         feature_names=feature_names,
         species_to_index=species_to_index,
+        inference_species_to_index=inference_species_to_index,
     )
 
 
@@ -3291,16 +3327,24 @@ def _slice_outer_cv_inference_matrix(
     *,
     species: list[str],
 ) -> np.ndarray:
+    """Return a read-only basic-slice view of the shared inference matrix."""
+
     if not species:
-        return np.empty((0, len(cache.feature_names)), dtype=float)
+        return cache.inference_matrix[:0, :]
     try:
-        row_idx = np.array([cache.species_to_index[value] for value in species], dtype=int)
+        row_idx = np.array(
+            [cache.inference_species_to_index[value] for value in species], dtype=int
+        )
     except KeyError as exc:
         raise CVError(
             "Inference target references species absent from shared outer-CV matrix; "
             f"species={exc.args[0]}"
         ) from exc
-    return cache.matrix[row_idx, :]
+    start = int(row_idx[0])
+    stop = start + int(row_idx.size)
+    if not np.array_equal(row_idx, np.arange(start, stop, dtype=int)):
+        raise CVError("Inference species must preserve the cached contiguous row order")
+    return cache.inference_matrix[start:stop, :]
 
 
 def _slice_outer_cv_matrix(
@@ -3612,7 +3656,8 @@ def _fit_outer_sample_set(
     contrast_groups_train: np.ndarray | None,
     x_valid_raw: np.ndarray,
     valid_species: list[str],
-    x_inference_raw: np.ndarray,
+    x_inference_matrix: np.ndarray,
+    inference_transform_applied: bool,
     feature_names: list[str],
     timing_recorder: TimingRecorder | None = None,
 ) -> OuterSampleSetFitResult:
@@ -3656,12 +3701,19 @@ def _fit_outer_sample_set(
     selected_indices = np.array(
         [selected_feature_index[feature] for feature in selected_features], dtype=int
     )
-    if x_inference_raw.shape[0] == 0:
+    if x_inference_matrix.shape[0] == 0:
         x_inference = np.empty((0, len(selected_features)), dtype=float)
     else:
-        x_inference_expr = _apply_expression_transform_for_config(config, x_inference_raw)
+        # none/log1p are column-local, so project to the fold's retained
+        # features before transforming. Contextual rank transforms were
+        # applied once to the complete row when the shared cache was built.
+        x_inference_selected = x_inference_matrix[:, selected_indices]
+        if not inference_transform_applied:
+            x_inference_selected = _apply_expression_transform_for_config(
+                config, x_inference_selected
+            )
         x_inference = apply_feature_scaling(
-            x_inference_expr[:, selected_indices],
+            x_inference_selected,
             scaler,
             config.preprocess.feature_scaling.method,
         )
@@ -4585,7 +4637,7 @@ def _run_outer_fold(
         train_species=train_species,
         valid_species=valid_species,
     )
-    x_inference_raw = _slice_outer_cv_inference_matrix(
+    x_inference_matrix = _slice_outer_cv_inference_matrix(
         outer_matrix_cache,
         species=inference_species,
     )
@@ -4830,7 +4882,8 @@ def _run_outer_fold(
             contrast_groups_train=contrast_groups_train,
             x_valid_raw=x_valid_raw,
             valid_species=valid_species,
-            x_inference_raw=x_inference_raw,
+            x_inference_matrix=x_inference_matrix,
+            inference_transform_applied=outer_matrix_cache.inference_transform_applied,
             feature_names=feature_names,
             timing_recorder=timing_recorder,
         )
