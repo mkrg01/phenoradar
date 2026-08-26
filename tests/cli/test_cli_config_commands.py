@@ -15,7 +15,7 @@ import phenoradar.cli as cli_mod
 from phenoradar import __version__
 from phenoradar.bundle import BundleError
 from phenoradar.cli import app
-from phenoradar.config import ConfigError
+from phenoradar.config import ConfigConditionSet, ConfigError
 from phenoradar.cv import CVError
 from phenoradar.figures import FigureError
 from phenoradar.provenance import ProvenanceError
@@ -1763,6 +1763,38 @@ def test_run_fails_when_config_resolution_raises(
 
     assert result.exit_code != 0
     assert "config failure" in result.output
+
+
+def test_run_expands_group_subsample_repeat_count_into_study(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    config = _write(
+        tmp_path / "config.yml",
+        """
+sampling:
+  training_group_count: 5
+  group_subsample_repeats: 3
+""".lstrip(),
+    )
+    captured_indices: list[int] = []
+
+    def _study(**kwargs: object) -> Path:
+        condition_set = kwargs["condition_set"]
+        assert isinstance(condition_set, ConfigConditionSet)
+        captured_indices.extend(
+            condition.config.sampling.group_subsample_repeat_index
+            for condition in condition_set.conditions
+        )
+        return tmp_path / "study"
+
+    monkeypatch.setattr("phenoradar.cli._run_condition_study", _study)
+
+    result = runner.invoke(app, ["run", "-c", str(config), "--quiet"])
+
+    assert result.exit_code == 0, result.output
+    assert captured_indices == [1, 2, 3]
 
 
 def test_run_expands_scalar_lists_into_ordered_study_and_resumes(

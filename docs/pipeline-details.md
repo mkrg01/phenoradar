@@ -108,11 +108,12 @@ For each outer fold:
 
 1. Slice shared matrix rows into fold-local train/valid arrays by species.
 2. Rank the fold-local `split.group_col` training groups reproducibly using
-   `runtime.seed` and `sampling.group_subsample_repeat`, then retain exactly
+   `runtime.seed` and the internal index generated from
+   `sampling.group_subsample_repeats`, then retain exactly
    `sampling.training_group_count` groups. Validation rows remain unchanged.
-   With a fixed repeat, increasing counts produce nested training-group subsets.
-   A numeric count that is unavailable in any fold is an error; `null` retains
-   every available training group.
+   With a fixed repeat index, increasing counts produce nested training-group
+   subsets. A numeric count that is unavailable in any fold is an error; `null`
+   retains every available training group.
 3. Build one or more sampled training sets from the retained groups:
   - `all_samples`: single full set
   - `group_balanced`: deterministic per-group balanced subsets

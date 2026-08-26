@@ -7,6 +7,7 @@ import polars as pl
 import pytest
 
 from phenoradar.study import (
+    _build_training_group_sensitivity,
     _ranked_feature_sensitivity_figures,
     generate_study_report,
 )
@@ -253,7 +254,7 @@ def test_generate_study_report_aggregates_training_group_subsample_repeats(
             {
                 "scope": ["outer_fold", "outer_fold"],
                 "fold_id": ["1", "2"],
-                "group_subsample_repeat": [repeat, repeat],
+                "group_subsample_repeat_index": [repeat, repeat],
                 "n_training_groups_selected": [effective_count, effective_count],
             }
         ).write_csv(
@@ -268,7 +269,7 @@ def test_generate_study_report_aggregates_training_group_subsample_repeats(
                 "varying_parameters_json": json.dumps(
                     {
                         "sampling.training_group_count": training_group_count,
-                        "sampling.group_subsample_repeat": repeat,
+                        "sampling.group_subsample_repeat_index": repeat,
                     }
                 ),
                 "status": "completed",
@@ -302,3 +303,12 @@ def test_generate_study_report_aggregates_training_group_subsample_repeats(
     assert "ROC AUC" in sensitivity_svg
     assert "Training-group count sensitivity" not in sensitivity_svg
     assert "Maximum training groups" not in sensitivity_svg
+
+    repeat_only = _build_training_group_sensitivity(
+        artifacts.condition_metrics,
+        manifest_rows[:2],
+    )
+    assert repeat_only is not None
+    assert repeat_only.filter(pl.col("metric") == "roc_auc").row(0, named=True)[
+        "n_subset_repeats"
+    ] == 2

@@ -1881,7 +1881,7 @@ _TRAINING_GROUP_SUBSET_SCHEMA = {
     "scope": pl.String,
     "fold_id": pl.String,
     "group_col": pl.String,
-    "group_subsample_repeat": pl.Int64,
+    "group_subsample_repeat_index": pl.Int64,
     "training_group_count_requested": pl.Int64,
     "n_training_groups_available": pl.Int64,
     "n_training_groups_selected": pl.Int64,
@@ -1919,12 +1919,12 @@ def _select_training_groups(
     if not unique_groups:
         raise CVError(f"No training groups are available for scope={scope}, fold={fold_id}")
 
-    repeat = int(config.sampling.group_subsample_repeat)
+    repeat_index = int(config.sampling.group_subsample_repeat_index)
     ordered_groups = sorted(
         unique_groups,
         key=lambda group: (
             _deterministic_int_seed(
-                f"{config.runtime.seed}|training_group_subset|{repeat}|{group}"
+                f"{config.runtime.seed}|training_group_subset|{repeat_index}|{group}"
             ),
             group,
         ),
@@ -1943,7 +1943,7 @@ def _select_training_groups(
         raise CVError(
             "Training-group subsampling produced fewer than two labels; "
             f"scope={scope}, fold={fold_id}, training_group_count={requested}, "
-            f"group_subsample_repeat={repeat}"
+            f"group_subsample_repeat_index={repeat_index}"
         )
 
     selected_set = set(selected_groups)
@@ -1956,7 +1956,7 @@ def _select_training_groups(
                 "scope": scope,
                 "fold_id": fold_id,
                 "group_col": config.split.group_col,
-                "group_subsample_repeat": repeat,
+                "group_subsample_repeat_index": repeat_index,
                 "training_group_count_requested": (
                     None if requested is None else int(requested)
                 ),

@@ -43,7 +43,7 @@ cross-condition outputs:
 - `tables/condition_metrics.tsv`
 - `tables/pairwise_comparisons.tsv`
 - `tables/training_group_sensitivity.tsv` for a pure
-  `sampling.training_group_count`/`group_subsample_repeat` sweep
+  `sampling.training_group_count`/`group_subsample_repeats` study
 - `figures/condition_metrics.{svg,pdf,png}`
 - `figures/training_group_sensitivity.{svg,pdf,png}` for that training-group
   sweep
@@ -106,7 +106,7 @@ Always written:
   - one audit row per available group in every outer fold, plus final-refit rows
     during `full_run`
   - records the requested and effective group counts, deterministic group rank,
-    selected flag, and per-group label/species counts
+    generated repeat index, selected flag, and per-group label/species counts
   - `group_id` is a value of `split.group_col`; selection changes training rows
     only and does not alter `split_manifest.tsv`
 - `cv/tables/metrics_cv.tsv`

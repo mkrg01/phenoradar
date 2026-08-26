@@ -291,7 +291,8 @@ class SamplingConfig(StrictModel):
     max_samples_per_label_per_group: PositiveInt | None = 1
     sampled_set_count: PositiveInt = 10
     training_group_count: PositiveInt | None = None
-    group_subsample_repeat: PositiveInt = 1
+    group_subsample_repeats: PositiveInt = 1
+    group_subsample_repeat_index: PositiveInt = 1
     weighting: WeightingMode = "none"
 
     @model_validator(mode="after")

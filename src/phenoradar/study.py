@@ -45,7 +45,7 @@ _COMPLETED_RUN_STATUSES = {"cv_completed", "full_run_completed"}
 _RANKED_METHOD_PATH = "preprocess.ranked_feature_filter.method"
 _RANKED_MAX_FEATURES_PATH = "preprocess.ranked_feature_filter.max_features"
 _TRAINING_GROUP_COUNT_PATH = "sampling.training_group_count"
-_GROUP_SUBSAMPLE_REPEAT_PATH = "sampling.group_subsample_repeat"
+_GROUP_SUBSAMPLE_REPEAT_INDEX_PATH = "sampling.group_subsample_repeat_index"
 
 
 @dataclass(frozen=True)
@@ -641,7 +641,10 @@ def _training_group_sensitivity_metadata(
     manifest_rows: Sequence[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Load condition axes and effective fold-local group counts for a pure group sweep."""
-    allowed_paths = {_TRAINING_GROUP_COUNT_PATH, _GROUP_SUBSAMPLE_REPEAT_PATH}
+    allowed_paths = {
+        _TRAINING_GROUP_COUNT_PATH,
+        _GROUP_SUBSAMPLE_REPEAT_INDEX_PATH,
+    }
     metadata: list[dict[str, Any]] = []
     for row in manifest_rows:
         raw_values = row.get("varying_parameters_json")
@@ -658,9 +661,10 @@ def _training_group_sensitivity_metadata(
         ):
             return []
         requested = values[_TRAINING_GROUP_COUNT_PATH]
-        configured_repeat = values.get(_GROUP_SUBSAMPLE_REPEAT_PATH)
+        configured_repeat_index = values.get(_GROUP_SUBSAMPLE_REPEAT_INDEX_PATH)
         if (requested is not None and not isinstance(requested, int)) or (
-            configured_repeat is not None and not isinstance(configured_repeat, int)
+            configured_repeat_index is not None
+            and not isinstance(configured_repeat_index, int)
         ):
             return []
 
@@ -677,11 +681,16 @@ def _training_group_sensitivity_metadata(
         )
         if audit.is_empty():
             return []
-        audit_repeats = audit.get_column("group_subsample_repeat").unique().to_list()
-        if len(audit_repeats) != 1:
+        audit_repeat_indices = (
+            audit.get_column("group_subsample_repeat_index").unique().to_list()
+        )
+        if len(audit_repeat_indices) != 1:
             return []
-        repeat = int(audit_repeats[0])
-        if configured_repeat is not None and repeat != configured_repeat:
+        repeat_index = int(audit_repeat_indices[0])
+        if (
+            configured_repeat_index is not None
+            and repeat_index != configured_repeat_index
+        ):
             return []
         per_fold = audit.select(
             "fold_id", "n_training_groups_selected"
@@ -698,7 +707,7 @@ def _training_group_sensitivity_metadata(
                 "condition_index": int(row["condition_index"]),
                 "training_group_count": requested,
                 "full_training_set": requested is None,
-                "group_subsample_repeat": int(repeat),
+                "group_subsample_repeat_index": int(repeat_index),
                 "effective_training_groups_mean": float(np.mean(effective_counts)),
                 "effective_training_groups_min": int(np.min(effective_counts)),
                 "effective_training_groups_max": int(np.max(effective_counts)),
@@ -709,7 +718,11 @@ def _training_group_sensitivity_metadata(
         (bool(row["full_training_set"]), row["training_group_count"])
         for row in metadata
     }
-    return metadata if len(group_settings) >= 2 else []
+    repeat_indices = {
+        int(row["group_subsample_repeat_index"])
+        for row in metadata
+    }
+    return metadata if len(group_settings) >= 2 or len(repeat_indices) >= 2 else []
 
 
 def _build_training_group_sensitivity(
@@ -734,7 +747,10 @@ def _build_training_group_sensitivity(
         )
         effective_min = min(int(row["effective_training_groups_min"]) for row in group_rows)
         effective_max = max(int(row["effective_training_groups_max"]) for row in group_rows)
-        repeats = {int(row["group_subsample_repeat"]) for row in group_rows}
+        repeat_indices = {
+            int(row["group_subsample_repeat_index"])
+            for row in group_rows
+        }
         for metric in _METRIC_ORDER:
             values = np.asarray(
                 condition_metrics.filter(
@@ -757,7 +773,7 @@ def _build_training_group_sensitivity(
                     "effective_training_groups_mean": float(np.mean(effective_means)),
                     "effective_training_groups_min": effective_min,
                     "effective_training_groups_max": effective_max,
-                    "n_subset_repeats": len(repeats),
+                    "n_subset_repeats": len(repeat_indices),
                     "n_conditions": len(group_rows),
                     "metric": metric,
                     "n_valid_conditions": int(finite.size),

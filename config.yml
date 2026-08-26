@@ -23,7 +23,7 @@ sampling:
   max_samples_per_label_per_group: null
   sampled_set_count: 1
   training_group_count: null
-  group_subsample_repeat: 1
+  group_subsample_repeats: 1
   weighting: group_label_inverse  # choices: none, group_label_inverse
 
 preprocess:

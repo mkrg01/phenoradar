@@ -1895,29 +1895,25 @@ def run(
     """Run training/evaluation pipeline."""
     config_paths = _normalize_config_paths(config)
     try:
-        resolved = load_and_resolve_config(
+        contains_conditions = has_condition_dimensions(
             config_paths,
             execution_stage_override=execution_stage,
-            allow_empty=False,
         )
-    except ConfigError as single_config_error:
-        try:
-            contains_conditions = has_condition_dimensions(
-                config_paths,
-                execution_stage_override=execution_stage,
-            )
-        except ConfigError as exc:
-            raise typer.BadParameter(str(exc)) from exc
-        if not contains_conditions:
-            raise typer.BadParameter(str(single_config_error)) from single_config_error
-        try:
+        if contains_conditions:
             condition_set = load_config_conditions(
                 config_paths,
                 execution_stage_override=execution_stage,
             )
-        except ConfigError as exc:
-            raise typer.BadParameter(str(exc)) from exc
-    else:
+        else:
+            resolved = load_and_resolve_config(
+                config_paths,
+                execution_stage_override=execution_stage,
+                allow_empty=False,
+            )
+    except ConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if not contains_conditions:
         if resume is not None:
             raise typer.BadParameter("--resume requires a config with multiple conditions")
         _run_single(

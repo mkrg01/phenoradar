@@ -218,7 +218,7 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "scope",
         "fold_id",
         "group_col",
-        "group_subsample_repeat",
+        "group_subsample_repeat_index",
         "training_group_count_requested",
         "n_training_groups_available",
         "n_training_groups_selected",
@@ -4618,14 +4618,14 @@ def test_training_group_subsets_are_reproducible_and_nested(tmp_path: Path) -> N
     config_two = config.model_copy(
         update={
             "sampling": config.sampling.model_copy(
-                update={"training_group_count": 2, "group_subsample_repeat": 3}
+                update={"training_group_count": 2, "group_subsample_repeat_index": 3}
             )
         }
     )
     config_three = config.model_copy(
         update={
             "sampling": config.sampling.model_copy(
-                update={"training_group_count": 3, "group_subsample_repeat": 3}
+                update={"training_group_count": 3, "group_subsample_repeat_index": 3}
             )
         }
     )

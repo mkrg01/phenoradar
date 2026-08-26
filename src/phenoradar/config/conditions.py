@@ -66,8 +66,14 @@ _RANKED_MAX_FEATURES_PATH = (
     "max_features",
 )
 _RANKED_MAX_FEATURES_DOTTED_PATH = ".".join(_RANKED_MAX_FEATURES_PATH)
-_GROUP_SUBSAMPLE_REPEAT_PATH = ("sampling", "group_subsample_repeat")
-_GROUP_SUBSAMPLE_REPEAT_DOTTED_PATH = ".".join(_GROUP_SUBSAMPLE_REPEAT_PATH)
+_TRAINING_GROUP_COUNT_PATH = ("sampling", "training_group_count")
+_GROUP_SUBSAMPLE_REPEAT_INDEX_PATH = (
+    "sampling",
+    "group_subsample_repeat_index",
+)
+_GROUP_SUBSAMPLE_REPEAT_INDEX_DOTTED_PATH = ".".join(
+    _GROUP_SUBSAMPLE_REPEAT_INDEX_PATH
+)
 
 
 def _merged_raw_config(
@@ -145,6 +151,51 @@ def _collect_dimensions(
     return dimensions
 
 
+def _condition_dimensions(raw: dict[str, Any]) -> list[ConditionDimension]:
+    """Collect explicit list axes and the generated group-subsample repeat axis."""
+    sampling = raw.get("sampling")
+    if isinstance(sampling, dict):
+        repeat_count = sampling.get("group_subsample_repeats", 1)
+        if isinstance(repeat_count, list):
+            raise ConfigError(
+                "sampling.group_subsample_repeats must be one integer repeat count, "
+                "not a condition list"
+            )
+        if "group_subsample_repeat_index" in sampling and repeat_count != 1:
+            raise ConfigError(
+                "sampling.group_subsample_repeat_index is generated internally and "
+                "cannot be combined with group_subsample_repeats greater than 1"
+            )
+    else:
+        repeat_count = 1
+
+    dimensions = _collect_dimensions(raw, AppConfig)
+    if (
+        isinstance(repeat_count, int)
+        and not isinstance(repeat_count, bool)
+        and repeat_count > 1
+    ):
+        if not any(dimension.path == _TRAINING_GROUP_COUNT_PATH for dimension in dimensions):
+            configured_count = (
+                sampling.get("training_group_count")
+                if isinstance(sampling, dict)
+                else None
+            )
+            dimensions.append(
+                ConditionDimension(
+                    path=_TRAINING_GROUP_COUNT_PATH,
+                    values=(configured_count,),
+                )
+            )
+        dimensions.append(
+            ConditionDimension(
+                path=_GROUP_SUBSAMPLE_REPEAT_INDEX_PATH,
+                values=tuple(range(1, repeat_count + 1)),
+            )
+        )
+    return dimensions
+
+
 def _is_forbidden_dimension(path: tuple[str, ...]) -> bool:
     return any(path[: len(prefix)] == prefix for prefix in _FORBIDDEN_DIMENSION_PREFIXES)
 
@@ -177,11 +228,16 @@ def _normalize_inactive_condition_fields(
                 values[position] = (path, None)
 
     sampling = raw.get("sampling")
-    if isinstance(sampling, dict) and sampling.get("training_group_count") is None:
-        sampling["group_subsample_repeat"] = 1
-        for position, (path, _value) in enumerate(values):
-            if path == _GROUP_SUBSAMPLE_REPEAT_DOTTED_PATH:
-                values[position] = (path, 1)
+    if isinstance(sampling, dict):
+        if "group_subsample_repeat_index" in sampling:
+            # The source repeat count is orchestration-only. Each resolved
+            # condition executes one generated repeat index.
+            sampling["group_subsample_repeats"] = 1
+        if sampling.get("training_group_count") is None:
+            sampling["group_subsample_repeat_index"] = 1
+            for position, (path, _value) in enumerate(values):
+                if path == _GROUP_SUBSAMPLE_REPEAT_INDEX_DOTTED_PATH:
+                    values[position] = (path, 1)
 
 
 def _differs_only_by_inactive_fields(
@@ -193,7 +249,7 @@ def _differs_only_by_inactive_fields(
     if resolved.preprocess.ranked_feature_filter.method == "none":
         inactive_paths.add(_RANKED_MAX_FEATURES_DOTTED_PATH)
     if resolved.sampling.training_group_count is None:
-        inactive_paths.add(_GROUP_SUBSAMPLE_REPEAT_DOTTED_PATH)
+        inactive_paths.add(_GROUP_SUBSAMPLE_REPEAT_INDEX_DOTTED_PATH)
     differing_paths = {
         previous_path
         for (previous_path, previous_value), (current_path, current_value) in zip(
@@ -224,18 +280,18 @@ def has_condition_dimensions(
     config_paths: list[Path],
     execution_stage_override: ExecutionStage | None = None,
 ) -> bool:
-    """Return whether a config contains any scalar field expressed as a list."""
+    """Return whether a config expands into multiple study conditions."""
     raw = _merged_raw_config(config_paths, execution_stage_override)
-    return bool(_collect_dimensions(raw, AppConfig))
+    return bool(_condition_dimensions(raw))
 
 
 def load_config_conditions(
     config_paths: list[Path],
     execution_stage_override: ExecutionStage | None = None,
 ) -> ConfigConditionSet:
-    """Expand and validate all ordered scalar-list conditions in a config."""
+    """Expand and validate all ordered study conditions in a config."""
     raw = _merged_raw_config(config_paths, execution_stage_override)
-    dimensions = tuple(_collect_dimensions(raw, AppConfig))
+    dimensions = tuple(_condition_dimensions(raw))
     forbidden = [
         dimension.dotted_path
         for dimension in dimensions

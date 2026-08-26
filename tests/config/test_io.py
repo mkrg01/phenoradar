@@ -61,7 +61,8 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.sampling.max_samples_per_label_per_group == 1
     assert resolved.sampling.sampled_set_count == 10
     assert resolved.sampling.training_group_count is None
-    assert resolved.sampling.group_subsample_repeat == 1
+    assert resolved.sampling.group_subsample_repeats == 1
+    assert resolved.sampling.group_subsample_repeat_index == 1
     assert resolved.sampling.weighting == "none"
     assert resolved.model.logistic_solver == "saga"
     assert resolved.model.logistic_warm_start_path is False
@@ -93,7 +94,8 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
     assert resolved.sampling.max_samples_per_label_per_group == 1
     assert resolved.sampling.sampled_set_count == 10
     assert resolved.sampling.training_group_count is None
-    assert resolved.sampling.group_subsample_repeat == 1
+    assert resolved.sampling.group_subsample_repeats == 1
+    assert resolved.sampling.group_subsample_repeat_index == 1
     assert resolved.sampling.weighting == "none"
     assert resolved.model_selection.selection_metric == "log_loss"
     assert resolved.model_selection.selection_rule == "best"

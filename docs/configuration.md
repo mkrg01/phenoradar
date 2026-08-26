@@ -54,19 +54,20 @@ That condition is generated once with `max_features: null`, independently of a
 `method: [none, pair_aware]` with seven `max_features` values generates eight
 conditions rather than fourteen.
 
-Training-group count sensitivity uses the same mechanism. The repeat value
-chooses a reproducible group ordering, and conditions with the same repeat are
-nested as the count increases:
+Training-group count sensitivity uses the same mechanism. The repeat count
+creates independently ranked group subsets, and subsets with the same internal
+repeat index are nested as the training-group count increases:
 
 ```yaml
 sampling:
   training_group_count: [5, 10, 15, null]
-  group_subsample_repeat: [1, 2, 3]
+  group_subsample_repeats: 3
 ```
 
-Here `null` means all fold-local training groups. Because the repeat is inactive
-for that full-data condition, the full-data run is generated once rather than
-three times.
+This creates three repeat conditions for each numeric training-group count.
+Here `null` means all fold-local training groups. Because repeating that
+condition would select the same groups, the all-available run is generated once
+rather than three times.
 
 Lists that are already part of a field's schema remain ordinary single-run
 values. In particular, this remains one inner model-selection search space:
@@ -118,7 +119,7 @@ sampling:
   max_samples_per_label_per_group: 1
   sampled_set_count: 10
   training_group_count: null
-  group_subsample_repeat: 1
+  group_subsample_repeats: 1
   weighting: none
 preprocess:
   max_pivot_cells: 50000000
@@ -296,14 +297,20 @@ runtime:
   - `null` keeps every available training group
   - a numeric count is an error when a fold or final-refit scope has fewer
     available training groups
-- `sampling.group_subsample_repeat`
+- `sampling.group_subsample_repeats`
   - type: `int >= 1`
   - default: `1`
-  - reproducible group-subset repeat identifier, combined with `runtime.seed`
-  - for a fixed repeat, group rankings do not depend on
+  - number of independently ranked training-group subsets evaluated for each
+    numeric `training_group_count`
+  - values greater than `1` automatically create separate study conditions with
+    internal repeat indices `1..group_subsample_repeats`
+  - each internal repeat index is combined with `runtime.seed`, so increasing
+    the repeat count preserves all previously generated subsets
+  - for a fixed internal repeat index, group rankings do not depend on
     `training_group_count`, so smaller counts are strict prefixes of larger
     counts
-  - inactive when `training_group_count=null`
+  - effectively inactive when `training_group_count=null`; the all-available
+    condition is run once
 - `sampling.weighting`
   - type: `none | group_label_inverse`
   - default: `none`
@@ -319,9 +326,9 @@ Compatibility rules:
 - `group_label_inverse` weights labels within `split.group_col` groups and does
   not require contrast-pair metadata.
 - training-group subsampling happens after the outer split and only on its
-  training side. Use multiple `group_subsample_repeat` values to measure
-  sensitivity to group composition; these are separate study conditions, not
-  members of the `sampled_set_count` ensemble.
+  training side. Increase `group_subsample_repeats` to measure sensitivity to
+  group composition; repeats are separate study conditions, not members of the
+  `sampled_set_count` ensemble.
 - when model selection is active, `training_group_count` must be at least `2`
   for inner `logo`, or at least `model_selection.inner_cv_n_splits` for inner
   `group_kfold`/`stratified_group_kfold`.
