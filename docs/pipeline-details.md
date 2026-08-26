@@ -108,9 +108,11 @@ For each outer fold:
 
 1. Slice shared matrix rows into fold-local train/valid arrays by species.
 2. Rank the fold-local `split.group_col` training groups reproducibly using
-   `runtime.seed` and `sampling.group_subsample_repeat`, then retain at most
-   `sampling.max_training_groups`. Validation rows remain unchanged. With a
-   fixed repeat, increasing limits produces nested training-group subsets.
+   `runtime.seed` and `sampling.group_subsample_repeat`, then retain exactly
+   `sampling.training_group_count` groups. Validation rows remain unchanged.
+   With a fixed repeat, increasing counts produce nested training-group subsets.
+   A numeric count that is unavailable in any fold is an error; `null` retains
+   every available training group.
 3. Build one or more sampled training sets from the retained groups:
   - `all_samples`: single full set
   - `group_balanced`: deterministic per-group balanced subsets
@@ -153,9 +155,10 @@ After all folds:
 ### 4) Final refit (`execution_stage=full_run`)
 
 - Training pool is `train + validation` species.
-- `sampling.max_training_groups` is applied again to this full refit pool using
-  the same reproducible group ranking. Thus a numeric limit also limits the
-  deployed refit model; use `cv_only` when the setting is only being explored.
+- `sampling.training_group_count` is applied again to this full refit pool using
+  the same reproducible group ranking. Thus a numeric count also determines the
+  exact number of groups used by the deployed refit model; use `cv_only` when
+  the setting is only being explored.
 - Candidate generation/selection is repeated in `final_refit` scope.
 - sampled sets can run in parallel up to `runtime.n_jobs` budget.
 - each sampled set is preprocessed independently before fit:

@@ -56,11 +56,11 @@ conditions rather than fourteen.
 
 Training-group count sensitivity uses the same mechanism. The repeat value
 chooses a reproducible group ordering, and conditions with the same repeat are
-nested as the limit increases:
+nested as the count increases:
 
 ```yaml
 sampling:
-  max_training_groups: [5, 10, 15, null]
+  training_group_count: [5, 10, 15, null]
   group_subsample_repeat: [1, 2, 3]
 ```
 
@@ -117,7 +117,7 @@ sampling:
   strategy: group_balanced
   max_samples_per_label_per_group: 1
   sampled_set_count: 10
-  max_training_groups: null
+  training_group_count: null
   group_subsample_repeat: 1
   weighting: none
 preprocess:
@@ -286,22 +286,24 @@ runtime:
 - `sampling.sampled_set_count`
   - type: `int >= 1`
   - default: `10`
-- `sampling.max_training_groups`
+- `sampling.training_group_count`
   - type: `int >= 1 | null`
   - default: `null`
-  - maximum number of fold-local training groups retained before species-level
+  - exact number of fold-local training groups retained before species-level
     sample-set construction
   - groups are values of `split.group_col`; validation groups are never removed
     or changed by this setting
   - `null` keeps every available training group
+  - a numeric count is an error when a fold or final-refit scope has fewer
+    available training groups
 - `sampling.group_subsample_repeat`
   - type: `int >= 1`
   - default: `1`
   - reproducible group-subset repeat identifier, combined with `runtime.seed`
   - for a fixed repeat, group rankings do not depend on
-    `max_training_groups`, so smaller limits are strict prefixes of larger
-    limits whenever enough groups are available
-  - inactive when `max_training_groups=null`
+    `training_group_count`, so smaller counts are strict prefixes of larger
+    counts
+  - inactive when `training_group_count=null`
 - `sampling.weighting`
   - type: `none | group_label_inverse`
   - default: `none`
@@ -320,7 +322,7 @@ Compatibility rules:
   training side. Use multiple `group_subsample_repeat` values to measure
   sensitivity to group composition; these are separate study conditions, not
   members of the `sampled_set_count` ensemble.
-- when model selection is active, `max_training_groups` must be at least `2`
+- when model selection is active, `training_group_count` must be at least `2`
   for inner `logo`, or at least `model_selection.inner_cv_n_splits` for inner
   `group_kfold`/`stratified_group_kfold`.
 

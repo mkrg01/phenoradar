@@ -43,7 +43,7 @@ cross-condition outputs:
 - `tables/condition_metrics.tsv`
 - `tables/pairwise_comparisons.tsv`
 - `tables/training_group_sensitivity.tsv` for a pure
-  `sampling.max_training_groups`/`group_subsample_repeat` sweep
+  `sampling.training_group_count`/`group_subsample_repeat` sweep
 - `figures/condition_metrics.{svg,pdf,png}`
 - `figures/training_group_sensitivity.{svg,pdf,png}` for that training-group
   sweep
@@ -59,8 +59,9 @@ favor condition A, including for loss metrics. Pairwise intervals use matched
 bootstrap replicate IDs generated from the shared groups and seed.
 `training_group_sensitivity.tsv` aggregates condition point estimates across
 group-subset repeats and reports their mean, standard deviation, quartiles, and
-range. The corresponding figure shows the mean and interquartile band against
-the effective mean number of training groups per fold.
+range. The corresponding figure shows the mean, interquartile band, and observed
+minimum-to-maximum range across repeats against the effective mean number of
+training groups per fold.
 
 Run outputs use a stage-first layout. Stage-specific TSVs are placed in
 `<stage>/tables/`, and stage-specific SVGs are placed in `<stage>/figures/`.

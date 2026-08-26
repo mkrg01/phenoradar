@@ -44,7 +44,7 @@ _METRIC_LABELS = {
 _COMPLETED_RUN_STATUSES = {"cv_completed", "full_run_completed"}
 _RANKED_METHOD_PATH = "preprocess.ranked_feature_filter.method"
 _RANKED_MAX_FEATURES_PATH = "preprocess.ranked_feature_filter.max_features"
-_MAX_TRAINING_GROUPS_PATH = "sampling.max_training_groups"
+_TRAINING_GROUP_COUNT_PATH = "sampling.training_group_count"
 _GROUP_SUBSAMPLE_REPEAT_PATH = "sampling.group_subsample_repeat"
 
 
@@ -641,7 +641,7 @@ def _training_group_sensitivity_metadata(
     manifest_rows: Sequence[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Load condition axes and effective fold-local group counts for a pure group sweep."""
-    allowed_paths = {_MAX_TRAINING_GROUPS_PATH, _GROUP_SUBSAMPLE_REPEAT_PATH}
+    allowed_paths = {_TRAINING_GROUP_COUNT_PATH, _GROUP_SUBSAMPLE_REPEAT_PATH}
     metadata: list[dict[str, Any]] = []
     for row in manifest_rows:
         raw_values = row.get("varying_parameters_json")
@@ -653,11 +653,11 @@ def _training_group_sensitivity_metadata(
             return []
         if (
             not isinstance(values, dict)
-            or _MAX_TRAINING_GROUPS_PATH not in values
+            or _TRAINING_GROUP_COUNT_PATH not in values
             or not set(values).issubset(allowed_paths)
         ):
             return []
-        requested = values[_MAX_TRAINING_GROUPS_PATH]
+        requested = values[_TRAINING_GROUP_COUNT_PATH]
         configured_repeat = values.get(_GROUP_SUBSAMPLE_REPEAT_PATH)
         if (requested is not None and not isinstance(requested, int)) or (
             configured_repeat is not None and not isinstance(configured_repeat, int)
@@ -690,11 +690,13 @@ def _training_group_sensitivity_metadata(
             per_fold.get_column("n_training_groups_selected").to_list(),
             dtype=float,
         )
+        if requested is not None and np.any(effective_counts != requested):
+            return []
         metadata.append(
             {
                 "condition_id": str(row["condition_id"]),
                 "condition_index": int(row["condition_index"]),
-                "max_training_groups": requested,
+                "training_group_count": requested,
                 "full_training_set": requested is None,
                 "group_subsample_repeat": int(repeat),
                 "effective_training_groups_mean": float(np.mean(effective_counts)),
@@ -704,7 +706,7 @@ def _training_group_sensitivity_metadata(
         )
 
     group_settings = {
-        (bool(row["full_training_set"]), row["max_training_groups"])
+        (bool(row["full_training_set"]), row["training_group_count"])
         for row in metadata
     }
     return metadata if len(group_settings) >= 2 else []
@@ -720,7 +722,7 @@ def _build_training_group_sensitivity(
 
     grouped_metadata: dict[tuple[bool, int | None], list[dict[str, Any]]] = {}
     for row in metadata_rows:
-        key = (bool(row["full_training_set"]), row["max_training_groups"])
+        key = (bool(row["full_training_set"]), row["training_group_count"])
         grouped_metadata.setdefault(key, []).append(row)
 
     output: list[dict[str, Any]] = []
@@ -747,9 +749,9 @@ def _build_training_group_sensitivity(
             finite = values[np.isfinite(values)]
             output.append(
                 {
-                    "max_training_groups": requested,
-                    "max_training_groups_label": (
-                        "full" if full_training_set else str(requested)
+                    "training_group_count": requested,
+                    "training_group_count_label": (
+                        "All available" if full_training_set else str(requested)
                     ),
                     "full_training_set": full_training_set,
                     "effective_training_groups_mean": float(np.mean(effective_means)),
@@ -794,7 +796,7 @@ def _training_group_sensitivity_figure(
 ) -> tuple[Path, ...]:
     settings = (
         sensitivity.select(
-            "effective_training_groups_mean", "max_training_groups_label"
+            "effective_training_groups_mean", "training_group_count_label"
         )
         .unique()
         .sort("effective_training_groups_mean")
@@ -802,7 +804,7 @@ def _training_group_sensitivity_figure(
     x_ticks = np.asarray(
         settings.get_column("effective_training_groups_mean").to_list(), dtype=float
     )
-    x_labels = [str(value) for value in settings.get_column("max_training_groups_label")]
+    x_labels = [str(value) for value in settings.get_column("training_group_count_label")]
     fig, axes = plt.subplots(2, 3, figsize=(10.5, 7.2), squeeze=False)
     for axis, metric in zip(axes.flat, _METRIC_ORDER, strict=True):
         rows = sensitivity.filter(pl.col("metric") == metric).sort(
@@ -812,14 +814,22 @@ def _training_group_sensitivity_figure(
         points = np.asarray(rows.get_column("point_estimate_mean").to_list(), dtype=float)
         lower = np.asarray(rows.get_column("point_estimate_q1").to_list(), dtype=float)
         upper = np.asarray(rows.get_column("point_estimate_q3").to_list(), dtype=float)
+        minimum = np.asarray(rows.get_column("point_estimate_min").to_list(), dtype=float)
+        maximum = np.asarray(rows.get_column("point_estimate_max").to_list(), dtype=float)
         finite = np.isfinite(points)
         if np.any(finite):
-            axis.plot(
+            range_lower = np.maximum(0.0, points - minimum)
+            range_upper = np.maximum(0.0, maximum - points)
+            range_error = np.vstack((range_lower, range_upper))
+            range_error[:, ~(np.isfinite(minimum) & np.isfinite(maximum))] = 0.0
+            axis.errorbar(
                 x[finite],
                 points[finite],
+                yerr=range_error[:, finite],
                 marker="o",
                 markersize=4,
                 linewidth=1.2,
+                capsize=2,
                 color="#4C72B0",
             )
             interval = finite & np.isfinite(lower) & np.isfinite(upper)
@@ -832,12 +842,11 @@ def _training_group_sensitivity_figure(
                     alpha=0.18,
                     linewidth=0,
                 )
-        axis.set_title(_METRIC_LABELS[metric])
         axis.set_xticks(x_ticks, labels=x_labels)
-        axis.set_xlabel("Maximum training groups (full = all available)")
+        axis.set_xlabel("Number of training groups")
+        axis.set_ylabel(_METRIC_LABELS[metric])
         axis.grid(alpha=0.25)
-    fig.suptitle("Training-group count sensitivity")
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.tight_layout()
     return _save_figure_formats(fig, output_dir / "training_group_sensitivity")
 
 

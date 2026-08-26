@@ -290,7 +290,7 @@ class SamplingConfig(StrictModel):
     strategy: SamplingStrategy = "group_balanced"
     max_samples_per_label_per_group: PositiveInt | None = 1
     sampled_set_count: PositiveInt = 10
-    max_training_groups: PositiveInt | None = None
+    training_group_count: PositiveInt | None = None
     group_subsample_repeat: PositiveInt = 1
     weighting: WeightingMode = "none"
 
@@ -479,17 +479,17 @@ class AppConfig(StrictModel):
             self.model_selection.selected_candidate_count is not None
             or self.model_selection.selected_candidate_percent is not None
         )
-        max_training_groups = self.sampling.max_training_groups
-        if selection_active and max_training_groups is not None:
+        training_group_count = self.sampling.training_group_count
+        if selection_active and training_group_count is not None:
             inner_strategy = self.model_selection.inner_cv_strategy
             required_groups = (
                 2
                 if inner_strategy == "logo"
                 else self.model_selection.inner_cv_n_splits
             )
-            if required_groups is not None and max_training_groups < required_groups:
+            if required_groups is not None and training_group_count < required_groups:
                 raise ValueError(
-                    "sampling.max_training_groups must be at least the number of "
+                    "sampling.training_group_count must be at least the number of "
                     "groups required by model-selection inner CV; "
                     f"required={required_groups}"
                 )

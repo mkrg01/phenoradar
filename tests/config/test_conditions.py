@@ -199,7 +199,7 @@ def test_training_group_count_and_repeat_expand_with_full_set_deduplicated(
         tmp_path / "config.yml",
         """
 sampling:
-  max_training_groups: [5, null]
+  training_group_count: [5, null]
   group_subsample_repeat: [1, 2]
 """.lstrip(),
     )
@@ -208,13 +208,13 @@ sampling:
 
     assert [
         (
-            condition.config.sampling.max_training_groups,
+            condition.config.sampling.training_group_count,
             condition.config.sampling.group_subsample_repeat,
         )
         for condition in condition_set.conditions
     ] == [(5, 1), (5, 2), (None, 1)]
     assert [condition.index for condition in condition_set.conditions] == [1, 2, 3]
     assert condition_set.conditions[-1].values == (
-        ("sampling.max_training_groups", None),
+        ("sampling.training_group_count", None),
         ("sampling.group_subsample_repeat", 1),
     )

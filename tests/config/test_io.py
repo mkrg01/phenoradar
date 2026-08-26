@@ -60,7 +60,7 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.sampling.strategy == "group_balanced"
     assert resolved.sampling.max_samples_per_label_per_group == 1
     assert resolved.sampling.sampled_set_count == 10
-    assert resolved.sampling.max_training_groups is None
+    assert resolved.sampling.training_group_count is None
     assert resolved.sampling.group_subsample_repeat == 1
     assert resolved.sampling.weighting == "none"
     assert resolved.model.logistic_solver == "saga"
@@ -92,7 +92,7 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
     assert resolved.sampling.strategy == "group_balanced"
     assert resolved.sampling.max_samples_per_label_per_group == 1
     assert resolved.sampling.sampled_set_count == 10
-    assert resolved.sampling.max_training_groups is None
+    assert resolved.sampling.training_group_count is None
     assert resolved.sampling.group_subsample_repeat == 1
     assert resolved.sampling.weighting == "none"
     assert resolved.model_selection.selection_metric == "log_loss"
@@ -420,14 +420,14 @@ sampling:
         load_and_resolve_config([cfg])
 
 
-def test_training_group_limit_must_support_model_selection_inner_cv(
+def test_training_group_count_must_support_model_selection_inner_cv(
     tmp_path: Path,
 ) -> None:
     cfg = _write(
         tmp_path / "invalid.yml",
         """
 sampling:
-  max_training_groups: 4
+  training_group_count: 4
 model_selection:
   selected_candidate_count: 1
   inner_cv_strategy: group_kfold
@@ -436,7 +436,7 @@ model_selection:
         + "\n",
     )
 
-    with pytest.raises(ConfigError, match="max_training_groups"):
+    with pytest.raises(ConfigError, match="training_group_count"):
         load_and_resolve_config([cfg])
 
 

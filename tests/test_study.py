@@ -241,14 +241,14 @@ def test_generate_study_report_aggregates_training_group_subsample_repeats(
         (3, "full", None, 1, 0.90),
     ]
     manifest_rows: list[dict[str, object]] = []
-    for index, condition_id, max_groups, repeat, point in specs:
+    for index, condition_id, training_group_count, repeat, point in specs:
         run_dir = tmp_path / "conditions" / condition_id
         points = {metric: point for metric in _METRICS}
         replicates = {metric: [point - 0.01, point, point + 0.01] for metric in _METRICS}
         _write_condition(run_dir, points=points, replicates=replicates)
         model_tables = run_dir / "model" / "tables"
         model_tables.mkdir(parents=True)
-        effective_count = 4 if max_groups is None else max_groups
+        effective_count = 4 if training_group_count is None else training_group_count
         pl.DataFrame(
             {
                 "scope": ["outer_fold", "outer_fold"],
@@ -267,7 +267,7 @@ def test_generate_study_report_aggregates_training_group_subsample_repeats(
                 "condition_label": condition_id,
                 "varying_parameters_json": json.dumps(
                     {
-                        "sampling.max_training_groups": max_groups,
+                        "sampling.training_group_count": training_group_count,
                         "sampling.group_subsample_repeat": repeat,
                     }
                 ),
@@ -281,7 +281,7 @@ def test_generate_study_report_aggregates_training_group_subsample_repeats(
     assert artifacts.training_group_sensitivity is not None
     sensitivity = artifacts.training_group_sensitivity
     limited = sensitivity.filter(
-        (pl.col("max_training_groups") == 2) & (pl.col("metric") == "roc_auc")
+        (pl.col("training_group_count") == 2) & (pl.col("metric") == "roc_auc")
     ).row(0, named=True)
     assert limited["n_subset_repeats"] == 2
     assert limited["point_estimate_mean"] == pytest.approx(0.7)
@@ -290,8 +290,15 @@ def test_generate_study_report_aggregates_training_group_subsample_repeats(
     full = sensitivity.filter(
         pl.col("full_training_set") & (pl.col("metric") == "roc_auc")
     ).row(0, named=True)
-    assert full["max_training_groups_label"] == "full"
+    assert full["training_group_count_label"] == "All available"
     assert full["effective_training_groups_mean"] == 4.0
     assert (tmp_path / "tables" / "training_group_sensitivity.tsv").exists()
     for extension in ("svg", "pdf", "png"):
         assert (tmp_path / "figures" / f"training_group_sensitivity.{extension}").exists()
+    sensitivity_svg = (
+        tmp_path / "figures" / "training_group_sensitivity.svg"
+    ).read_text(encoding="utf-8")
+    assert "Number of training groups" in sensitivity_svg
+    assert "ROC AUC" in sensitivity_svg
+    assert "Training-group count sensitivity" not in sensitivity_svg
+    assert "Maximum training groups" not in sensitivity_svg

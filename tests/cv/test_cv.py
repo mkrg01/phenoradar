@@ -219,7 +219,7 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "fold_id",
         "group_col",
         "group_subsample_repeat",
-        "max_training_groups_requested",
+        "training_group_count_requested",
         "n_training_groups_available",
         "n_training_groups_selected",
         "group_rank",
@@ -4618,14 +4618,14 @@ def test_training_group_subsets_are_reproducible_and_nested(tmp_path: Path) -> N
     config_two = config.model_copy(
         update={
             "sampling": config.sampling.model_copy(
-                update={"max_training_groups": 2, "group_subsample_repeat": 3}
+                update={"training_group_count": 2, "group_subsample_repeat": 3}
             )
         }
     )
     config_three = config.model_copy(
         update={
             "sampling": config.sampling.model_copy(
-                update={"max_training_groups": 3, "group_subsample_repeat": 3}
+                update={"training_group_count": 3, "group_subsample_repeat": 3}
             )
         }
     )
@@ -4636,7 +4636,6 @@ def test_training_group_subsets_are_reproducible_and_nested(tmp_path: Path) -> N
         groups_train,
         scope="outer_fold",
         fold_id="1",
-        warnings=[],
     )
     selected_two_again = cv_mod._select_training_groups(
         config_two,
@@ -4644,7 +4643,6 @@ def test_training_group_subsets_are_reproducible_and_nested(tmp_path: Path) -> N
         groups_train,
         scope="outer_fold",
         fold_id="1",
-        warnings=[],
     )
     selected_three = cv_mod._select_training_groups(
         config_three,
@@ -4652,13 +4650,39 @@ def test_training_group_subsets_are_reproducible_and_nested(tmp_path: Path) -> N
         groups_train,
         scope="outer_fold",
         fold_id="1",
-        warnings=[],
     )
 
     assert selected_two.group_ids == selected_two_again.group_ids
     assert set(selected_two.group_ids) < set(selected_three.group_ids)
     assert [row["group_rank"] for row in selected_three.audit_rows] == [1, 2, 3, 4]
     assert sum(bool(row["selected"]) for row in selected_two.audit_rows) == 2
+
+
+def test_training_group_count_rejects_fewer_available_groups(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    strict_config = config.model_copy(
+        update={
+            "sampling": config.sampling.model_copy(
+                update={"training_group_count": 5}
+            )
+        }
+    )
+
+    with pytest.raises(
+        CVError,
+        match="requires exactly 5 training groups, but only 4 are available",
+    ):
+        cv_mod._select_training_groups(
+            strict_config,
+            np.array([0, 1] * 4, dtype=int),
+            np.array(
+                ["g1", "g1", "g2", "g2", "g3", "g3", "g4", "g4"],
+                dtype=str,
+            ),
+            scope="outer_fold",
+            fold_id="1",
+        )
 
 
 def test_sample_training_sets_uses_only_selected_groups(tmp_path: Path) -> None:
@@ -4674,7 +4698,7 @@ sampling:
   strategy: all_samples
   max_samples_per_label_per_group: null
   sampled_set_count: 1
-  max_training_groups: 1
+  training_group_count: 1
 """.strip(),
             )
         ]

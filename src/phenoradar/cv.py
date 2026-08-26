@@ -1882,7 +1882,7 @@ _TRAINING_GROUP_SUBSET_SCHEMA = {
     "fold_id": pl.String,
     "group_col": pl.String,
     "group_subsample_repeat": pl.Int64,
-    "max_training_groups_requested": pl.Int64,
+    "training_group_count_requested": pl.Int64,
     "n_training_groups_available": pl.Int64,
     "n_training_groups_selected": pl.Int64,
     "group_rank": pl.Int64,
@@ -1909,7 +1909,6 @@ def _select_training_groups(
     *,
     scope: str,
     fold_id: str,
-    warnings: list[str],
 ) -> TrainingGroupSelection:
     """Select a reproducible nested subset of ``split.group_col`` training groups."""
     if y_train.shape[0] != groups_train.shape[0]:
@@ -1930,23 +1929,20 @@ def _select_training_groups(
             group,
         ),
     )
-    requested = config.sampling.max_training_groups
-    effective_count = (
-        len(ordered_groups)
-        if requested is None
-        else min(int(requested), len(ordered_groups))
-    )
+    requested = config.sampling.training_group_count
     if requested is not None and int(requested) > len(ordered_groups):
-        warnings.append(
-            "sampling.max_training_groups exceeded the available training groups; "
-            f"capped from {requested} to {effective_count} for scope={scope}, fold={fold_id}"
+        raise CVError(
+            "sampling.training_group_count requires exactly "
+            f"{requested} training groups, but only {len(ordered_groups)} are available "
+            f"for scope={scope}, fold={fold_id}"
         )
+    effective_count = len(ordered_groups) if requested is None else int(requested)
     selected_groups = tuple(ordered_groups[:effective_count])
     selected_mask = np.isin(normalized_groups, np.asarray(selected_groups, dtype=str))
     if np.unique(y_train[selected_mask]).size < 2:
         raise CVError(
             "Training-group subsampling produced fewer than two labels; "
-            f"scope={scope}, fold={fold_id}, max_training_groups={requested}, "
+            f"scope={scope}, fold={fold_id}, training_group_count={requested}, "
             f"group_subsample_repeat={repeat}"
         )
 
@@ -1961,7 +1957,7 @@ def _select_training_groups(
                 "fold_id": fold_id,
                 "group_col": config.split.group_col,
                 "group_subsample_repeat": repeat,
-                "max_training_groups_requested": (
+                "training_group_count_requested": (
                     None if requested is None else int(requested)
                 ),
                 "n_training_groups_available": len(ordered_groups),
@@ -4098,7 +4094,6 @@ def _run_final_refit_impl(
         groups_train,
         scope="final_refit",
         fold_id="NA",
-        warnings=warnings,
     )
     sampled_sets = _sample_training_sets(
         config=config,
@@ -4597,7 +4592,6 @@ def _run_outer_fold(
         groups_train,
         scope="outer_fold",
         fold_id=fold_id,
-        warnings=warnings,
     )
     sampled_sets = _sample_training_sets(
         config=config,

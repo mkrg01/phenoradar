@@ -177,7 +177,7 @@ def _normalize_inactive_condition_fields(
                 values[position] = (path, None)
 
     sampling = raw.get("sampling")
-    if isinstance(sampling, dict) and sampling.get("max_training_groups") is None:
+    if isinstance(sampling, dict) and sampling.get("training_group_count") is None:
         sampling["group_subsample_repeat"] = 1
         for position, (path, _value) in enumerate(values):
             if path == _GROUP_SUBSAMPLE_REPEAT_DOTTED_PATH:
@@ -192,7 +192,7 @@ def _differs_only_by_inactive_fields(
     inactive_paths: set[str] = set()
     if resolved.preprocess.ranked_feature_filter.method == "none":
         inactive_paths.add(_RANKED_MAX_FEATURES_DOTTED_PATH)
-    if resolved.sampling.max_training_groups is None:
+    if resolved.sampling.training_group_count is None:
         inactive_paths.add(_GROUP_SUBSAMPLE_REPEAT_DOTTED_PATH)
     differing_paths = {
         previous_path
