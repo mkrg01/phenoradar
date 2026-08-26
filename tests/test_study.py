@@ -5,9 +5,12 @@ from pathlib import Path
 
 import polars as pl
 import pytest
+from matplotlib.figure import Figure
 
+import phenoradar.study as study_module
 from phenoradar.study import (
     _build_training_group_sensitivity,
+    _condition_metric_figure,
     _ranked_feature_sensitivity_figures,
     generate_study_report,
 )
@@ -164,6 +167,51 @@ def test_generate_study_report_preserves_order_and_uses_paired_replicates(
     assert "Condition" in condition_svg
     assert "ROC AUC" in condition_svg
     assert "Multi-condition OOF performance" not in condition_svg
+
+
+def test_condition_metric_figure_uses_conditions_on_y_axis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        {
+            "condition_index": condition_index,
+            "condition_id": condition_id,
+            "condition_label": condition_label,
+            "metric": metric,
+            "point_estimate": point_estimate,
+            "ci_lower": point_estimate - 0.1,
+            "ci_upper": point_estimate + 0.1,
+            "confidence_level": 0.95,
+        }
+        for condition_index, condition_id, condition_label, point_estimate in (
+            (1, "cond_a", "first", 0.8),
+            (2, "cond_b", "second", 0.6),
+        )
+        for metric in _METRICS
+    ]
+    captured: dict[str, Figure] = {}
+
+    def capture_figure(figure: Figure, base_path: Path) -> tuple[Path, ...]:
+        captured["figure"] = figure
+        return (base_path.with_suffix(".svg"),)
+
+    monkeypatch.setattr(study_module, "_save_figure_formats", capture_figure)
+
+    _condition_metric_figure(pl.DataFrame(rows), output_dir=tmp_path)
+
+    figure = captured["figure"]
+    axis = figure.axes[0]
+    assert axis.get_xlabel() == "ROC AUC"
+    assert axis.get_ylabel() == "Condition"
+    assert [label.get_text() for label in axis.get_yticklabels()] == ["first", "second"]
+    assert axis.yaxis_inverted()
+    assert axis.lines[0].get_xdata().tolist() == [0.8]
+    assert axis.lines[0].get_ydata().tolist() == [0.0]
+    assert [text.get_text() for text in figure.legends[0].get_texts()] == [
+        "OOF point estimate",
+        "95% group-bootstrap CI",
+    ]
 
 
 def test_ranked_feature_sensitivity_figures_use_matched_feature_counts(

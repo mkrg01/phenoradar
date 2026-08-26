@@ -422,9 +422,20 @@ def _condition_metric_figure(
         _condition_figure_label(str(value))
         for value in condition_rows.get_column("condition_label")
     ]
-    figure_width = max(10.5, 6.0 + 0.5 * len(indices))
-    fig, axes = plt.subplots(2, 3, figsize=(figure_width, 6.5), squeeze=False)
-    x = np.arange(len(indices), dtype=float)
+    confidence_levels = (
+        condition_metrics.get_column("confidence_level").drop_nulls().unique().to_list()
+    )
+    if len(confidence_levels) == 1:
+        confidence_label = f"{100.0 * float(confidence_levels[0]):g}% group-bootstrap CI"
+    elif confidence_levels:
+        confidence_label = "Group-bootstrap CI (confidence level varies)"
+    else:
+        confidence_label = "Group-bootstrap CI"
+    figure_height = max(6.5, 3.5 + 0.35 * len(indices))
+    fig, axes = plt.subplots(2, 3, figsize=(10.5, figure_height), squeeze=False)
+    y = np.arange(len(indices), dtype=float)
+    has_points = False
+    has_intervals = False
     for axis, metric in zip(axes.flat, _METRIC_ORDER, strict=True):
         metric_rows = condition_metrics.filter(pl.col("metric") == metric).sort(
             "condition_index"
@@ -435,11 +446,13 @@ def _condition_metric_figure(
         for position, point in enumerate(points):
             if not np.isfinite(point):
                 continue
+            has_points = True
             if np.isfinite(lower[position]) and np.isfinite(upper[position]):
+                has_intervals = True
                 axis.errorbar(
-                    x[position],
                     point,
-                    yerr=np.asarray(
+                    y[position],
+                    xerr=np.asarray(
                         [[point - lower[position]], [upper[position] - point]], dtype=float
                     ),
                     fmt="o",
@@ -449,12 +462,37 @@ def _condition_metric_figure(
                     linewidth=1,
                 )
             else:
-                axis.scatter(x[position], point, color="C0", s=18)
-        axis.set_xticks(x, labels=labels, rotation=45, ha="right")
-        axis.set_xlabel("Condition")
-        axis.set_ylabel(_METRIC_LABELS[metric])
-        axis.grid(axis="y", alpha=0.3)
-    fig.tight_layout()
+                axis.scatter(point, y[position], color="C0", s=18)
+        axis.set_yticks(y, labels=labels)
+        axis.invert_yaxis()
+        axis.set_xlabel(_METRIC_LABELS[metric])
+        axis.set_ylabel("Condition")
+        axis.grid(axis="x", alpha=0.3)
+    legend_handles: list[Line2D] = []
+    if has_points:
+        legend_handles.append(
+            Line2D(
+                [],
+                [],
+                color="C0",
+                marker="o",
+                linestyle="none",
+                markersize=4,
+                label="OOF point estimate",
+            )
+        )
+    if has_intervals:
+        legend_handles.append(Line2D([], [], color="C0", linewidth=1, label=confidence_label))
+    if legend_handles:
+        fig.legend(
+            handles=legend_handles,
+            loc="upper center",
+            ncol=len(legend_handles),
+            frameon=False,
+        )
+        fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
+    else:
+        fig.tight_layout()
     return _save_figure_formats(fig, output_dir / "condition_metrics")
 
 
