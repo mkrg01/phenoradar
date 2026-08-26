@@ -1504,7 +1504,7 @@ def _draw_heatmap_legend(
 
 def _draw_confusion_group_legend(*, canvas: Any, width: int) -> None:
     legend_axes = canvas.cartesian(
-        bounds=(width - 270, width - 35, 122, 238),
+        bounds=(width - 270, width - 35, 150, 266),
         show=False,
         xmin=0,
         xmax=1,

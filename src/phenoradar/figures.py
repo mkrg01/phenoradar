@@ -1683,10 +1683,37 @@ def _top_feature_expression_by_confusion(
             "top_feature_expression_by_confusion.svg"
         )
 
+    title_lines_by_feature: dict[str, list[str]] = {}
+    for feature in features:
+        annotation = annotation_lookup.get(feature)
+        title_lines = (
+            textwrap.wrap(
+                " ".join(annotation.split()),
+                width=36,
+                break_long_words=False,
+            )
+            if annotation is not None
+            else []
+        )
+        title_lines.extend([f"({feature})", f"importance={importance_lookup[feature]:.3g}"])
+        coefficient = coefficient_lookup.get(feature)
+        if coefficient is not None:
+            if np.isclose(coefficient, 0.0):
+                title_lines[-1] += " | β=0"
+            else:
+                title_lines[-1] += f" | β={coefficient:+.3g}"
+        title_lines_by_feature[feature] = title_lines
+
     n_columns = min(5, len(features))
     n_rows = int(np.ceil(len(features) / n_columns))
     width_px = max(_NATURE_DOUBLE_COLUMN_WIDTH_PX, 210 * n_columns)
-    height_px = max(350, 115 + 205 * n_rows)
+    max_title_lines = max(len(lines) for lines in title_lines_by_feature.values())
+    top_padding_px = max(42, 12 + 9 * max_title_lines)
+    bottom_padding_px = 60
+    height_px = max(
+        430,
+        145 + 205 * n_rows + max(0, top_padding_px - 57),
+    )
     fig, axes = plt.subplots(
         n_rows,
         n_columns,
@@ -1759,25 +1786,11 @@ def _top_feature_expression_by_confusion(
                 scatter_kwargs["edgecolors"] = "white"
             ax.scatter(x_values, values, **scatter_kwargs)
 
-        importance = importance_lookup[feature]
-        coefficient = coefficient_lookup.get(feature)
-        annotation = annotation_lookup.get(feature)
-        title_lines = (
-            textwrap.wrap(
-                " ".join(annotation.split()),
-                width=36,
-                break_long_words=False,
-            )
-            if annotation is not None
-            else []
+        ax.set_title(
+            "\n".join(title_lines_by_feature[feature]),
+            fontsize=_SUBTITLE_FONTSIZE,
+            pad=3.0,
         )
-        title_lines.extend([f"({feature})", f"importance={importance:.3g}"])
-        if coefficient is not None:
-            if np.isclose(coefficient, 0.0):
-                title_lines[-1] += " | β=0"
-            else:
-                title_lines[-1] += f" | β={coefficient:+.3g}"
-        ax.set_title("\n".join(title_lines), fontsize=_SUBTITLE_FONTSIZE, pad=3.0)
         ax.axvline(2.5, color="#d0d0d0", linewidth=0.6, linestyle=(0, (3, 3)))
         ax.set_xlim(0.55, 4.45)
         ax.set_xticks(positions)
@@ -1791,13 +1804,17 @@ def _top_feature_expression_by_confusion(
     for axis_index in range(len(features), flat_axes.size):
         flat_axes[axis_index].set_visible(False)
 
-    fig.supxlabel("OOF confusion group", fontsize=_LABEL_FONTSIZE, y=0.012)
+    fig.supxlabel(
+        "OOF confusion group",
+        fontsize=_LABEL_FONTSIZE,
+        y=10 / height_px,
+    )
     fig.supylabel("log2(TPM + 1)", fontsize=_LABEL_FONTSIZE, x=0.008)
     fig.subplots_adjust(
         left=0.055,
         right=0.995,
-        top=0.955,
-        bottom=0.055,
+        top=1.0 - top_padding_px / height_px,
+        bottom=bottom_padding_px / height_px,
         wspace=0.32,
         hspace=0.88,
     )

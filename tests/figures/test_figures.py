@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -39,6 +40,19 @@ def _svg_viewbox_size(svg_path: Path) -> tuple[float, float]:
     root = ET.parse(svg_path).getroot()
     _, _, width, height = root.attrib["viewBox"].split()
     return float(width), float(height)
+
+
+def _svg_text_translate_y_values(svg_path: Path, text: str) -> list[float]:
+    root = ET.parse(svg_path).getroot()
+    values: list[float] = []
+    for element in root.iter():
+        if not element.tag.endswith("text") or "".join(element.itertext()) != text:
+            continue
+        transform = element.attrib.get("transform", "")
+        match = re.search(r"translate\([^ ,]+[ ,]+([^ )]+)\)", transform)
+        if match is not None:
+            values.append(float(match.group(1)))
+    return values
 
 
 def _minimal_metrics_cv() -> pl.DataFrame:
@@ -507,6 +521,17 @@ def test_write_run_figures_writes_top_feature_expression_by_confusion(
     assert "C4=1" not in svg_text
     for group in ["TP", "FN", "TN", "FP"]:
         assert group in svg_text
+    upper_label_y = _svg_text_translate_y_values(
+        figure_path,
+        "beta carbonic anhydrase with a",
+    )
+    count_label_y = _svg_text_translate_y_values(figure_path, "n=1")
+    x_label_y, viewbox_height = _svg_text_y_and_viewbox_height(
+        figure_path,
+        "OOF confusion group",
+    )
+    assert upper_label_y and min(upper_label_y) > 0
+    assert count_label_y and max(count_label_y) + 8 < x_label_y < viewbox_height
     assert warnings == []
 
 

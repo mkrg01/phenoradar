@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -18,6 +19,27 @@ from phenoradar.tree_prediction import (
     build_tree_feature_heatmap_annotation,
     write_run_tree_prediction_artifacts,
 )
+
+
+def _svg_text_absolute_y(svg_text: str, text: str) -> float:
+    root = ET.fromstring(svg_text)
+    parent_by_child = {child: parent for parent in root.iter() for child in parent}
+    element = next(
+        element
+        for element in root.iter()
+        if element.tag.endswith("text") and "".join(element.itertext()) == text
+    )
+    y = float(element.attrib.get("y", "0"))
+    current = element
+    while current in parent_by_child:
+        current = parent_by_child[current]
+        for match in re.finditer(
+            r"translate\([^ ,]+(?:[ ,]+([^ )]+))?\)",
+            current.attrib.get("transform", ""),
+        ):
+            if match.group(1) is not None:
+                y += float(match.group(1))
+    return y
 
 
 def _metadata() -> pl.DataFrame:
@@ -598,6 +620,9 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
         assert "FP: false positive" in svg_text
         assert "sp1 OOF confusion group=TN" in svg_text
         assert "sp2 OOF confusion group=TP" in svg_text
+        heatmap_legend_y = _svg_text_absolute_y(svg_text, "log2(TPM + 1)")
+        confusion_legend_y = _svg_text_absolute_y(svg_text, "OOF confusion group")
+        assert confusion_legend_y - heatmap_legend_y >= 30
         svg_root = ET.fromstring(svg_text)
         text_styles = {
             element.text: element.get("style", "")
