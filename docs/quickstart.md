@@ -134,6 +134,20 @@ The same `phenoradar run -c config.yml` command then writes
 pairwise tables and publication-oriented SVG/PDF/PNG figures. Conditions retain
 their config order and no reference condition is selected.
 
+For a conservative trait-1 positive-evidence filter, keep the supervised method
+fixed and vary the direction if you want to compare it with the original
+two-sided ranking:
+
+```yaml
+preprocess:
+  sparse_feature_filter:
+    within_trait: 1
+  ranked_feature_filter:
+    method: pair_aware
+    max_features: 100
+    higher_in_trait: [null, 1]
+```
+
 Core outputs include:
 
 - `resolved_config.yml`

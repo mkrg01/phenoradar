@@ -134,9 +134,12 @@ For each outer fold:
     - `search_strategy=tpe` remains sequential
 5. For each sampled training set, preprocess sampled-train/valid and fit selected models:
   - `preprocess.expression_transform` (`none`, `log1p`, `sample_rank`, or `sample_percentile_rank`)
-  - optional sparse feature filter
+  - optional sparse feature filter; `within_trait: null` uses the best
+    train-fold nonzero fraction across trait classes, while `0` or `1` uses
+    only that class
   - optional low-variance filter
-  - optional pair-aware filter (train-only group-contrast ranking)
+  - optional ranked feature filter; supervised methods can require the
+    train-fold effect `trait 1 - trait 0` to have a configured direction
   - optional correlation filter (pearson/spearman)
   - `preprocess.feature_scaling` (`none` or train-fitted standard scaling)
   - fit selected model(s), predict fold-valid probabilities
@@ -164,9 +167,10 @@ After all folds:
 - sampled sets can run in parallel up to `runtime.n_jobs` budget.
 - each sampled set is preprocessed independently before fit:
   - `preprocess.expression_transform` (`none`, `log1p`, `sample_rank`, or `sample_percentile_rank`)
-  - optional sparse feature filter
+  - optional sparse feature filter, optionally restricted to one trait class
   - optional low-variance filter
-  - optional pair-aware filter (train-only group-contrast ranking)
+  - optional ranked feature filter, including pair-aware or unpaired
+    directional-effect eligibility
   - optional correlation filter (pearson/spearman)
   - `preprocess.feature_scaling` (`none` or train-fitted standard scaling)
 - within each sampled set, selected model fits can also run in parallel.
@@ -251,6 +255,18 @@ Feature alignment:
 - for feature-wise `none` and `log1p`, alignment may be restricted to the model-feature union
   because feature selection and transformation commute.
 - zero overlap with the model-feature union is an error.
+
+Missing-value semantics:
+
+- a bundle feature absent from the prediction input is filled with `0` and
+  reported as a warning; this applies to feature-wise transforms as well as
+  rank transforms
+- the long expression format also maps an absent `(species, feature)` coordinate
+  to `0`, so it cannot by itself distinguish an unmeasured value from a measured
+  biological zero
+- directional feature filtering reduces reliance on absence of trait-0-high
+  features, but it does not change these input semantics or constrain final
+  multivariable model coefficient signs
 
 Inference:
 

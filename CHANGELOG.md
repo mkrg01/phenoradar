@@ -4,6 +4,9 @@
 
 ### Features
 
+* add trait-targeted sparse filtering and direction-aware ranked filtering so
+  models can retain only features with higher train-fold expression in trait 1
+  (or symmetrically trait 0)
 * add final-refit feature-importance, signed-coefficient, feature-filter, and
   model-selection artifacts under `model/`, plus external-test top-feature
   expression grouped by final-model confusion status

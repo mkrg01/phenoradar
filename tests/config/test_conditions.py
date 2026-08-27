@@ -53,6 +53,39 @@ preprocess:
     assert len({condition.condition_id for condition in condition_set.conditions}) == 4
 
 
+def test_directional_filter_values_expand_with_fixed_supervised_method(
+    tmp_path: Path,
+) -> None:
+    config_path = _write(
+        tmp_path / "config.yml",
+        """
+preprocess:
+  sparse_feature_filter:
+    within_trait: [null, 1]
+  ranked_feature_filter:
+    method: pair_aware
+    max_features: 100
+    higher_in_trait: [null, 1]
+""".lstrip(),
+    )
+
+    condition_set = load_config_conditions([config_path])
+
+    assert len(condition_set.conditions) == 4
+    assert [
+        (
+            condition.config.preprocess.sparse_feature_filter.within_trait,
+            condition.config.preprocess.ranked_feature_filter.higher_in_trait,
+        )
+        for condition in condition_set.conditions
+    ] == [
+        (None, None),
+        (None, 1),
+        (1, None),
+        (1, 1),
+    ]
+
+
 def test_none_method_is_independent_of_max_features_dimension(tmp_path: Path) -> None:
     config_path = _write(
         tmp_path / "config.yml",

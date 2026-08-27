@@ -32,7 +32,8 @@ preprocess:
     method: log1p  # choices: none, log1p, sample_rank, sample_percentile_rank
   sparse_feature_filter:
     enabled: true
-    min_nonzero_fraction_in_at_least_one_trait: 0.9
+    min_nonzero_fraction: 0.9
+    within_trait: 1  # choices: 0, 1, null; null checks both traits and keeps either
   low_variance_filter:
     enabled: false
     min_variance: null
@@ -40,6 +41,7 @@ preprocess:
     method: pair_aware  # choices: none, pair_aware, unpaired, variance
     max_features: 200
     min_contrast_pairs: 1
+    higher_in_trait: 1  # choices: 0, 1, null; null keeps either direction
   correlation_filter:
     enabled: false
     method: pearson  # choices: pearson, spearman

@@ -440,6 +440,11 @@ def test_config_without_config_writes_default_yaml(
     assert payload["data"]["tpm_path"] == "testdata/c4_tiny/tpm.tsv"
     assert payload["data"]["tree_path"] is None
     assert payload["data"]["orthogroup_annotation_path"] is None
+    assert payload["preprocess"]["sparse_feature_filter"]["within_trait"] is None
+    assert (
+        payload["preprocess"]["ranked_feature_filter"]["higher_in_trait"]
+        is None
+    )
     assert payload["figures"]["top_features"] == 30
 
 

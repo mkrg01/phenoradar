@@ -12,6 +12,7 @@ from phenoradar.study import (
     _build_training_group_sensitivity,
     _condition_metric_figure,
     _ranked_feature_sensitivity_figures,
+    _ranked_sensitivity_metadata,
     generate_study_report,
 )
 
@@ -282,6 +283,32 @@ def test_ranked_feature_sensitivity_figures_use_matched_feature_counts(
     assert "pair_aware" in sensitivity_svg
     assert "unpaired" in sensitivity_svg
     assert "unpaired improvement over pair_aware" in difference_svg
+
+
+def test_ranked_sensitivity_metadata_rejects_additional_direction_axis() -> None:
+    manifest_rows = [
+        {
+            "condition_id": f"condition_{index}",
+            "varying_parameters_json": json.dumps(
+                {
+                    "preprocess.ranked_feature_filter.method": method,
+                    "preprocess.ranked_feature_filter.max_features": max_features,
+                    "preprocess.ranked_feature_filter.higher_in_trait": direction,
+                }
+            ),
+        }
+        for index, (method, max_features, direction) in enumerate(
+            [
+                ("pair_aware", 50, None),
+                ("pair_aware", 50, 1),
+                ("unpaired", 50, None),
+                ("unpaired", 50, 1),
+            ],
+            start=1,
+        )
+    ]
+
+    assert _ranked_sensitivity_metadata(manifest_rows) == []
 
 
 def test_generate_study_report_aggregates_training_group_subsample_repeats(

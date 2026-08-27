@@ -72,9 +72,11 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.preprocess.expression_transform.method == "log1p"
     assert resolved.preprocess.sparse_feature_filter.enabled is True
     assert (
-        resolved.preprocess.sparse_feature_filter.min_nonzero_fraction_in_at_least_one_trait
+        resolved.preprocess.sparse_feature_filter.min_nonzero_fraction
         == 0.8
     )
+    assert resolved.preprocess.sparse_feature_filter.within_trait is None
+    assert resolved.preprocess.ranked_feature_filter.higher_in_trait is None
     assert resolved.preprocess.feature_scaling.method == "standard"
     assert resolved.evaluation.group_bootstrap.enabled is False
     assert resolved.evaluation.group_bootstrap.n_resamples == 2000
@@ -103,9 +105,11 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
     assert resolved.preprocess.expression_transform.method == "log1p"
     assert resolved.preprocess.sparse_feature_filter.enabled is True
     assert (
-        resolved.preprocess.sparse_feature_filter.min_nonzero_fraction_in_at_least_one_trait
+        resolved.preprocess.sparse_feature_filter.min_nonzero_fraction
         == 0.8
     )
+    assert resolved.preprocess.sparse_feature_filter.within_trait is None
+    assert resolved.preprocess.ranked_feature_filter.higher_in_trait is None
     assert resolved.preprocess.feature_scaling.method == "standard"
     assert resolved.evaluation.group_bootstrap.enabled is False
     assert resolved.evaluation.group_bootstrap.n_resamples == 2000
@@ -449,12 +453,43 @@ def test_preprocess_sparse_feature_rejects_null_fraction_when_enabled(tmp_path: 
 preprocess:
   sparse_feature_filter:
     enabled: true
-    min_nonzero_fraction_in_at_least_one_trait: null
+    min_nonzero_fraction: null
 """.strip()
         + "\n",
     )
 
     with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_preprocess_sparse_feature_accepts_binary_within_trait(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "valid.yml",
+        """
+preprocess:
+  sparse_feature_filter:
+    within_trait: 1
+""".strip()
+        + "\n",
+    )
+
+    resolved = load_and_resolve_config([cfg])
+
+    assert resolved.preprocess.sparse_feature_filter.within_trait == 1
+
+
+def test_preprocess_sparse_feature_rejects_nonbinary_within_trait(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+preprocess:
+  sparse_feature_filter:
+    within_trait: 2
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError, match="within_trait"):
         load_and_resolve_config([cfg])
 
 
@@ -518,6 +553,45 @@ preprocess:
     )
 
     with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_ranked_feature_filter_accepts_supervised_higher_in_trait(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "valid.yml",
+        """
+preprocess:
+  ranked_feature_filter:
+    method: unpaired
+    max_features: 10
+    higher_in_trait: 1
+""".strip()
+        + "\n",
+    )
+
+    resolved = load_and_resolve_config([cfg])
+
+    assert resolved.preprocess.ranked_feature_filter.higher_in_trait == 1
+
+
+@pytest.mark.parametrize("method", ["none", "variance"])
+def test_ranked_feature_filter_rejects_higher_in_trait_for_unsupervised_method(
+    tmp_path: Path,
+    method: str,
+) -> None:
+    max_features = "" if method == "none" else "    max_features: 10\n"
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        (
+            "preprocess:\n"
+            "  ranked_feature_filter:\n"
+            f"    method: {method}\n"
+            f"{max_features}"
+            "    higher_in_trait: 1\n"
+        ),
+    )
+
+    with pytest.raises(ConfigError, match="higher_in_trait"):
         load_and_resolve_config([cfg])
 
 

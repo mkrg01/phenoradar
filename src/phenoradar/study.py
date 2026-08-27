@@ -510,6 +510,8 @@ def _ranked_sensitivity_metadata(
             return []
         if not isinstance(values, dict):
             return []
+        if set(values) != {_RANKED_METHOD_PATH, _RANKED_MAX_FEATURES_PATH}:
+            return []
         method = values.get(_RANKED_METHOD_PATH)
         max_features = values.get(_RANKED_MAX_FEATURES_PATH)
         if not isinstance(method, str) or not isinstance(max_features, int):

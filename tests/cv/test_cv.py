@@ -258,7 +258,9 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "fold_id",
         "sample_set_id",
         "method",
+        "higher_in_trait",
         "feature",
+        "direction_match",
         "score",
         "rank",
         "retained",
@@ -1876,7 +1878,7 @@ def test_select_feature_indices_raises_when_filters_remove_all_features(
 preprocess:
   sparse_feature_filter:
     enabled: true
-    min_nonzero_fraction_in_at_least_one_trait: 0.5
+    min_nonzero_fraction: 0.5
 """.strip(),
             )
         ]
@@ -4215,7 +4217,7 @@ def test_select_feature_indices_rejects_missing_sparse_feature_threshold_when_mu
                     "sparse_feature_filter": config.preprocess.sparse_feature_filter.model_copy(
                         update={
                             "enabled": True,
-                            "min_nonzero_fraction_in_at_least_one_trait": None,
+                            "min_nonzero_fraction": None,
                         }
                     )
                 }
@@ -4223,7 +4225,7 @@ def test_select_feature_indices_rejects_missing_sparse_feature_threshold_when_mu
         }
     )
 
-    with pytest.raises(CVError, match="min_nonzero_fraction_in_at_least_one_trait is missing"):
+    with pytest.raises(CVError, match="min_nonzero_fraction is missing"):
         _select_feature_indices(
             config_bad,
             np.array([[0.0, 0.1], [0.2, 0.3]], dtype=float),
@@ -4256,6 +4258,77 @@ def test_select_feature_indices_sparse_feature_filter_keeps_any_trait_signal(
     )
 
     assert selected.tolist() == [0, 2]
+
+
+@pytest.mark.parametrize(("within_trait", "expected"), [(0, [0]), (1, [1])])
+def test_select_feature_indices_sparse_feature_filter_can_target_one_trait(
+    tmp_path: Path,
+    within_trait: int,
+    expected: list[int],
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra=f"""
+preprocess:
+  sparse_feature_filter:
+    min_nonzero_fraction: 0.8
+    within_trait: {within_trait}
+""".strip(),
+            )
+        ]
+    )
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [2.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [0.0, 3.0, 1.0],
+                [0.0, 3.0, 0.0],
+                [0.0, 3.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        ["trait_0_common", "trait_1_common", "trait_1_rare"],
+        y_train=np.array([0, 0, 0, 1, 1, 1], dtype=int),
+    )
+
+    assert selected.tolist() == expected
+
+
+def test_sparse_feature_filter_rejects_within_trait_missing_from_training_rows(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    within_trait: 1
+""".strip(),
+            )
+        ]
+    )
+
+    with pytest.raises(CVError, match="within_trait is not present"):
+        _select_feature_indices(
+            config,
+            np.array([[1.0], [2.0]], dtype=float),
+            ["OG1"],
+            y_train=np.array([0, 0], dtype=int),
+        )
 
 
 def test_select_feature_indices_rejects_missing_low_variance_threshold_when_mutated(
@@ -4367,6 +4440,49 @@ preprocess:
 
     assert selected.tolist() == [0]
     assert warnings == []
+
+
+def test_pair_aware_filter_higher_in_trait_1_excludes_trait_0_signal(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: pair_aware
+    max_features: 2
+    higher_in_trait: 1
+""".strip(),
+            )
+        ]
+    )
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [10.0, 0.0],
+                [0.0, 2.0],
+                [9.0, 0.0],
+                [0.0, 3.0],
+            ],
+            dtype=float,
+        ),
+        ["trait_0_signal", "trait_1_signal"],
+        y_train=np.array([0, 1, 0, 1], dtype=int),
+        groups_train=np.array(["g1", "g1", "g2", "g2"], dtype=str),
+        warnings=[],
+    )
+
+    assert selected.tolist() == [1]
 
 
 def test_pair_aware_filter_breaks_score_ties_by_feature_name(
@@ -4535,6 +4651,41 @@ preprocess:
     assert any("too few valid contrast pairs" in item for item in warnings)
 
 
+def test_pair_aware_higher_in_trait_fails_closed_when_too_few_groups(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: pair_aware
+    max_features: 1
+    min_contrast_pairs: 2
+    higher_in_trait: 1
+""".strip(),
+            )
+        ]
+    )
+
+    with pytest.raises(CVError, match="cannot enforce higher_in_trait=1"):
+        _select_feature_indices(
+            config,
+            np.array([[0.0], [2.0]], dtype=float),
+            ["trait_1_signal"],
+            y_train=np.array([0, 1], dtype=int),
+            groups_train=np.array(["g1", "g1"], dtype=str),
+            warnings=[],
+        )
+
+
 def test_ranked_feature_filter_unpaired_uses_label_difference(
     tmp_path: Path,
 ) -> None:
@@ -4579,6 +4730,150 @@ preprocess:
     assert {row["method"] for row in score_rows} == {"unpaired"}
     retained = {str(row["feature"]): bool(row["retained"]) for row in score_rows}
     assert retained == {"label_signal": True, "within_label_variance": False}
+
+
+def test_ranked_feature_filter_higher_in_trait_1_excludes_stronger_trait_0_signal(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: unpaired
+    max_features: 2
+    higher_in_trait: 1
+""".strip(),
+            )
+        ]
+    )
+    score_rows: list[dict[str, object]] = []
+
+    selected, counts = cv_mod._select_feature_indices_with_counts(
+        config,
+        np.array(
+            [
+                [10.0, 0.0, 1.0],
+                [10.0, 0.0, 2.0],
+                [0.0, 2.0, 1.0],
+                [0.0, 2.0, 2.0],
+            ],
+            dtype=float,
+        ),
+        ["strong_trait_0_signal", "trait_1_signal", "no_label_effect"],
+        y_train=np.array([0, 0, 1, 1], dtype=int),
+        ranked_feature_score_rows=score_rows,
+    )
+
+    assert selected.tolist() == [1]
+    assert counts.n_features_after_ranked_feature_filter == 1
+    assert {row["higher_in_trait"] for row in score_rows} == {1}
+    retained = {str(row["feature"]): bool(row["retained"]) for row in score_rows}
+    assert retained == {
+        "strong_trait_0_signal": False,
+        "trait_1_signal": True,
+        "no_label_effect": False,
+    }
+    eligibility = {
+        str(row["feature"]): bool(row["direction_match"]) for row in score_rows
+    }
+    assert eligibility == {
+        "strong_trait_0_signal": False,
+        "trait_1_signal": True,
+        "no_label_effect": False,
+    }
+    ranks = {str(row["feature"]): row["rank"] for row in score_rows}
+    assert ranks["trait_1_signal"] == 1
+    assert ranks["strong_trait_0_signal"] is None
+    assert ranks["no_label_effect"] is None
+
+
+def test_ranked_feature_filter_can_retain_features_higher_in_trait_0(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: unpaired
+    max_features: 2
+    higher_in_trait: 0
+""".strip(),
+            )
+        ]
+    )
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [10.0, 0.0],
+                [10.0, 0.0],
+                [0.0, 2.0],
+                [0.0, 2.0],
+            ],
+            dtype=float,
+        ),
+        ["trait_0_signal", "trait_1_signal"],
+        y_train=np.array([0, 0, 1, 1], dtype=int),
+    )
+
+    assert selected.tolist() == [0]
+
+
+def test_ranked_feature_filter_higher_in_trait_fails_closed_when_no_feature_matches(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: unpaired
+    max_features: 2
+    higher_in_trait: 1
+""".strip(),
+            )
+        ]
+    )
+
+    with pytest.raises(CVError, match="higher_in_trait=1"):
+        _select_feature_indices(
+            config,
+            np.array(
+                [
+                    [10.0, 3.0],
+                    [10.0, 3.0],
+                    [0.0, 3.0],
+                    [0.0, 3.0],
+                ],
+                dtype=float,
+            ),
+            ["trait_0_signal", "no_label_effect"],
+            y_train=np.array([0, 0, 1, 1], dtype=int),
+        )
 
 
 def test_ranked_feature_filter_variance_is_label_independent(tmp_path: Path) -> None:

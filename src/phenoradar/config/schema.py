@@ -11,6 +11,7 @@ from pydantic import (
     NonNegativeFloat,
     PositiveFloat,
     PositiveInt,
+    field_validator,
     model_validator,
 )
 
@@ -178,18 +179,26 @@ class SparseFeatureFilterConfig(StrictModel):
     """Sparse feature filter settings."""
 
     enabled: bool = True
-    min_nonzero_fraction_in_at_least_one_trait: float | None = Field(
+    min_nonzero_fraction: float | None = Field(
         default=0.8,
         ge=0.0,
         le=1.0,
     )
+    within_trait: Literal[0, 1] | None = None
+
+    @field_validator("within_trait", mode="before")
+    @classmethod
+    def reject_boolean_within_trait(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("preprocess.sparse_feature_filter.within_trait must be 0, 1, or null")
+        return value
 
     @model_validator(mode="after")
     def validate_enabled_args(self) -> SparseFeatureFilterConfig:
-        if self.enabled and self.min_nonzero_fraction_in_at_least_one_trait is None:
+        if self.enabled and self.min_nonzero_fraction is None:
             raise ValueError(
                 "preprocess.sparse_feature_filter."
-                "min_nonzero_fraction_in_at_least_one_trait "
+                "min_nonzero_fraction "
                 "is required when enabled=true"
             )
         return self
@@ -235,6 +244,16 @@ class RankedFeatureFilterConfig(StrictModel):
     method: RankedFeatureFilterMethod = "none"
     max_features: PositiveInt | None = None
     min_contrast_pairs: PositiveInt = 1
+    higher_in_trait: Literal[0, 1] | None = None
+
+    @field_validator("higher_in_trait", mode="before")
+    @classmethod
+    def reject_boolean_higher_in_trait(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError(
+                "preprocess.ranked_feature_filter.higher_in_trait must be 0, 1, or null"
+            )
+        return value
 
     @model_validator(mode="after")
     def validate_method_args(self) -> RankedFeatureFilterConfig:
@@ -242,6 +261,14 @@ class RankedFeatureFilterConfig(StrictModel):
             raise ValueError(
                 "preprocess.ranked_feature_filter.max_features is required "
                 "when method is not none"
+            )
+        if (
+            self.higher_in_trait is not None
+            and self.method not in {"pair_aware", "unpaired"}
+        ):
+            raise ValueError(
+                "preprocess.ranked_feature_filter.higher_in_trait is only configurable "
+                "for method=pair_aware|unpaired"
             )
         return self
 

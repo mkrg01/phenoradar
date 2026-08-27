@@ -127,7 +127,8 @@ preprocess:
     method: log1p
   sparse_feature_filter:
     enabled: true
-    min_nonzero_fraction_in_at_least_one_trait: 0.8
+    min_nonzero_fraction: 0.8
+    within_trait: null
   low_variance_filter:
     enabled: false
     min_variance: null
@@ -135,6 +136,7 @@ preprocess:
     method: none
     max_features: null
     min_contrast_pairs: 1
+    higher_in_trait: null
   correlation_filter:
     enabled: false
     method: pearson
@@ -360,12 +362,21 @@ Compatibility rules:
 - `enabled`
   - type: `bool`
   - default: `true`
-- `min_nonzero_fraction_in_at_least_one_trait`
+- `min_nonzero_fraction`
   - type: `float in [0, 1] | null`
   - default: `0.8`
   - rule: required when `enabled=true`
   - behavior: keeps a feature when its train-fold nonzero fraction is at least
-    this value in at least one trait class
+    this value in the class or classes selected by `within_trait`
+- `within_trait`
+  - type: `0 | 1 | null`
+  - default: `null`
+  - behavior:
+    - `null`: preserves the original behavior and keeps a feature when the
+      threshold is met in at least one trait class
+    - `0` or `1`: calculates the nonzero fraction only within that train-fold
+      trait class
+  - the selected trait must be present in the training rows
 
 ### `preprocess.low_variance_filter`
 
@@ -389,23 +400,61 @@ Compatibility rules:
 - `min_contrast_pairs`
   - type: `int >= 1`
   - default: `1`
+- `higher_in_trait`
+  - type: `0 | 1 | null`
+  - default: `null`
+  - rule: a non-`null` value is valid only with `pair_aware` or `unpaired`
 - behavior:
   - all methods are fitted using training rows only, after sparse and
     low-variance filtering and before correlation filtering
   - `none` keeps all candidates and does not require `max_features`
-  - `pair_aware` ranks by a stabilized paired t-like score computed from
-    per-group label contrasts; with no usable standard errors it uses absolute
-    mean contrast
-  - `unpaired` ignores contrast groups and ranks by a stabilized label-mean
+  - `pair_aware` calculates `mean(trait 1) - mean(trait 0)` within each valid
+    contrast group and ranks by a stabilized paired t-like score computed from
+    per-group label contrasts; with no usable standard errors it ranks by
+    unstandardized effect magnitude while still enforcing directional
+    eligibility
+  - `unpaired` calculates `mean(trait 1) - mean(trait 0)`, ignores contrast
+    groups, and ranks by a stabilized label-mean
     difference divided by its Welch standard error; with no usable standard
-    errors it uses absolute mean difference
+    errors it ranks by unstandardized effect magnitude while still enforcing
+    directional eligibility
   - `variance` ranks by train-set sample variance without using labels
   - keeps the top `max_features`
+  - `null` ranks both effect directions by magnitude, preserving the
+    original behavior
+  - `1` makes only positive effects eligible;
+    `0` makes only negative effects eligible
+  - directional modes keep at most `max_features` eligible features and never
+    fill unused slots with zero-effect or opposite-direction features
+  - directional modes fail closed when no candidate has an eligible effect
   - when fewer than `min_contrast_pairs` valid contrast pairs are available in a
-    split, the filter is skipped with a warning
+    split, `null` mode is skipped with a warning; directional modes fail
+    closed because their direction constraint cannot be verified
   - `pair_aware` requires `data.contrast_pair_col`; this is independent from
     `split.group_col`, so taxonomic-rank splits can still use contrast-pair
     feature scoring where contrast pairs are available.
+
+To retain features that provide positive expression evidence for trait `1`, use
+both filters together:
+
+```yaml
+preprocess:
+  sparse_feature_filter:
+    enabled: true
+    min_nonzero_fraction: 0.9
+    within_trait: 1
+  ranked_feature_filter:
+    method: pair_aware
+    max_features: 200
+    min_contrast_pairs: 1
+    higher_in_trait: 1
+```
+
+`within_trait: 1` only requires frequent nonzero expression within trait `1`;
+it does not by itself require expression to be higher than in trait `0`.
+Conversely, `higher_in_trait` constrains the univariate train-fold filtering
+effect but does not constrain the sign or monotonicity learned by the final
+multivariable model.
 
 ### `preprocess.correlation_filter`
 

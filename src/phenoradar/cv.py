@@ -500,8 +500,10 @@ _RANKED_FEATURE_SCORE_SCHEMA = {
     "fold_id": pl.String,
     "sample_set_id": pl.Int64,
     "method": pl.String,
+    "higher_in_trait": pl.Int64,
     "feature": pl.String,
     "effect": pl.Float64,
+    "direction_match": pl.Boolean,
     "standard_error": pl.Float64,
     "score": pl.Float64,
     "rank": pl.Int64,
@@ -1387,6 +1389,7 @@ def _pair_group_contrasts(
 def _ranked_score_rows(
     *,
     method: str,
+    higher_in_trait: int | None,
     selected: np.ndarray,
     feature_names: list[str],
     effect: np.ndarray,
@@ -1408,14 +1411,28 @@ def _ranked_score_rows(
     rows: list[dict[str, Any]] = []
     for local_idx, feature_index in enumerate(selected.tolist()):
         rank_value = int(rank_by_local[local_idx])
+        effect_value = float(effect[local_idx])
+        direction_match = (
+            higher_in_trait is None
+            or (
+                higher_in_trait == 1
+                and effect_value > _NONZERO_TOLERANCE
+            )
+            or (
+                higher_in_trait == 0
+                and effect_value < -_NONZERO_TOLERANCE
+            )
+        )
         rows.append(
             {
                 "method": method,
+                "higher_in_trait": higher_in_trait,
                 "feature": feature_names[feature_index],
-                "effect": _finite_or_none(float(effect[local_idx])),
+                "effect": _finite_or_none(effect_value),
+                "direction_match": direction_match,
                 "standard_error": _finite_or_none(float(standard_error[local_idx])),
                 "score": _finite_or_none(float(score[local_idx])),
-                "rank": None if rank_value <= 0 else rank_value,
+                "rank": None if rank_value <= 0 or not direction_match else rank_value,
                 "retained": local_idx in retained_local,
                 "n_valid_contrast_pairs": n_valid_contrast_pairs,
                 "n_label0": n_label0,
@@ -1440,6 +1457,7 @@ def _apply_ranked_feature_filter(
 ) -> RankedFeatureFilterResult:
     filter_config = config.preprocess.ranked_feature_filter
     method = filter_config.method
+    higher_in_trait = filter_config.higher_in_trait
     candidate_count = int(selected.size)
     if candidate_count == 0:
         return RankedFeatureFilterResult(
@@ -1463,6 +1481,7 @@ def _apply_ranked_feature_filter(
     if method == "none":
         rows = _ranked_score_rows(
             method=method,
+            higher_in_trait=higher_in_trait,
             selected=selected,
             feature_names=feature_names,
             effect=empty_values,
@@ -1487,7 +1506,7 @@ def _apply_ranked_feature_filter(
     standard_error = empty_values.copy()
     score = empty_values.copy()
     n_valid_contrast_pairs: int | None = None
-    fallback_to_absolute_effect = False
+    fallback_to_unstandardized_effect = False
 
     if method == "pair_aware":
         if y_train is None or groups_train is None:
@@ -1498,6 +1517,14 @@ def _apply_ranked_feature_filter(
         n_valid_contrast_pairs = int(contrasts.shape[0])
         min_contrast_pairs = int(filter_config.min_contrast_pairs)
         if n_valid_contrast_pairs < min_contrast_pairs:
+            if higher_in_trait is not None:
+                raise CVError(
+                    "ranked_feature_filter cannot enforce "
+                    f"higher_in_trait={higher_in_trait} because too few valid contrast "
+                    "pairs were available in a split; "
+                    f"valid_contrast_pairs={n_valid_contrast_pairs}, "
+                    f"min_contrast_pairs={min_contrast_pairs}"
+                )
             if warnings is not None:
                 warnings.append(
                     "ranked_feature_filter method pair_aware skipped because too few valid "
@@ -1507,6 +1534,7 @@ def _apply_ranked_feature_filter(
                 )
             rows = _ranked_score_rows(
                 method=method,
+                higher_in_trait=higher_in_trait,
                 selected=selected,
                 feature_names=feature_names,
                 effect=effect,
@@ -1531,7 +1559,7 @@ def _apply_ranked_feature_filter(
                 float(n_valid_contrast_pairs)
             )
         else:
-            fallback_to_absolute_effect = True
+            fallback_to_unstandardized_effect = True
     elif method == "unpaired":
         if y_train is None:
             raise CVError("ranked_feature_filter method unpaired requires y_train")
@@ -1551,7 +1579,7 @@ def _apply_ranked_feature_filter(
                 + np.var(label0_values, axis=0, ddof=1) / float(label0_idx.size)
             )
         else:
-            fallback_to_absolute_effect = True
+            fallback_to_unstandardized_effect = True
     elif method == "variance":
         if x_train_expr.shape[0] > 1:
             score = np.asarray(np.var(x_train_expr[:, selected], axis=0, ddof=1), dtype=float)
@@ -1563,7 +1591,7 @@ def _apply_ranked_feature_filter(
     if method in {"pair_aware", "unpaired"}:
         positive_se = standard_error[np.isfinite(standard_error) & (standard_error > 0.0)]
         if positive_se.size == 0:
-            fallback_to_absolute_effect = True
+            fallback_to_unstandardized_effect = True
             score = np.abs(effect)
         else:
             s0 = max(
@@ -1571,13 +1599,20 @@ def _apply_ranked_feature_filter(
                 _RANKED_FEATURE_SCORE_FLOOR,
             )
             score = np.abs(effect) / np.maximum(standard_error, s0)
-        if fallback_to_absolute_effect and warnings is not None:
+        if fallback_to_unstandardized_effect and warnings is not None:
             warnings.append(
-                f"ranked_feature_filter method {method} used absolute effect because usable "
-                "per-feature standard errors were unavailable"
+                f"ranked_feature_filter method {method} used unstandardized effect because "
+                "usable per-feature standard errors were unavailable"
             )
 
     score = np.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0)
+    direction_match = np.ones(candidate_count, dtype=bool)
+    if higher_in_trait == 1:
+        direction_match = effect > _NONZERO_TOLERANCE
+        score = np.where(direction_match, score, 0.0)
+    elif higher_in_trait == 0:
+        direction_match = effect < -_NONZERO_TOLERANCE
+        score = np.where(direction_match, score, 0.0)
     feature_keys = np.asarray(
         [feature_names[feature_index] for feature_index in selected], dtype=str
     )
@@ -1586,11 +1621,20 @@ def _apply_ranked_feature_filter(
         if method in {"pair_aware", "unpaired"}
         else np.zeros(candidate_count, dtype=float)
     )
+    if higher_in_trait is not None:
+        secondary = np.where(direction_match, secondary, 0.0)
     order = np.lexsort((feature_keys, -secondary, -score))
     rank_by_local = np.empty(candidate_count, dtype=int)
     rank_by_local[order] = np.arange(1, candidate_count + 1, dtype=int)
 
-    if np.all(np.isclose(score, 0.0)):
+    if higher_in_trait is not None and not np.any(direction_match):
+        expected_effect = "> 0" if higher_in_trait == 1 else "< 0"
+        raise CVError(
+            "ranked_feature_filter removed all candidates because "
+            f"higher_in_trait={higher_in_trait} requires effect {expected_effect}"
+        )
+
+    if higher_in_trait is None and np.all(np.isclose(score, 0.0)):
         if warnings is not None:
             warnings.append(
                 f"ranked_feature_filter method {method} skipped because all scores were zero "
@@ -1598,6 +1642,7 @@ def _apply_ranked_feature_filter(
             )
         rows = _ranked_score_rows(
             method=method,
+            higher_in_trait=higher_in_trait,
             selected=selected,
             feature_names=feature_names,
             effect=effect,
@@ -1615,10 +1660,12 @@ def _apply_ranked_feature_filter(
         )
         return RankedFeatureFilterResult(selected=selected, priority_scores=None, score_rows=rows)
 
-    keep_count = min(int(max_features), candidate_count)
-    kept_local = np.asarray(order[:keep_count], dtype=int)
+    eligible_order = order[direction_match[order]]
+    keep_count = min(int(max_features), int(eligible_order.size))
+    kept_local = np.asarray(eligible_order[:keep_count], dtype=int)
     rows = _ranked_score_rows(
         method=method,
+        higher_in_trait=higher_in_trait,
         selected=selected,
         feature_names=feature_names,
         effect=effect,
@@ -1658,12 +1705,12 @@ def _select_feature_indices_with_counts(
 
     if config.preprocess.sparse_feature_filter.enabled:
         min_fraction = (
-            config.preprocess.sparse_feature_filter.min_nonzero_fraction_in_at_least_one_trait
+            config.preprocess.sparse_feature_filter.min_nonzero_fraction
         )
         if min_fraction is None:
             raise CVError(
                 "sparse_feature_filter is enabled but "
-                "min_nonzero_fraction_in_at_least_one_trait is missing"
+                "min_nonzero_fraction is missing"
             )
         if y_train is None:
             raise CVError("sparse_feature_filter requires y_train in preprocessing")
@@ -1671,9 +1718,19 @@ def _select_feature_indices_with_counts(
             raise CVError("sparse_feature_filter y_train length does not match training rows")
 
         y_train_arr = np.asarray(y_train)
+        within_trait = config.preprocess.sparse_feature_filter.within_trait
+        if within_trait is None:
+            trait_values = np.unique(y_train_arr)
+        else:
+            if not np.any(y_train_arr == within_trait):
+                raise CVError(
+                    "sparse_feature_filter within_trait is not present in training rows: "
+                    f"{within_trait}"
+                )
+            trait_values = np.asarray([within_trait], dtype=int)
         max_nonzero_fraction = np.zeros(selected.size, dtype=float)
         nonzero_mask = x_train_expr > _NONZERO_TOLERANCE
-        for trait_value in np.unique(y_train_arr):
+        for trait_value in trait_values:
             trait_mask = y_train_arr == trait_value
             trait_count = int(np.count_nonzero(trait_mask))
             if trait_count == 0:
@@ -3670,7 +3727,7 @@ def _final_refit_can_prune_target_matrix(config: AppConfig) -> bool:
     if transform_method not in {"none", "log1p"}:
         return False
     sparse_filter = config.preprocess.sparse_feature_filter
-    min_fraction = sparse_filter.min_nonzero_fraction_in_at_least_one_trait
+    min_fraction = sparse_filter.min_nonzero_fraction
     return bool(sparse_filter.enabled and min_fraction is not None and float(min_fraction) > 0.0)
 
 

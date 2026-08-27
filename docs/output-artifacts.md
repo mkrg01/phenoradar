@@ -181,9 +181,11 @@ Always written:
       `retained_ratio_mean`, `retained_ratio_q3`, `retained_ratio_max`
 - `model/tables/ranked_feature_scores.tsv`
   - one row per ranked-filter candidate in each outer-fold or final-refit sample set
-  - includes `method`, `feature`, `effect`, `standard_error`, `score`, `rank`,
-    `retained`, label/pair counts, requested/effective feature counts, and any
-    skip reason
+  - includes `method`, `higher_in_trait`, `feature`, signed `effect`,
+    `direction_match`, `standard_error`, `score`, `rank`, `retained`,
+    label/pair counts, requested/effective feature counts, and any skip reason
+  - in directional modes, ineligible candidates have `rank=NA` and cannot be
+    retained merely to fill `max_features`
 - `model/tables/retained_features.tsv`
   - columns:
     - `scope`, `fold_id`, `sample_set_id`, `feature`
@@ -584,7 +586,7 @@ when individual folds are single-label.
   - raw (`n_features_before`)
   - sparse feature
   - low variance
-  - pair aware
+  - ranked filter
   - correlation
   - final (`n_features_after_all`)
 - Use this table to inspect fold/sample-set-specific filtering behavior.

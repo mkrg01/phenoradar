@@ -221,6 +221,9 @@ Rules:
   interpreted as zero
 - duplicate `(species, feature)` rows are summed after every contributing value is validated
 - an absent `(species, feature)` coordinate is represented as zero in the constructed matrix
+- consequently, the long format cannot distinguish a truly measured zero from
+  an unmeasured coordinate; encode or validate measurement coverage upstream
+  when that distinction matters
 
 Example:
 

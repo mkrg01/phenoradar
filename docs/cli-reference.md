@@ -265,7 +265,10 @@ Prediction-time feature alignment policy:
 - rank transforms align raw input to the complete bundled transform schema before ranking
 - for rank transforms, transform-schema features missing in input -> filled with `0` before ranking
 - for rank transforms, extra input features outside the transform schema -> ignored before ranking
-- feature-wise transforms may align directly to the model-feature union
+- feature-wise transforms may align directly to the model-feature union; missing
+  model features are also filled with `0`
+- missing bundled features produce a warning, but prediction continues when at
+  least one model feature overlaps
 - zero overlap with the model-feature union -> error
 
 ## `dataset`
