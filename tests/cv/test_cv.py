@@ -1128,6 +1128,43 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
     }.issubset(refit_artifacts.pred_inference.columns)
     assert refit_artifacts.pred_inference.get_column("true_label").null_count() == 1
     assert refit_artifacts.model_selection_selected is None
+    assert refit_artifacts.model_selection_trials is None
+    assert refit_artifacts.model_selection_trials_summary is None
+    assert {
+        "feature",
+        "importance_mean",
+        "importance_std",
+        "n_models",
+        "method",
+    }.issubset(refit_artifacts.feature_importance.columns)
+    assert {
+        "model_index",
+        "feature",
+        "importance",
+        "method",
+    }.issubset(refit_artifacts.feature_importance_by_model.columns)
+    assert {
+        "feature",
+        "coef_mean",
+        "coef_std",
+        "n_models",
+        "method",
+    }.issubset(refit_artifacts.coefficients.columns)
+    assert {
+        "model_index",
+        "feature",
+        "coefficient",
+        "method",
+        "reason",
+    }.issubset(refit_artifacts.coefficients_by_model.columns)
+    assert set(refit_artifacts.top_feature_expression_external.columns) == {
+        "species",
+        "feature",
+        "tpm",
+    }
+    assert refit_artifacts.top_feature_expression_external.get_column(
+        "species"
+    ).unique().to_list() == ["sp5"]
     assert refit_artifacts.feature_filter_counts.height > 0
     assert {
         "scope",

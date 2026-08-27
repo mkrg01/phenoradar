@@ -37,12 +37,10 @@ def _plain_output(text: str) -> str:
 
 def _c4_tiny_source_uri() -> str:
     return (
-        Path(__file__).resolve().parents[2]
-        / "src"
-        / "phenoradar"
-        / "data"
-        / "c4_tiny"
-    ).resolve().as_uri()
+        (Path(__file__).resolve().parents[2] / "src" / "phenoradar" / "data" / "c4_tiny")
+        .resolve()
+        .as_uri()
+    )
 
 
 def _write_split_fixture(tmp_path: Path) -> tuple[Path, Path]:
@@ -490,9 +488,7 @@ def test_run_passes_top_features_to_run_and_tree_figures(
         "phenoradar.cli._build_run_fingerprint_metadata",
         lambda **_kwargs: _stub_fingerprint_metadata(),
     )
-    monkeypatch.setattr(
-        "phenoradar.cli.phenoradar_build_snapshot", lambda *_args, **_kwargs: {}
-    )
+    monkeypatch.setattr("phenoradar.cli.phenoradar_build_snapshot", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         "phenoradar.cli.runtime_environment_snapshot",
         lambda *_args, **_kwargs: {"python": "test"},
@@ -697,6 +693,12 @@ evaluation:
     assert (run_dirs[0] / "model" / "tables" / "retained_features_summary.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "model_sparsity.tsv").exists()
     assert (run_dirs[0] / "model" / "tables" / "model_sparsity_summary.tsv").exists()
+    assert (run_dirs[0] / "model" / "tables" / "final_refit_feature_importance.tsv").exists()
+    assert (
+        run_dirs[0] / "model" / "tables" / "final_refit_feature_importance_by_model.tsv"
+    ).exists()
+    assert (run_dirs[0] / "model" / "tables" / "final_refit_coefficients.tsv").exists()
+    assert (run_dirs[0] / "model" / "tables" / "final_refit_coefficients_by_model.tsv").exists()
     convergence_path = run_dirs[0] / "model" / "tables" / "convergence_diagnostics.tsv"
     assert convergence_path.exists()
     assert {
@@ -714,9 +716,7 @@ evaluation:
     }.issubset(pl.read_csv(convergence_path, separator="\t").columns)
     assert (run_dirs[0] / "external_test" / "tables" / "prediction_external_test.tsv").exists()
     assert (run_dirs[0] / "inference" / "tables" / "prediction_inference.tsv").exists()
-    assert (
-        run_dirs[0] / "inference" / "tables" / "prediction_inference_by_fold.tsv"
-    ).exists()
+    assert (run_dirs[0] / "inference" / "tables" / "prediction_inference_by_fold.tsv").exists()
     assert (run_dirs[0] / "external_test" / "tables" / "loss_by_split_final_refit.tsv").exists()
     assert (run_dirs[0] / "summary" / "tables" / "classification_summary.tsv").exists()
     assert (run_dirs[0] / "runtime" / "tables" / "timing.tsv").exists()
@@ -758,13 +758,16 @@ evaluation:
     assert not (run_dirs[0] / "cv" / "figures" / "selected_feature_count_by_fold.svg").exists()
     assert not (run_dirs[0] / "cv" / "figures" / "model_sparsity_scatter.svg").exists()
     assert (run_dirs[0] / "external_test" / "figures" / "final_refit_loss_by_split.svg").exists()
-    assert (run_dirs[0] / "external_test" / "figures" / "feature_filter_funnel.svg").exists()
+    assert (run_dirs[0] / "model" / "figures" / "final_refit_feature_filter_funnel.svg").exists()
+    assert (run_dirs[0] / "model" / "figures" / "final_refit_feature_importance_top.svg").exists()
+    assert (run_dirs[0] / "model" / "figures" / "final_refit_coefficients_signed_top.svg").exists()
+    assert (
+        run_dirs[0] / "external_test" / "figures" / "top_feature_expression_by_confusion.svg"
+    ).exists()
     assert (
         run_dirs[0] / "external_test" / "figures" / "external_species_probability_by_trait.svg"
     ).exists()
-    assert (
-        run_dirs[0] / "external_test" / "figures" / "external_confusion_matrix.svg"
-    ).exists()
+    assert (run_dirs[0] / "external_test" / "figures" / "external_confusion_matrix.svg").exists()
     assert (
         run_dirs[0] / "external_test" / "figures" / "cv_external_metric_comparison.svg"
     ).exists()
@@ -775,9 +778,7 @@ evaluation:
         run_dirs[0] / "inference" / "figures" / "species_probability_cv_and_inference.svg"
     ).exists()
     assert (run_dirs[0] / "external_test" / "tables" / "group_summary_family.tsv").exists()
-    assert (
-        run_dirs[0] / "external_test" / "figures" / "probability_by_family.svg"
-    ).exists()
+    assert (run_dirs[0] / "external_test" / "figures" / "probability_by_family.svg").exists()
     assert (run_dirs[0] / "inference" / "tables" / "group_summary_family.tsv").exists()
     assert (run_dirs[0] / "inference" / "figures" / "probability_by_family.svg").exists()
     cv_trait_svg = (
@@ -786,9 +787,7 @@ evaluation:
     assert "C4" in cv_trait_svg
     assert "C4=0" not in cv_trait_svg
     assert "C4=1" not in cv_trait_svg
-    pr_curve_svg = (run_dirs[0] / "cv" / "figures" / "pr_curve_cv.svg").read_text(
-        encoding="utf-8"
-    )
+    pr_curve_svg = (run_dirs[0] / "cv" / "figures" / "pr_curve_cv.svg").read_text(encoding="utf-8")
     assert "Average Precision=" in pr_curve_svg
     assert "PR AUC=" not in pr_curve_svg
 
@@ -807,9 +806,7 @@ evaluation:
         "brier",
         "log_loss",
     }
-    assert bootstrap_metrics.get_column("group_col").unique().to_list() == [
-        "contrast_pair_id"
-    ]
+    assert bootstrap_metrics.get_column("group_col").unique().to_list() == ["contrast_pair_id"]
     assert bootstrap_metrics.get_column("n_groups").unique().to_list() == [2]
     assert bootstrap_metrics.get_column("n_resamples").unique().to_list() == [20]
     assert bootstrap_metrics.get_column("confidence_level").unique().to_list() == [0.9]
@@ -835,9 +832,7 @@ evaluation:
         "ended_at_sec",
         "duration_sec",
     } == set(timing.columns)
-    run_timing_stages = set(
-        timing.filter(pl.col("scope") == "run").get_column("stage")
-    )
+    run_timing_stages = set(timing.filter(pl.col("scope") == "run").get_column("stage"))
     assert {
         "config_resolution",
         "split_construction",
@@ -894,9 +889,7 @@ evaluation:
         "outer_fold",
         "final_refit",
     }
-    assert training_group_subsets.get_column("group_col").unique().to_list() == [
-        "contrast_pair_id"
-    ]
+    assert training_group_subsets.get_column("group_col").unique().to_list() == ["contrast_pair_id"]
     evaluation_contract = pl.read_csv(
         run_dirs[0] / "model" / "tables" / "evaluation_contract.tsv",
         separator="\t",
@@ -1065,7 +1058,7 @@ data:
         run_dirs[0] / "external_test" / "figures" / "final_refit_loss_by_split.svg"
     ).exists()
     assert not (
-        run_dirs[0] / "external_test" / "figures" / "feature_filter_funnel.svg"
+        run_dirs[0] / "model" / "figures" / "final_refit_feature_filter_funnel.svg"
     ).exists()
     assert not (
         run_dirs[0] / "external_test" / "figures" / "external_species_probability_by_trait.svg"
@@ -1209,11 +1202,21 @@ model_selection:
     selected_path = run_dirs[0] / "model" / "tables" / "model_selection_selected.tsv"
     trials_path = run_dirs[0] / "cv" / "tables" / "model_selection_trials.tsv"
     trials_summary_path = run_dirs[0] / "cv" / "tables" / "model_selection_trials_summary.tsv"
+    final_trials_path = run_dirs[0] / "model" / "tables" / "final_refit_model_selection_trials.tsv"
+    final_trials_summary_path = (
+        run_dirs[0] / "model" / "tables" / "final_refit_model_selection_trials_summary.tsv"
+    )
     assert selected_path.exists()
     assert trials_path.exists()
     assert trials_summary_path.exists()
+    assert final_trials_path.exists()
+    assert final_trials_summary_path.exists()
     assert (run_dirs[0] / "cv" / "figures" / "model_selection_trials.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "model_selection_one_se_curve.svg").exists()
+    assert (run_dirs[0] / "model" / "figures" / "final_refit_model_selection_trials.svg").exists()
+    assert (
+        run_dirs[0] / "model" / "figures" / "final_refit_model_selection_one_se_curve.svg"
+    ).exists()
     assert not (run_dirs[0] / "cv" / "figures" / "selected_hyperparameter_stability.svg").exists()
 
     selected_df = pl.read_csv(selected_path, separator="\t")
@@ -1237,6 +1240,20 @@ model_selection:
         "metric_value_std",
         "metric_value_se",
     }.issubset(trials_summary_df.columns)
+    final_trials_df = pl.read_csv(final_trials_path, separator="\t")
+    assert {"fold_id", "sample_set_id", "candidate_index", "inner_fold_id"}.issubset(
+        final_trials_df.columns
+    )
+    final_trials_summary_df = pl.read_csv(final_trials_summary_path, separator="\t")
+    assert {
+        "fold_id",
+        "sample_set_id",
+        "candidate_index",
+        "metric_name",
+        "params_json",
+        "metric_value_mean",
+        "metric_value_se",
+    }.issubset(final_trials_summary_df.columns)
 
 
 def test_run_emits_warning_summary_and_quiet_mode_suppresses_progress(
@@ -1271,9 +1288,7 @@ def test_run_emits_warning_summary_and_quiet_mode_suppresses_progress(
         "phenoradar.cli._build_run_fingerprint_metadata",
         lambda **_kwargs: _stub_fingerprint_metadata(),
     )
-    monkeypatch.setattr(
-        "phenoradar.cli.phenoradar_build_snapshot", lambda *_args, **_kwargs: {}
-    )
+    monkeypatch.setattr("phenoradar.cli.phenoradar_build_snapshot", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         "phenoradar.cli.runtime_environment_snapshot",
         lambda *_args, **_kwargs: {"python": "test"},
@@ -1658,9 +1673,7 @@ def test_report_requires_run_selection_arguments(
     assert "Either --run-dir or --runs-root must be provided" in output
 
 
-def test_config_fails_for_invalid_yaml(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_config_fails_for_invalid_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runner = CliRunner()
     monkeypatch.chdir(tmp_path)
     invalid = _write(tmp_path / "invalid.yml", "runtime: [1, 2\n")
@@ -2111,9 +2124,7 @@ def test_run_writes_ensemble_tables_when_available(
         "phenoradar.cli._build_run_fingerprint_metadata",
         lambda **_kwargs: _stub_fingerprint_metadata(),
     )
-    monkeypatch.setattr(
-        "phenoradar.cli.phenoradar_build_snapshot", lambda *_args, **_kwargs: {}
-    )
+    monkeypatch.setattr("phenoradar.cli.phenoradar_build_snapshot", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         "phenoradar.cli.runtime_environment_snapshot",
         lambda *_args, **_kwargs: {"python": "test"},

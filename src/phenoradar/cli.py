@@ -1211,6 +1211,26 @@ def _run_single(
             float_precision=8,
             null_value="NA",
         )
+        final_refit_table_specs = (
+            ("feature_importance", "final_refit_feature_importance.tsv"),
+            ("feature_importance_by_model", "final_refit_feature_importance_by_model.tsv"),
+            ("coefficients", "final_refit_coefficients.tsv"),
+            ("coefficients_by_model", "final_refit_coefficients_by_model.tsv"),
+            ("model_selection_trials", "final_refit_model_selection_trials.tsv"),
+            (
+                "model_selection_trials_summary",
+                "final_refit_model_selection_trials_summary.tsv",
+            ),
+        )
+        for attribute_name, table_name in final_refit_table_specs:
+            table = getattr(final_refit_artifacts, attribute_name, None)
+            if isinstance(table, pl.DataFrame):
+                table.write_csv(
+                    model_tables_dir / table_name,
+                    separator="\t",
+                    float_precision=8,
+                    null_value="NA",
+                )
         if final_refit_artifacts.model_selection_selected is not None:
             selected_tables.append(final_refit_artifacts.model_selection_selected)
         _log("Export model bundle.")
@@ -1511,6 +1531,29 @@ def _run_single(
             coefficients=cv_artifacts.coefficients,
             top_features=resolved.figures.top_features,
         )
+        final_refit_feature_importance = (
+            None
+            if final_refit_artifacts is None
+            else getattr(final_refit_artifacts, "feature_importance", None)
+        )
+        final_refit_coefficients = (
+            None
+            if final_refit_artifacts is None
+            else getattr(final_refit_artifacts, "coefficients", None)
+        )
+        if isinstance(final_refit_feature_importance, pl.DataFrame) and isinstance(
+            final_refit_coefficients, pl.DataFrame
+        ):
+            annotation_features = sorted(
+                {
+                    *annotation_features,
+                    *figure_annotation_features(
+                        feature_importance=final_refit_feature_importance,
+                        coefficients=final_refit_coefficients,
+                        top_features=resolved.figures.top_features,
+                    ),
+                }
+            )
         if (
             candidate_evidence_artifacts is not None
             and candidate_evidence_artifacts.features.height > 0
@@ -1567,6 +1610,36 @@ def _run_single(
             model_sparsity=model_sparsity_table,
             model_sparsity_summary=model_sparsity_summary_table,
             top_feature_expression=cv_artifacts.top_feature_expression,
+            final_refit_feature_importance=(
+                None
+                if final_refit_artifacts is None
+                else getattr(final_refit_artifacts, "feature_importance", None)
+            ),
+            final_refit_coefficients=(
+                None
+                if final_refit_artifacts is None
+                else getattr(final_refit_artifacts, "coefficients", None)
+            ),
+            final_refit_feature_importance_by_model=(
+                None
+                if final_refit_artifacts is None
+                else getattr(final_refit_artifacts, "feature_importance_by_model", None)
+            ),
+            final_refit_coefficients_by_model=(
+                None
+                if final_refit_artifacts is None
+                else getattr(final_refit_artifacts, "coefficients_by_model", None)
+            ),
+            final_refit_model_selection_trials_summary=(
+                None
+                if final_refit_artifacts is None
+                else getattr(final_refit_artifacts, "model_selection_trials_summary", None)
+            ),
+            final_refit_top_feature_expression_external=(
+                None
+                if final_refit_artifacts is None
+                else getattr(final_refit_artifacts, "top_feature_expression_external", None)
+            ),
             top_features=resolved.figures.top_features,
             orthogroup_annotations=orthogroup_annotations,
             parallel_workers=_artifact_parallel_workers(resolved),

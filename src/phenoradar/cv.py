@@ -124,7 +124,13 @@ class FinalRefitArtifacts:
     pred_external_test: pl.DataFrame
     pred_inference: pl.DataFrame
     loss_by_split_final_refit: pl.DataFrame
+    feature_importance: pl.DataFrame
+    coefficients: pl.DataFrame
+    feature_importance_by_model: pl.DataFrame
+    coefficients_by_model: pl.DataFrame
     model_selection_selected: pl.DataFrame | None
+    model_selection_trials: pl.DataFrame | None
+    model_selection_trials_summary: pl.DataFrame | None
     feature_filter_counts: pl.DataFrame
     feature_filter_counts_summary: pl.DataFrame
     ranked_feature_scores: pl.DataFrame
@@ -141,6 +147,7 @@ class FinalRefitArtifacts:
     scaler: FeatureScaler
     models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
     convergence_diagnostics: pl.DataFrame
+    top_feature_expression_external: pl.DataFrame
     model_entries: list[FinalModelEntry] = field(default_factory=list)
 
 
@@ -3372,16 +3379,20 @@ def _slice_outer_cv_matrix(
     return cache.matrix[train_row_idx, :], cache.matrix[valid_row_idx, :]
 
 
-def _build_top_feature_expression(
-    cache: OuterCvMatrixCache,
-    feature_importance: pl.DataFrame,
+def _build_top_feature_expression_from_matrix(
     *,
+    species_order: list[str],
+    matrix: np.ndarray,
+    feature_names: list[str],
+    feature_importance: pl.DataFrame,
     feature_limit: int,
 ) -> pl.DataFrame:
     """Build a small validated raw-expression cache for downstream figures."""
     schema = {"species": pl.String, "feature": pl.String, "tpm": pl.Float64}
     if feature_limit < 1 or feature_importance.height == 0:
         return pl.DataFrame(schema=schema)
+    if matrix.ndim != 2 or matrix.shape != (len(species_order), len(feature_names)):
+        raise CVError("Top-feature expression matrix does not match its species/feature schema")
     top_features = (
         feature_importance.drop_nulls(["feature", "importance_mean"])
         .with_columns(
@@ -3396,16 +3407,12 @@ def _build_top_feature_expression(
     )
     if not top_features:
         return pl.DataFrame(schema=schema)
-    feature_to_index = {feature: index for index, feature in enumerate(cache.feature_names)}
+    feature_to_index = {feature: index for index, feature in enumerate(feature_names)}
     selected_features = [feature for feature in top_features if feature in feature_to_index]
     if not selected_features:
         return pl.DataFrame(schema=schema)
-    species_order = [
-        species
-        for species, _index in sorted(cache.species_to_index.items(), key=lambda row: row[1])
-    ]
     feature_indices = [feature_to_index[feature] for feature in selected_features]
-    values = cache.matrix[:, feature_indices]
+    values = matrix[:, feature_indices]
     return pl.DataFrame(
         {
             "species": np.repeat(np.asarray(species_order, dtype=str), len(selected_features)),
@@ -3413,6 +3420,62 @@ def _build_top_feature_expression(
             "tpm": values.reshape(-1),
         },
         schema=schema,
+    )
+
+
+def _build_top_feature_expression(
+    cache: OuterCvMatrixCache,
+    feature_importance: pl.DataFrame,
+    *,
+    feature_limit: int,
+) -> pl.DataFrame:
+    species_order = [
+        species
+        for species, _index in sorted(cache.species_to_index.items(), key=lambda row: row[1])
+    ]
+    return _build_top_feature_expression_from_matrix(
+        species_order=species_order,
+        matrix=cache.matrix,
+        feature_names=cache.feature_names,
+        feature_importance=feature_importance,
+        feature_limit=feature_limit,
+    )
+
+
+def _build_final_refit_interpretation(
+    model_entries: list[FinalModelEntry],
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame, list[str]]:
+    """Summarize final-ensemble feature effects across individual model members."""
+    entries = [
+        ModelFeatureEntry(
+            feature_names=entry.feature_names,
+            model=entry.model,
+            fold_id=str(model_index),
+        )
+        for model_index, entry in enumerate(model_entries)
+    ]
+    artifacts = build_interpretation_tables(entries)
+    feature_importance = artifacts.feature_importance.drop("n_folds")
+    coefficients = artifacts.coefficients.drop("n_folds")
+    feature_importance_by_model = artifacts.feature_importance_by_fold.select(
+        pl.col("fold_id").cast(pl.Int64, strict=True).alias("model_index"),
+        "feature",
+        pl.col("importance_mean").alias("importance"),
+        "method",
+    )
+    coefficients_by_model = artifacts.coefficients_by_fold.select(
+        pl.col("fold_id").cast(pl.Int64, strict=True).alias("model_index"),
+        "feature",
+        pl.col("coef_mean").alias("coefficient"),
+        "method",
+        "reason",
+    )
+    return (
+        feature_importance,
+        coefficients,
+        feature_importance_by_model,
+        coefficients_by_model,
+        artifacts.warnings,
     )
 
 
@@ -4121,6 +4184,7 @@ def _run_final_refit_impl(
     prune_target_matrix = target_count > 0 and _final_refit_can_prune_target_matrix(config)
     n_features_before_override: int | None = None
     target_feature_names: list[str] | None = None
+    x_target_pruned: np.ndarray | None = None
 
     matrix_build_started = recorder.start()
     if prune_target_matrix:
@@ -4187,6 +4251,7 @@ def _run_final_refit_impl(
     fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
     selection_active = _selection_is_active(config)
     model_selection_selected_rows: list[dict[str, Any]] = []
+    model_selection_trial_rows: list[dict[str, Any]] = []
     convergence_rows: list[dict[str, Any]] = []
 
     source_sample_set_ids = _selection_source_sample_set_ids(config, len(sampled_sets))
@@ -4239,6 +4304,17 @@ def _run_final_refit_impl(
     if selection_active:
         for source_sample_set_id in source_sample_set_ids:
             for row in source_results[source_sample_set_id].trial_rows:
+                model_selection_trial_rows.append(
+                    {
+                        "fold_id": "NA",
+                        "sample_set_id": source_sample_set_id,
+                        "candidate_index": row["candidate_index"],
+                        "inner_fold_id": row["inner_fold_id"],
+                        "metric_name": row["metric_name"],
+                        "metric_value": row["metric_value"],
+                        "params_json": row["params_json"],
+                    }
+                )
                 fit_diagnostic = row.get("fit_diagnostic")
                 if isinstance(fit_diagnostic, EstimatorFitDiagnostic):
                     convergence_rows.append(
@@ -4516,6 +4592,47 @@ def _run_final_refit_impl(
         uncertainty_std=inference_uncertainty,
         include_true_label_column=True,
     )
+    interpretation_started = recorder.start()
+    try:
+        (
+            feature_importance,
+            coefficients,
+            feature_importance_by_model,
+            coefficients_by_model,
+            interpretation_warnings,
+        ) = _build_final_refit_interpretation(model_entries)
+    except InterpretationError as exc:
+        raise CVError(str(exc)) from exc
+    recorder.record_since(
+        interpretation_started,
+        scope="final_refit",
+        stage="interpretation",
+    )
+    warnings.extend(interpretation_warnings)
+
+    if external_count > 0:
+        if prune_target_matrix:
+            if x_target_pruned is None:
+                raise CVError("Pruned external-test expression matrix is unavailable")
+            external_expression_matrix = x_target_pruned[:external_count, :]
+        else:
+            if x_target_raw is None:
+                raise CVError("External-test expression matrix is unavailable after final refit")
+            external_expression_matrix = x_target_raw[:external_count, :]
+        if target_feature_names is None:
+            raise CVError("External-test feature schema is unavailable after final refit")
+        top_feature_expression_external = _build_top_feature_expression_from_matrix(
+            species_order=external_species,
+            matrix=external_expression_matrix,
+            feature_names=target_feature_names,
+            feature_importance=feature_importance,
+            feature_limit=config.figures.top_features,
+        )
+    else:
+        top_feature_expression_external = pl.DataFrame(
+            schema={"species": pl.String, "feature": pl.String, "tpm": pl.Float64}
+        )
+
     model_selection_selected: pl.DataFrame | None = None
     if model_selection_selected_rows:
         model_selection_selected = pl.DataFrame(model_selection_selected_rows).sort(
@@ -4527,6 +4644,13 @@ def _run_final_refit_impl(
                 "candidate_index",
             ]
         )
+    model_selection_trials: pl.DataFrame | None = None
+    model_selection_trials_summary: pl.DataFrame | None = None
+    if model_selection_trial_rows:
+        model_selection_trials = pl.DataFrame(model_selection_trial_rows).sort(
+            ["fold_id", "sample_set_id", "candidate_index", "inner_fold_id"]
+        )
+        model_selection_trials_summary = _summarize_model_selection_trials(model_selection_trials)
     feature_filter_counts = _build_feature_filter_counts(feature_filter_count_rows)
     feature_filter_counts_summary = _summarize_feature_filter_counts(feature_filter_counts)
     ranked_feature_scores = _build_ranked_feature_scores(ranked_feature_score_rows)
@@ -4550,7 +4674,13 @@ def _run_final_refit_impl(
         pred_external_test=pred_external,
         pred_inference=pred_inference,
         loss_by_split_final_refit=loss_by_split_final_refit,
+        feature_importance=feature_importance,
+        coefficients=coefficients,
+        feature_importance_by_model=feature_importance_by_model,
+        coefficients_by_model=coefficients_by_model,
         model_selection_selected=model_selection_selected,
+        model_selection_trials=model_selection_trials,
+        model_selection_trials_summary=model_selection_trials_summary,
         feature_filter_counts=feature_filter_counts,
         feature_filter_counts_summary=feature_filter_counts_summary,
         ranked_feature_scores=ranked_feature_scores,
@@ -4567,6 +4697,7 @@ def _run_final_refit_impl(
         scaler=scaler,
         models=fitted_models,
         convergence_diagnostics=convergence_diagnostics,
+        top_feature_expression_external=top_feature_expression_external,
         model_entries=model_entries,
     )
 

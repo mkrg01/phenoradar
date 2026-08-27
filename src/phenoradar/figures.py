@@ -123,7 +123,7 @@ _FEATURE_FILTER_FIGURE_STAGE_LABELS = {
     "n_features_after_correlation": "Correlation",
     "n_features_after_all": "Final",
 }
-_RUN_FIGURE_STAGES = ("cv", "external_test", "inference")
+_RUN_FIGURE_STAGES = ("cv", "model", "external_test", "inference")
 _CV_EXTERNAL_METRIC_ORDER = (
     ("accuracy", "Accuracy"),
     ("precision", "Precision"),
@@ -957,6 +957,7 @@ def _feature_importance_top(
     feature_importance_by_fold: pl.DataFrame | None = None,
     top_features: int = _DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
+    x_label: str = "Mean feature importance per fold",
 ) -> None:
     required = {"feature", "importance_mean"}
     if not required.issubset(feature_importance.columns):
@@ -1084,10 +1085,7 @@ def _feature_importance_top(
             )
             ax.invert_yaxis()
             ax.set_xlim(0.0, max_value * 1.15)
-            ax.set_xlabel(
-                "Mean feature importance per fold",
-                fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE,
-            )
+            ax.set_xlabel(x_label, fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE)
             ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
             ax.set_axisbelow(True)
             fig.subplots_adjust(
@@ -1126,10 +1124,7 @@ def _feature_importance_top(
 
     right_limit = max_value * 1.15
     ax.set_xlim(0.0, right_limit)
-    ax.set_xlabel(
-        "Mean feature importance per fold",
-        fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE,
-    )
+    ax.set_xlabel(x_label, fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE)
     ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
 
@@ -1323,6 +1318,7 @@ def _coefficients_signed_top(
     coefficients_by_fold: pl.DataFrame | None = None,
     top_features: int = _DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
+    x_label: str = "Mean signed coefficient per fold",
 ) -> None:
     required = {"feature", "coef_mean", "method"}
     if not required.issubset(coefficients.columns):
@@ -1458,10 +1454,7 @@ def _coefficients_signed_top(
             ax.invert_yaxis()
             limit = max_abs * 1.15
             ax.set_xlim(-limit, limit)
-            ax.set_xlabel(
-                "Mean signed coefficient per fold",
-                fontsize=_COEFFICIENTS_AXIS_LABEL_FONTSIZE,
-            )
+            ax.set_xlabel(x_label, fontsize=_COEFFICIENTS_AXIS_LABEL_FONTSIZE)
             ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
             ax.set_axisbelow(True)
             ax.axvline(0.0, color=_MUTED_TEXT_COLOR, linewidth=0.8)
@@ -1501,10 +1494,7 @@ def _coefficients_signed_top(
 
     limit = max_abs * 1.15
     ax.set_xlim(-limit, limit)
-    ax.set_xlabel(
-        "Mean signed coefficient per fold",
-        fontsize=_COEFFICIENTS_AXIS_LABEL_FONTSIZE,
-    )
+    ax.set_xlabel(x_label, fontsize=_COEFFICIENTS_AXIS_LABEL_FONTSIZE)
     ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
     ax.axvline(0.0, color=_MUTED_TEXT_COLOR, linewidth=0.8)
@@ -1545,34 +1535,29 @@ def _top_feature_expression_by_confusion(
     out_path: Path,
     top_features: int = _DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
+    label_col: str = "label",
+    source_table_name: str = "prediction_cv.tsv",
+    figure_name: str = "top_feature_expression_by_confusion.svg",
 ) -> None:
-    prediction_required = {"species", "label", "prob"}
+    prediction_required = {"species", label_col, "prob"}
     expression_required = {"species", "feature", "tpm"}
     importance_required = {"feature", "importance_mean"}
     coefficient_required = {"feature", "coef_mean", "method"}
     if not prediction_required.issubset(oof_predictions.columns):
-        raise FigureError(
-            "prediction_cv.tsv schema is invalid for top_feature_expression_by_confusion.svg"
-        )
+        raise FigureError(f"{source_table_name} schema is invalid for {figure_name}")
     if not expression_required.issubset(top_feature_expression.columns):
-        raise FigureError(
-            "top-feature expression schema is invalid for top_feature_expression_by_confusion.svg"
-        )
+        raise FigureError(f"top-feature expression schema is invalid for {figure_name}")
     if not importance_required.issubset(feature_importance.columns):
-        raise FigureError(
-            "feature_importance.tsv schema is invalid for top_feature_expression_by_confusion.svg"
-        )
+        raise FigureError(f"feature_importance.tsv schema is invalid for {figure_name}")
     if not coefficient_required.issubset(coefficients.columns):
-        raise FigureError(
-            "coefficients.tsv schema is invalid for top_feature_expression_by_confusion.svg"
-        )
+        raise FigureError(f"coefficients.tsv schema is invalid for {figure_name}")
     if top_features < 1:
         raise FigureError("figures.top_features must be >= 1")
 
     predictions = (
         oof_predictions.select(
             pl.col("species").cast(pl.String, strict=False).str.strip_chars().alias("__species"),
-            pl.col("label").cast(pl.Int8, strict=False).alias("__label"),
+            pl.col(label_col).cast(pl.Int8, strict=False).alias("__label"),
             pl.col("prob").cast(pl.Float64, strict=False).alias("__prob"),
         )
         .filter(
@@ -1585,20 +1570,15 @@ def _top_feature_expression_by_confusion(
         .sort("__species")
     )
     if predictions.height == 0:
-        raise FigureError(
-            "prediction_cv.tsv is empty; cannot draw top_feature_expression_by_confusion.svg"
-        )
+        raise FigureError(f"{source_table_name} is empty; cannot draw {figure_name}")
     labels = [int(value) for value in predictions.get_column("__label").to_list()]
     _binary_trait_color_map(
         labels,
-        source_table_name="prediction_cv.tsv",
-        figure_name="top_feature_expression_by_confusion.svg",
+        source_table_name=source_table_name,
+        figure_name=figure_name,
     )
     if predictions.get_column("__species").n_unique() != predictions.height:
-        raise FigureError(
-            "prediction_cv.tsv must contain one row per species for "
-            "top_feature_expression_by_confusion.svg"
-        )
+        raise FigureError(f"{source_table_name} must contain one row per species for {figure_name}")
     predictions = predictions.with_columns(
         (pl.col("__prob") >= FIXED_PROBABILITY_THRESHOLD_VALUE).alias("__pred_label")
     ).with_columns(
@@ -1628,9 +1608,7 @@ def _top_feature_expression_by_confusion(
     )
     features = [str(value) for value in top.get_column("__feature").to_list()]
     if not features:
-        raise FigureError(
-            "feature_importance.tsv is empty; cannot draw top_feature_expression_by_confusion.svg"
-        )
+        raise FigureError(f"feature_importance.tsv is empty; cannot draw {figure_name}")
     importance_lookup = {
         str(row["__feature"]): float(row["__importance"]) for row in top.iter_rows(named=True)
     }
@@ -1662,10 +1640,7 @@ def _top_feature_expression_by_confusion(
         & pl.col("__tpm").is_finite()
     )
     if expression.filter(pl.col("__tpm") < 0.0).height > 0:
-        raise FigureError(
-            "top-feature expression contains negative TPM values for "
-            "top_feature_expression_by_confusion.svg"
-        )
+        raise FigureError(f"top-feature expression contains negative TPM values for {figure_name}")
     data = (
         expression.join(
             predictions.select(["__species", "__confusion_group"]),
@@ -1679,8 +1654,7 @@ def _top_feature_expression_by_confusion(
     features = [feature for feature in features if feature in available_features]
     if not features:
         raise FigureError(
-            "No top-feature expression rows overlap CV species for "
-            "top_feature_expression_by_confusion.svg"
+            f"No top-feature expression rows overlap prediction species for {figure_name}"
         )
 
     title_lines_by_feature: dict[str, list[str]] = {}
@@ -3714,6 +3688,8 @@ def _model_selection_one_se_curve(
     out_path: Path,
     *,
     max_sample_sets_per_fold: int,
+    selection_scope: str = "outer_fold",
+    panel_scope_label: str = "fold",
 ) -> None:
     required = {
         "fold_id",
@@ -3785,7 +3761,7 @@ def _model_selection_one_se_curve(
                 pl.col("rank").cast(pl.Int64, strict=False).alias("__rank"),
             )
             .filter(
-                (pl.col("__scope") == "outer_fold")
+                (pl.col("__scope") == selection_scope)
                 & (pl.col("__rank") == 1)
                 & pl.col("__fold_id").is_not_null()
                 & pl.col("__sample_set_id").is_not_null()
@@ -3990,7 +3966,7 @@ def _model_selection_one_se_curve(
         ax.set_ylim(y_min, y_max)
         ax.grid(color=_GRID_COLOR, linewidth=0.5)
         ax.set_axisbelow(True)
-        title = f"fold={panel['fold_id']}"
+        title = f"{panel_scope_label}={panel['fold_id']}"
         if int(panel["sample_set_id"]) != 0:
             title += f", sample_set={panel['sample_set_id']}"
         ax.set_title(title, fontsize=_LABEL_FONTSIZE, pad=5.0)
@@ -4605,6 +4581,12 @@ def write_run_figures(
     model_sparsity: pl.DataFrame | None = None,
     model_sparsity_summary: pl.DataFrame | None = None,
     top_feature_expression: pl.DataFrame | None = None,
+    final_refit_feature_importance: pl.DataFrame | None = None,
+    final_refit_coefficients: pl.DataFrame | None = None,
+    final_refit_feature_importance_by_model: pl.DataFrame | None = None,
+    final_refit_coefficients_by_model: pl.DataFrame | None = None,
+    final_refit_model_selection_trials_summary: pl.DataFrame | None = None,
+    final_refit_top_feature_expression_external: pl.DataFrame | None = None,
     feature_filter_funnel_stage_order: Sequence[str] | None = None,
     top_features: int = _DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
@@ -4614,6 +4596,7 @@ def write_run_figures(
     """Write run-level SVG figures under <run_dir>/<stage>/figures."""
     stage_dirs = _stage_figure_dirs(run_dir)
     cv_dir = stage_dirs["cv"]
+    model_dir = stage_dirs["model"]
     external_test_dir = stage_dirs["external_test"]
     inference_dir = stage_dirs["inference"]
     feature_label_annotations = _feature_label_annotations_subset(
@@ -4621,6 +4604,16 @@ def write_run_figures(
         feature_importance=feature_importance,
         coefficients=coefficients,
         top_features=top_features,
+    )
+    final_refit_feature_label_annotations = (
+        None
+        if final_refit_feature_importance is None or final_refit_coefficients is None
+        else _feature_label_annotations_subset(
+            orthogroup_annotations,
+            feature_importance=final_refit_feature_importance,
+            coefficients=final_refit_coefficients,
+            top_features=top_features,
+        )
     )
     jobs: list[_FigureJob] = []
 
@@ -4692,6 +4685,59 @@ def write_run_figures(
             "orthogroup_annotations": feature_label_annotations,
         },
     )
+    if final_refit_feature_importance is not None:
+        final_importance_replicates: pl.DataFrame | None = None
+        if final_refit_feature_importance_by_model is not None:
+            required = {"model_index", "feature", "importance", "method"}
+            if not required.issubset(final_refit_feature_importance_by_model.columns):
+                raise FigureError("final_refit_feature_importance_by_model.tsv schema is invalid")
+            final_importance_replicates = final_refit_feature_importance_by_model.select(
+                pl.col("model_index").cast(pl.String, strict=False).alias("fold_id"),
+                "feature",
+                pl.col("importance").alias("importance_mean"),
+                "method",
+            )
+        add_job(
+            "final_refit_feature_importance_top",
+            _feature_importance_top,
+            (
+                final_refit_feature_importance,
+                model_dir / "final_refit_feature_importance_top.svg",
+            ),
+            {
+                "feature_importance_by_fold": final_importance_replicates,
+                "top_features": top_features,
+                "orthogroup_annotations": final_refit_feature_label_annotations,
+                "x_label": "Normalized feature importance per final model",
+            },
+        )
+    if final_refit_coefficients is not None:
+        final_coefficient_replicates: pl.DataFrame | None = None
+        if final_refit_coefficients_by_model is not None:
+            required = {"model_index", "feature", "coefficient", "method", "reason"}
+            if not required.issubset(final_refit_coefficients_by_model.columns):
+                raise FigureError("final_refit_coefficients_by_model.tsv schema is invalid")
+            final_coefficient_replicates = final_refit_coefficients_by_model.select(
+                pl.col("model_index").cast(pl.String, strict=False).alias("fold_id"),
+                "feature",
+                pl.col("coefficient").alias("coef_mean"),
+                "method",
+                "reason",
+            )
+        add_job(
+            "final_refit_coefficients_signed_top",
+            _coefficients_signed_top,
+            (
+                final_refit_coefficients,
+                model_dir / "final_refit_coefficients_signed_top.svg",
+            ),
+            {
+                "coefficients_by_fold": final_coefficient_replicates,
+                "top_features": top_features,
+                "orthogroup_annotations": final_refit_feature_label_annotations,
+                "x_label": "Signed coefficient per final model",
+            },
+        )
     if top_feature_expression is not None:
         add_job(
             "top_feature_expression_by_confusion",
@@ -4704,6 +4750,30 @@ def write_run_figures(
                 "out_path": cv_dir / "top_feature_expression_by_confusion.svg",
                 "top_features": top_features,
                 "orthogroup_annotations": feature_label_annotations,
+            },
+            catch_figure_error=True,
+        )
+    if (
+        pred_external_test is not None
+        and pred_external_test.height > 0
+        and final_refit_top_feature_expression_external is not None
+        and final_refit_feature_importance is not None
+        and final_refit_coefficients is not None
+    ):
+        add_job(
+            "external_top_feature_expression_by_confusion",
+            _top_feature_expression_by_confusion,
+            kwargs={
+                "oof_predictions": pred_external_test,
+                "top_feature_expression": final_refit_top_feature_expression_external,
+                "feature_importance": final_refit_feature_importance,
+                "coefficients": final_refit_coefficients,
+                "out_path": external_test_dir / "top_feature_expression_by_confusion.svg",
+                "top_features": top_features,
+                "orthogroup_annotations": final_refit_feature_label_annotations,
+                "label_col": "true_label",
+                "source_table_name": "prediction_external_test.tsv",
+                "figure_name": "top_feature_expression_by_confusion.svg",
             },
             catch_figure_error=True,
         )
@@ -4776,6 +4846,47 @@ def write_run_figures(
             ),
             {"max_sample_sets_per_fold": _MODEL_SELECTION_SAMPLE_SET_LIMIT},
         )
+    if final_refit_model_selection_trials_summary is not None:
+        final_selection_summary = final_refit_model_selection_trials_summary.with_columns(
+            pl.when(pl.col("fold_id").cast(pl.String, strict=False) == "NA")
+            .then(pl.lit("final_refit"))
+            .otherwise(pl.col("fold_id").cast(pl.String, strict=False))
+            .alias("fold_id")
+        )
+        final_selection_selected = model_selection_selected
+        if final_selection_selected is not None:
+            final_selection_selected = final_selection_selected.with_columns(
+                pl.when(
+                    (pl.col("selection_scope") == "final_refit")
+                    & (pl.col("fold_id").cast(pl.String, strict=False) == "NA")
+                )
+                .then(pl.lit("final_refit"))
+                .otherwise(pl.col("fold_id").cast(pl.String, strict=False))
+                .alias("fold_id")
+            )
+        add_job(
+            "final_refit_model_selection_trials",
+            _model_selection_trials_summary_panels,
+            (
+                final_selection_summary,
+                model_dir / "final_refit_model_selection_trials.svg",
+            ),
+            {"max_sample_sets_per_fold": _MODEL_SELECTION_SAMPLE_SET_LIMIT},
+        )
+        add_job(
+            "final_refit_model_selection_one_se_curve",
+            _model_selection_one_se_curve,
+            (
+                final_selection_summary,
+                final_selection_selected,
+                model_dir / "final_refit_model_selection_one_se_curve.svg",
+            ),
+            {
+                "max_sample_sets_per_fold": _MODEL_SELECTION_SAMPLE_SET_LIMIT,
+                "selection_scope": "final_refit",
+                "panel_scope_label": "scope",
+            },
+        )
     if feature_filter_counts_summary is not None:
         add_job(
             "cv_feature_filter_funnel",
@@ -4793,7 +4904,10 @@ def write_run_figures(
             add_job(
                 "final_refit_feature_filter_funnel",
                 _feature_filter_funnel,
-                (feature_filter_counts_summary, external_test_dir / "feature_filter_funnel.svg"),
+                (
+                    feature_filter_counts_summary,
+                    model_dir / "final_refit_feature_filter_funnel.svg",
+                ),
                 {
                     "stage_order": feature_filter_funnel_stage_order,
                     "scopes": ("final_refit",),

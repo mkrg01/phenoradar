@@ -29,11 +29,7 @@ def _svg_text_y_and_viewbox_height(svg_path: Path, text: str) -> tuple[float, fl
 
 def _svg_text_values(svg_path: Path) -> set[str]:
     root = ET.parse(svg_path).getroot()
-    return {
-        "".join(element.itertext())
-        for element in root.iter()
-        if element.tag.endswith("text")
-    }
+    return {"".join(element.itertext()) for element in root.iter() if element.tag.endswith("text")}
 
 
 def _svg_viewbox_size(svg_path: Path) -> tuple[float, float]:
@@ -619,9 +615,7 @@ def test_write_run_figures_uses_annotations_in_standard_feature_figures(
     heatmap_svg = (cv_figures_dir / "feature_importance_by_fold_heatmap.svg").read_text(
         encoding="utf-8"
     )
-    coefficients_svg = (cv_figures_dir / "coefficients_signed_top.svg").read_text(
-        encoding="utf-8"
-    )
+    coefficients_svg = (cv_figures_dir / "coefficients_signed_top.svg").read_text(encoding="utf-8")
     assert "beta carbonic anhydrase" in feature_importance_svg
     assert "(OG1)" in feature_importance_svg
     assert "beta carbonic anhydrase" in heatmap_svg
@@ -657,17 +651,14 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
     )
 
     figures_dir = tmp_path / "run" / "cv" / "figures"
-    external_figures_dir = tmp_path / "run" / "external_test" / "figures"
+    model_figures_dir = tmp_path / "run" / "model" / "figures"
     assert (figures_dir / "feature_filter_funnel.svg").exists()
     funnel_svg = (figures_dir / "feature_filter_funnel.svg").read_text(encoding="utf-8")
-    assert (external_figures_dir / "feature_filter_funnel.svg").exists()
-    final_refit_funnel_svg = (external_figures_dir / "feature_filter_funnel.svg").read_text(
-        encoding="utf-8"
-    )
+    final_refit_funnel_path = model_figures_dir / "final_refit_feature_filter_funnel.svg"
+    assert final_refit_funnel_path.exists()
+    final_refit_funnel_svg = final_refit_funnel_path.read_text(encoding="utf-8")
     funnel_text = _svg_text_values(figures_dir / "feature_filter_funnel.svg")
-    final_refit_funnel_text = _svg_text_values(
-        external_figures_dir / "feature_filter_funnel.svg"
-    )
+    final_refit_funnel_text = _svg_text_values(final_refit_funnel_path)
     assert "Feature selection step" in funnel_svg
     assert "Number of selected features" in funnel_svg
     assert "Number of features" not in funnel_svg
@@ -726,6 +717,32 @@ def test_write_run_figures_writes_external_trait_probability_when_available(tmp_
                 "prob": [0.1, 0.55, 0.9],
             }
         ),
+        final_refit_feature_importance=_minimal_feature_importance(),
+        final_refit_coefficients=_minimal_coefficients(),
+        final_refit_feature_importance_by_model=pl.DataFrame(
+            {
+                "model_index": [0, 0],
+                "feature": ["OG1", "OG2"],
+                "importance": [0.7, 0.3],
+                "method": ["coef_abs_l1_norm", "coef_abs_l1_norm"],
+            }
+        ),
+        final_refit_coefficients_by_model=pl.DataFrame(
+            {
+                "model_index": [0, 0],
+                "feature": ["OG1", "OG2"],
+                "coefficient": [0.2, -0.1],
+                "method": ["coef_signed", "coef_signed"],
+                "reason": ["NA", "NA"],
+            }
+        ),
+        final_refit_top_feature_expression_external=pl.DataFrame(
+            {
+                "species": ["sp5", "sp5", "sp6", "sp6"],
+                "feature": ["OG1", "OG2", "OG1", "OG2"],
+                "tpm": [2.0, 8.0, 15.0, 1.0],
+            }
+        ),
     )
 
     external_figures_dir = tmp_path / "run" / "external_test" / "figures"
@@ -738,6 +755,18 @@ def test_write_run_figures_writes_external_trait_probability_when_available(tmp_
     assert (external_figures_dir / "external_confusion_matrix.svg").exists()
     assert (external_figures_dir / "external_roc_curve.svg").exists()
     assert (external_figures_dir / "external_pr_curve.svg").exists()
+    assert (external_figures_dir / "top_feature_expression_by_confusion.svg").exists()
+    model_figures_dir = tmp_path / "run" / "model" / "figures"
+    final_importance_path = model_figures_dir / "final_refit_feature_importance_top.svg"
+    final_coefficients_path = model_figures_dir / "final_refit_coefficients_signed_top.svg"
+    assert final_importance_path.exists()
+    assert final_coefficients_path.exists()
+    assert "Normalized feature importance per final model" in final_importance_path.read_text(
+        encoding="utf-8"
+    )
+    assert "Signed coefficient per final model" in final_coefficients_path.read_text(
+        encoding="utf-8"
+    )
     comparison_path = external_figures_dir / "cv_external_metric_comparison.svg"
     assert comparison_path.exists()
     comparison_svg = comparison_path.read_text(encoding="utf-8")
@@ -897,7 +926,7 @@ def test_write_run_figures_writes_model_selection_trials_when_summary_provided(
                 "sample_set_id": [0, 0, 0, 0],
                 "candidate_index": [0, 1, 0, 1],
                 "metric_name": ["mcc", "mcc", "mcc", "mcc"],
-                "params_json": ["{}", "{\"C\":1.0}", "{}", "{\"C\":1.0}"],
+                "params_json": ["{}", '{"C":1.0}', "{}", '{"C":1.0}'],
                 "n_inner_folds": [2, 2, 2, 2],
                 "n_valid_inner_folds": [2, 2, 2, 2],
                 "metric_value_mean": [0.40, 0.55, 0.38, 0.52],
@@ -930,7 +959,7 @@ def test_write_run_figures_uses_log_loss_axis_label_for_model_selection_trials(
                 "sample_set_id": [0, 0],
                 "candidate_index": [0, 1],
                 "metric_name": ["log_loss", "log_loss"],
-                "params_json": ["{}", "{\"C\":1.0}"],
+                "params_json": ["{}", '{"C":1.0}'],
                 "n_inner_folds": [2, 2],
                 "n_valid_inner_folds": [2, 2],
                 "metric_value_mean": [0.40, 0.55],
@@ -963,8 +992,8 @@ def test_write_run_figures_hides_fixed_params_in_model_selection_labels(
                 "candidate_index": [0, 1],
                 "metric_name": ["mcc", "mcc"],
                 "params_json": [
-                    "{\"C\":1.0,\"l1_ratio\":0.5}",
-                    "{\"C\":2.0,\"l1_ratio\":0.5}",
+                    '{"C":1.0,"l1_ratio":0.5}',
+                    '{"C":2.0,"l1_ratio":0.5}',
                 ],
                 "n_inner_folds": [2, 2],
                 "n_valid_inner_folds": [2, 2],
@@ -992,12 +1021,12 @@ def test_write_run_figures_writes_one_se_model_selection_figure(
             "candidate_index": [0, 1, 2, 0, 1, 2],
             "metric_name": ["log_loss"] * 6,
             "params_json": [
-                "{\"C\":0.01}",
-                "{\"C\":0.1}",
-                "{\"C\":1.0}",
-                "{\"C\":0.01}",
-                "{\"C\":0.1}",
-                "{\"C\":1.0}",
+                '{"C":0.01}',
+                '{"C":0.1}',
+                '{"C":1.0}',
+                '{"C":0.01}',
+                '{"C":0.1}',
+                '{"C":1.0}',
             ],
             "n_inner_folds": [2] * 6,
             "n_valid_inner_folds": [2] * 6,
@@ -1022,7 +1051,7 @@ def test_write_run_figures_writes_one_se_model_selection_figure(
             "n_scored_candidates": [3, 3, 3],
             "selected_candidate_count_requested": [1, 1, 1],
             "selected_candidate_count_effective": [1, 1, 1],
-            "params_json": ["{\"C\":0.1}", "{\"C\":0.1}", "{\"C\":0.1}"],
+            "params_json": ['{"C":0.1}', '{"C":0.1}', '{"C":0.1}'],
         }
     )
 
@@ -1039,9 +1068,7 @@ def test_write_run_figures_writes_one_se_model_selection_figure(
     )
 
     figures_dir = tmp_path / "run" / "cv" / "figures"
-    one_se_svg = (figures_dir / "model_selection_one_se_curve.svg").read_text(
-        encoding="utf-8"
-    )
+    one_se_svg = (figures_dir / "model_selection_one_se_curve.svg").read_text(encoding="utf-8")
     assert "one-SE threshold" in one_se_svg
     assert "Selected candidate" in one_se_svg
     assert "log10(C)" in one_se_svg
@@ -1063,11 +1090,7 @@ def test_write_run_figures_limits_model_selection_sample_sets_per_fold(
                     "sample_set_id": sample_set_id,
                     "candidate_index": candidate_index,
                     "metric_name": "mcc",
-                    "params_json": (
-                        "{\"panel_param\":"
-                        f"{sample_set_id * 10 + candidate_index}"
-                        "}"
-                    ),
+                    "params_json": (f'{{"panel_param":{sample_set_id * 10 + candidate_index}}}'),
                     "n_inner_folds": 2,
                     "n_valid_inner_folds": 2,
                     "metric_value_mean": 0.3 + sample_set_id * 0.01 + candidate_index * 0.02,
@@ -1842,9 +1865,7 @@ def test_predict_probability_distribution_uses_contiguous_histogram_bins(
 def test_predict_uncertainty_rejects_empty_table_when_required(tmp_path: Path) -> None:
     with pytest.raises(FigureError, match="prediction_inference.tsv is empty"):
         figures_mod._predict_uncertainty(
-            pred_predict=pl.DataFrame(
-                schema={"species": pl.String, "uncertainty_std": pl.Float64}
-            ),
+            pred_predict=pl.DataFrame(schema={"species": pl.String, "uncertainty_std": pl.Float64}),
             out_path=tmp_path / "predict_uncertainty.svg",
             required=True,
         )
@@ -1948,12 +1969,8 @@ def test_roc_pr_curves_cv_use_square_publication_panels(tmp_path: Path) -> None:
         pr_out_path=tmp_path / "pr_curve_cv.svg",
     )
 
-    assert _svg_viewbox_size(tmp_path / "roc_curve_cv.svg") == pytest.approx(
-        (252.0, 252.0)
-    )
-    assert _svg_viewbox_size(tmp_path / "pr_curve_cv.svg") == pytest.approx(
-        (252.0, 252.0)
-    )
+    assert _svg_viewbox_size(tmp_path / "roc_curve_cv.svg") == pytest.approx((252.0, 252.0))
+    assert _svg_viewbox_size(tmp_path / "pr_curve_cv.svg") == pytest.approx((252.0, 252.0))
 
 
 def test_predict_probability_distribution_handles_nan_only_probabilities(tmp_path: Path) -> None:

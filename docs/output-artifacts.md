@@ -21,6 +21,9 @@ For one `run` result directory, a practical order is:
 6. `cv/tables/feature_importance.tsv`, `cv/tables/coefficients.tsv`, and
    `cv/tables/feature_stability_summary.tsv`
    (model interpretation and outer-fold stability)
+7. `model/tables/final_refit_feature_importance.tsv`,
+   `model/tables/final_refit_coefficients.tsv`, and `model/figures/`
+   (`full_run`; interpretation of the fitted final ensemble)
 
 ## Run directory layout
 
@@ -246,7 +249,8 @@ Always written:
   - `run_metadata.json.timing.stage_duration_sec` repeats the top-level
     `scope=run` durations for machine-readable comparison
 - stage-specific `figures/` directories
-  - always creates `cv/figures/`, `external_test/figures/`, and `inference/figures/`.
+  - always creates `cv/figures/`, `model/figures/`, `external_test/figures/`,
+    and `inference/figures/`.
   - always attempts:
     - `cv/figures/cv_metrics_overview.svg`
     - `cv/figures/cv_loss_by_split.svg`
@@ -265,8 +269,13 @@ Always written:
     - `cv/figures/model_selection_one_se_curve.svg` (candidate selection active)
     - `cv/figures/roc_curve_cv.svg` (may be skipped with warning for degenerate folds)
     - `cv/figures/pr_curve_cv.svg` (may be skipped with warning for degenerate folds)
+    - `model/figures/final_refit_feature_importance_top.svg` (`full_run`)
+    - `model/figures/final_refit_coefficients_signed_top.svg` (`full_run`; linear model)
+    - `model/figures/final_refit_feature_filter_funnel.svg` (`full_run`)
+    - `model/figures/final_refit_model_selection_trials.svg` (candidate selection active in `full_run`)
+    - `model/figures/final_refit_model_selection_one_se_curve.svg` (candidate selection active in `full_run`)
     - `external_test/figures/final_refit_loss_by_split.svg` (attempted in `full_run`)
-    - `external_test/figures/feature_filter_funnel.svg` (attempted in `full_run`)
+    - `external_test/figures/top_feature_expression_by_confusion.svg` (attempted in `full_run` when external test rows exist)
     - `external_test/figures/external_species_probability_by_trait.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
     - `external_test/figures/external_confusion_matrix.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
     - `external_test/figures/cv_external_metric_comparison.svg` (attempted in `full_run`; may be skipped with warning when the pooled CV or external-test summary is missing)
@@ -345,6 +354,17 @@ Conditionally written:
     - `n_available_candidates`, `n_scored_candidates`
     - `selected_candidate_count_requested`, `selected_candidate_count_effective`
     - `params_json`
+- `model/tables/final_refit_feature_importance.tsv` / `final_refit_coefficients.tsv`
+  (`full_run`)
+  - final-ensemble summaries across fitted model members
+- `model/tables/final_refit_feature_importance_by_model.tsv` /
+  `final_refit_coefficients_by_model.tsv` (`full_run`)
+  - one row per final ensemble member and feature; features absent from a member's
+    retained schema are represented by zero importance/coefficient
+- `model/tables/final_refit_model_selection_trials.tsv` /
+  `final_refit_model_selection_trials_summary.tsv`
+  (candidate selection active in `full_run`)
+  - inner-CV candidate evidence used specifically for final-refit selection
 
 ## Run interpretation guide
 
@@ -655,6 +675,23 @@ when individual folds are single-label.
 - These fold-level values are the points and boxplot distribution in
   `cv/figures/coefficients_signed_top.svg`.
 
+#### Final-refit feature interpretation tables (`full_run`)
+
+- `model/tables/final_refit_feature_importance.tsv` and
+  `model/tables/final_refit_coefficients.tsv` summarize the fitted final ensemble,
+  independently of whether an external-test pool exists.
+- Their `importance_std` / `coef_std` values describe variation across individual
+  final ensemble members, rather than variation across outer-CV folds.
+- `final_refit_feature_importance_by_model.tsv` contains `model_index`, `feature`,
+  normalized `importance`, and `method` for each member.
+- `final_refit_coefficients_by_model.tsv` contains `model_index`, `feature`, signed
+  `coefficient`, `method`, and `reason`. Coefficients are `NA` for unsupported
+  non-linear models.
+- A feature omitted by one member's preprocessing is represented as zero for that
+  member, allowing models with different retained schemas to be summarized together.
+- These tables describe model reliance; they are not external-test performance
+  estimates and do not replace the outer-CV stability tables.
+
 #### Feature-stability tables
 
 - `selection_frequency` is the fraction of all outer folds in which a feature's
@@ -721,6 +758,9 @@ when individual folds are single-label.
   - `metric_value_std / sqrt(n_valid_inner_folds)`.
 - `n_inner_folds` / `n_valid_inner_folds`:
   - total inner folds vs folds with valid numeric score.
+- The corresponding `model/tables/final_refit_model_selection_trials.tsv` and
+  `final_refit_model_selection_trials_summary.tsv` use the same schema, with
+  `fold_id=NA`, and record the inner-CV search performed for the final refit.
 
 #### `model_selection_selected.tsv` (when candidate selection is enabled)
 
@@ -823,6 +863,20 @@ when individual folds are single-label.
   - Uses `log10(C)` on the x-axis when all candidates expose positive `C`;
     otherwise falls back to `candidate_index`.
   - All folds are shown; per fold, only the first `sample_set_id` is plotted.
+- `model/figures/final_refit_feature_importance_top.svg` (`full_run`)
+  - Top features of the fitted final ensemble.
+  - Boxplots and points show variation across final ensemble members, not CV folds.
+- `model/figures/final_refit_coefficients_signed_top.svg` (`full_run`, linear model)
+  - Signed coefficients on the configured transformed/scaled model-input scale.
+  - Boxplots and points show variation across final ensemble members.
+- `model/figures/final_refit_feature_filter_funnel.svg` (`full_run`)
+  - Final-refit feature-count trend through the enabled `preprocess.*_filter` steps.
+  - Uses the full training/validation pool and does not depend on external-test rows.
+- `model/figures/final_refit_model_selection_trials.svg` /
+  `model/figures/final_refit_model_selection_one_se_curve.svg`
+  (candidate selection active in `full_run`)
+  - Candidate scores, standard errors, one-SE boundary, and selected candidate from
+    the inner CV performed specifically for final refit.
 - `external_test/figures/external_species_probability_by_trait.svg` (`full_run` with external samples)
   - External-test species probabilities grouped by `true_label`.
   - Boxplot with per-species points and trait-wise mean markers.
@@ -837,9 +891,11 @@ when individual folds are single-label.
 - `external_test/figures/external_roc_curve.svg` / `external_test/figures/external_pr_curve.svg` (`full_run` with both external-test labels)
   - External-test ROC and precision-recall curves from `prediction_external_test.tsv`.
   - The ROC panel annotates ROC AUC. The PR panel annotates average precision and the external-test positive rate.
-- `external_test/figures/feature_filter_funnel.svg` (`full_run`)
-  - Final-refit feature-count trend through the enabled `preprocess.*_filter` steps.
-  - Uses the model fit on the full training/validation pool rather than outer-CV folds.
+- `external_test/figures/top_feature_expression_by_confusion.svg`
+  (`full_run` with external samples)
+  - Uses final-ensemble feature ranking and coefficients together with external-test
+    `true_label` and final predictions.
+  - Each panel shows `log2(TPM + 1)` values in external-test TP, FN, TN, and FP groups.
 - `<stage>/figures/probability_by_<group>.svg` (when `summary.group_col` is present in metadata)
   - Group-wise predicted probability distributions for the configured summary group.
   - Uses `summary.group_name_col` for y-axis labels when available.

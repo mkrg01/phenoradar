@@ -88,7 +88,8 @@ Always written:
 - `summary/tables/classification_summary.tsv`
 - `runtime/tables/timing.tsv`
 - `run_metadata.json`
-- stage-specific figure directories (`cv/figures/`, `external_test/figures/`, `inference/figures/`)
+- stage-specific figure directories (`cv/figures/`, `model/figures/`,
+  `external_test/figures/`, `inference/figures/`)
 
 Notes:
 
@@ -112,8 +113,13 @@ Notes:
   - `cv/figures/model_selection_trials.svg` (model selection enabled)
   - `cv/figures/roc_curve_cv.svg` (may be skipped when degenerate)
   - `cv/figures/pr_curve_cv.svg` (may be skipped when degenerate)
+  - `model/figures/final_refit_feature_importance_top.svg` (`full_run`)
+  - `model/figures/final_refit_coefficients_signed_top.svg` (`full_run`, linear model)
+  - `model/figures/final_refit_feature_filter_funnel.svg` (`full_run`)
+  - `model/figures/final_refit_model_selection_trials.svg` (model selection enabled)
+  - `model/figures/final_refit_model_selection_one_se_curve.svg` (model selection enabled)
   - `external_test/figures/final_refit_loss_by_split.svg` (`full_run`)
-  - `external_test/figures/feature_filter_funnel.svg` (`full_run`)
+  - `external_test/figures/top_feature_expression_by_confusion.svg` (`full_run` when external test rows exist)
   - `external_test/figures/external_species_probability_by_trait.svg` (`full_run` when external test rows exist)
   - `external_test/figures/external_confusion_matrix.svg` (`full_run` when external test rows exist)
   - `external_test/figures/cv_external_metric_comparison.svg` (`full_run` when external test rows exist)
@@ -136,6 +142,13 @@ Conditionally written:
 - `cv/tables/model_selection_trials.tsv` (model selection enabled)
 - `cv/tables/model_selection_trials_summary.tsv` (model selection enabled)
 - `model/tables/model_selection_selected.tsv` (candidate selection enabled)
+- `model/tables/final_refit_feature_importance.tsv` /
+  `model/tables/final_refit_feature_importance_by_model.tsv` (`full_run`)
+- `model/tables/final_refit_coefficients.tsv` /
+  `model/tables/final_refit_coefficients_by_model.tsv` (`full_run`)
+- `model/tables/final_refit_model_selection_trials.tsv` /
+  `model/tables/final_refit_model_selection_trials_summary.tsv`
+  (candidate selection enabled in `full_run`)
 - `cv/figures/model_selection_one_se_curve.svg` (candidate selection enabled)
 
 ## `config`

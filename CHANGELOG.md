@@ -4,6 +4,9 @@
 
 ### Features
 
+* add final-refit feature-importance, signed-coefficient, feature-filter, and
+  model-selection artifacts under `model/`, plus external-test top-feature
+  expression grouped by final-model confusion status
 * add a top-feature `log2(TPM + 1)` small-multiple view with species points grouped by
   OOF TP, FN, TN, and FP status
 * allow single-label outer-CV validation groups while keeping two-label training folds mandatory;
