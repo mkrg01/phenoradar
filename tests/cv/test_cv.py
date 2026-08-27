@@ -187,6 +187,8 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "sign_agreement_rate",
         "sign_reason",
     }.issubset(cv_artifacts.feature_stability_by_feature.columns)
+
+
     assert cv_artifacts.feature_stability_by_fold_pair.height == 1
     assert {
         "fold_id_a",
@@ -339,6 +341,57 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         ("outer_fold", "total"),
     }.issubset(timing_pairs)
     assert cv_artifacts.timing.filter(pl.col("duration_sec") < 0.0).height == 0
+
+
+def test_run_outer_cv_random_forest_preserves_absent_coordinates_as_nan(
+    tmp_path: Path,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "tpm_with_absent_coordinates.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp1\tOG2\t0.5",
+                "sp2\tOG1\t2.0",
+                "sp3\tOG2\t2.0",
+                "sp4\tOG1\t4.0",
+                "sp4\tOG2\t0.1",
+                "sp5\tOG1\t5.0",
+                "sp6\tOG1\t6.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+sampling:
+  strategy: all_samples
+  max_samples_per_label_per_group: null
+  sampled_set_count: 1
+preprocess:
+  absent_feature_fill: nan
+model:
+  name: random_forest
+model_selection:
+  search_space:
+    n_estimators: [5]
+""".strip(),
+            )
+        ]
+    )
+    split_artifacts = build_split_artifacts(config)
+
+    artifacts = run_outer_cv(config, split_artifacts.split_manifest)
+
+    assert artifacts.oof_predictions.height == 4
+    assert artifacts.oof_predictions.get_column("prob").is_finite().all()
 
 
 def test_run_outer_cv_predicts_inference_species_with_each_fold_model(
@@ -2009,6 +2062,51 @@ def test_expression_matrix_builder_build_matrix_respects_feature_order_and_zero_
     assert matrix.tolist() == [[0.5, 0.0], [0.3, 0.0]]
 
 
+@pytest.mark.parametrize("max_pivot_cells", [50_000_000, 1])
+def test_expression_matrix_builder_can_fill_absent_coordinates_with_nan(
+    tmp_path: Path,
+    max_pivot_cells: int,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "missing_coordinates_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp1\tOG2\t0.5",
+                "sp2\tOG1\t2.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra=f"""
+preprocess:
+  max_pivot_cells: {max_pivot_cells}
+  absent_feature_fill: nan
+model:
+  name: random_forest
+""".strip(),
+            )
+        ]
+    )
+
+    matrix, features = ExpressionMatrixBuilder(config).build_matrix(
+        ["sp1", "sp2"],
+        feature_order=["OG2", "OG_missing"],
+    )
+
+    assert features == ["OG2", "OG_missing"]
+    np.testing.assert_allclose(matrix[0], np.array([0.5, np.nan]), equal_nan=True)
+    assert np.isnan(matrix[1]).all()
+
+
 @pytest.mark.parametrize(
     "feature",
     ["__species", "__row_idx", "__phenoradar_missing_feature__"],
@@ -2357,6 +2455,17 @@ def test_sample_percentile_rank_transform_preserves_zero_values() -> None:
         dtype=float,
     )
     assert transformed == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("method", ["sample_rank", "sample_percentile_rank"])
+def test_sample_rank_transforms_preserve_nan_values(method: str) -> None:
+    raw = np.array([[0.0, 10.0, np.nan, 5.0]], dtype=float)
+
+    transformed = apply_expression_transform(raw, method)
+
+    assert transformed[0, 0] == 0.0
+    assert np.isnan(transformed[0, 2])
+    assert transformed[0, 1] > transformed[0, 3] > 0.0
 
 
 def test_preprocess_train_and_target_can_disable_feature_scaling(tmp_path: Path) -> None:
@@ -2726,6 +2835,43 @@ model:
 
     assert isinstance(estimator, RandomForestClassifier)
     assert estimator.n_jobs == 2
+
+
+def test_random_forest_fit_and_prediction_accept_nan_features(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  absent_feature_fill: nan
+model:
+  name: random_forest
+""".strip(),
+            )
+        ]
+    )
+    y = np.array([0, 0, 1, 1], dtype=int)
+    estimator = _build_estimator(
+        config,
+        model_seed=42,
+        y_train=y,
+        model_params={"n_estimators": 10},
+        rf_n_jobs=1,
+    )
+    x = np.array(
+        [[0.0, np.nan], [1.0, 0.5], [2.0, np.nan], [3.0, 1.5]],
+        dtype=float,
+    )
+
+    _fit_estimator(estimator, x, y, sample_weight=None)
+    probabilities = _predict_positive_probability(estimator, x)
+
+    assert probabilities.shape == (4,)
+    assert np.isfinite(probabilities).all()
 
 
 def test_inner_cv_splits_requires_strategy_when_mutated_to_none(tmp_path: Path) -> None:
@@ -4913,6 +5059,49 @@ preprocess:
     assert selected.tolist() == [1]
 
 
+def test_low_variance_and_ranked_filters_use_observed_nan_values(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  absent_feature_fill: nan
+  sparse_feature_filter:
+    enabled: false
+  low_variance_filter:
+    enabled: true
+    min_variance: 0.1
+  ranked_feature_filter:
+    method: variance
+    max_features: 1
+model:
+  name: random_forest
+""".strip(),
+            )
+        ]
+    )
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [0.0, 5.0, np.nan],
+                [1.0, np.nan, 0.0],
+                [np.nan, 5.0, 10.0],
+                [2.0, 5.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        ["moderate_variance", "constant", "high_variance"],
+    )
+
+    assert selected.tolist() == [2]
+
+
 def test_ranked_feature_filter_none_keeps_all_candidates(tmp_path: Path) -> None:
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config(
@@ -5021,6 +5210,47 @@ preprocess:
     )
 
     assert kept.tolist() == [1]
+
+
+def test_apply_correlation_filter_uses_pairwise_complete_nan_observations(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  absent_feature_fill: nan
+  correlation_filter:
+    enabled: true
+    max_abs_correlation: 0.9
+model:
+  name: random_forest
+""".strip(),
+            )
+        ]
+    )
+
+    kept = _apply_correlation_filter(
+        config,
+        x_train_log=np.array(
+            [
+                [0.0, 0.0],
+                [1.0, 1.0],
+                [2.0, np.nan],
+                [np.nan, 2.0],
+            ],
+            dtype=float,
+        ),
+        selected=np.array([0, 1], dtype=int),
+        feature_names=["OG1", "OG2"],
+    )
+
+    assert kept.tolist() == [0]
 
 
 def test_apply_correlation_filter_rejects_missing_threshold_when_mutated(tmp_path: Path) -> None:

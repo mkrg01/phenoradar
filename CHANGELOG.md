@@ -4,6 +4,8 @@
 
 ### Features
 
+* allow random-forest runs to preserve absent orthogroup coordinates as `NA`
+  with `preprocess.absent_feature_fill=nan`, including model-bundle prediction
 * add trait-targeted sparse filtering and direction-aware ranked filtering so
   models can retain only features with higher train-fold expression in trait 1
   (or symmetrically trait 0)

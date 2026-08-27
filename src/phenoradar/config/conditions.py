@@ -58,6 +58,7 @@ _FORBIDDEN_DIMENSION_PREFIXES = (
     ("model_selection", "inner_cv_strategy"),
     ("model_selection", "inner_cv_n_splits"),
     ("preprocess", "max_pivot_cells"),
+    ("preprocess", "absent_feature_fill"),
 )
 
 _RANKED_MAX_FEATURES_PATH = (

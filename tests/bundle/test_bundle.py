@@ -11,6 +11,7 @@ import numpy as np
 import polars as pl
 import pytest
 
+import phenoradar.bundle as bundle_mod
 from phenoradar.bundle import (
     BundleError,
     LoadedBundle,
@@ -226,6 +227,7 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
     assert manifest["threshold_fixed"] == pytest.approx(0.5)
     assert manifest["threshold_policy"] == "fixed_constant"
     assert manifest["threshold_derived_from_cv"] is False
+    assert manifest["absent_feature_fill"] == 0
     assert manifest["source_provenance_schema_version"] == 1
     assert isinstance(manifest["source_phenoradar_version"], str)
     assert manifest["source_git_source"] in {"phenoradar_source", "unavailable"}
@@ -244,6 +246,7 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
         "pred_label_fixed_threshold"
     ).to_dicts()
     assert warnings == refit_warnings
+    assert bundle.absent_feature_fill == 0
     assert pred_df.height == 6
     assert {
         "species",
@@ -280,6 +283,20 @@ preprocess:
     assert all(entry.scaler is None for entry in bundle.model_preprocess)
     assert pred_df.height == 6
     assert warnings == []
+
+
+def test_load_model_bundle_reads_nan_absent_feature_fill(tmp_path: Path) -> None:
+    metadata, tpm = _fixture_data(tmp_path)
+    _config_value, bundle = _export_and_load_bundle(tmp_path, metadata, tpm)
+    preprocess_path = bundle.bundle_dir / "preprocess_state.joblib"
+    preprocess_state = joblib.load(preprocess_path)
+    preprocess_state["absent_feature_fill"] = "nan"
+    joblib.dump(preprocess_state, preprocess_path)
+    _rewrite_manifest_to_current_files(bundle.bundle_dir)
+
+    loaded = load_model_bundle(bundle.bundle_dir)
+
+    assert loaded.absent_feature_fill == "nan"
 
 
 @pytest.mark.parametrize("rank_method", ["sample_rank", "sample_percentile_rank"])
@@ -455,6 +472,46 @@ def test_predict_with_bundle_feature_alignment_missing_and_extra(tmp_path: Path)
     assert pred_df.height == 6
     assert any("missing bundle features" in warning for warning in warnings)
     assert any("extra features" in warning for warning in warnings)
+
+
+def test_predict_with_bundle_uses_bundled_nan_fill_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata, tpm = _fixture_data(tmp_path)
+    _, bundle = _export_and_load_bundle(tmp_path, metadata, tpm)
+    nan_bundle = replace(bundle, absent_feature_fill="nan")
+    predict_tpm = _write(
+        tmp_path / "predict_nan_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                *[f"sp{index}\tOG1\t{float(index)}" for index in range(1, 7)],
+            ]
+        )
+        + "\n",
+    )
+    predict_config = load_and_resolve_config([_config(tmp_path, metadata, predict_tpm)])
+    captured: list[np.ndarray] = []
+
+    def _capture_probability(_estimator: object, matrix: np.ndarray) -> np.ndarray:
+        captured.append(matrix.copy())
+        return np.full(matrix.shape[0], 0.5, dtype=float)
+
+    monkeypatch.setattr(bundle_mod, "_predict_probability", _capture_probability)
+
+    pred_df, warnings = predict_with_bundle(predict_config, nan_bundle)
+
+    assert pred_df.height == 6
+    checked_og2 = False
+    for matrix, preprocess in zip(captured, nan_bundle.model_preprocess, strict=True):
+        if "OG2" not in preprocess.feature_names:
+            continue
+        checked_og2 = True
+        og2_index = preprocess.feature_names.index("OG2")
+        assert np.isnan(matrix[:, og2_index]).all()
+    assert checked_og2
+    assert any("filled with NA" in warning for warning in warnings)
 
 
 def test_predict_with_bundle_fails_when_feature_overlap_is_zero(tmp_path: Path) -> None:

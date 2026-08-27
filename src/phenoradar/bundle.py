@@ -87,6 +87,7 @@ class LoadedBundle:
     source_run_id: str
     expression_transform: str
     feature_scaling: str
+    absent_feature_fill: int | str = 0
 
 
 @dataclass(frozen=True)
@@ -197,6 +198,18 @@ def _preprocess_methods(preprocess_state: dict[str, Any]) -> tuple[str, str]:
             f"preprocess_state.joblib has unsupported feature_scaling: {feature_scaling}"
         )
     return expression_transform, feature_scaling
+
+
+def _absent_feature_fill(preprocess_state: dict[str, Any]) -> int | str:
+    value = preprocess_state.get("absent_feature_fill", 0)
+    if isinstance(value, int) and not isinstance(value, bool) and value == 0:
+        return 0
+    if value == "nan":
+        return "nan"
+    raise BundleError(
+        "preprocess_state.joblib has unsupported absent_feature_fill: "
+        f"{value}"
+    )
 
 
 def _validate_scaler_state(
@@ -311,6 +324,7 @@ def export_model_bundle(
             "transform": _preprocess_transform_label(config),
             "expression_transform": config.preprocess.expression_transform.method,
             "feature_scaling": config.preprocess.feature_scaling.method,
+            "absent_feature_fill": config.preprocess.absent_feature_fill,
             "model_preprocess": [
                 {
                     "feature_names": entry.feature_names,
@@ -361,6 +375,7 @@ def export_model_bundle(
         "calibration": _calibration_for_model(config.model.name),
         "ensemble_size": final_refit_artifacts.ensemble_size,
         "ensemble_probability_aggregation": config.ensemble.probability_aggregation,
+        "absent_feature_fill": config.preprocess.absent_feature_fill,
         "threshold_fixed": threshold_fixed,
         "threshold_name": FIXED_PROBABILITY_THRESHOLD_NAME,
         "threshold_policy": FIXED_PROBABILITY_THRESHOLD_POLICY,
@@ -506,6 +521,7 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
         raise BundleError("model_state.joblib must contain a mapping")
 
     expression_transform, feature_scaling = _preprocess_methods(preprocess_state)
+    absent_feature_fill = _absent_feature_fill(preprocess_state)
     if version_value == _LEGACY_BUNDLE_FORMAT_VERSION:
         if expression_transform in _CONTEXTUAL_EXPRESSION_TRANSFORMS:
             raise BundleError(
@@ -621,6 +637,7 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
         source_run_id=source_run_id,
         expression_transform=expression_transform,
         feature_scaling=feature_scaling,
+        absent_feature_fill=absent_feature_fill,
     )
 
 
@@ -667,7 +684,14 @@ def predict_with_bundle(
         raise BundleError("Predict metadata produced zero valid species")
 
     try:
-        matrix_builder = ExpressionMatrixBuilder(config)
+        matrix_config = config.model_copy(
+            update={
+                "preprocess": config.preprocess.model_copy(
+                    update={"absent_feature_fill": bundle.absent_feature_fill}
+                )
+            }
+        )
+        matrix_builder = ExpressionMatrixBuilder(matrix_config)
         x_raw, input_features = matrix_builder.build_matrix(species_list)
     except CVError as exc:
         raise BundleError(str(exc)) from exc
@@ -686,7 +710,14 @@ def predict_with_bundle(
         alignment_features = bundle_features
     alignment_feature_set = set(alignment_features)
 
-    aligned_raw = np.zeros((len(species_list), len(alignment_features)), dtype=float)
+    absent_feature_fill_value = (
+        0.0 if bundle.absent_feature_fill == 0 else float("nan")
+    )
+    aligned_raw = np.full(
+        (len(species_list), len(alignment_features)),
+        absent_feature_fill_value,
+        dtype=float,
+    )
     alignment_overlap_count = 0
     for feature_idx, feature_name in enumerate(alignment_features):
         input_idx = input_index.get(feature_name)
@@ -707,9 +738,10 @@ def predict_with_bundle(
     extra_count = len(input_feature_set - alignment_feature_set)
     warnings: list[str] = []
     if missing_count > 0:
+        fill_label = "0" if bundle.absent_feature_fill == 0 else "NA"
         warnings.append(
             "Prediction input is missing bundle features; "
-            f"filled with 0 for {missing_count} features"
+            f"filled with {fill_label} for {missing_count} features"
         )
     if extra_count > 0:
         warnings.append(

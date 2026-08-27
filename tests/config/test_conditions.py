@@ -210,6 +210,21 @@ runtime:
         load_config_conditions([config_path])
 
 
+def test_absent_feature_fill_condition_list_is_rejected(tmp_path: Path) -> None:
+    config_path = _write(
+        tmp_path / "config.yml",
+        """
+preprocess:
+  absent_feature_fill: [0, nan]
+model:
+  name: random_forest
+""".lstrip(),
+    )
+
+    with pytest.raises(ConfigError, match="preprocess.absent_feature_fill"):
+        load_config_conditions([config_path])
+
+
 def test_duplicate_condition_values_are_rejected(tmp_path: Path) -> None:
     config_path = _write(
         tmp_path / "config.yml",

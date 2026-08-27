@@ -98,7 +98,9 @@ Before fold execution:
 - scan and normalize the long TPM rows for all outer-CV train/validation
   species once into a temporary Parquet cache;
 - build one shared species x feature matrix by mapping the cached long rows to
-  integer coordinates and accumulating values into a zero-filled NumPy array;
+  integer coordinates; absent coordinates are initialized according to
+  `preprocess.absent_feature_fill` (`0` by default, optionally `nan` for
+  random forest);
 - retain a small raw-expression table for only the top interpreted features so
   tree heatmaps do not rescan the full TPM input when species coverage matches;
 - retain `preprocess.max_pivot_cells` as the dense-cell limit used to split
@@ -250,20 +252,22 @@ Feature alignment:
 
 - for `sample_rank` and `sample_percentile_rank`, align raw input to the complete
   `transform_feature_schema.tsv` before applying the expression transform.
-- raw transform features missing from the input are filled with `0`; extra input features are
-  removed before rank calculation and therefore cannot change retained-feature ranks.
+- raw transform features missing from the input use the fill policy stored in
+  the bundle (`0` by default or `NA` for a random-forest bundle trained with
+  `preprocess.absent_feature_fill=nan`); extra input features are removed before
+  rank calculation and therefore cannot change retained-feature ranks.
 - for feature-wise `none` and `log1p`, alignment may be restricted to the model-feature union
   because feature selection and transformation commute.
 - zero overlap with the model-feature union is an error.
 
 Missing-value semantics:
 
-- a bundle feature absent from the prediction input is filled with `0` and
-  reported as a warning; this applies to feature-wise transforms as well as
-  rank transforms
-- the long expression format also maps an absent `(species, feature)` coordinate
-  to `0`, so it cannot by itself distinguish an unmeasured value from a measured
-  biological zero
+- a bundle feature absent from the prediction input is filled according to the
+  bundled training policy (`0` or `NA`) and reported as a warning; this applies
+  to feature-wise transforms as well as rank transforms
+- the long expression format maps an absent `(species, feature)` coordinate to
+  the same bundled policy; default `0` mode cannot by itself distinguish an
+  unmeasured value from a measured biological zero
 - directional feature filtering reduces reliance on absence of trait-0-high
   features, but it does not change these input semantics or constrain final
   multivariable model coefficient signs

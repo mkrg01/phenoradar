@@ -896,9 +896,9 @@ def _sample_rank_transform(values: np.ndarray, *, percentile: bool) -> np.ndarra
     if np.any(values < 0):
         raise CVError("Expression values must be non-negative before sample rank transform")
 
-    ranked = np.zeros_like(values, dtype=float)
+    ranked = np.where(np.isnan(values), np.nan, 0.0)
     for row_idx in range(values.shape[0]):
-        positive_mask = values[row_idx] > 0.0
+        positive_mask = np.isfinite(values[row_idx]) & (values[row_idx] > 0.0)
         positive_count = int(np.count_nonzero(positive_mask))
         if positive_count == 0:
             continue
@@ -984,6 +984,15 @@ class ExpressionMatrixBuilder:
         self._feature_col = config.data.feature_col
         self._value_col = config.data.value_col
         self._max_pivot_cells = int(config.preprocess.max_pivot_cells)
+        absent_feature_fill = config.preprocess.absent_feature_fill
+        if absent_feature_fill != 0 and absent_feature_fill != "nan":
+            raise CVError(
+                "Unsupported preprocess.absent_feature_fill: "
+                f"{absent_feature_fill}"
+            )
+        self._absent_feature_fill_value = (
+            0.0 if absent_feature_fill == 0 else float("nan")
+        )
         self._cache_tempdir: TemporaryDirectory[str] | None = None
         self._cached_long_path: Path | None = None
         self._cached_species: set[str] | None = None
@@ -1209,9 +1218,14 @@ class ExpressionMatrixBuilder:
         long_df: pl.DataFrame,
         ordering_df: pl.DataFrame,
         feature_names: list[str],
+        absent_feature_fill_value: float = 0.0,
     ) -> np.ndarray:
         if long_df.height == 0:
-            return np.zeros((ordering_df.height, len(feature_names)), dtype=float)
+            return np.full(
+                (ordering_df.height, len(feature_names)),
+                absent_feature_fill_value,
+                dtype=float,
+            )
         species_index = (
             ordering_df.select("__species")
             .unique(maintain_order=True)
@@ -1223,15 +1237,18 @@ class ExpressionMatrixBuilder:
             .join(species_index, on="__species", how="inner")
             .join(feature_index, on="__feature", how="inner")
         )
+        matrix_rows = coordinates.get_column("__matrix_row").to_numpy()
+        matrix_cols = coordinates.get_column("__matrix_col").to_numpy()
         matrix = np.zeros((species_index.height, len(feature_names)), dtype=float)
         np.add.at(
             matrix,
-            (
-                coordinates.get_column("__matrix_row").to_numpy(),
-                coordinates.get_column("__matrix_col").to_numpy(),
-            ),
+            (matrix_rows, matrix_cols),
             coordinates.get_column("__value").to_numpy(),
         )
+        if np.isnan(absent_feature_fill_value):
+            present = np.zeros_like(matrix, dtype=bool)
+            present[matrix_rows, matrix_cols] = True
+            matrix[~present] = np.nan
         ordered_rows = (
             ordering_df.join(species_index, on="__species", how="left", validate="m:1")
             .sort("__row_idx")
@@ -1329,10 +1346,22 @@ class ExpressionMatrixBuilder:
             long_df = self._collect_expression(long_scan)
             self._validate_tpm_frame(long_df)
             long_df = long_df.select(["__species", "__feature", "__value"])
-            return self._matrix_from_long_df(long_df, ordering_df, feature_names), feature_names
+            return (
+                self._matrix_from_long_df(
+                    long_df,
+                    ordering_df,
+                    feature_names,
+                    self._absent_feature_fill_value,
+                ),
+                feature_names,
+            )
 
         feature_chunk_size = max(1, self._max_pivot_cells // max(1, len(unique_species)))
-        matrix = np.zeros((len(species_order), len(feature_names)), dtype=float)
+        matrix = np.full(
+            (len(species_order), len(feature_names)),
+            self._absent_feature_fill_value,
+            dtype=float,
+        )
         for start in range(0, len(feature_names), feature_chunk_size):
             stop = min(start + feature_chunk_size, len(feature_names))
             chunk_features = feature_names[start:stop]
@@ -1341,13 +1370,50 @@ class ExpressionMatrixBuilder:
             )
             self._validate_tpm_frame(chunk_df)
             chunk_df = chunk_df.select(["__species", "__feature", "__value"])
-            chunk_matrix = self._matrix_from_long_df(chunk_df, ordering_df, chunk_features)
+            chunk_matrix = self._matrix_from_long_df(
+                chunk_df,
+                ordering_df,
+                chunk_features,
+                self._absent_feature_fill_value,
+            )
             expected_shape = (len(species_order), len(chunk_features))
             if chunk_matrix.shape != expected_shape:
                 raise CVError("Expression matrix chunking produced inconsistent chunk shape")
             matrix[:, start:stop] = chunk_matrix
 
         return matrix, feature_names
+
+
+def _column_nan_mean(values: np.ndarray) -> np.ndarray:
+    observed = np.isfinite(values)
+    counts = np.count_nonzero(observed, axis=0)
+    totals = np.sum(np.where(observed, values, 0.0), axis=0)
+    return np.asarray(
+        np.divide(
+            totals,
+            counts,
+            out=np.full(values.shape[1], np.nan, dtype=float),
+            where=counts > 0,
+        ),
+        dtype=float,
+    )
+
+
+def _column_nan_variance(values: np.ndarray, *, ddof: int) -> np.ndarray:
+    observed = np.isfinite(values)
+    counts = np.count_nonzero(observed, axis=0)
+    means = _column_nan_mean(values)
+    squared_deviations = np.where(observed, (values - means) ** 2, 0.0)
+    denominator = counts - int(ddof)
+    return np.asarray(
+        np.divide(
+            np.sum(squared_deviations, axis=0),
+            denominator,
+            out=np.full(values.shape[1], np.nan, dtype=float),
+            where=denominator > 0,
+        ),
+        dtype=float,
+    )
 
 
 def _pair_group_contrasts(
@@ -1377,8 +1443,8 @@ def _pair_group_contrasts(
         label1_idx = group_indices[y_train[group_indices] == 1]
         if label0_idx.size == 0 or label1_idx.size == 0:
             continue
-        label1_mean = np.mean(x_train_expr[label1_idx][:, selected], axis=0)
-        label0_mean = np.mean(x_train_expr[label0_idx][:, selected], axis=0)
+        label1_mean = _column_nan_mean(x_train_expr[label1_idx][:, selected])
+        label0_mean = _column_nan_mean(x_train_expr[label0_idx][:, selected])
         contrast_rows.append(np.asarray(label1_mean - label0_mean, dtype=float))
 
     if not contrast_rows:
@@ -1553,10 +1619,17 @@ def _apply_ranked_feature_filter(
             return RankedFeatureFilterResult(
                 selected=selected, priority_scores=None, score_rows=rows
             )
-        effect = np.asarray(np.mean(contrasts, axis=0), dtype=float)
+        effect = _column_nan_mean(contrasts)
         if n_valid_contrast_pairs > 1:
-            standard_error = np.asarray(np.std(contrasts, axis=0, ddof=1), dtype=float) / np.sqrt(
-                float(n_valid_contrast_pairs)
+            valid_contrast_counts = np.count_nonzero(np.isfinite(contrasts), axis=0)
+            contrast_variance = _column_nan_variance(contrasts, ddof=1)
+            standard_error = np.sqrt(
+                np.divide(
+                    contrast_variance,
+                    valid_contrast_counts,
+                    out=np.full(candidate_count, np.nan, dtype=float),
+                    where=valid_contrast_counts > 0,
+                )
             )
         else:
             fallback_to_unstandardized_effect = True
@@ -1569,20 +1642,29 @@ def _apply_ranked_feature_filter(
             raise CVError("ranked_feature_filter method unpaired requires both labels")
         label0_values = x_train_expr[label0_idx][:, selected]
         label1_values = x_train_expr[label1_idx][:, selected]
-        effect = np.asarray(
-            np.mean(label1_values, axis=0) - np.mean(label0_values, axis=0),
-            dtype=float,
-        )
+        effect = _column_nan_mean(label1_values) - _column_nan_mean(label0_values)
         if label0_idx.size > 1 and label1_idx.size > 1:
+            label0_counts = np.count_nonzero(np.isfinite(label0_values), axis=0)
+            label1_counts = np.count_nonzero(np.isfinite(label1_values), axis=0)
             standard_error = np.sqrt(
-                np.var(label1_values, axis=0, ddof=1) / float(label1_idx.size)
-                + np.var(label0_values, axis=0, ddof=1) / float(label0_idx.size)
+                np.divide(
+                    _column_nan_variance(label1_values, ddof=1),
+                    label1_counts,
+                    out=np.full(candidate_count, np.nan, dtype=float),
+                    where=label1_counts > 0,
+                )
+                + np.divide(
+                    _column_nan_variance(label0_values, ddof=1),
+                    label0_counts,
+                    out=np.full(candidate_count, np.nan, dtype=float),
+                    where=label0_counts > 0,
+                )
             )
         else:
             fallback_to_unstandardized_effect = True
     elif method == "variance":
         if x_train_expr.shape[0] > 1:
-            score = np.asarray(np.var(x_train_expr[:, selected], axis=0, ddof=1), dtype=float)
+            score = _column_nan_variance(x_train_expr[:, selected], ddof=1)
         else:
             score = np.zeros(candidate_count, dtype=float)
     else:  # pragma: no cover - guarded by config validation.
@@ -1598,7 +1680,12 @@ def _apply_ranked_feature_filter(
                 float(np.quantile(positive_se, _RANKED_FEATURE_SE_QUANTILE)),
                 _RANKED_FEATURE_SCORE_FLOOR,
             )
-            score = np.abs(effect) / np.maximum(standard_error, s0)
+            denominator = np.where(
+                np.isfinite(standard_error),
+                np.maximum(standard_error, s0),
+                s0,
+            )
+            score = np.abs(effect) / denominator
         if fallback_to_unstandardized_effect and warnings is not None:
             warnings.append(
                 f"ranked_feature_filter method {method} used unstandardized effect because "
@@ -1750,7 +1837,7 @@ def _select_feature_indices_with_counts(
         min_variance = config.preprocess.low_variance_filter.min_variance
         if min_variance is None:
             raise CVError("low_variance_filter is enabled but min_variance is missing")
-        variances = np.var(x_train_expr[:, selected], axis=0)
+        variances = _column_nan_variance(x_train_expr[:, selected], ddof=0)
         selected = selected[variances >= float(min_variance)]
     n_features_after_low_variance = int(selected.size)
 
@@ -1823,14 +1910,40 @@ def _apply_correlation_filter(
         raise CVError("ranked feature priority scores must align with the selected feature set")
 
     train_selected = x_train_log[:, selected]
-    if config.preprocess.correlation_filter.method == "spearman":
-        ranked = np.apply_along_axis(rankdata, 0, train_selected)
-        corr = np.corrcoef(ranked, rowvar=False)
+    method = config.preprocess.correlation_filter.method
+    feature_count = train_selected.shape[1]
+    if np.isfinite(train_selected).all():
+        if method == "spearman":
+            ranked = np.apply_along_axis(rankdata, 0, train_selected)
+            corr = np.corrcoef(ranked, rowvar=False)
+        else:
+            corr = np.corrcoef(train_selected, rowvar=False)
+        corr = np.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
+        local_variances = np.var(train_selected, axis=0)
     else:
-        corr = np.corrcoef(train_selected, rowvar=False)
-    corr = np.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
-
-    local_variances = np.var(train_selected, axis=0)
+        corr = np.eye(feature_count, dtype=float)
+        for left_idx in range(feature_count):
+            for right_idx in range(left_idx):
+                observed = np.isfinite(train_selected[:, left_idx]) & np.isfinite(
+                    train_selected[:, right_idx]
+                )
+                left = train_selected[observed, left_idx]
+                right = train_selected[observed, right_idx]
+                if left.size < 2 or np.ptp(left) == 0.0 or np.ptp(right) == 0.0:
+                    value = 0.0
+                else:
+                    if method == "spearman":
+                        left = rankdata(left, method="average")
+                        right = rankdata(right, method="average")
+                    value = float(np.corrcoef(left, right)[0, 1])
+                    if not np.isfinite(value):
+                        value = 0.0
+                corr[left_idx, right_idx] = value
+                corr[right_idx, left_idx] = value
+        local_variances = np.nan_to_num(
+            _column_nan_variance(train_selected, ddof=0),
+            nan=-np.inf,
+        )
     order = sorted(
         range(selected.size),
         key=lambda idx: (

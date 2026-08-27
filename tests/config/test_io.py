@@ -69,6 +69,7 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.model_selection.selection_metric == "log_loss"
     assert resolved.model_selection.selection_rule == "best"
     assert resolved.model_selection.candidate_source_policy == "per_sample_set"
+    assert resolved.preprocess.absent_feature_fill == 0
     assert resolved.preprocess.expression_transform.method == "log1p"
     assert resolved.preprocess.sparse_feature_filter.enabled is True
     assert (
@@ -102,6 +103,7 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
     assert resolved.model_selection.selection_metric == "log_loss"
     assert resolved.model_selection.selection_rule == "best"
     assert resolved.model_selection.candidate_source_policy == "per_sample_set"
+    assert resolved.preprocess.absent_feature_fill == 0
     assert resolved.preprocess.expression_transform.method == "log1p"
     assert resolved.preprocess.sparse_feature_filter.enabled is True
     assert (
@@ -459,6 +461,59 @@ preprocess:
     )
 
     with pytest.raises(ConfigError):
+        load_and_resolve_config([cfg])
+
+
+def test_preprocess_nan_absent_feature_fill_accepts_random_forest(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "valid.yml",
+        """
+preprocess:
+  absent_feature_fill: nan
+model:
+  name: random_forest
+""".strip()
+        + "\n",
+    )
+
+    resolved = load_and_resolve_config([cfg])
+
+    assert resolved.preprocess.absent_feature_fill == "nan"
+
+
+@pytest.mark.parametrize("value", ["zero", "false", "1"])
+def test_preprocess_absent_feature_fill_rejects_values_other_than_numeric_zero_or_nan(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        f"""
+preprocess:
+  absent_feature_fill: {value}
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError, match="absent_feature_fill"):
+        load_and_resolve_config([cfg])
+
+
+def test_preprocess_nan_absent_feature_fill_rejects_non_random_forest(
+    tmp_path: Path,
+) -> None:
+    cfg = _write(
+        tmp_path / "invalid.yml",
+        """
+preprocess:
+  absent_feature_fill: nan
+model:
+  name: logistic_elasticnet
+""".strip()
+        + "\n",
+    )
+
+    with pytest.raises(ConfigError, match="only supported.*random_forest"):
         load_and_resolve_config([cfg])
 
 

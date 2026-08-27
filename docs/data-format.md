@@ -220,10 +220,13 @@ Rules:
 - invalid consumed rows are reported with source-line examples; invalid values are never
   interpreted as zero
 - duplicate `(species, feature)` rows are summed after every contributing value is validated
-- an absent `(species, feature)` coordinate is represented as zero in the constructed matrix
-- consequently, the long format cannot distinguish a truly measured zero from
-  an unmeasured coordinate; encode or validate measurement coverage upstream
-  when that distinction matters
+- an absent `(species, feature)` coordinate is represented as zero by default
+- set `preprocess.absent_feature_fill: nan` with `model.name: random_forest` to
+  represent absent coordinates as missing values instead; explicit TPM values
+  must still be finite and cannot be written as `NA`
+- in the default `0` mode, the long format cannot distinguish a truly
+  measured zero from an unmeasured coordinate; encode or validate measurement
+  coverage upstream when that distinction matters
 
 Example:
 

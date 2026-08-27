@@ -123,6 +123,7 @@ sampling:
   weighting: none
 preprocess:
   max_pivot_cells: 50000000
+  absent_feature_fill: 0
   expression_transform:
     method: log1p
   sparse_feature_filter:
@@ -199,6 +200,7 @@ runtime:
 - `sampling.strategy`: `all_samples` | `group_balanced`
 - `sampling.weighting`: `none` | `group_label_inverse`
 - `preprocess.expression_transform.method`: `none` | `log1p` | `sample_rank` | `sample_percentile_rank`
+- `preprocess.absent_feature_fill`: `0` | `nan`
 - `preprocess.feature_scaling.method`: `none` | `standard`
 - `ensemble.probability_aggregation`: `mean` | `median`
 - `model_selection.search_strategy`: `grid` | `random` | `tpe`
@@ -342,6 +344,19 @@ Compatibility rules:
   - default: `50000000`
   - meaning: upper bound for direct species x feature pivot size before chunked
     pivot mode
+- `preprocess.absent_feature_fill`
+  - type: `0 | nan`
+  - default: `0`
+  - behavior:
+    - `0`: represent an absent `(species, feature)` coordinate as numeric zero
+    - `nan`: preserve it as a floating-point missing value through expression
+      transforms, optional scaling, model fitting, and prediction
+  - rule: `nan` is supported only with `model.name=random_forest`; the other
+    model families reject missing feature values
+  - sparse filtering still counts an absent coordinate as not nonzero; the
+    remaining feature statistics use available finite observations
+  - the selected policy is stored in full-run model bundles and reused during
+    `predict`, including for bundle features entirely absent from prediction input
 
 ### `preprocess.expression_transform`
 

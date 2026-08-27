@@ -30,6 +30,7 @@ CorrelationMethod = Literal["pearson", "spearman"]
 ExpressionTransformMethod = Literal["none", "log1p", "sample_rank", "sample_percentile_rank"]
 FeatureScalingMethod = Literal["none", "standard"]
 RankedFeatureFilterMethod = Literal["none", "pair_aware", "unpaired", "variance"]
+AbsentFeatureFill = Literal[0, "nan"]
 
 
 class StrictModel(BaseModel):
@@ -289,6 +290,7 @@ class PreprocessConfig(StrictModel):
     """Preprocessing settings."""
 
     max_pivot_cells: PositiveInt = 50_000_000
+    absent_feature_fill: AbsentFeatureFill = 0
     expression_transform: ExpressionTransformConfig = Field(
         default_factory=ExpressionTransformConfig
     )
@@ -301,6 +303,13 @@ class PreprocessConfig(StrictModel):
     )
     correlation_filter: CorrelationFilterConfig = Field(default_factory=CorrelationFilterConfig)
     feature_scaling: FeatureScalingConfig = Field(default_factory=FeatureScalingConfig)
+
+    @field_validator("absent_feature_fill", mode="before")
+    @classmethod
+    def reject_boolean_absent_feature_fill(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("preprocess.absent_feature_fill must be 0 or nan")
+        return value
 
 
 class ModelConfig(StrictModel):
@@ -495,6 +504,14 @@ class AppConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_contrast_pair_dependencies(self) -> AppConfig:
+        if (
+            self.preprocess.absent_feature_fill == "nan"
+            and self.model.name != "random_forest"
+        ):
+            raise ValueError(
+                "preprocess.absent_feature_fill=nan is only supported when "
+                "model.name=random_forest"
+            )
         if (
             self.preprocess.ranked_feature_filter.method == "pair_aware"
             and self.data.contrast_pair_col is None
