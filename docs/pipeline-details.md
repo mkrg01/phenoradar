@@ -153,6 +153,9 @@ After all folds:
 - write macro/micro aggregate metrics.
 - write the configured fixed prediction threshold.
 - build interpretation tables (`feature_importance`, `coefficients`).
+- for linear models, build one local-evidence record for every fixed-threshold OOF
+  misclassification from only the models used in its held-out fold; expression
+  references use the unique species sampled for that fold's training.
 - when `evaluation.group_bootstrap.enabled=true`, pool the OOF predictions and
   resample the intact `split.group_col` groups to estimate percentile confidence
   intervals for ROC AUC, Average Precision, balanced accuracy, MCC, Brier score,

@@ -4995,6 +4995,25 @@ _CANDIDATE_MANIFEST_SCHEMA = {
     "n_features": pl.Int64,
     "figure_path": pl.String,
 }
+_CV_SPECIES_EVIDENCE_MANIFEST_SCHEMA = {
+    "fold_id": pl.String,
+    "species": pl.String,
+    "group_id": pl.String,
+    "true_label": pl.Int8,
+    "pred_label": pl.Int8,
+    "confusion_group": pl.String,
+    "prob": pl.Float64,
+    "log_loss": pl.Float64,
+    "uncertainty_std": pl.Float64,
+    "n_model_predictions": pl.Int64,
+    "model_prob_min": pl.Float64,
+    "model_prob_q1": pl.Float64,
+    "model_prob_median": pl.Float64,
+    "model_prob_q3": pl.Float64,
+    "model_prob_max": pl.Float64,
+    "n_features": pl.Int64,
+    "figure_path": pl.String,
+}
 
 
 def _candidate_probability_bin(probability: float) -> str:
@@ -5069,12 +5088,19 @@ def _candidate_evidence_figure(
     orthogroup_annotations: pl.DataFrame | None,
     trait_name: str,
     out_path: Path,
+    evidence_context: str = "candidate",
 ) -> None:
+    if evidence_context not in {"candidate", "cv_error"}:
+        raise FigureError(f"Unsupported species evidence context: {evidence_context}")
+    is_cv_error = evidence_context == "cv_error"
+    expression_col = (
+        "target_log2_tpm_plus1" if is_cv_error else "candidate_log2_tpm_plus1"
+    )
     required_features = {
         "feature",
         "local_rank",
         "contribution_mean",
-        "candidate_log2_tpm_plus1",
+        expression_col,
     }
     missing_features = sorted(required_features - set(candidate_features.columns))
     if missing_features:
@@ -5095,15 +5121,24 @@ def _candidate_evidence_figure(
     labels = _candidate_feature_labels(features, orthogroup_annotations)
     contributions = np.asarray(ordered.get_column("contribution_mean").to_list(), dtype=float)
     candidate_expression = np.asarray(
-        ordered.get_column("candidate_log2_tpm_plus1").to_list(), dtype=float
+        ordered.get_column(expression_col).to_list(), dtype=float
     )
     species = str(candidate["species"])
     probability = float(candidate["prob"])
-    family_id = str(candidate.get("family_id") or "unassigned")
-    family_name = str(candidate.get("family_name") or family_id)
-    family_text = family_name
-    if family_id not in {"", "unassigned", family_name}:
-        family_text = f"{family_name} ({family_id})"
+    if is_cv_error:
+        group_id = str(candidate.get("group_id") or "unassigned")
+        fold_id = str(candidate.get("fold_id") or "NA")
+        label = int(candidate["label"])
+        pred_label = int(candidate["pred_label"])
+        confusion_group = str(candidate["confusion_group"])
+        metadata_text = f"Fold: {fold_id} | Group: {group_id}"
+    else:
+        family_id = str(candidate.get("family_id") or "unassigned")
+        family_name = str(candidate.get("family_name") or family_id)
+        family_text = family_name
+        if family_id not in {"", "unassigned", family_name}:
+            family_text = f"{family_name} ({family_id})"
+        metadata_text = f"Family: {family_text}"
 
     feature_count = len(features)
     figure_height = max(4.8, 1.85 + 0.39 * feature_count)
@@ -5141,7 +5176,7 @@ def _candidate_evidence_figure(
     fig.text(
         0.025,
         0.905,
-        f"Family: {family_text}",
+        metadata_text,
         ha="left",
         va="top",
         fontsize=7,
@@ -5156,9 +5191,23 @@ def _candidate_evidence_figure(
         fontsize=9,
         color=_AXIS_COLOR,
     )
+    if is_cv_error:
+        fig.text(
+            0.98,
+            0.905,
+            f"True = {label} | Predicted = {pred_label} | {confusion_group}",
+            ha="right",
+            va="top",
+            fontsize=7,
+            color=_MUTED_TEXT_COLOR,
+        )
 
     ax_stability.set_title(
-        "A   Prediction stability across outer-CV models",
+        (
+            "A   OOF prediction across fold ensemble models"
+            if is_cv_error
+            else "A   Prediction stability across outer-CV models"
+        ),
         loc="left",
         fontsize=8,
         pad=6,
@@ -5207,8 +5256,9 @@ def _candidate_evidence_figure(
             linewidths=0.5,
             zorder=4,
         )
+        summary_label = "Ensemble" if is_cv_error else "Outer-CV"
         summary_text = (
-            f"Outer-CV median {float(median):.3f} "
+            f"{summary_label} median {float(median):.3f} "
             f"(range {float(np.min(fold_values)):.3f}–{float(np.max(fold_values)):.3f})"
         )
         ax_stability.text(
@@ -5230,12 +5280,19 @@ def _candidate_evidence_figure(
         edgecolors="white",
         linewidths=0.55,
         zorder=5,
-        label="Final refit",
+        label="OOF aggregate" if is_cv_error else "Final refit",
     )
     ax_stability.set_xlim(0.0, 1.0)
     ax_stability.set_ylim(-0.14, 0.22)
     ax_stability.set_yticks([])
     ax_stability.set_xlabel(f"Predicted probability of {trait_name} = 1", labelpad=2)
+    ax_stability.axvline(
+        FIXED_PROBABILITY_THRESHOLD_VALUE,
+        color=_PROBABILITY_THRESHOLD_COLOR,
+        linewidth=0.8,
+        linestyle=(0, (4, 4)),
+        zorder=0,
+    )
     ax_stability.grid(axis="x", alpha=0.7)
     ax_stability.spines["left"].set_visible(False)
     ax_stability.legend(loc="upper left", frameon=False, fontsize=6, handletextpad=0.3)
@@ -5370,7 +5427,7 @@ def _candidate_evidence_figure(
             linestyle="none",
             color="#111111",
             markersize=4,
-            label="Candidate",
+            label="OOF species" if is_cv_error else "Candidate",
         ),
     ]
     ax_expression.legend(
@@ -5387,7 +5444,8 @@ def _candidate_evidence_figure(
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    _save_pdf_figure(fig, out_path, title=f"Candidate evidence: {species}")
+    title_prefix = "CV misclassification evidence" if is_cv_error else "Candidate evidence"
+    _save_pdf_figure(fig, out_path, title=f"{title_prefix}: {species}")
 
 
 def write_candidate_evidence_figures(
@@ -5488,6 +5546,188 @@ def write_candidate_evidence_figures(
     )
     manifest.write_csv(
         output_root / "candidate_manifest.tsv",
+        separator="\t",
+        float_precision=8,
+        null_value="NA",
+    )
+    return manifest, warnings
+
+
+def write_cv_species_evidence_figures(
+    *,
+    run_dir: Path,
+    species_evidence: pl.DataFrame,
+    features: pl.DataFrame,
+    reference_expression: pl.DataFrame,
+    ensemble_model_probs: pl.DataFrame | None,
+    trait_name: str,
+    orthogroup_annotations: pl.DataFrame | None = None,
+    parallel_workers: int = 1,
+) -> tuple[pl.DataFrame, list[str]]:
+    """Write one candidate-evidence-style PDF per misclassified OOF species."""
+    if species_evidence.height == 0 or features.height == 0:
+        return pl.DataFrame(schema=_CV_SPECIES_EVIDENCE_MANIFEST_SCHEMA), []
+    required_species = {
+        "fold_id",
+        "species",
+        "group_id",
+        "label",
+        "pred_label",
+        "confusion_group",
+        "prob",
+        "log_loss",
+        "uncertainty_std",
+    }
+    missing_species = sorted(required_species - set(species_evidence.columns))
+    if missing_species:
+        raise FigureError(
+            "CV species evidence schema is invalid: " + ", ".join(missing_species)
+        )
+    required_features = {
+        "fold_id",
+        "species",
+        "feature",
+        "local_rank",
+        "contribution_mean",
+        "target_log2_tpm_plus1",
+    }
+    missing_features = sorted(required_features - set(features.columns))
+    if missing_features:
+        raise FigureError(
+            "CV species feature evidence schema is invalid: "
+            + ", ".join(missing_features)
+        )
+    required_reference = {
+        "fold_id",
+        "target_species",
+        "species",
+        "label",
+        "feature",
+        "log2_tpm_plus1",
+    }
+    missing_reference = sorted(required_reference - set(reference_expression.columns))
+    if missing_reference:
+        raise FigureError(
+            "CV species reference-expression schema is invalid: "
+            + ", ".join(missing_reference)
+        )
+    if ensemble_model_probs is not None and ensemble_model_probs.height > 0:
+        required_model_probs = {"fold_id", "species", "prob"}
+        missing_model_probs = sorted(required_model_probs - set(ensemble_model_probs.columns))
+        if missing_model_probs:
+            raise FigureError(
+                "ensemble_model_probs.tsv schema is invalid for CV species evidence: "
+                + ", ".join(missing_model_probs)
+            )
+
+    output_root = run_dir / "cv" / "figures" / "species_evidence"
+    output_root.mkdir(parents=True, exist_ok=True)
+    jobs: list[_FigureJob] = []
+    manifest_rows: list[dict[str, Any]] = []
+    used_names_by_group: dict[str, set[str]] = {}
+    ordered_species = species_evidence.sort(
+        ["confusion_group", "log_loss", "species"],
+        descending=[False, True, False],
+    )
+    for target in ordered_species.iter_rows(named=True):
+        species = str(target["species"])
+        fold_id = str(target["fold_id"])
+        confusion_group = str(target["confusion_group"])
+        if confusion_group not in {"FN", "FP"}:
+            raise FigureError(
+                "CV species evidence confusion_group must be FN or FP: "
+                f"{confusion_group}"
+            )
+        directory = "false_negative" if confusion_group == "FN" else "false_positive"
+        used_names = used_names_by_group.setdefault(directory, set())
+        filename = _candidate_filename(species, used_names=used_names)
+        relative_path = Path(directory) / filename
+        out_path = output_root / relative_path
+        target_features = features.filter(
+            (pl.col("fold_id") == fold_id) & (pl.col("species") == species)
+        ).sort("local_rank")
+        if target_features.height == 0:
+            continue
+        feature_names = target_features.get_column("feature").to_list()
+        reference_subset = reference_expression.filter(
+            (pl.col("fold_id") == fold_id)
+            & (pl.col("target_species") == species)
+            & pl.col("feature").is_in(feature_names)
+        )
+        if ensemble_model_probs is None:
+            model_prob_subset = pl.DataFrame({"prob": [float(target["prob"])]})
+        else:
+            model_prob_subset = ensemble_model_probs.filter(
+                (pl.col("fold_id") == fold_id) & (pl.col("species") == species)
+            )
+        jobs.append(
+            (
+                f"cv_species_evidence_{fold_id}_{species}",
+                _candidate_evidence_figure,
+                (),
+                {
+                    "candidate": target,
+                    "candidate_features": target_features,
+                    "reference_expression": reference_subset,
+                    "cross_fold_predictions": model_prob_subset,
+                    "orthogroup_annotations": orthogroup_annotations,
+                    "trait_name": trait_name,
+                    "out_path": out_path,
+                    "evidence_context": "cv_error",
+                },
+                False,
+            )
+        )
+        model_values = np.asarray(
+            model_prob_subset.get_column("prob").to_list()
+            if "prob" in model_prob_subset.columns
+            else [],
+            dtype=float,
+        )
+        model_values = model_values[np.isfinite(model_values)]
+        if model_values.size:
+            q1, median, q3 = np.quantile(model_values, [0.25, 0.50, 0.75])
+            model_min: float | None = float(np.min(model_values))
+            model_max: float | None = float(np.max(model_values))
+            model_q1: float | None = float(q1)
+            model_median: float | None = float(median)
+            model_q3: float | None = float(q3)
+        else:
+            model_min = model_q1 = model_median = model_q3 = model_max = None
+        uncertainty = target.get("uncertainty_std")
+        manifest_rows.append(
+            {
+                "fold_id": fold_id,
+                "species": species,
+                "group_id": str(target["group_id"]),
+                "true_label": int(target["label"]),
+                "pred_label": int(target["pred_label"]),
+                "confusion_group": confusion_group,
+                "prob": float(target["prob"]),
+                "log_loss": float(target["log_loss"]),
+                "uncertainty_std": (
+                    None if uncertainty is None else float(uncertainty)
+                ),
+                "n_model_predictions": int(model_values.size),
+                "model_prob_min": model_min,
+                "model_prob_q1": model_q1,
+                "model_prob_median": model_median,
+                "model_prob_q3": model_q3,
+                "model_prob_max": model_max,
+                "n_features": target_features.height,
+                "figure_path": relative_path.as_posix(),
+            }
+        )
+
+    warnings = _run_figure_jobs(jobs, parallel_workers=parallel_workers)
+    manifest = pl.DataFrame(
+        manifest_rows, schema=_CV_SPECIES_EVIDENCE_MANIFEST_SCHEMA
+    ).sort(
+        ["confusion_group", "log_loss", "species"],
+        descending=[False, True, False],
+    )
+    manifest.write_csv(
+        output_root / "species_manifest.tsv",
         separator="\t",
         float_precision=8,
         null_value="NA",

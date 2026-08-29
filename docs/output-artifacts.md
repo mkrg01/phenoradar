@@ -291,6 +291,21 @@ Always written:
 
 Conditionally written:
 
+- `cv/tables/cv_species_evidence.tsv` (linear outer-fold model and at least one
+  fixed-threshold OOF misclassification)
+  - one row per plotted FP/FN species
+  - columns include `fold_id`, `species`, `group_id`, true/predicted labels,
+    `confusion_group`, OOF probability, species-level log loss, optional ensemble
+    uncertainty, and model count
+- `cv/tables/cv_species_feature_evidence.tsv` (same condition)
+  - one row per species-local feature, ranked by mean absolute local contribution
+    from only the models used for that species' held-out-fold OOF prediction
+  - columns include signed/absolute contribution summaries, raw target TPM,
+    `log2(TPM + 1)`, local rank, and model count
+- `cv/tables/cv_species_reference_expression.tsv` (same condition)
+  - expression references for the local features of each misclassified target species
+  - references are restricted to the unique training species actually sampled by at
+    least one ensemble member in that target's outer fold
 - `cv/tables/group_bootstrap_metrics.tsv`
   (`evaluation.group_bootstrap.enabled=true`)
   - one row per metric (`roc_auc`, `pr_auc`, `balanced_accuracy`, `mcc`,
@@ -846,6 +861,21 @@ when individual folds are single-label.
 - `cv/figures/cv_fold_trait_probability.svg`
   - Fold-level probability distribution grouped by trait.
   - Useful for checking fold-to-fold drift or fold-specific overlap.
+- `cv/figures/species_evidence/` (linear outer-fold model and at least one OOF FP/FN)
+  - contains one vector PDF per misclassified OOF species, grouped into
+    `false_positive/` and `false_negative/`
+  - panel A shows the individual model probabilities from the actual held-out fold,
+    the aggregate OOF probability, and the fixed threshold
+  - panel B shows signed species-local contributions to the linear score, ranked by
+    mean absolute contribution across that fold's ensemble members; features absent
+    from a model-local schema contribute zero
+  - panel C compares the target's `log2(TPM + 1)` with label-0 and label-1 expression
+    among the species sampled for that fold's training
+  - `species_manifest.tsv` records fold/group identity, true and predicted labels,
+    FP/FN status, OOF probability, log loss, model-probability summaries, feature
+    count, and relative PDF path
+  - local contribution is unavailable for non-linear models; PhenoRadar skips these
+    PDFs with a warning rather than substituting a different explainer
 - `cv/figures/feature_filter_funnel.svg`
   - Outer-CV feature-count trend through the enabled `preprocess.*_filter` steps.
   - Line is median count; shaded band is IQR; dashed lines are min-max.

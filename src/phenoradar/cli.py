@@ -41,6 +41,7 @@ from phenoradar.figures import (
     FigureError,
     figure_annotation_features,
     write_candidate_evidence_figures,
+    write_cv_species_evidence_figures,
     write_group_probability_figure,
     write_predict_figures,
     write_run_figures,
@@ -1124,6 +1125,37 @@ def _run_single(
     cv_artifacts.oof_predictions.write_csv(
         cv_tables_dir / "prediction_cv.tsv", separator="\t", float_precision=8, null_value="NA"
     )
+    cv_species_evidence = getattr(cv_artifacts, "cv_species_evidence", None)
+    cv_species_feature_evidence = getattr(
+        cv_artifacts, "cv_species_feature_evidence", None
+    )
+    cv_species_reference_expression = getattr(
+        cv_artifacts, "cv_species_reference_expression", None
+    )
+    if (
+        isinstance(cv_species_evidence, pl.DataFrame)
+        and isinstance(cv_species_feature_evidence, pl.DataFrame)
+        and isinstance(cv_species_reference_expression, pl.DataFrame)
+        and cv_species_feature_evidence.height > 0
+    ):
+        cv_species_evidence.write_csv(
+            cv_tables_dir / "cv_species_evidence.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
+        cv_species_feature_evidence.write_csv(
+            cv_tables_dir / "cv_species_feature_evidence.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
+        cv_species_reference_expression.write_csv(
+            cv_tables_dir / "cv_species_reference_expression.tsv",
+            separator="\t",
+            float_precision=8,
+            null_value="NA",
+        )
     if cv_artifacts.ensemble_model_probs is not None:
         cv_artifacts.ensemble_model_probs.write_csv(
             cv_tables_dir / "ensemble_model_probs.tsv",
@@ -1569,6 +1601,21 @@ def _run_single(
                     ],
                 }
             )
+        if (
+            isinstance(cv_species_feature_evidence, pl.DataFrame)
+            and cv_species_feature_evidence.height > 0
+        ):
+            annotation_features = sorted(
+                {
+                    *annotation_features,
+                    *[
+                        str(value)
+                        for value in cv_species_feature_evidence.get_column(
+                            "feature"
+                        ).unique()
+                    ],
+                }
+            )
         orthogroup_annotations = load_orthogroup_annotations(
             None if orthogroup_annotation_path is None else Path(orthogroup_annotation_path),
             feature_names=annotation_features,
@@ -1649,6 +1696,28 @@ def _run_single(
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    if (
+        isinstance(cv_species_evidence, pl.DataFrame)
+        and isinstance(cv_species_feature_evidence, pl.DataFrame)
+        and isinstance(cv_species_reference_expression, pl.DataFrame)
+        and cv_species_feature_evidence.height > 0
+    ):
+        try:
+            _cv_species_manifest, cv_species_figure_warnings = (
+                write_cv_species_evidence_figures(
+                    run_dir=run_dir,
+                    species_evidence=cv_species_evidence,
+                    features=cv_species_feature_evidence,
+                    reference_expression=cv_species_reference_expression,
+                    ensemble_model_probs=cv_artifacts.ensemble_model_probs,
+                    trait_name=resolved.data.trait_col,
+                    orthogroup_annotations=orthogroup_annotations,
+                    parallel_workers=_artifact_parallel_workers(resolved),
+                )
+            )
+        except FigureError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        figure_warnings.extend(cv_species_figure_warnings)
     if (
         candidate_evidence_artifacts is not None
         and candidate_evidence_artifacts.features.height > 0

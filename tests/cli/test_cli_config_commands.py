@@ -6,6 +6,7 @@ from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 
+import numpy as np
 import polars as pl
 import pytest
 import yaml
@@ -207,6 +208,9 @@ def test_prepare_run_inputs_hashes_and_builds_splits_concurrently(
 def _stub_cv_artifacts(
     *,
     ensemble_model_probs: pl.DataFrame | None = None,
+    cv_species_evidence: pl.DataFrame | None = None,
+    cv_species_feature_evidence: pl.DataFrame | None = None,
+    cv_species_reference_expression: pl.DataFrame | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         thresholds=pl.DataFrame(
@@ -313,6 +317,9 @@ def _stub_cv_artifacts(
             }
         ),
         ensemble_model_probs=ensemble_model_probs,
+        cv_species_evidence=cv_species_evidence,
+        cv_species_feature_evidence=cv_species_feature_evidence,
+        cv_species_reference_expression=cv_species_reference_expression,
         model_selection_trials=None,
         model_selection_trials_summary=None,
         model_selection_selected=None,
@@ -2142,6 +2149,103 @@ def test_run_writes_ensemble_tables_when_available(
     run_dirs = sorted((tmp_path / "runs").glob("*_run_*"))
     assert len(run_dirs) == 1
     assert (run_dirs[0] / "cv" / "tables" / "ensemble_model_probs.tsv").exists()
+
+
+def test_run_writes_cv_species_evidence_tables_and_pdf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    config = _write(tmp_path / "config.yml", "{}\n")
+    species_evidence = pl.DataFrame(
+        {
+            "fold_id": ["0"],
+            "species": ["sp1"],
+            "group_id": ["family_a"],
+            "label": [1],
+            "pred_label": [0],
+            "confusion_group": ["FN"],
+            "prob": [0.2],
+            "log_loss": [-np.log(0.2)],
+            "uncertainty_std": [0.05],
+            "n_models": [2],
+        }
+    )
+    feature_evidence = pl.DataFrame(
+        {
+            "fold_id": ["0"],
+            "species": ["sp1"],
+            "label": [1],
+            "feature": ["OG1"],
+            "local_rank": [1],
+            "contribution_mean": [-1.0],
+            "contribution_mean_abs": [1.0],
+            "contribution_min": [-1.1],
+            "contribution_max": [-0.9],
+            "target_tpm": [1.0],
+            "target_log2_tpm_plus1": [1.0],
+            "n_models": [2],
+        }
+    )
+    reference_expression = pl.DataFrame(
+        {
+            "fold_id": ["0", "0"],
+            "target_species": ["sp1", "sp1"],
+            "species": ["train_0", "train_1"],
+            "label": [0, 1],
+            "feature": ["OG1", "OG1"],
+            "tpm": [1.0, 4.0],
+            "log2_tpm_plus1": [1.0, np.log2(5.0)],
+        }
+    )
+    ensemble_model_probs = pl.DataFrame(
+        {
+            "fold_id": ["0", "0"],
+            "model_index": [0, 1],
+            "species": ["sp1", "sp1"],
+            "prob": [0.15, 0.25],
+        }
+    )
+    monkeypatch.setattr(
+        "phenoradar.cli.load_and_resolve_config",
+        lambda *_args, **_kwargs: _stub_resolved_config(execution_stage="cv_only"),
+    )
+    monkeypatch.setattr(
+        "phenoradar.cli.build_split_artifacts",
+        lambda *_args, **_kwargs: _stub_split_artifacts(),
+    )
+    monkeypatch.setattr(
+        "phenoradar.cli.run_outer_cv",
+        lambda *_args, **_kwargs: _stub_cv_artifacts(
+            ensemble_model_probs=ensemble_model_probs,
+            cv_species_evidence=species_evidence,
+            cv_species_feature_evidence=feature_evidence,
+            cv_species_reference_expression=reference_expression,
+        ),
+    )
+    monkeypatch.setattr("phenoradar.cli.write_resolved_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("phenoradar.cli.write_run_figures", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("phenoradar.cli.collect_input_files", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "phenoradar.cli._build_run_fingerprint_metadata",
+        lambda **_kwargs: _stub_fingerprint_metadata(),
+    )
+    monkeypatch.setattr("phenoradar.cli.phenoradar_build_snapshot", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        "phenoradar.cli.runtime_environment_snapshot",
+        lambda *_args, **_kwargs: {"python": "test"},
+    )
+
+    result = runner.invoke(app, ["run", "-c", str(config)])
+
+    assert result.exit_code == 0, result.output
+    run_dir = next((tmp_path / "runs").glob("*_run_*"))
+    assert (run_dir / "cv" / "tables" / "cv_species_evidence.tsv").exists()
+    assert (run_dir / "cv" / "tables" / "cv_species_feature_evidence.tsv").exists()
+    assert (run_dir / "cv" / "tables" / "cv_species_reference_expression.tsv").exists()
+    evidence_root = run_dir / "cv" / "figures" / "species_evidence"
+    assert (evidence_root / "species_manifest.tsv").exists()
+    assert len(list((evidence_root / "false_negative").glob("*.pdf"))) == 1
 
 
 def test_predict_fails_when_config_resolution_raises(

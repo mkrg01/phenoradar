@@ -806,6 +806,9 @@ derived deterministically from `runtime.seed`.
     - also limits the candidate-local features in each
       `inference/figures/candidate_evidence/**/*.pdf`; candidate features are ranked
       separately for each species by mean absolute local contribution.
+    - also limits the species-local features in each misclassified-OOF diagnostic under
+      `cv/figures/species_evidence/**/*.pdf`; features are ranked separately for each
+      species using only the models that produced its held-out-fold prediction.
 
 ## `report`
 

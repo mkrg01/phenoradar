@@ -42,6 +42,7 @@ from phenoradar.feature_stability import (
 from phenoradar.interpret import (
     InterpretationError,
     ModelFeatureEntry,
+    _linear_coefficients,
     build_interpretation_tables,
 )
 from phenoradar.metrics import (
@@ -115,6 +116,9 @@ class CVArtifacts:
     timing: pl.DataFrame
     warnings: list[str]
     convergence_diagnostics: pl.DataFrame
+    cv_species_evidence: pl.DataFrame
+    cv_species_feature_evidence: pl.DataFrame
+    cv_species_reference_expression: pl.DataFrame
 
 
 @dataclass(frozen=True)
@@ -212,6 +216,9 @@ class OuterFoldResult:
     n_features_after_preprocess: int
     warnings: list[str]
     convergence_rows: list[dict[str, Any]]
+    cv_species_evidence: pl.DataFrame
+    cv_species_feature_evidence: pl.DataFrame
+    cv_species_reference_expression: pl.DataFrame
 
 
 @dataclass(frozen=True)
@@ -263,6 +270,7 @@ class OuterSampleSetFitResult:
     ensemble_model_prob_rows: list[dict[str, float | int | str]]
     model_sparsity_rows: list[dict[str, Any]]
     selected_features: list[str]
+    scaler: FeatureScaler
     filter_counts: FeatureFilterCounts
     ranked_feature_score_rows: list[dict[str, Any]]
     model_count: int
@@ -961,6 +969,276 @@ def fit_feature_scaling(
     else:
         x_target_scaled = np.asarray(scaler.transform(x_target_values), dtype=float)
     return x_train_scaled, x_target_scaled, scaler
+
+
+_CV_SPECIES_EVIDENCE_SCHEMA = {
+    "fold_id": pl.String,
+    "species": pl.String,
+    "group_id": pl.String,
+    "label": pl.Int8,
+    "pred_label": pl.Int8,
+    "confusion_group": pl.String,
+    "prob": pl.Float64,
+    "log_loss": pl.Float64,
+    "uncertainty_std": pl.Float64,
+    "n_models": pl.Int64,
+}
+_CV_SPECIES_FEATURE_EVIDENCE_SCHEMA = {
+    "fold_id": pl.String,
+    "species": pl.String,
+    "label": pl.Int8,
+    "feature": pl.String,
+    "local_rank": pl.Int64,
+    "contribution_mean": pl.Float64,
+    "contribution_mean_abs": pl.Float64,
+    "contribution_min": pl.Float64,
+    "contribution_max": pl.Float64,
+    "target_tpm": pl.Float64,
+    "target_log2_tpm_plus1": pl.Float64,
+    "n_models": pl.Int64,
+}
+_CV_SPECIES_REFERENCE_EXPRESSION_SCHEMA = {
+    "fold_id": pl.String,
+    "target_species": pl.String,
+    "species": pl.String,
+    "label": pl.Int8,
+    "feature": pl.String,
+    "tpm": pl.Float64,
+    "log2_tpm_plus1": pl.Float64,
+}
+_LOCAL_EVIDENCE_NONZERO_TOLERANCE = 1e-12
+
+
+def _empty_cv_species_evidence() -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    return (
+        pl.DataFrame(schema=_CV_SPECIES_EVIDENCE_SCHEMA),
+        pl.DataFrame(schema=_CV_SPECIES_FEATURE_EVIDENCE_SCHEMA),
+        pl.DataFrame(schema=_CV_SPECIES_REFERENCE_EXPRESSION_SCHEMA),
+    )
+
+
+def _build_cv_species_evidence(
+    *,
+    config: AppConfig,
+    fold_id: str,
+    model_entries: list[FinalModelEntry],
+    feature_names: list[str],
+    train_species: list[str],
+    valid_species: list[str],
+    valid_group_ids: list[str],
+    y_train: np.ndarray,
+    y_valid: np.ndarray,
+    x_train_raw: np.ndarray,
+    x_valid_raw: np.ndarray,
+    reference_indices: np.ndarray,
+    mean_prob: np.ndarray,
+    uncertainty_std: np.ndarray | None,
+    fixed_threshold: float,
+    top_features: int,
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, list[str]]:
+    """Build local linear evidence for species misclassified in one outer fold."""
+    empty_species, empty_features, empty_reference = _empty_cv_species_evidence()
+    warnings: list[str] = []
+    n_valid = len(valid_species)
+    if not (
+        len(valid_group_ids) == n_valid
+        and y_valid.shape == (n_valid,)
+        and mean_prob.shape == (n_valid,)
+        and x_valid_raw.shape == (n_valid, len(feature_names))
+    ):
+        raise CVError(f"Fold {fold_id} CV species-evidence validation schema is inconsistent")
+    if not (
+        y_train.shape == (len(train_species),)
+        and x_train_raw.shape == (len(train_species), len(feature_names))
+    ):
+        raise CVError(f"Fold {fold_id} CV species-evidence training schema is inconsistent")
+    if uncertainty_std is not None and uncertainty_std.shape != (n_valid,):
+        raise CVError(f"Fold {fold_id} CV species-evidence uncertainty schema is inconsistent")
+    if top_features < 1:
+        raise CVError("figures.top_features must be >= 1")
+
+    pred_label = (mean_prob >= fixed_threshold).astype(int)
+    error_indices = np.flatnonzero(pred_label != y_valid)
+    if error_indices.size == 0:
+        return empty_species, empty_features, empty_reference, warnings
+    if not model_entries:
+        warnings.append(
+            f"Skipped CV species evidence for fold {fold_id}: no fitted outer-fold models"
+        )
+        return empty_species, empty_features, empty_reference, warnings
+
+    coefficients: list[np.ndarray] = []
+    for entry in model_entries:
+        coefficient = _linear_coefficients(entry.model)
+        if coefficient is None:
+            warnings.append(
+                f"Skipped CV species evidence for fold {fold_id}: local contribution is "
+                "unavailable for the outer-fold model family"
+            )
+            return empty_species, empty_features, empty_reference, warnings
+        if coefficient.shape[0] != len(entry.feature_names):
+            raise CVError(
+                f"Fold {fold_id} model coefficient width does not match its feature schema"
+            )
+        coefficients.append(np.asarray(coefficient, dtype=float))
+
+    feature_index = {feature: idx for idx, feature in enumerate(feature_names)}
+    if len(feature_index) != len(feature_names):
+        raise CVError("Outer-CV transform feature schema contains duplicates")
+    model_features = sorted(
+        {feature for entry in model_entries for feature in entry.feature_names}
+    )
+    missing_features = sorted(set(model_features) - set(feature_names))
+    if missing_features:
+        raise CVError(
+            f"Fold {fold_id} model features are absent from the transform schema: "
+            + ", ".join(missing_features[:10])
+        )
+
+    x_valid_transformed = _apply_expression_transform_for_config(config, x_valid_raw)
+    x_error_transformed = x_valid_transformed[error_indices, :]
+    model_feature_index = {feature: idx for idx, feature in enumerate(model_features)}
+    contribution_cube = np.zeros(
+        (len(model_entries), error_indices.size, len(model_features)), dtype=float
+    )
+    for model_idx, (entry, coefficient) in enumerate(
+        zip(model_entries, coefficients, strict=True)
+    ):
+        selected_indices = np.array(
+            [feature_index[feature] for feature in entry.feature_names], dtype=int
+        )
+        selected = x_error_transformed[:, selected_indices]
+        scaled = apply_feature_scaling(
+            selected,
+            entry.scaler,
+            config.preprocess.feature_scaling.method,
+        )
+        model_contributions = scaled * coefficient[np.newaxis, :]
+        union_indices = np.array(
+            [model_feature_index[feature] for feature in entry.feature_names], dtype=int
+        )
+        contribution_cube[model_idx][:, union_indices] = model_contributions
+
+    contribution_mean = np.mean(contribution_cube, axis=0)
+    contribution_mean_abs = np.mean(np.abs(contribution_cube), axis=0)
+    contribution_min = np.min(contribution_cube, axis=0)
+    contribution_max = np.max(contribution_cube, axis=0)
+    uncertainty_values: list[float | None] = (
+        [None] * n_valid
+        if uncertainty_std is None
+        else uncertainty_std.astype(float, copy=False).tolist()
+    )
+
+    species_rows: list[dict[str, Any]] = []
+    feature_rows: list[dict[str, Any]] = []
+    selected_by_species: dict[int, list[int]] = {}
+    for error_idx, valid_idx in enumerate(error_indices.tolist()):
+        order = sorted(
+            range(len(model_features)),
+            key=lambda feature_idx: (
+                -float(contribution_mean_abs[error_idx, feature_idx]),
+                model_features[feature_idx],
+            ),
+        )
+        nonzero_order = [
+            feature_idx
+            for feature_idx in order
+            if float(contribution_mean_abs[error_idx, feature_idx])
+            > _LOCAL_EVIDENCE_NONZERO_TOLERANCE
+        ][:top_features]
+        species = valid_species[valid_idx]
+        if not nonzero_order:
+            warnings.append(
+                f"Skipped CV species evidence for {species} in fold {fold_id}: "
+                "all local contributions are zero"
+            )
+            continue
+        selected_by_species[valid_idx] = nonzero_order
+        label = int(y_valid[valid_idx])
+        predicted = int(pred_label[valid_idx])
+        probability = float(mean_prob[valid_idx])
+        true_class_probability = probability if label == 1 else 1.0 - probability
+        true_class_probability = float(
+            np.clip(true_class_probability, np.finfo(float).eps, 1.0)
+        )
+        species_rows.append(
+            {
+                "fold_id": fold_id,
+                "species": species,
+                "group_id": valid_group_ids[valid_idx],
+                "label": label,
+                "pred_label": predicted,
+                "confusion_group": "FN" if label == 1 else "FP",
+                "prob": probability,
+                "log_loss": float(-np.log(true_class_probability)),
+                "uncertainty_std": uncertainty_values[valid_idx],
+                "n_models": len(model_entries),
+            }
+        )
+        for local_rank, feature_idx in enumerate(nonzero_order, start=1):
+            feature = model_features[feature_idx]
+            raw_value = float(x_valid_raw[valid_idx, feature_index[feature]])
+            feature_rows.append(
+                {
+                    "fold_id": fold_id,
+                    "species": species,
+                    "label": label,
+                    "feature": feature,
+                    "local_rank": local_rank,
+                    "contribution_mean": float(contribution_mean[error_idx, feature_idx]),
+                    "contribution_mean_abs": float(
+                        contribution_mean_abs[error_idx, feature_idx]
+                    ),
+                    "contribution_min": float(contribution_min[error_idx, feature_idx]),
+                    "contribution_max": float(contribution_max[error_idx, feature_idx]),
+                    "target_tpm": raw_value,
+                    "target_log2_tpm_plus1": float(np.log2(raw_value + 1.0)),
+                    "n_models": len(model_entries),
+                }
+            )
+
+    if not species_rows:
+        return empty_species, empty_features, empty_reference, warnings
+
+    resolved_reference_indices = np.unique(np.asarray(reference_indices, dtype=int))
+    if resolved_reference_indices.size == 0:
+        raise CVError(f"Fold {fold_id} CV species evidence has no training reference species")
+    if (
+        np.min(resolved_reference_indices) < 0
+        or np.max(resolved_reference_indices) >= len(train_species)
+    ):
+        raise CVError(f"Fold {fold_id} CV species-evidence reference index is out of range")
+    reference_rows: list[dict[str, Any]] = []
+    for valid_idx, selected_features in selected_by_species.items():
+        target_species = valid_species[valid_idx]
+        for reference_idx in resolved_reference_indices.tolist():
+            for selected_feature_idx in selected_features:
+                feature = model_features[selected_feature_idx]
+                raw_value = float(x_train_raw[reference_idx, feature_index[feature]])
+                reference_rows.append(
+                    {
+                        "fold_id": fold_id,
+                        "target_species": target_species,
+                        "species": train_species[reference_idx],
+                        "label": int(y_train[reference_idx]),
+                        "feature": feature,
+                        "tpm": raw_value,
+                        "log2_tpm_plus1": float(np.log2(raw_value + 1.0)),
+                    }
+                )
+
+    return (
+        pl.DataFrame(species_rows, schema=_CV_SPECIES_EVIDENCE_SCHEMA).sort(
+            ["log_loss", "species"], descending=[True, False]
+        ),
+        pl.DataFrame(feature_rows, schema=_CV_SPECIES_FEATURE_EVIDENCE_SCHEMA).sort(
+            ["species", "local_rank"]
+        ),
+        pl.DataFrame(
+            reference_rows, schema=_CV_SPECIES_REFERENCE_EXPRESSION_SCHEMA
+        ).sort(["target_species", "feature", "label", "species"]),
+        warnings,
+    )
 
 
 class ExpressionMatrixBuilder:
@@ -4061,6 +4339,7 @@ def _fit_outer_sample_set(
         ensemble_model_prob_rows=ensemble_model_prob_rows,
         model_sparsity_rows=model_sparsity_rows,
         selected_features=selected_features,
+        scaler=scaler,
         filter_counts=filter_counts,
         ranked_feature_score_rows=_with_ranked_feature_score_context(
             ranked_feature_score_rows,
@@ -4915,6 +5194,10 @@ def _run_outer_fold(
 
     train_species = [str(v) for v in train_df.select("species").to_series().to_list()]
     valid_species = [str(v) for v in valid_df.select("species").to_series().to_list()]
+    valid_group_ids = [
+        "" if value is None else str(value)
+        for value in valid_df.select("group_id").to_series().to_list()
+    ]
     inference_species = _outer_cv_inference_species(config, split_manifest)
     y_train = np.array(train_df.select("label").to_series().to_list(), dtype=int)
     y_valid = np.array(valid_df.select("label").to_series().to_list(), dtype=int)
@@ -5275,7 +5558,7 @@ def _run_outer_fold(
 
     model_probs: list[np.ndarray] = []
     inference_model_probs: list[np.ndarray] = []
-    fold_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
+    evidence_model_entries: list[FinalModelEntry] = []
     interpretation_entries: list[ModelFeatureEntry] = []
     ensemble_model_prob_rows: list[dict[str, float | int | str]] = []
     fold_model_count = 0
@@ -5283,7 +5566,14 @@ def _run_outer_fold(
         fit_result = sample_results[sample_set_id]
         model_probs.extend(fit_result.model_probs)
         inference_model_probs.extend(fit_result.inference_model_probs)
-        fold_models.extend(fit_result.fold_models)
+        evidence_model_entries.extend(
+            FinalModelEntry(
+                feature_names=fit_result.selected_features,
+                scaler=fit_result.scaler,
+                model=model,
+            )
+            for model in fit_result.fold_models
+        )
         interpretation_entries.extend(fit_result.interpretation_entries)
         ensemble_model_prob_rows.extend(fit_result.ensemble_model_prob_rows)
         fold_model_count += fit_result.model_count
@@ -5298,6 +5588,33 @@ def _run_outer_fold(
         aggregation=config.ensemble.probability_aggregation,
     )
     uncertainty_std = _population_std_probability(model_probs)
+    reference_indices = np.unique(
+        np.concatenate([np.asarray(sampled_idx, dtype=int) for sampled_idx in sampled_sets])
+    )
+    (
+        cv_species_evidence,
+        cv_species_feature_evidence,
+        cv_species_reference_expression,
+        cv_species_evidence_warnings,
+    ) = _build_cv_species_evidence(
+        config=config,
+        fold_id=fold_id,
+        model_entries=evidence_model_entries,
+        feature_names=feature_names,
+        train_species=train_species,
+        valid_species=valid_species,
+        valid_group_ids=valid_group_ids,
+        y_train=y_train,
+        y_valid=y_valid,
+        x_train_raw=x_train_raw,
+        x_valid_raw=x_valid_raw,
+        reference_indices=reference_indices,
+        mean_prob=mean_prob,
+        uncertainty_std=uncertainty_std,
+        fixed_threshold=fixed_threshold,
+        top_features=config.figures.top_features,
+    )
+    warnings.extend(cv_species_evidence_warnings)
     inference_prediction_rows: list[dict[str, float | str]] = []
     if inference_species:
         inference_prob = _aggregate_probabilities(
@@ -5421,6 +5738,9 @@ def _run_outer_fold(
         n_features_after_preprocess=n_features_after_preprocess,
         warnings=warnings,
         convergence_rows=convergence_rows,
+        cv_species_evidence=cv_species_evidence,
+        cv_species_feature_evidence=cv_species_feature_evidence,
+        cv_species_reference_expression=cv_species_reference_expression,
     )
     if timing_recorder is not None and postprocess_started is not None:
         timing_recorder.record_since(
@@ -5465,6 +5785,9 @@ def _run_outer_cv_impl(
     model_sparsity_rows: list[dict[str, Any]] = []
     training_group_subset_rows: list[dict[str, Any]] = []
     convergence_rows: list[dict[str, Any]] = []
+    cv_species_evidence_frames: list[pl.DataFrame] = []
+    cv_species_feature_evidence_frames: list[pl.DataFrame] = []
+    cv_species_reference_expression_frames: list[pl.DataFrame] = []
     max_fold_ensemble_size = 0
 
     fold_ids = _fold_ids(split_manifest)
@@ -5511,6 +5834,11 @@ def _run_outer_cv_impl(
         model_sparsity_rows.extend(fold_result.model_sparsity_rows)
         training_group_subset_rows.extend(fold_result.training_group_subset_rows)
         convergence_rows.extend(fold_result.convergence_rows)
+        cv_species_evidence_frames.append(fold_result.cv_species_evidence)
+        cv_species_feature_evidence_frames.append(fold_result.cv_species_feature_evidence)
+        cv_species_reference_expression_frames.append(
+            fold_result.cv_species_reference_expression
+        )
         max_fold_ensemble_size = max(max_fold_ensemble_size, fold_result.fold_model_count)
 
     def _execute_fold(fold_id: str) -> OuterFoldResult:
@@ -5644,6 +5972,30 @@ def _run_outer_cv_impl(
         ensemble_model_probs = pl.DataFrame(ensemble_model_prob_rows).sort(
             ["fold_id", "model_index", "species"]
         )
+    empty_species_evidence, empty_feature_evidence, empty_reference_expression = (
+        _empty_cv_species_evidence()
+    )
+    cv_species_evidence = (
+        pl.concat(cv_species_evidence_frames, how="vertical").sort(
+            ["log_loss", "fold_id", "species"], descending=[True, False, False]
+        )
+        if cv_species_evidence_frames
+        else empty_species_evidence
+    )
+    cv_species_feature_evidence = (
+        pl.concat(cv_species_feature_evidence_frames, how="vertical").sort(
+            ["fold_id", "species", "local_rank"]
+        )
+        if cv_species_feature_evidence_frames
+        else empty_feature_evidence
+    )
+    cv_species_reference_expression = (
+        pl.concat(cv_species_reference_expression_frames, how="vertical").sort(
+            ["fold_id", "target_species", "feature", "label", "species"]
+        )
+        if cv_species_reference_expression_frames
+        else empty_reference_expression
+    )
     inference_predictions_by_fold: pl.DataFrame | None = None
     if inference_prediction_rows:
         inference_predictions_by_fold = pl.DataFrame(inference_prediction_rows).sort(
@@ -5729,6 +6081,9 @@ def _run_outer_cv_impl(
         timing=timing,
         warnings=warnings,
         convergence_diagnostics=convergence_diagnostics,
+        cv_species_evidence=cv_species_evidence,
+        cv_species_feature_evidence=cv_species_feature_evidence,
+        cv_species_reference_expression=cv_species_reference_expression,
     )
 
 

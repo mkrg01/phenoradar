@@ -4,6 +4,9 @@
 
 ### Features
 
+* add one candidate-evidence-style PDF per misclassified OOF species, with
+  held-out-fold ensemble probabilities, signed local linear contributions, and
+  expression references restricted to species sampled for that fold's training
 * allow random-forest runs to preserve absent orthogroup coordinates as `NA`
   with `preprocess.absent_feature_fill=nan`, including model-bundle prediction
 * add trait-targeted sparse filtering and direction-aware ranked filtering so
