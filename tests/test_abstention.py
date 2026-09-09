@@ -213,6 +213,7 @@ def test_cv_refit_bundle_with_real_missingness(tmp_path: Path, prune: bool) -> N
         },
     )
     config.preprocess.sparse_feature_filter.enabled = prune
+    config.preprocess.sparse_feature_filter.scope = "all_samples"
     config.preprocess.sparse_feature_filter.min_nonzero_fraction = 0.5
     split = build_split_artifacts(config)
     cv = run_outer_cv(config, split.split_manifest)

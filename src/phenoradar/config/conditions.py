@@ -13,7 +13,7 @@ from typing import Any, get_args
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from .io import ConfigError, _deep_merge_dicts, _load_yaml_mapping
-from .schema import AppConfig, ExecutionStage
+from .schema import AppConfig, ExecutionStage, normalize_sparse_filter_scope
 
 
 @dataclass(frozen=True)
@@ -91,6 +91,15 @@ def _merged_raw_config(
         runtime = dict(runtime_raw) if isinstance(runtime_raw, dict) else {}
         runtime["execution_stage"] = execution_stage_override
         merged["runtime"] = runtime
+    preprocess = merged.get("preprocess")
+    if isinstance(preprocess, dict) and "sparse_feature_filter" in preprocess:
+        try:
+            preprocess["sparse_feature_filter"] = normalize_sparse_filter_scope(
+                preprocess["sparse_feature_filter"],
+                allow_condition_lists=True,
+            )
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
     return merged
 
 

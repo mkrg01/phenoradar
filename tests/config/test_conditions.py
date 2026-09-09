@@ -74,15 +74,15 @@ preprocess:
     assert len(condition_set.conditions) == 4
     assert [
         (
-            condition.config.preprocess.sparse_feature_filter.within_trait,
+            condition.config.preprocess.sparse_feature_filter.scope,
             condition.config.preprocess.ranked_feature_filter.higher_in_trait,
         )
         for condition in condition_set.conditions
     ] == [
-        (None, None),
-        (None, 1),
-        (1, None),
-        (1, 1),
+        ("any_trait", None),
+        ("any_trait", 1),
+        ("trait_1", None),
+        ("trait_1", 1),
     ]
 
 

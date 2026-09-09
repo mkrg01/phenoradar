@@ -136,9 +136,11 @@ For each outer fold:
     - `search_strategy=tpe` remains sequential
 5. For each sampled training set, preprocess sampled-train/valid and fit selected models:
   - `preprocess.expression_transform` (`none`, `log1p`, `sample_rank`, or `sample_percentile_rank`)
-  - optional sparse feature filter; `within_trait: null` uses the best
-    train-fold nonzero fraction across trait classes, while `0` or `1` uses
-    only that class
+  - optional sparse feature filter; `scope: all_samples` uses the nonzero
+    fraction across all sampled training species, `any_trait` uses the best
+    fraction across trait classes, and `trait_0` / `trait_1` uses only that class;
+    zero and missing values stay in the denominator, with no validation or
+    prediction species contributing to these fractions
   - optional low-variance filter
   - optional ranked feature filter; supervised methods can require the
     train-fold effect `trait 1 - trait 0` to have a configured direction

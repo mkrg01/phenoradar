@@ -2120,38 +2120,39 @@ def _select_feature_indices_with_counts(
                 "sparse_feature_filter is enabled but "
                 "min_nonzero_fraction is missing"
             )
-        if y_train is None:
-            raise CVError("sparse_feature_filter requires y_train in preprocessing")
-        if len(y_train) != x_train_expr.shape[0]:
-            raise CVError("sparse_feature_filter y_train length does not match training rows")
-
-        y_train_arr = np.asarray(y_train)
-        within_trait = config.preprocess.sparse_feature_filter.within_trait
-        if within_trait is None:
-            trait_values = np.unique(y_train_arr)
-        else:
-            if not np.any(y_train_arr == within_trait):
-                raise CVError(
-                    "sparse_feature_filter within_trait is not present in training rows: "
-                    f"{within_trait}"
-                )
-            trait_values = np.asarray([within_trait], dtype=int)
-        max_nonzero_fraction = np.zeros(selected.size, dtype=float)
+        if x_train_expr.shape[0] == 0:
+            raise CVError("sparse_feature_filter requires at least one training row")
+        scope = config.preprocess.sparse_feature_filter.scope
         nonzero_mask = x_train_expr[:, selected] > _NONZERO_TOLERANCE
-        for trait_value in trait_values:
-            trait_mask = y_train_arr == trait_value
-            trait_count = int(np.count_nonzero(trait_mask))
-            if trait_count == 0:
-                continue
-            trait_nonzero_fraction = (
-                np.count_nonzero(
-                    nonzero_mask[trait_mask, :],
-                    axis=0,
+        if scope == "all_samples":
+            nonzero_fraction = np.count_nonzero(nonzero_mask, axis=0) / x_train_expr.shape[0]
+        else:
+            if y_train is None:
+                raise CVError("sparse_feature_filter requires y_train in preprocessing")
+            if len(y_train) != x_train_expr.shape[0]:
+                raise CVError("sparse_feature_filter y_train length does not match training rows")
+            y_train_arr = np.asarray(y_train)
+            if scope == "any_trait":
+                trait_values = np.unique(y_train_arr)
+            else:
+                target_trait = 0 if scope == "trait_0" else 1
+                if not np.any(y_train_arr == target_trait):
+                    raise CVError(
+                        f"sparse_feature_filter scope={scope} requires trait {target_trait} "
+                        "in training rows"
+                    )
+                trait_values = np.asarray([target_trait], dtype=int)
+            nonzero_fraction = np.zeros(selected.size, dtype=float)
+            for trait_value in trait_values:
+                trait_mask = y_train_arr == trait_value
+                trait_count = int(np.count_nonzero(trait_mask))
+                if trait_count == 0:
+                    continue
+                trait_nonzero_fraction = (
+                    np.count_nonzero(nonzero_mask[trait_mask, :], axis=0) / trait_count
                 )
-                / trait_count
-            )
-            max_nonzero_fraction = np.maximum(max_nonzero_fraction, trait_nonzero_fraction)
-        selected = selected[max_nonzero_fraction >= float(min_fraction)]
+                nonzero_fraction = np.maximum(nonzero_fraction, trait_nonzero_fraction)
+        selected = selected[nonzero_fraction >= float(min_fraction)]
     n_features_after_sparse_feature_filter = int(selected.size)
 
     if config.preprocess.low_variance_filter.enabled:

@@ -4,6 +4,9 @@
 
 ### Features
 
+* add `sparse_feature_filter.scope` with `all_samples`, `any_trait`, `trait_0`,
+  and `trait_1` populations; support label-independent pooled nonzero fractions
+  and read legacy `within_trait` settings as the corresponding explicit scope
 * add observed-only standardization and neutral missing-expression inputs for
   logistic regression, with optional zero-as-missing handling and fixed 0.8
   coefficient-weight coverage abstention; persist policies in version 3 model

@@ -76,7 +76,7 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
         resolved.preprocess.sparse_feature_filter.min_nonzero_fraction
         == 0.8
     )
-    assert resolved.preprocess.sparse_feature_filter.within_trait is None
+    assert resolved.preprocess.sparse_feature_filter.scope == "any_trait"
     assert resolved.preprocess.ranked_feature_filter.higher_in_trait is None
     assert resolved.preprocess.feature_scaling.method == "standard"
     assert resolved.evaluation.group_bootstrap.enabled is False
@@ -110,7 +110,7 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
         resolved.preprocess.sparse_feature_filter.min_nonzero_fraction
         == 0.8
     )
-    assert resolved.preprocess.sparse_feature_filter.within_trait is None
+    assert resolved.preprocess.sparse_feature_filter.scope == "any_trait"
     assert resolved.preprocess.ranked_feature_filter.higher_in_trait is None
     assert resolved.preprocess.feature_scaling.method == "standard"
     assert resolved.evaluation.group_bootstrap.enabled is False
@@ -530,7 +530,7 @@ preprocess:
 
     resolved = load_and_resolve_config([cfg])
 
-    assert resolved.preprocess.sparse_feature_filter.within_trait == 1
+    assert resolved.preprocess.sparse_feature_filter.scope == "trait_1"
 
 
 def test_preprocess_sparse_feature_rejects_nonbinary_within_trait(tmp_path: Path) -> None:

@@ -4406,10 +4406,10 @@ def test_select_feature_indices_sparse_feature_filter_keeps_any_trait_signal(
     assert selected.tolist() == [0, 2]
 
 
-@pytest.mark.parametrize(("within_trait", "expected"), [(0, [0]), (1, [1])])
+@pytest.mark.parametrize(("scope", "expected"), [("trait_0", [0]), ("trait_1", [1])])
 def test_select_feature_indices_sparse_feature_filter_can_target_one_trait(
     tmp_path: Path,
-    within_trait: int,
+    scope: str,
     expected: list[int],
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
@@ -4423,7 +4423,7 @@ def test_select_feature_indices_sparse_feature_filter_can_target_one_trait(
 preprocess:
   sparse_feature_filter:
     min_nonzero_fraction: 0.8
-    within_trait: {within_trait}
+    scope: {scope}
 """.strip(),
             )
         ]
@@ -4449,7 +4449,7 @@ preprocess:
     assert selected.tolist() == expected
 
 
-def test_sparse_feature_filter_rejects_within_trait_missing_from_training_rows(
+def test_sparse_feature_filter_rejects_target_trait_missing_from_training_rows(
     tmp_path: Path,
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
@@ -4462,13 +4462,13 @@ def test_sparse_feature_filter_rejects_within_trait_missing_from_training_rows(
                 extra="""
 preprocess:
   sparse_feature_filter:
-    within_trait: 1
+    scope: trait_1
 """.strip(),
             )
         ]
     )
 
-    with pytest.raises(CVError, match="within_trait is not present"):
+    with pytest.raises(CVError, match="scope=trait_1 requires trait 1"):
         _select_feature_indices(
             config,
             np.array([[1.0], [2.0]], dtype=float),

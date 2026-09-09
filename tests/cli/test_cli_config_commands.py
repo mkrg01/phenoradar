@@ -449,7 +449,8 @@ def test_config_without_config_writes_default_yaml(
     assert payload["data"]["tree_path"] is None
     assert payload["data"]["orthogroup_annotation_path"] is None
     assert payload["preprocess"]["absent_feature_fill"] == 0
-    assert payload["preprocess"]["sparse_feature_filter"]["within_trait"] is None
+    assert payload["preprocess"]["sparse_feature_filter"]["scope"] == "any_trait"
+    assert "within_trait" not in payload["preprocess"]["sparse_feature_filter"]
     assert (
         payload["preprocess"]["ranked_feature_filter"]["higher_in_trait"]
         is None

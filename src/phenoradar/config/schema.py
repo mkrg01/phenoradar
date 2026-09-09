@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from pydantic import (
@@ -31,6 +32,38 @@ ExpressionTransformMethod = Literal["none", "log1p", "sample_rank", "sample_perc
 FeatureScalingMethod = Literal["none", "standard"]
 RankedFeatureFilterMethod = Literal["none", "pair_aware", "unpaired", "variance"]
 AbsentFeatureFill = Literal[0, "nan"]
+SparseFeatureScope = Literal["all_samples", "any_trait", "trait_0", "trait_1"]
+
+
+def normalize_sparse_filter_scope(value: Any, *, allow_condition_lists: bool = False) -> Any:
+    """Read legacy within_trait settings as scope, preserving source key order."""
+    if not isinstance(value, Mapping) or "within_trait" not in value:
+        return value
+    if "scope" in value:
+        raise ValueError(
+            "preprocess.sparse_feature_filter cannot specify both scope and within_trait"
+        )
+
+    def convert(trait: Any) -> SparseFeatureScope:
+        if trait is None:
+            return "any_trait"
+        if not isinstance(trait, bool) and isinstance(trait, (int, float)):
+            if trait == 0:
+                return "trait_0"
+            if trait == 1:
+                return "trait_1"
+        raise ValueError("preprocess.sparse_feature_filter.within_trait must be 0, 1, or null")
+
+    legacy = value["within_trait"]
+    scope = (
+        [convert(trait) for trait in legacy]
+        if allow_condition_lists and isinstance(legacy, list)
+        else convert(legacy)
+    )
+    return {
+        "scope" if key == "within_trait" else key: scope if key == "within_trait" else item
+        for key, item in value.items()
+    }
 
 
 class StrictModel(BaseModel):
@@ -185,14 +218,12 @@ class SparseFeatureFilterConfig(StrictModel):
         ge=0.0,
         le=1.0,
     )
-    within_trait: Literal[0, 1] | None = None
+    scope: SparseFeatureScope = "any_trait"
 
-    @field_validator("within_trait", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def reject_boolean_within_trait(cls, value: Any) -> Any:
-        if isinstance(value, bool):
-            raise ValueError("preprocess.sparse_feature_filter.within_trait must be 0, 1, or null")
-        return value
+    def normalize_legacy_scope(cls, value: Any) -> Any:
+        return normalize_sparse_filter_scope(value)
 
     @model_validator(mode="after")
     def validate_enabled_args(self) -> SparseFeatureFilterConfig:

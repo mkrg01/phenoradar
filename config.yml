@@ -37,7 +37,7 @@ preprocess:
   sparse_feature_filter:
     enabled: true
     min_nonzero_fraction: 0.9
-    within_trait: 1  # choices: 0, 1, null; null checks both traits and keeps either
+    scope: all_samples  # choices: all_samples, any_trait, trait_0, trait_1
   low_variance_filter:
     enabled: false
     min_variance: null

@@ -129,7 +129,7 @@ preprocess:
   sparse_feature_filter:
     enabled: true
     min_nonzero_fraction: 0.8
-    within_trait: null
+    scope: any_trait
   low_variance_filter:
     enabled: false
     min_variance: null
@@ -441,17 +441,49 @@ The bundle persists both policies, the scalers, and the fixed gate threshold;
   - type: `float in [0, 1] | null`
   - default: `0.8`
   - rule: required when `enabled=true`
-  - behavior: keeps a feature when its train-fold nonzero fraction is at least
-    this value in the class or classes selected by `within_trait`
-- `within_trait`
-  - type: `0 | 1 | null`
-  - default: `null`
+  - behavior: keeps a feature when its nonzero fraction is at least this value
+    in the training population selected by `scope`
+- `scope`
+  - type: `all_samples | any_trait | trait_0 | trait_1`
+  - default: `any_trait`
   - behavior:
-    - `null`: preserves the original behavior and keeps a feature when the
-      threshold is met in at least one trait class
-    - `0` or `1`: calculates the nonzero fraction only within that train-fold
-      trait class
-  - the selected trait must be present in the training rows
+    - `all_samples`: divides the nonzero count by the total number of sampled
+      training species, without using their trait labels
+    - `any_trait`: calculates the fraction separately in each trait class and
+      keeps a feature if at least one class meets the threshold
+    - `trait_0` / `trait_1`: calculates the fraction only in the selected class;
+      that class must be present in the training rows
+
+For example, with five species of each trait, a feature detected in one trait-0
+species and all five trait-1 species has overall fraction `6/10 = 0.6`. At a
+threshold of `0.8`, `all_samples` removes it, while `any_trait` and `trait_1`
+retain it. With unequal class sizes, `all_samples` still divides by total species
+count; it does not take an unweighted mean of the two class fractions and does
+not use model sample weights.
+
+The filter runs on each model's sampled training set, including inner-CV training
+partitions when model selection is enabled. Validation and prediction species
+never affect its fractions. Values are counted after the expression transform
+and before standardization or neutral filling, using the existing nonzero
+tolerance. Zeros and missing values at this stage remain in the denominator but
+not the numerator. Under neutral `log1p` handling, uncertain raw zeros are
+already missing when the filter runs.
+
+To select features by their overall training prevalence:
+
+```yaml
+preprocess:
+  sparse_feature_filter:
+    enabled: true
+    min_nonzero_fraction: 0.8
+    scope: all_samples
+```
+
+Legacy `within_trait` inputs are accepted as `null -> any_trait`, `0 -> trait_0`,
+and `1 -> trait_1`. Supplying both `scope` and `within_trait` is an error, even
+when the values agree. Resolved configuration always uses `scope`. Condition
+lists such as `scope: [all_samples, any_trait, trait_1]` are supported; legacy
+`within_trait` lists are also converted to the corresponding `scope` dimension.
 
 ### `preprocess.low_variance_filter`
 
@@ -517,7 +549,7 @@ preprocess:
   sparse_feature_filter:
     enabled: true
     min_nonzero_fraction: 0.9
-    within_trait: 1
+    scope: trait_1
   ranked_feature_filter:
     method: pair_aware
     max_features: 200
@@ -525,7 +557,7 @@ preprocess:
     higher_in_trait: 1
 ```
 
-`within_trait: 1` only requires frequent nonzero expression within trait `1`;
+`scope: trait_1` only requires frequent nonzero expression within trait `1`;
 it does not by itself require expression to be higher than in trait `0`.
 Conversely, `higher_in_trait` constrains the univariate train-fold filtering
 effect but does not constrain the sign or monotonicity learned by the final

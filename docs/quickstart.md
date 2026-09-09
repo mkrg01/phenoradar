@@ -141,7 +141,7 @@ two-sided ranking:
 ```yaml
 preprocess:
   sparse_feature_filter:
-    within_trait: 1
+    scope: trait_1
   ranked_feature_filter:
     method: pair_aware
     max_features: 100
