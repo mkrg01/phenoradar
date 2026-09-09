@@ -7,7 +7,9 @@ import re
 import textwrap
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import wraps
 from hashlib import sha256
+from inspect import signature
 from multiprocessing import get_context
 from pathlib import Path
 from typing import Any, cast
@@ -29,10 +31,15 @@ from sklearn.metrics import (
 
 from phenoradar.abstention import prediction_label_expr
 from phenoradar.colors import CONFUSION_GROUP_COLORS, CONFUSION_GROUP_ORDER
+from phenoradar.figure_population import (
+    population_figure_path,
+    prediction_figure_populations,
+)
 from phenoradar.group_summary import GroupSummaryError, finite_group_probabilities
 from phenoradar.metrics import (
     FIXED_PROBABILITY_THRESHOLD_NAME,
     FIXED_PROBABILITY_THRESHOLD_VALUE,
+    binary_probability_metrics,
     metric_contract,
     metric_direction,
     metric_higher_is_better,
@@ -139,6 +146,57 @@ type _FigureJob = tuple[
     dict[str, Any],
     bool,
 ]
+
+
+def _prediction_population_figures(
+    *prediction_names: str,
+    require_two_labels: bool = False,
+) -> Callable[[Callable[..., None]], Callable[..., None]]:
+    """Render both populations from the same plotting implementation."""
+
+    def decorate(func: Callable[..., None]) -> Callable[..., None]:
+        parameters = signature(func)
+
+        @wraps(func)
+        def render(*args: Any, **kwargs: Any) -> None:
+            bound = parameters.bind(*args, **kwargs)
+            inputs = {name: bound.arguments[name] for name in prediction_names}
+            paths = {
+                name: value for name, value in bound.arguments.items() if name.endswith("out_path")
+            }
+            for suffix, frames in prediction_figure_populations(inputs):
+                call = {**bound.arguments, **frames}
+                outputs = {
+                    name: population_figure_path(path, suffix) for name, path in paths.items()
+                }
+                call.update(outputs)
+                message = None
+                if suffix and any(frame.height == 0 for frame in frames.values()):
+                    message = (
+                        "No accepted species in one or more populations.\nNo data to evaluate."
+                    )
+                elif suffix and require_two_labels:
+                    frame = next(iter(frames.values()))
+                    label = "true_label" if "true_label" in frame.columns else "label"
+                    if frame[label].drop_nulls().n_unique() < 2:
+                        message = (
+                            "ROC/PR is undefined: accepted species contain fewer than two labels."
+                        )
+                if message is None:
+                    func(**call)
+                else:
+                    for path in outputs.values():
+                        _write_message_figure(
+                            title="",
+                            message=message,
+                            out_path=path,
+                            width_px=_NATURE_DOUBLE_COLUMN_WIDTH_PX,
+                            height_px=220,
+                        )
+
+        return render
+
+    return decorate
 
 
 def _figure_size_inches(width_px: int, height_px: int) -> tuple[float, float]:
@@ -688,6 +746,34 @@ def _cv_metrics_overview(metrics_cv: pl.DataFrame, out_path: Path) -> None:
 
     fig.subplots_adjust(left=0.08, right=0.99, top=0.96, bottom=0.18)
     _save_svg_figure(fig, out_path)
+
+
+@_prediction_population_figures("oof_predictions")
+def _cv_metrics_by_population(oof_predictions: pl.DataFrame, out_path: Path) -> None:
+    """Recompute pooled and fold-mean metrics for the actual plotted species."""
+
+    def metrics(frame: pl.DataFrame) -> dict[str, float]:
+        return binary_probability_metrics(
+            frame["label"].to_numpy(),
+            frame["prob"].to_numpy(),
+            threshold=FIXED_PROBABILITY_THRESHOLD_VALUE,
+        )
+
+    pooled = metrics(oof_predictions)
+    folds = [metrics(frame) for frame in oof_predictions.partition_by("fold_id")]
+    rows = []
+    for name, value in pooled.items():
+        finite = [fold[name] for fold in folds if np.isfinite(fold[name])]
+        for scope, score in (("micro", value), ("macro", np.mean(finite) if finite else np.nan)):
+            rows.append(
+                {
+                    "fold_id": "NA",
+                    "aggregate_scope": scope,
+                    "metric": name,
+                    "metric_value": float(score),
+                }
+            )
+    _cv_metrics_overview(pl.DataFrame(rows), out_path)
 
 
 def _group_bootstrap_metrics_figure(
@@ -1527,6 +1613,7 @@ def _coefficients_signed_top(
     _save_svg_figure(fig, out_path)
 
 
+@_prediction_population_figures("oof_predictions")
 def _top_feature_expression_by_confusion(
     *,
     oof_predictions: pl.DataFrame,
@@ -1782,7 +1869,7 @@ def _top_feature_expression_by_confusion(
         flat_axes[axis_index].set_visible(False)
 
     fig.supxlabel(
-        "OOF confusion group",
+        "OOF confusion group" if label_col == "label" else "External-test confusion group",
         fontsize=_LABEL_FONTSIZE,
         y=10 / height_px,
     )
@@ -1798,6 +1885,7 @@ def _top_feature_expression_by_confusion(
     _save_svg_figure(fig, out_path)
 
 
+@_prediction_population_figures("pred_predict")
 def _predict_probability_distribution(
     pred_predict: pl.DataFrame,
     out_path: Path,
@@ -1874,6 +1962,7 @@ def _predict_probability_distribution(
     _save_svg_figure(fig, out_path)
 
 
+@_prediction_population_figures("pred_predict")
 def _predict_uncertainty(pred_predict: pl.DataFrame, out_path: Path, *, required: bool) -> None:
     if "uncertainty_std" not in pred_predict.columns:
         if required:
@@ -1970,6 +2059,7 @@ def _binary_trait_color_map(
     }
 
 
+@_prediction_population_figures("predictions")
 def _species_probability_by_trait(
     *,
     predictions: pl.DataFrame,
@@ -2109,6 +2199,7 @@ def _species_probability_by_trait(
     _save_svg_figure(fig, out_path)
 
 
+@_prediction_population_figures("oof_predictions", "pred_inference")
 def _species_probability_cv_and_inference(
     *,
     oof_predictions: pl.DataFrame,
@@ -2283,6 +2374,7 @@ def _species_probability_cv_and_inference(
     _save_svg_figure(fig, out_path)
 
 
+@_prediction_population_figures("grouped_predictions")
 def write_group_probability_figure(
     *,
     grouped_predictions: pl.DataFrame,
@@ -2393,7 +2485,7 @@ def write_group_probability_figure(
     ax.set_xlim(-0.02, 1.02)
     ax.set_yticks(y_positions)
     ax.set_yticklabels(labels, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
-    ax.invert_yaxis()
+    ax.set_ylim(len(groups) - 0.5, -0.5)
     ax.set_xlabel("Predicted probability", fontsize=_LABEL_FONTSIZE)
     ax.set_ylabel(group_label, fontsize=_LABEL_FONTSIZE)
     ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
@@ -2436,26 +2528,28 @@ def write_group_probability_figure(
     ax.legend(
         handles=legend_handles,
         loc="lower center",
-        bbox_to_anchor=(0.5, 1.005),
+        bbox_to_anchor=(0.5, 1.0),
         ncol=3,
-        frameon=True,
-        framealpha=0.95,
-        facecolor="white",
-        edgecolor="#dddddd",
+        frameon=False,
         borderpad=0.25,
         handlelength=1.2,
         columnspacing=0.9,
     )
 
     fig.subplots_adjust(
-        left=_label_left_margin(labels, width_px=width_px, fontsize_px=_MONO_FONTSIZE),
+        left=_label_left_margin(
+            labels,
+            width_px=width_px,
+            fontsize_px=int(np.ceil(_MONO_FONTSIZE * _FIG_DPI / 72)),
+        ),
         right=0.985,
-        top=0.90,
+        top=1.0 - (16 + 14 * int(np.ceil(len(legend_handles) / 3))) / height_px,
         bottom=_compact_bottom_margin(height_px),
     )
     _save_svg_figure(fig, out_path)
 
 
+@_prediction_population_figures("oof_predictions")
 def _cv_fold_trait_probability(
     oof_predictions: pl.DataFrame, out_path: Path, *, trait_name: str = "trait"
 ) -> None:
@@ -2722,6 +2816,7 @@ def _pr_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     _save_svg_figure(fig, out_path)
 
 
+@_prediction_population_figures("oof_predictions", require_two_labels=True)
 def _roc_pr_curves_cv(
     oof_predictions: pl.DataFrame,
     *,
@@ -2818,6 +2913,7 @@ def _pr_curve_external(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> 
     _save_svg_figure(fig, out_path)
 
 
+@_prediction_population_figures("pred_external_test", require_two_labels=True)
 def _external_roc_pr_curves(
     pred_external_test: pl.DataFrame,
     *,
@@ -2879,6 +2975,7 @@ def _binary_metric_summary_from_counts(
     }
 
 
+@_prediction_population_figures("pred_external_test")
 def _external_confusion_matrix(pred_external_test: pl.DataFrame, out_path: Path) -> None:
     required = {"true_label", "pred_label_fixed_threshold"}
     if not required.issubset(pred_external_test.columns):
@@ -2990,6 +3087,37 @@ def _external_confusion_matrix(pred_external_test: pl.DataFrame, out_path: Path)
 
     fig.subplots_adjust(left=0.12, right=0.98, top=0.96, bottom=0.16)
     _save_svg_figure(fig, out_path)
+
+
+@_prediction_population_figures("oof_predictions", "pred_external_test")
+def _cv_external_comparison_by_population(
+    oof_predictions: pl.DataFrame,
+    pred_external_test: pl.DataFrame,
+    out_path: Path,
+) -> None:
+    rows = []
+    for pool, frame, label in (
+        ("validation_oof", oof_predictions, "label"),
+        ("external_test", pred_external_test, "true_label"),
+    ):
+        labeled = frame.filter(pl.col(label).is_in([0, 1]) & pl.col("prob").is_finite())
+        y = labeled[label].to_numpy()
+        pred = labeled["prob"].to_numpy() >= FIXED_PROBABILITY_THRESHOLD_VALUE
+        metrics = _binary_metric_summary_from_counts(
+            tn=int(np.sum((y == 0) & ~pred)),
+            fp=int(np.sum((y == 0) & pred)),
+            fn=int(np.sum((y == 1) & ~pred)),
+            tp=int(np.sum((y == 1) & pred)),
+        )
+        rows.append(
+            {
+                "pool": pool,
+                "fold_id": "NA",
+                "threshold_name": FIXED_PROBABILITY_THRESHOLD_NAME,
+                **metrics,
+            }
+        )
+    _cv_external_metric_comparison(pl.DataFrame(rows), out_path)
 
 
 def _cv_external_metric_comparison(
@@ -4665,11 +4793,18 @@ def write_run_figures(
     ) -> None:
         jobs.append((name, func, args, {} if kwargs is None else kwargs, catch_figure_error))
 
-    add_job(
-        "cv_metrics_overview",
-        _cv_metrics_overview,
-        (metrics_cv, cv_dir / "cv_metrics_overview.svg"),
-    )
+    if "decision_status" in oof_predictions.columns:
+        add_job(
+            "cv_metrics_overview",
+            _cv_metrics_by_population,
+            (oof_predictions, cv_dir / "cv_metrics_overview.svg"),
+        )
+    else:
+        add_job(
+            "cv_metrics_overview",
+            _cv_metrics_overview,
+            (metrics_cv, cv_dir / "cv_metrics_overview.svg"),
+        )
     if group_bootstrap_metrics is not None:
         add_job(
             "group_bootstrap_metrics",
@@ -4958,7 +5093,20 @@ def write_run_figures(
             (model_sparsity, cv_dir / "non_zero_feature_count_by_fold.svg"),
         )
     if pred_external_test is not None:
-        if classification_summary is not None:
+        if any(
+            "decision_status" in frame.columns for frame in (oof_predictions, pred_external_test)
+        ):
+            add_job(
+                "cv_external_metric_comparison",
+                _cv_external_comparison_by_population,
+                (
+                    oof_predictions,
+                    pred_external_test,
+                    external_test_dir / "cv_external_metric_comparison.svg",
+                ),
+                catch_figure_error=True,
+            )
+        elif classification_summary is not None:
             add_job(
                 "cv_external_metric_comparison",
                 _cv_external_metric_comparison,

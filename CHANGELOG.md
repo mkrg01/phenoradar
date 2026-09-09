@@ -4,6 +4,10 @@
 
 ### Features
 
+* generate all-species and `_accepted_only` prediction/evaluation SVGs when
+  abstention is enabled, with recomputed selective metrics and explicit messages
+  for empty or single-label accepted populations; preserve publication layouts
+  without added population subtitles
 * add `sparse_feature_filter.scope` with `all_samples`, `any_trait`, `trait_0`,
   and `trait_1` populations; support label-independent pooled nonzero fractions
   and read legacy `within_trait` settings as the corresponding explicit scope

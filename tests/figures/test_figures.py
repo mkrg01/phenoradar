@@ -1445,6 +1445,9 @@ def test_group_probability_figure_writes_all_groups(tmp_path: Path) -> None:
     svg_text = out_path.read_text(encoding="utf-8")
     assert "Family 01" in svg_text
     assert "Family 31" in svg_text
+    first_group_y, _ = _svg_text_y_and_viewbox_height(out_path, "Family 01 (n=1)")
+    legend_y, _ = _svg_text_y_and_viewbox_height(out_path, "pred 0")
+    assert 0 < legend_y < first_group_y < 45
 
 
 def test_cv_fold_trait_probability_rejects_invalid_schema(tmp_path: Path) -> None:

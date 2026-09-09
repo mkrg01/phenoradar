@@ -69,11 +69,40 @@ Grouped tables additionally report `n_accepted`, `n_abstained`, `n_pred_negative
 and `decision_rate`. Their `n_pred_positive` excludes abstention and
 `pred_positive_rate` uses accepted species as its denominator. Probability
 statistics and `top_species` still describe raw probabilities across all species.
-Candidate evidence is generated only for accepted positives. Group-probability
-plots, inference histograms, and tree prediction labels distinguish abstention;
-the external confusion matrix uses accepted decisions and displays the number
-withheld. CV error-evidence plots remain diagnostics of raw fixed-0.5 errors and
-explicitly label abstained species.
+Candidate evidence is generated only for accepted positives. CV error-evidence
+PDFs remain diagnostics of raw fixed-0.5 errors and explicitly label abstained
+species.
+
+When prediction tables include abstention, prediction and evaluation SVGs are
+written for both populations:
+
+- `<name>.svg`: all species, including those whose decisions were withheld.
+  Binary groups and metrics use the raw fixed-0.5 decision.
+- `<name>_accepted_only.svg`: only species with `decision_status=accepted`.
+  Probabilities, counts, confusion groups, and metrics use this subset.
+
+The filename identifies the population. Figures retain their original canvas
+size and layout without added population titles, subtitles, or explanatory
+banners. Existing sample-count labels and metric annotations use the plotted
+population; original totals and abstention counts remain in the summary tables.
+Legends explain visual encodings rather than repeat population descriptions.
+The pairs are generated even when no species abstain. With abstention disabled,
+existing single-figure behavior is retained.
+
+Paired figures include the CV metric overview, ROC/PR curves, the external
+confusion matrix and CV/external metric comparison, trait/fold/group probability
+plots, inference/predict probability histograms, available predict uncertainty
+plots, top-feature expression by confusion group, prediction trees, and CV
+tree-feature heatmaps. Accepted-only CV macro metrics average defined metrics
+from the remaining folds; micro metrics pool the remaining OOF species.
+An empty accepted population produces an explanatory figure rather than a
+zero-error score; accepted-only ROC/PR curves also explain when fewer than two
+labels remain.
+
+Model interpretation, model selection, training/validation loss, and the existing
+group-bootstrap figures keep their original populations. Candidate and individual
+CV error-evidence PDFs keep the selection rules described above. Prediction and
+summary TSVs are unchanged; `abstention_summary.tsv` supplies accepted-only scores.
 
 With neutral expression handling, expression-evidence tables add `is_missing`.
 Raw TPM is preserved, while missing plot values become `NA` rather than a
@@ -972,7 +1001,9 @@ when individual folds are single-label.
   - Side annotations report accuracy, precision, recall, specificity, F1, and MCC.
 - `external_test/figures/cv_external_metric_comparison.svg` (`full_run` with external samples)
   - Grouped-bar comparison of pooled out-of-fold CV and external-test classification metrics.
-  - Uses the fixed-threshold rows from `summary/tables/classification_summary.tsv`.
+  - With abstention, recomputes fixed-threshold metrics from each figure's
+    prediction population. Otherwise uses the fixed-threshold rows from
+    `summary/tables/classification_summary.tsv`.
   - Shows accuracy, precision, recall, F1, and MCC.
 - `external_test/figures/external_roc_curve.svg` / `external_test/figures/external_pr_curve.svg` (`full_run` with both external-test labels)
   - External-test ROC and precision-recall curves from `prediction_external_test.tsv`.

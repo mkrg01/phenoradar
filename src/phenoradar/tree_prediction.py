@@ -7,6 +7,7 @@ import math
 from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import suppress
+from functools import wraps
 from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,11 @@ from phenoradar.colors import (
     CONFUSION_GROUP_COLORS,
     CONFUSION_GROUP_LABELS,
     CONFUSION_GROUP_ORDER,
+)
+from phenoradar.figure_population import (
+    population_figure_path,
+    prediction_figure_populations,
+    write_population_message_svg,
 )
 from phenoradar.metrics import (
     FIXED_PROBABILITY_THRESHOLD_NAME,
@@ -47,6 +53,26 @@ _INVALID_TPM_REASON_LABELS = (
     (16, "non-finite-after-sum"),
 )
 type _TreeSvgJob = tuple[str, Callable[..., list[str]], dict[str, Any]]
+
+
+def _tree_population_figures(func: Callable[..., list[str]]) -> Callable[..., list[str]]:
+    @wraps(func)
+    def render(**kwargs: Any) -> list[str]:
+        warnings = []
+        for suffix, frames in prediction_figure_populations(
+            {"annotation": kwargs["annotation"]}
+        ):
+            annotation = frames["annotation"]
+            path = population_figure_path(kwargs["out_path"], suffix)
+            if suffix and annotation["species"].n_unique() < 2:
+                write_population_message_svg(
+                    path, "Fewer than two accepted species; tree unavailable."
+                )
+            else:
+                warnings.extend(func(**{**kwargs, "annotation": annotation, "out_path": path}))
+        return warnings
+
+    return render
 
 
 def _stage_figures_dir(run_dir: Path, stage: str) -> Path:
@@ -1037,6 +1063,7 @@ def _fixed_probability_threshold(thresholds: pl.DataFrame) -> float:
     return float(raw)
 
 
+@_tree_population_figures
 def _write_tree_prediction_svg(
     *,
     tree_path: Path,
@@ -1098,6 +1125,7 @@ def _write_tree_prediction_svg(
     return warnings
 
 
+@_tree_population_figures
 def _write_tree_feature_heatmap_svg(
     *,
     tree_path: Path,

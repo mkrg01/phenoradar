@@ -301,6 +301,15 @@ def test_cli_run_and_predict_preserve_abstention_and_missing_evidence(
     result = runner.invoke(app, ["run", "-c", str(config_path)])
     assert result.exit_code == 0, (result.output, result.exception)
     run_dir = next((tmp_path / "runs").glob("*_run_*"))
+    for relative in (
+        "cv/figures/cv_metrics_overview_accepted_only.svg",
+        "cv/figures/roc_curve_cv_accepted_only.svg",
+        "external_test/figures/external_confusion_matrix_accepted_only.svg",
+        "external_test/figures/cv_external_metric_comparison_accepted_only.svg",
+        "external_test/figures/tree_prediction_external_accepted_only.svg",
+        "inference/figures/inference_probability_distribution_accepted_only.svg",
+    ):
+        assert (run_dir / relative).exists(), relative
     heatmap = pl.read_csv(
         run_dir / "cv" / "tables" / "tree_feature_heatmap_annotation.tsv",
         separator="\t",
@@ -342,6 +351,9 @@ def test_cli_run_and_predict_preserve_abstention_and_missing_evidence(
     )
     assert result.exit_code == 0, (result.output, result.exception)
     predict_dir = next((tmp_path / "runs").glob("*_predict_*"))
+    assert (
+        predict_dir / "inference/figures/predict_probability_distribution_accepted_only.svg"
+    ).exists()
     predictions = pl.read_csv(
         predict_dir / "inference" / "tables" / "prediction_inference.tsv",
         separator="\t",
