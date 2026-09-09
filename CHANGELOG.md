@@ -4,6 +4,10 @@
 
 ### Features
 
+* add optional `split.require_both_labels_per_group` filtering before CV,
+  routing single-label groups to external test and keeping them out of CV
+  and final-refit training; support family-level eligibility from existing
+  metadata annotations without rewriting holdout columns
 * generate all-species and `_accepted_only` prediction/evaluation SVGs when
   abstention is enabled, with recomputed selective metrics and explicit messages
   for empty or single-label accepted populations; preserve publication layouts

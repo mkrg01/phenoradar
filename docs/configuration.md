@@ -112,6 +112,7 @@ split:
   group_col: contrast_pair_id
   test_holdout_col: contrast_pair_test_holdout
   exclude_col: null
+  require_both_labels_per_group: false
   outer_cv_strategy: logo
   outer_cv_n_splits: null
 sampling:
@@ -259,13 +260,27 @@ runtime:
   - metadata column marking labeled species to keep out of CV and evaluate only
     as `external_test` during `full_run`. Accepted true values are `yes`,
     `true`, and `1`; false values are `no`, `false`, `0`, empty, or null. When
-    set to `null`, no explicit external-test holdout column is read.
+    set to `null`, no explicit external-test holdout column is read. Automatic
+    group filtering can still assign species to `external_test`.
 - `split.exclude_col`
   - type: `str | null`
   - default: `null`
   - optional metadata column marking species to remove from CV, external test,
     and inference pools. It accepts the same boolean values as
     `split.test_holdout_col`.
+- `split.require_both_labels_per_group`
+  - type: `bool`
+  - default: `false`
+  - when true, only groups containing both labels (`0` and `1`) are eligible
+    for CV. Eligibility is checked using labeled, non-excluded, non-holdout
+    species grouped by `split.group_col`, before any folds are constructed.
+    Labeled species in single-label groups are assigned to `external_test`
+    and are absent from both CV training/validation and final-refit training.
+    Trait-missing species remain in `discovery_inference`.
+  - explicit holdouts and exclusions still apply. Inconsistent explicit
+    holdout assignments within a split group remain an error.
+    The default preserves existing pool assignment and permits single-label
+    CV groups when the other configured constraints allow them.
 - `split.outer_cv_strategy`
   - type: `logo | group_kfold | stratified_group_kfold`
   - default: `logo`
@@ -279,6 +294,21 @@ runtime:
     - required when `outer_cv_strategy=group_kfold|stratified_group_kfold`
     - must be `>= 2`
     - must be `null` when `outer_cv_strategy=logo`
+
+For family-level CV using existing `family_id` annotations, without rewriting
+metadata or generating family holdout columns:
+
+```yaml
+split:
+  group_col: family_id
+  test_holdout_col: null
+  require_both_labels_per_group: true
+```
+
+This ignores the explicit contrast-pair holdout column and uses all eligible
+labeled species in families containing both labels. Single-label families
+become `external_test`. This filters the training population before CV; it
+does not merely omit single-label validation folds from the reported metrics.
 
 ## `sampling`
 

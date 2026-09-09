@@ -184,6 +184,7 @@ class SplitConfig(StrictModel):
     group_col: str = "contrast_pair_id"
     test_holdout_col: str | None = "contrast_pair_test_holdout"
     exclude_col: str | None = None
+    require_both_labels_per_group: bool = False
     outer_cv_strategy: OuterCvStrategy = "logo"
     outer_cv_n_splits: PositiveInt | None = None
 

@@ -6,7 +6,7 @@ import polars as pl
 import pytest
 
 import phenoradar.split as split_mod
-from phenoradar.config import load_and_resolve_config
+from phenoradar.config import AppConfig, load_and_resolve_config
 from phenoradar.split import SplitError, build_split_artifacts
 
 
@@ -190,6 +190,208 @@ preprocess:
 
     assert manifest.filter(pl.col("pool").is_in(["train", "validation"])).height > 0
     assert manifest.filter(pl.col("contrast_group_id").is_null()).height > 0
+
+
+def _both_label_groups_config(
+    tmp_path: Path,
+    *,
+    require_both_labels: bool | None = True,
+    outer_cv_strategy: str = "logo",
+    outer_cv_n_splits: int | None = None,
+    sampling_strategy: str = "all_samples",
+    rows: list[str] | None = None,
+    test_holdout_col: str | None = "test_holdout",
+) -> AppConfig:
+    if rows is None:
+        rows = [
+            "a_pos\t1\tcp_a\tfamily_a\tno\tno",
+            "a_neg\t0\tcp_a\tfamily_a\tno\tno",
+            "b_pos\t1\t\tfamily_b\tno\tno",
+            "b_neg\t0\t\tfamily_b\tno\tno",
+            "c_pos\t1\tcp_c\tfamily_c\tno\tno",
+            "c_neg\t0\tcp_c\tfamily_c\tno\tno",
+            "positive_1\t1\t\tpositive_only\tno\tno",
+            "positive_2\t1\t\tpositive_only\tno\tno",
+            "negative_1\t0\t\tnegative_only\tno\tno",
+            "negative_2\t0\t\tnegative_only\tno\tno",
+            "remaining_neg\t0\t\texcluded_positive\tno\tno",
+            "excluded_pos\t1\t\texcluded_positive\tno\tyes",
+            "unknown_positive_family\t\t\tpositive_only\tno\tno",
+            "unknown_only\t\t\tunlabeled_family\tno\tno",
+            "holdout_pos\t1\tcp_holdout\tholdout_family\tyes\tno",
+            "holdout_neg\t0\tcp_holdout\tholdout_family\tyes\tno",
+        ]
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "species\tC4\tcontrast_pair_id\tfamily_id\ttest_holdout\texclude\n"
+        + "\n".join(rows)
+        + "\n",
+    )
+    species = [row.split("\t")[0] for row in rows if row.split("\t")[-1] != "yes"]
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "species\torthogroup\ttpm\n"
+        + "\n".join(f"{name}\tOG1\t1.0" for name in species)
+        + "\n",
+    )
+    enabled_line = (
+        ""
+        if require_both_labels is None
+        else f"  require_both_labels_per_group: {str(require_both_labels).lower()}\n"
+    )
+    config_path = _write(
+        tmp_path / "config.yml",
+        f"""data:
+  metadata_path: {metadata}
+  tpm_path: {tpm}
+  contrast_pair_col: contrast_pair_id
+split:
+  group_col: family_id
+  test_holdout_col: {test_holdout_col or "null"}
+  exclude_col: exclude
+  outer_cv_strategy: {outer_cv_strategy}
+  outer_cv_n_splits: {outer_cv_n_splits or "null"}
+{enabled_line}sampling:
+  strategy: {sampling_strategy}
+  max_samples_per_label_per_group: null
+  sampled_set_count: 1
+""",
+    )
+    return load_and_resolve_config([config_path])
+
+
+@pytest.mark.parametrize("sampling_strategy", ["all_samples", "group_balanced"])
+@pytest.mark.parametrize(
+    ("outer_cv_strategy", "outer_cv_n_splits", "expected_folds"),
+    [("logo", None, 3), ("group_kfold", 2, 2), ("stratified_group_kfold", 2, 2)],
+)
+def test_require_both_labels_routes_single_label_groups_before_cv(
+    tmp_path: Path,
+    sampling_strategy: str,
+    outer_cv_strategy: str,
+    outer_cv_n_splits: int | None,
+    expected_folds: int,
+) -> None:
+    config = _both_label_groups_config(
+        tmp_path,
+        sampling_strategy=sampling_strategy,
+        outer_cv_strategy=outer_cv_strategy,
+        outer_cv_n_splits=outer_cv_n_splits,
+    )
+
+    artifacts = build_split_artifacts(config)
+    manifest = artifacts.split_manifest
+    cv_rows = manifest.filter(pl.col("pool").is_in(["train", "validation"]))
+    expected_cv_species = {"a_pos", "a_neg", "b_pos", "b_neg", "c_pos", "c_neg"}
+
+    assert artifacts.fold_count == expected_folds
+    assert artifacts.pool_counts == {
+        "training_validation": 6,
+        "external_test": 7,
+        "discovery_inference": 2,
+        "excluded": 1,
+    }
+    assert set(cv_rows.get_column("species")) == expected_cv_species
+    assert cv_rows.height == len(expected_cv_species) * expected_folds
+    validation = cv_rows.filter(pl.col("pool") == "validation")
+    assert validation.height == len(expected_cv_species)
+    assert validation.get_column("species").n_unique() == len(expected_cv_species)
+    assert cv_rows.filter(pl.col("group_id") == "family_b").get_column(
+        "contrast_group_id"
+    ).null_count() == 2 * expected_folds
+    assert set(manifest.filter(pl.col("pool") == "external_test").get_column("species")) == {
+        "positive_1", "positive_2", "negative_1", "negative_2", "remaining_neg",
+        "holdout_pos", "holdout_neg",
+    }
+    assert set(
+        manifest.filter(pl.col("pool") == "discovery_inference").get_column("species")
+    ) == {"unknown_positive_family", "unknown_only"}
+    assert "excluded_pos" not in set(manifest.get_column("species"))
+    assert artifacts.fold_diagnostics.get_column("two_class_validation_metrics_defined").all()
+    for fold_id in cv_rows.get_column("fold_id").unique():
+        fold = cv_rows.filter(pl.col("fold_id") == fold_id)
+        train = fold.filter(pl.col("pool") == "train")
+        valid = fold.filter(pl.col("pool") == "validation")
+        assert set(train.get_column("group_id")).isdisjoint(valid.get_column("group_id"))
+        assert set(train.get_column("label")) == {0, 1}
+        assert set(valid.get_column("label")) == {0, 1}
+
+
+def test_require_both_labels_defaults_to_existing_single_label_group_behavior(
+    tmp_path: Path,
+) -> None:
+    default_config = _both_label_groups_config(tmp_path, require_both_labels=None)
+    default_artifacts = build_split_artifacts(default_config)
+    disabled_config = _both_label_groups_config(tmp_path, require_both_labels=False)
+    disabled_artifacts = build_split_artifacts(disabled_config)
+
+    assert default_config.split.require_both_labels_per_group is False
+    assert default_artifacts.split_manifest.equals(disabled_artifacts.split_manifest)
+    assert default_artifacts.fold_count == 6
+    assert default_artifacts.pool_counts["training_validation"] == 11
+    assert default_artifacts.pool_counts["external_test"] == 2
+    assert not default_artifacts.fold_diagnostics.get_column(
+        "two_class_validation_metrics_defined"
+    ).all()
+
+
+def test_require_both_labels_can_route_groups_without_holdout_column(tmp_path: Path) -> None:
+    config = _both_label_groups_config(tmp_path, test_holdout_col=None)
+
+    artifacts = build_split_artifacts(config)
+
+    assert artifacts.fold_count == 4
+    assert artifacts.pool_counts["training_validation"] == 8
+    assert artifacts.pool_counts["external_test"] == 5
+    assert set(
+        artifacts.split_manifest.filter(pl.col("pool") == "external_test").get_column("species")
+    ) == {"positive_1", "positive_2", "negative_1", "negative_2", "remaining_neg"}
+
+
+@pytest.mark.parametrize(
+    ("remaining_mixed_groups", "message"),
+    [(0, "require_both_labels_per_group"), (1, "at least two split groups"), (2, "n_splits")],
+)
+def test_require_both_labels_rejects_insufficient_remaining_cv_groups(
+    tmp_path: Path, remaining_mixed_groups: int, message: str
+) -> None:
+    rows = [
+        "positive\t1\t\tpositive_only\tno\tno",
+        "negative\t0\t\tnegative_only\tno\tno",
+    ]
+    for index in range(remaining_mixed_groups):
+        rows.extend([
+            f"mixed_{index}_pos\t1\t\tmixed_{index}\tno\tno",
+            f"mixed_{index}_neg\t0\t\tmixed_{index}\tno\tno",
+        ])
+    config = _both_label_groups_config(
+        tmp_path,
+        rows=rows,
+        outer_cv_strategy="group_kfold",
+        outer_cv_n_splits=3,
+    )
+
+    with pytest.raises(SplitError, match=message):
+        build_split_artifacts(config)
+
+
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        (["missing\t1\t\t\tno\tno"], "non-empty split group"),
+        (
+            ["train\t1\t\tfamily_a\tno\tno", "test\t1\t\tfamily_a\tyes\tno"],
+            "consistent test-holdout assignment",
+        ),
+    ],
+)
+def test_require_both_labels_preserves_metadata_validation(
+    tmp_path: Path, rows: list[str], message: str
+) -> None:
+    config = _both_label_groups_config(tmp_path, rows=rows)
+
+    with pytest.raises(SplitError, match=message):
+        build_split_artifacts(config)
 
 
 def test_null_contrast_pair_col_uses_split_group_without_contrast_column(

@@ -58,6 +58,20 @@ Pool assignment:
 - trait present + test holdout false + split group present -> `training_validation`
 - trait missing -> `discovery_inference`
 
+When `split.require_both_labels_per_group=true`, inspect the provisional
+`training_validation` pool by `split.group_col` before constructing folds.
+Only groups with both `0` and `1` remain eligible; labeled species in
+single-label groups move to `external_test`. Explicit holdouts, excluded
+species, and trait-missing species do not contribute to that check. Existing
+validation of consistent explicit holdout assignments within each split group
+still runs. The default `false` preserves the original pool assignment.
+
+This is a filter on CV eligibility, not a filter on completed folds or their
+metrics: moved species are absent from all CV training and validation sets
+and from final-refit training. Setting `split.test_holdout_col=null` only
+disables explicit holdout flags; automatic group filtering can still create
+an `external_test` pool.
+
 `training_validation` is an internal pool label before fold expansion.
 In `split/tables/split_manifest.tsv`, these species appear as `train` and `validation`.
 
@@ -165,7 +179,9 @@ After all folds:
 
 ### 4) Final refit (`execution_stage=full_run`)
 
-- Training pool is `train + validation` species.
+- Training pool is `train + validation` species, after any
+  `split.require_both_labels_per_group` filtering. Automatically held-out
+  single-label groups remain in `external_test`.
 - `sampling.training_group_count` is applied again to this full refit pool using
   the same reproducible group ranking. Thus a numeric count also determines the
   exact number of groups used by the deployed refit model; use `cv_only` when

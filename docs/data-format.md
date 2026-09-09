@@ -83,6 +83,22 @@ split:
   exclude_col: family_exclude
 ```
 
+If metadata already contains `family_id`, the same two-label eligibility rule
+can instead be applied at run time without generating block columns or
+rewriting metadata:
+
+```yaml
+split:
+  group_col: family_id
+  test_holdout_col: null
+  require_both_labels_per_group: true
+```
+
+Here `null` disables reading an explicit holdout column. Families with only
+one observed trait label are still routed to `external_test` automatically;
+families with both labels enter CV. Missing family IDs on labeled species
+remain an error unless those species are explicitly held out or excluded.
+
 ## Species Taxid TSV
 
 When known NCBI Taxonomy IDs are available, `phenoradar metadata` can use them for tree
@@ -133,7 +149,8 @@ Rules:
 - `split.group_col` is required for labeled species unless
   `split.test_holdout_col` marks the species as a test holdout.
 - `split.test_holdout_col` accepts `yes/no`, `true/false`, `1/0`, empty, or
-  null values. Empty/null values are treated as false.
+  null values. Empty/null values are treated as false. Set the config key to
+  `null` when no explicit holdout column should be read.
 - `split.exclude_col`, when configured, accepts the same boolean values and
   removes matching species from CV, external test, and inference.
 - `data.contrast_pair_col` can be set to `null` for non-contrast-pair
@@ -141,13 +158,22 @@ Rules:
   be used.
 
 Pool assignment is derived from `(trait, split.group_col, split.test_holdout_col,
-split.exclude_col)`:
+split.exclude_col)` and the optional group eligibility rule:
 
 - `exclude` true -> removed from all pools
 - `trait` present and test holdout true -> `external_test`
 - `trait` present, test holdout false, and split group present -> `training_validation`
 - `trait` missing -> `discovery_inference`
 - `trait` present, test holdout false, and split group missing -> error
+
+With `split.require_both_labels_per_group: true`, labeled species initially
+eligible for `training_validation` are grouped by `split.group_col`. Groups
+without both labels are moved to `external_test` before CV construction.
+These species are not used in any CV training/validation fold or final-refit
+training. Excluded species and explicit holdouts do not contribute to the
+eligibility check; trait-missing species remain in `discovery_inference`.
+Explicit holdout assignments must still be consistent within each split group.
+The default `false` leaves the pool assignment above unchanged.
 
 ## Orthogroup annotations
 

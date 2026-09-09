@@ -53,6 +53,31 @@ def _normalized_string_expr(column: str, alias: str) -> pl.Expr:
     return pl.col(column).cast(pl.String, strict=False).str.strip_chars().alias(alias)
 
 
+def _hold_out_single_label_groups(metadata: pl.DataFrame) -> pl.DataFrame:
+    """Reserve single-label CV groups without changing explicit exclusions or unknowns."""
+    candidate = (
+        pl.col("__label").is_not_null()
+        & ~pl.col("__test_holdout")
+        & ~pl.col("__exclude")
+    )
+    single_label_groups = (
+        metadata.filter(candidate)
+        .group_by("__group")
+        .agg(pl.col("__label").n_unique().alias("__n_labels"))
+        .filter(pl.col("__n_labels") < 2)
+        .get_column("__group")
+        .to_list()
+    )
+    if not single_label_groups:
+        return metadata
+    return metadata.with_columns(
+        (
+            pl.col("__test_holdout")
+            | (candidate & pl.col("__group").is_in(single_label_groups).fill_null(False))
+        ).alias("__test_holdout")
+    )
+
+
 def _normalize_metadata(config: AppConfig) -> pl.DataFrame:
     metadata = _load_tsv(Path(config.data.metadata_path))
     species_col = config.data.species_col
@@ -242,6 +267,9 @@ def _normalize_metadata(config: AppConfig) -> pl.DataFrame:
             f"offending species: {species_str}"
         )
 
+    if config.split.require_both_labels_per_group:
+        normalized = _hold_out_single_label_groups(normalized)
+
     return normalized.with_columns(
         pl.when(
             pl.col("__label").is_not_null()
@@ -308,7 +336,22 @@ def _validate_expression_coverage(metadata: pl.DataFrame, expression_species: se
 
 def _preflight_training_pool(config: AppConfig, training_df: pl.DataFrame) -> None:
     if training_df.height == 0:
+        if config.split.require_both_labels_per_group:
+            raise SplitError(
+                "No species available in training and validation pool after applying "
+                "split.require_both_labels_per_group=true; no non-held-out, non-excluded "
+                "split group contains both labels"
+            )
         raise SplitError("No species available in training and validation pool")
+
+    if (
+        config.split.require_both_labels_per_group
+        and training_df.get_column("__group").n_unique() < 2
+    ):
+        raise SplitError(
+            "CV requires at least two split groups containing both labels after applying "
+            "split.require_both_labels_per_group=true and holdout/exclude flags"
+        )
 
     if training_df.select(pl.col("__label").n_unique()).item() < 2:
         raise SplitError("Training and validation pool must contain both labels before CV")
