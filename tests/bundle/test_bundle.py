@@ -163,6 +163,28 @@ def _rewrite_bundle_as_v1(bundle_dir: Path) -> None:
     _rewrite_manifest_to_current_files(bundle_dir, manifest_mutator=_set_v1)
 
 
+def test_v2_bundle_without_missing_expression_policy_keeps_legacy_predictions(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _fixture_data(tmp_path)
+    config, bundle = _export_and_load_bundle(tmp_path, metadata, tpm)
+    expected, _ = predict_with_bundle(config, bundle)
+    state_path = bundle.bundle_dir / "preprocess_state.joblib"
+    state = joblib.load(state_path)
+    for key in ("missing_expression", "abstention", "abstention_top_features"):
+        state.pop(key, None)
+    joblib.dump(state, state_path)
+    _rewrite_manifest_to_current_files(
+        bundle.bundle_dir,
+        manifest_mutator=lambda manifest: manifest.update(bundle_format_version="2"),
+    )
+    legacy = load_model_bundle(bundle.bundle_dir)
+    assert legacy.missing_expression_method == "none"
+    assert not legacy.abstention_enabled
+    actual, _ = predict_with_bundle(config, legacy)
+    assert actual.equals(expected)
+
+
 def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
     metadata, tpm = _fixture_data(tmp_path)
     config = load_and_resolve_config([_config(tmp_path, metadata, tpm)])

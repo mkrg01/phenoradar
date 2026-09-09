@@ -351,12 +351,72 @@ Compatibility rules:
     - `0`: represent an absent `(species, feature)` coordinate as numeric zero
     - `nan`: preserve it as a floating-point missing value through expression
       transforms, optional scaling, model fitting, and prediction
-  - rule: `nan` is supported only with `model.name=random_forest`; the other
-    model families reject missing feature values
+  - rule: `nan` is supported with `model.name=random_forest` or the neutral
+    logistic-regression mode described below
   - sparse filtering still counts an absent coordinate as not nonzero; the
     remaining feature statistics use available finite observations
   - the selected policy is stored in full-run model bundles and reused during
     `predict`, including for bundle features entirely absent from prediction input
+
+### `preprocess.missing_expression` and `abstention`
+
+These features are opt-in in built-in defaults. The checked-in `config.yml`
+enables neutral expression handling and fixed-threshold abstention:
+
+```yaml
+model:
+  name: logistic_elasticnet
+preprocess:
+  absent_feature_fill: nan
+  missing_expression:
+    method: neutral
+    zero_as_missing: true
+  expression_transform:
+    method: log1p
+  feature_scaling:
+    method: standard
+abstention:
+  enabled: true
+  threshold: 0.8
+```
+
+- `preprocess.missing_expression.method`: `none` (default) or `neutral`.
+  Neutral mode requires logistic regression, `log1p`, standard scaling, and
+  `absent_feature_fill: nan`. Retrain the model when enabling this mode.
+- `zero_as_missing`: default `false`. With `true`, explicit numeric zeros are
+  treated as unknown after duplicate coordinates have been summed. Missing
+  coordinates are unknown with either setting. Positive TPM remains observed;
+  no small-positive-expression cutoff is inferred. This policy cannot distinguish
+  biological silence from technical failure and discards zero-expression evidence.
+- Unknown values stay missing during feature selection. All-missing, singleton,
+  and constant-observation features are removed. Supervised ranking requires
+  observations in both labels; pair-aware filtering also requires the configured
+  number of valid contrasts for each retained feature.
+- Means and population standard deviations are fitted on observed values in each
+  model's sampled training set. Standardized missing inputs become exactly zero,
+  so their additive linear contribution is zero. Raw TPM and observation status
+  are kept separately for evidence. Validation/inference never refits these statistics.
+- `abstention.enabled`: default `false`; requires neutral mode.
+- `abstention.threshold`: fixed value in `(0, 1]`, default `0.8`. No CV threshold
+  search, artificial missingness training, or minimum validation sample count is
+  introduced. Existing model selection and evaluation CV remain available.
+
+For each model, information coverage is
+`sum(abs(coef[j]) * observed[j]) / sum(abs(coef[j]))`. Intercept-only models
+have zero coverage. For ensembles, coverages are averaged arithmetically,
+independently of mean/median probability aggregation. A genuinely observed value
+equal to the training mean counts as observed, even though its standardized value
+is zero. Opposite-signed model coefficients never cancel in this calculation.
+
+Predictions with coverage at least the threshold are accepted; lower coverage
+produces a null selective label. Probabilities and the raw fixed-0.5 labels remain
+available. A model with no informative coefficients always abstains. The gate
+does not reject a probability merely because it is close to 0.5. Coverage is a
+measurement-availability heuristic, not a calibrated confidence or error bound.
+Removing negative evidence can still increase the predicted probability.
+
+The bundle persists both policies, the scalers, and the fixed gate threshold;
+`predict` uses the saved policies rather than the prediction config's overrides.
 
 ### `preprocess.expression_transform`
 

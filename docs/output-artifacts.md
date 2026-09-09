@@ -27,6 +27,60 @@ For one `run` result directory, a practical order is:
 
 ## Run directory layout
 
+When `abstention.enabled: true`, inspect each prediction table together with its
+`abstention_summary.tsv`. The raw probability is retained even for a withheld
+decision; use `pred_label_selective` for downstream classification and candidate
+selection.
+
+The following columns are added to CV, external-test, inference, and bundled
+prediction tables (and per-fold inference predictions):
+
+| Column | Meaning |
+| --- | --- |
+| `information_coverage` | Observed fraction of absolute coefficient weight, averaged across models |
+| `abstention_threshold` | Saved fixed coverage threshold, normally `0.8` |
+| `pred_label_selective` | Fixed-0.5 binary decision for accepted species; `NA` for abstained species |
+| `decision_status` | `accepted` or `abstained` |
+| `abstention_reason` | `insufficient_information`, `no_informative_coefficients`, or `NA` when accepted |
+| `missing_features_json` | Missing important features for abstained species, ordered by coefficient weight |
+
+Each prediction stage writes:
+
+- `<stage>/tables/abstention_summary.tsv`: overall, true-label, and available
+  fold/group summaries with `n_species`, `n_accepted`, `n_abstained`,
+  `decision_rate`, accepted positive/negative counts, and `n_evaluated`.
+  Confusion counts and metrics evaluate accepted labeled species only.
+  `positive_error_rate = FP / (TP + FP)` and
+  `negative_error_rate = FN / (TN + FN)`; undefined denominators are `NA`.
+  If all species abstain, performance metrics are `NA`, not zero error.
+- `<stage>/tables/abstention_features.tsv`: readable long form of the missing
+  evidence, with `species`, `rank`, `feature`, and `coefficient_fraction`.
+  At most `figures.top_features` features are listed per species. These are
+  availability weights, not signed contributions or causal explanations.
+- `<stage>/tables/abstention_by_<group>.tsv`: additional summary by the configured
+  metadata group, when grouped summaries are available.
+
+Existing `metrics_cv.tsv`, `classification_summary.tsv`, loss, ROC/PR, and
+probability-comparison outputs continue to describe raw predictions across all
+species. Compare those baseline metrics with `abstention_summary.tsv` and its
+decision rate; selective metrics alone can hide excessive withholding.
+
+Grouped tables additionally report `n_accepted`, `n_abstained`, `n_pred_negative`,
+and `decision_rate`. Their `n_pred_positive` excludes abstention and
+`pred_positive_rate` uses accepted species as its denominator. Probability
+statistics and `top_species` still describe raw probabilities across all species.
+Candidate evidence is generated only for accepted positives. Group-probability
+plots, inference histograms, and tree prediction labels distinguish abstention;
+the external confusion matrix uses accepted decisions and displays the number
+withheld. CV error-evidence plots remain diagnostics of raw fixed-0.5 errors and
+explicitly label abstained species.
+
+With neutral expression handling, expression-evidence tables add `is_missing`.
+Raw TPM is preserved, while missing plot values become `NA` rather than a
+low-expression point or a zero-intensity heatmap cell. Missing linear inputs
+have zero standardized contribution; an observed value at the training mean
+also has zero contribution but remains observed for coverage.
+
 `phenoradar run` writes:
 
 - `runs/<timestamp>_run_<id>/...`
@@ -1106,7 +1160,9 @@ Bundle loading enforces:
 
 Bundle format compatibility:
 
-- current exports use format version `2`.
+- current exports use format version `3`, which persists neutral-expression and
+  fixed-abstention policies. Readers also support versions `1` and `2` with their
+  original policies. Neutral scalers and their declared policy must agree.
 - version `1` bundles using feature-wise `none` or `log1p` transforms remain loadable.
 - version `1` rank-transform bundles cannot reconstruct the complete pre-transform schema and
   must be regenerated with the current PhenoRadar version.

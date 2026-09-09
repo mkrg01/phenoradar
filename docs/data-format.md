@@ -221,12 +221,17 @@ Rules:
   interpreted as zero
 - duplicate `(species, feature)` rows are summed after every contributing value is validated
 - an absent `(species, feature)` coordinate is represented as zero by default
-- set `preprocess.absent_feature_fill: nan` with `model.name: random_forest` to
+- set `preprocess.absent_feature_fill: nan` with `model.name: random_forest`
+  or neutral logistic regression (`preprocess.missing_expression.method: neutral`) to
   represent absent coordinates as missing values instead; explicit TPM values
   must still be finite and cannot be written as `NA`
 - in the default `0` mode, the long format cannot distinguish a truly
   measured zero from an unmeasured coordinate; encode or validate measurement
   coverage upstream when that distinction matters
+- neutral mode can additionally treat explicit zero as unknown with
+  `preprocess.missing_expression.zero_as_missing: true`. The original TPM is not
+  overwritten. Positive values remain observed; explicit `NA`/blank TPM is still
+  invalid. Duplicate coordinates are summed before zero masking.
 
 Example:
 

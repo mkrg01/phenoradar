@@ -28,7 +28,10 @@ sampling:
 
 preprocess:
   max_pivot_cells: 50000000
-  absent_feature_fill: 0  # choices: 0, nan; nan requires random_forest
+  absent_feature_fill: nan  # choices: 0, nan; nan supports random_forest or neutral LR
+  missing_expression:
+    method: neutral  # choices: none, neutral; neutral requires logistic_elasticnet/log1p/standard
+    zero_as_missing: true  # explicit TPM=0 is unknown; raw TPM is retained in evidence
   expression_transform:
     method: log1p  # choices: none, log1p, sample_rank, sample_percentile_rank
   sparse_feature_filter:
@@ -73,6 +76,10 @@ model_selection:
   inner_cv_n_splits: 5
   selection_metric: log_loss  # choices: mcc, balanced_accuracy, log_loss
   selection_rule: best  # choices: best, one_se
+
+abstention:
+  enabled: true
+  threshold: 0.8  # fixed observed coefficient fraction; not a probability threshold
 
 ensemble:
   probability_aggregation: mean  # choices: mean, median

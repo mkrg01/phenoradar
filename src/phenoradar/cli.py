@@ -15,6 +15,12 @@ import polars as pl
 import typer
 
 from phenoradar import __version__
+from phenoradar.abstention import (
+    ABSTENTION_COLUMNS,
+    abstention_summary,
+    prediction_label_expr,
+    write_abstention_artifacts,
+)
 from phenoradar.bundle import (
     BundleError,
     export_model_bundle,
@@ -271,6 +277,12 @@ def _write_group_summary_artifacts(
         float_precision=8,
         null_value="NA",
     )
+    if "decision_status" in artifacts.predictions.columns:
+        abstention_summary(artifacts.predictions).write_csv(
+            tables_dir / f"abstention_by_{artifacts.suffix}.tsv",
+            separator="\t",
+            null_value="NA",
+        )
     try:
         write_group_probability_figure(
             grouped_predictions=artifacts.predictions,
@@ -563,10 +575,13 @@ def _emit_predict_summary(
     n_species = pred_predict.height
     n_positive = None
     if "pred_label_fixed_threshold" in pred_predict.columns:
-        n_positive = int(pred_predict.filter(pl.col("pred_label_fixed_threshold") == 1).height)
+        n_positive = int(pred_predict.filter(prediction_label_expr(pred_predict) == 1).height)
     message = f"Prediction summary (n_species={n_species}"
     if n_positive is not None:
         message += f", n_pred_positive={n_positive}"
+    if "decision_status" in pred_predict.columns:
+        n_abstained = pred_predict.filter(pl.col("decision_status") == "abstained").height
+        message += f", n_abstained={n_abstained}"
     message += ")."
     _progress_log("predict", message, start_time=start_time, log_verbosity=log_verbosity)
 
@@ -1125,6 +1140,7 @@ def _run_single(
     cv_artifacts.oof_predictions.write_csv(
         cv_tables_dir / "prediction_cv.tsv", separator="\t", float_precision=8, null_value="NA"
     )
+    write_abstention_artifacts(cv_artifacts.oof_predictions, cv_tables_dir)
     cv_species_evidence = getattr(cv_artifacts, "cv_species_evidence", None)
     cv_species_feature_evidence = getattr(
         cv_artifacts, "cv_species_feature_evidence", None
@@ -1183,6 +1199,10 @@ def _run_single(
     if cv_artifacts.model_selection_selected is not None:
         selected_tables.append(cv_artifacts.model_selection_selected)
     if final_refit_artifacts is not None:
+        write_abstention_artifacts(
+            final_refit_artifacts.pred_external_test, external_test_tables_dir
+        )
+        write_abstention_artifacts(final_refit_artifacts.pred_inference, inference_tables_dir)
         final_refit_artifacts.pred_external_test.write_csv(
             external_test_tables_dir / "prediction_external_test.tsv",
             separator="\t",
@@ -1740,6 +1760,8 @@ def _run_single(
     if tree_path is not None and contrast_pair_col is not None:
         try:
             tree_warnings = write_run_tree_prediction_artifacts(
+                preserve_missing=resolved.preprocess.missing_expression.method == "neutral",
+                zero_as_missing=resolved.preprocess.missing_expression.zero_as_missing,
                 run_dir=run_dir,
                 tree_path=Path(tree_path),
                 metadata_path=Path(resolved.data.metadata_path),
@@ -2609,6 +2631,7 @@ def predict(
                 "prob",
                 "pred_label_fixed_threshold",
                 "uncertainty_std",
+                *ABSTENTION_COLUMNS,
             ]
             if name in pred_predict.columns
         ]
@@ -2625,6 +2648,7 @@ def predict(
         float_precision=8,
         null_value="NA",
     )
+    write_abstention_artifacts(pred_predict, inference_tables_dir)
     if pred_predict.height > 0:
         predict_warnings.extend(
             _write_group_summary_artifacts(

@@ -34,6 +34,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
 from sklearn.utils.validation import has_fit_parameter
 
+from phenoradar.abstention import annotate_abstention
 from phenoradar.config import AppConfig
 from phenoradar.feature_stability import (
     FeatureStabilityError,
@@ -53,6 +54,11 @@ from phenoradar.metrics import (
     binary_log_loss,
     binary_probability_metrics,
     metric_higher_is_better,
+)
+from phenoradar.missing_expression import (
+    NeutralStandardScaler,
+    mark_expression_observations,
+    mask_expression,
 )
 from phenoradar.model_selection import (
     Candidate,
@@ -917,11 +923,13 @@ def _sample_rank_transform(values: np.ndarray, *, percentile: bool) -> np.ndarra
     return ranked
 
 
-def apply_expression_transform(matrix: np.ndarray, method: str) -> np.ndarray:
+def apply_expression_transform(
+    matrix: np.ndarray, method: str, *, zero_as_missing: bool = False
+) -> np.ndarray:
     """Apply a sample x feature expression transform before feature filters."""
 
     resolved_method = _validate_expression_transform_method(str(method))
-    values = np.asarray(matrix, dtype=float)
+    values = mask_expression(matrix, zero_as_missing=zero_as_missing)
     if resolved_method == "none":
         return values
     if resolved_method == "log1p":
@@ -934,7 +942,11 @@ def apply_expression_transform(matrix: np.ndarray, method: str) -> np.ndarray:
 
 
 def _apply_expression_transform_for_config(config: AppConfig, matrix: np.ndarray) -> np.ndarray:
-    return apply_expression_transform(matrix, config.preprocess.expression_transform.method)
+    return apply_expression_transform(
+        matrix,
+        config.preprocess.expression_transform.method,
+        zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
+    )
 
 
 def apply_feature_scaling(matrix: np.ndarray, scaler: FeatureScaler, method: str) -> np.ndarray:
@@ -962,7 +974,11 @@ def fit_feature_scaling(
     if method == "none":
         return x_train_values, x_target_values, None
 
-    scaler = StandardScaler()
+    scaler = (
+        NeutralStandardScaler()
+        if config.preprocess.missing_expression.method == "neutral"
+        else StandardScaler()
+    )
     x_train_scaled = np.asarray(scaler.fit_transform(x_train_values), dtype=float)
     if x_target_values.shape[0] == 0:
         x_target_scaled = np.empty((0, x_train_values.shape[1]), dtype=float)
@@ -1227,6 +1243,11 @@ def _build_cv_species_evidence(
                     }
                 )
 
+    reference_frame = pl.DataFrame(reference_rows, schema=_CV_SPECIES_REFERENCE_EXPRESSION_SCHEMA)
+    if config.preprocess.missing_expression.method == "neutral":
+        reference_frame = mark_expression_observations(
+            reference_frame, zero_as_missing=config.preprocess.missing_expression.zero_as_missing
+        )
     return (
         pl.DataFrame(species_rows, schema=_CV_SPECIES_EVIDENCE_SCHEMA).sort(
             ["log_loss", "species"], descending=[True, False]
@@ -1234,9 +1255,7 @@ def _build_cv_species_evidence(
         pl.DataFrame(feature_rows, schema=_CV_SPECIES_FEATURE_EVIDENCE_SCHEMA).sort(
             ["species", "local_rank"]
         ),
-        pl.DataFrame(
-            reference_rows, schema=_CV_SPECIES_REFERENCE_EXPRESSION_SCHEMA
-        ).sort(["target_species", "feature", "label", "species"]),
+        reference_frame.sort(["target_species", "feature", "label", "species"]),
         warnings,
     )
 
@@ -2067,6 +2086,30 @@ def _select_feature_indices_with_counts(
 ) -> tuple[np.ndarray, FeatureFilterCounts]:
     selected = np.arange(x_train_expr.shape[1], dtype=int)
     n_features_before = int(selected.size)
+    if config.preprocess.missing_expression.method == "neutral":
+        observations = np.count_nonzero(np.isfinite(x_train_expr), axis=0)
+        variance = _column_nan_variance(x_train_expr, ddof=0)
+        selected = selected[(observations >= 2) & np.isfinite(variance) & (variance > 0)]
+        if y_train is not None and config.preprocess.ranked_feature_filter.method in {
+            "pair_aware",
+            "unpaired",
+        }:
+            observed_in_both = np.all(
+                [
+                    np.any(np.isfinite(x_train_expr[np.asarray(y_train) == label]), axis=0)
+                    for label in (0, 1)
+                ],
+                axis=0,
+            )
+            selected = selected[observed_in_both[selected]]
+            if config.preprocess.ranked_feature_filter.method == "pair_aware":
+                if groups_train is None:
+                    raise CVError("Pair-aware neutral preprocessing requires contrast groups")
+                contrasts = _pair_group_contrasts(x_train_expr, y_train, groups_train, selected)
+                counts_per_feature = np.count_nonzero(np.isfinite(contrasts), axis=0)
+                selected = selected[
+                    counts_per_feature >= config.preprocess.ranked_feature_filter.min_contrast_pairs
+                ]
 
     if config.preprocess.sparse_feature_filter.enabled:
         min_fraction = (
@@ -2094,7 +2137,7 @@ def _select_feature_indices_with_counts(
                 )
             trait_values = np.asarray([within_trait], dtype=int)
         max_nonzero_fraction = np.zeros(selected.size, dtype=float)
-        nonzero_mask = x_train_expr > _NONZERO_TOLERANCE
+        nonzero_mask = x_train_expr[:, selected] > _NONZERO_TOLERANCE
         for trait_value in trait_values:
             trait_mask = y_train_arr == trait_value
             trait_count = int(np.count_nonzero(trait_mask))
@@ -4152,6 +4195,28 @@ def _build_prediction_table(
     return pl.DataFrame(payload).sort("species")
 
 
+def _annotate_prediction_abstention(
+    config: AppConfig,
+    predictions: pl.DataFrame,
+    species: list[str],
+    matrix: np.ndarray,
+    feature_names: list[str],
+    entries: list[FinalModelEntry],
+) -> pl.DataFrame:
+    if not config.abstention.enabled:
+        return predictions
+    return annotate_abstention(
+        predictions,
+        species=species,
+        matrix=matrix,
+        feature_names=feature_names,
+        model_coefficients=[(entry.feature_names, entry.model.coef_) for entry in entries],
+        zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
+        threshold=config.abstention.threshold,
+        top_features=config.figures.top_features,
+    )
+
+
 def _fit_outer_sample_set(
     *,
     config: AppConfig,
@@ -5041,6 +5106,31 @@ def _run_final_refit_impl(
         uncertainty_std=inference_uncertainty,
         include_true_label_column=True,
     )
+    if config.abstention.enabled:
+        target_matrix = x_target_pruned if prune_target_matrix else x_target_raw
+        if target_matrix is None or target_feature_names is None:
+            if target_count:
+                raise CVError("Target expression is unavailable for abstention")
+            target_feature_names = list(
+                dict.fromkeys(feature for entry in model_entries for feature in entry.feature_names)
+            )
+            target_matrix = np.empty((0, len(target_feature_names)), dtype=float)
+        pred_external = _annotate_prediction_abstention(
+            config,
+            pred_external,
+            external_species,
+            target_matrix[:external_count],
+            target_feature_names,
+            model_entries,
+        )
+        pred_inference = _annotate_prediction_abstention(
+            config,
+            pred_inference,
+            inference_species,
+            target_matrix[external_count:],
+            target_feature_names,
+            model_entries,
+        )
     interpretation_started = recorder.start()
     try:
         (
@@ -5082,6 +5172,11 @@ def _run_final_refit_impl(
             schema={"species": pl.String, "feature": pl.String, "tpm": pl.Float64}
         )
 
+    if config.preprocess.missing_expression.method == "neutral":
+        top_feature_expression_external = mark_expression_observations(
+            top_feature_expression_external,
+            zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
+        )
     model_selection_selected: pl.DataFrame | None = None
     if model_selection_selected_rows:
         model_selection_selected = pl.DataFrame(model_selection_selected_rows).sort(
@@ -5714,6 +5809,35 @@ def _run_outer_fold(
                 }
             )
 
+    if config.abstention.enabled:
+        annotated = _annotate_prediction_abstention(
+            config,
+            pl.DataFrame(oof_rows),
+            valid_species,
+            x_valid_raw,
+            feature_names,
+            evidence_model_entries,
+        ).join(
+            pl.DataFrame({"species": valid_species, "group_id": valid_group_ids}),
+            on="species",
+            how="left",
+        )
+        oof_rows = annotated.to_dicts()
+        cv_species_evidence = cv_species_evidence.join(
+            annotated.select("species", "decision_status", "information_coverage"),
+            on="species",
+            how="left",
+        )
+        if inference_prediction_rows:
+            inference_prediction_rows = _annotate_prediction_abstention(
+                config,
+                pl.DataFrame(inference_prediction_rows),
+                inference_species,
+                x_inference_matrix,
+                feature_names,
+                evidence_model_entries,
+            ).to_dicts()
+
     result = OuterFoldResult(
         fold_metrics=fold_metrics,
         metric_rows=metric_rows,
@@ -5899,7 +6023,7 @@ def _run_outer_cv_impl(
         raise CVError("No out-of-fold predictions were generated")
 
     postprocess_started = recorder.start()
-    oof_df = pl.DataFrame(oof_rows).sort(["fold_id", "species"])
+    oof_df = pl.DataFrame(oof_rows, infer_schema_length=None).sort(["fold_id", "species"])
     oof_y = np.array(oof_df.select("label").to_series().to_list(), dtype=int)
     oof_prob = np.array(oof_df.select("prob").to_series().to_list(), dtype=float)
 
@@ -5990,7 +6114,7 @@ def _run_outer_cv_impl(
         else empty_feature_evidence
     )
     cv_species_reference_expression = (
-        pl.concat(cv_species_reference_expression_frames, how="vertical").sort(
+        pl.concat(cv_species_reference_expression_frames, how="diagonal_relaxed").sort(
             ["fold_id", "target_species", "feature", "label", "species"]
         )
         if cv_species_reference_expression_frames
@@ -5998,9 +6122,9 @@ def _run_outer_cv_impl(
     )
     inference_predictions_by_fold: pl.DataFrame | None = None
     if inference_prediction_rows:
-        inference_predictions_by_fold = pl.DataFrame(inference_prediction_rows).sort(
-            ["fold_id", "species"]
-        )
+        inference_predictions_by_fold = pl.DataFrame(
+            inference_prediction_rows, infer_schema_length=None
+        ).sort(["fold_id", "species"])
     model_selection_selected: pl.DataFrame | None = None
     if model_selection_selected_rows:
         model_selection_selected = pl.DataFrame(model_selection_selected_rows).sort(
@@ -6044,6 +6168,11 @@ def _run_outer_cv_impl(
         interpretation_artifacts.feature_importance,
         feature_limit=config.figures.top_features,
     )
+    if config.preprocess.missing_expression.method == "neutral":
+        top_feature_expression = mark_expression_observations(
+            top_feature_expression,
+            zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
+        )
     recorder.record_since(
         postprocess_started,
         scope="outer_cv",

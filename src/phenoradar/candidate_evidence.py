@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from phenoradar.abstention import prediction_label_expr
 from phenoradar.config import AppConfig
 from phenoradar.cv import (
     CVError,
@@ -19,6 +20,7 @@ from phenoradar.cv import (
     apply_feature_scaling,
 )
 from phenoradar.interpret import _linear_coefficients
+from phenoradar.missing_expression import mark_expression_observations
 
 
 class CandidateEvidenceError(ValueError):
@@ -97,7 +99,7 @@ def _positive_candidates(pred_inference: pl.DataFrame) -> pl.DataFrame:
         pred_inference.select(
             pl.col("species").cast(pl.String, strict=False).str.strip_chars().alias("species"),
             pl.col("prob").cast(pl.Float64, strict=False).alias("prob"),
-            pl.col("pred_label_fixed_threshold")
+            prediction_label_expr(pred_inference)
             .cast(pl.Int64, strict=False)
             .alias("pred_label_fixed_threshold"),
         )
@@ -318,6 +320,7 @@ def build_candidate_evidence_artifacts(
         candidate_transformed = apply_expression_transform(
             candidate_raw,
             config.preprocess.expression_transform.method,
+            zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
         )
     except CVError as exc:
         raise CandidateEvidenceError(str(exc)) from exc
@@ -427,6 +430,11 @@ def build_candidate_evidence_artifacts(
     reference_expression = pl.DataFrame(reference_rows, schema=_REFERENCE_SCHEMA).sort(
         ["feature", "label", "species"]
     )
+    if config.preprocess.missing_expression.method == "neutral":
+        reference_expression = mark_expression_observations(
+            reference_expression,
+            zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
+        )
     normalized_cross_fold = _normalized_cross_fold_predictions(
         cross_fold_predictions,
         candidate_species=[str(value) for value in retained_candidate_species],

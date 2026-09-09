@@ -7,6 +7,8 @@ from pathlib import Path
 
 import polars as pl
 
+from phenoradar.abstention import ABSTENTION_COLUMNS, prediction_label_expr
+
 
 class GroupSummaryError(ValueError):
     """Raised when group summaries cannot be generated."""
@@ -118,6 +120,7 @@ def build_group_summary_artifacts(
             _label_expr(predictions),
             _pred_label_expr(predictions),
             _uncertainty_expr(predictions),
+            *[pl.col(name) for name in ABSTENTION_COLUMNS if name in predictions.columns],
         ]
     ).filter(pl.col("species").is_not_null() & (pl.col("species") != ""))
 
@@ -193,9 +196,12 @@ def _summarize_joined_predictions(joined: pl.DataFrame, *, group_col: str) -> pl
         joined.group_by(["group_id", "group_name"])
         .agg(
             pl.len().alias("n_species"),
+            prediction_label_expr(joined).is_not_null().sum().alias("n_accepted"),
+            prediction_label_expr(joined).is_null().sum().alias("n_abstained"),
+            (prediction_label_expr(joined) == 0).sum().alias("n_pred_negative"),
             (pl.col("true_label") == 1).sum().alias("n_true_positive"),
             (pl.col("true_label") == 0).sum().alias("n_true_negative"),
-            (pl.col("pred_label_fixed_threshold") == 1).sum().alias("n_pred_positive"),
+            (prediction_label_expr(joined) == 1).sum().alias("n_pred_positive"),
             pl.col("prob").min().alias("prob_min"),
             pl.col("prob").quantile(0.25, interpolation="linear").alias("prob_q1"),
             pl.col("prob").median().alias("prob_median"),
@@ -205,7 +211,11 @@ def _summarize_joined_predictions(joined: pl.DataFrame, *, group_col: str) -> pl
             pl.col("uncertainty_std").mean().alias("uncertainty_mean"),
         )
         .with_columns(
-            (pl.col("n_pred_positive") / pl.col("n_species")).alias("pred_positive_rate"),
+            pl.when(pl.col("n_accepted") > 0)
+            .then(pl.col("n_pred_positive") / pl.col("n_accepted"))
+            .otherwise(None)
+            .alias("pred_positive_rate"),
+            (pl.col("n_accepted") / pl.col("n_species")).alias("decision_rate"),
             pl.lit(group_col).alias("group_col"),
         )
         .join(top_species, on="group_id", how="left")
@@ -215,6 +225,10 @@ def _summarize_joined_predictions(joined: pl.DataFrame, *, group_col: str) -> pl
                 "group_id",
                 "group_name",
                 "n_species",
+                "n_accepted",
+                "n_abstained",
+                "n_pred_negative",
+                "decision_rate",
                 "n_true_positive",
                 "n_true_negative",
                 "n_pred_positive",
@@ -260,6 +274,7 @@ def finite_group_probabilities(predictions: pl.DataFrame) -> pl.DataFrame:
                 pl.col("pred_label_fixed_threshold")
                 .cast(pl.Int64, strict=False)
                 .alias("pred_label_fixed_threshold"),
+                *[pl.col(name) for name in ABSTENTION_COLUMNS if name in predictions.columns],
             ]
         )
         .filter(

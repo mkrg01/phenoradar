@@ -286,11 +286,33 @@ class FeatureScalingConfig(StrictModel):
     method: FeatureScalingMethod = "standard"
 
 
+class MissingExpressionConfig(StrictModel):
+    """Optional observed-only standardization and neutral missing inputs."""
+
+    method: Literal["none", "neutral"] = "none"
+    zero_as_missing: bool = False
+
+
+class AbstentionConfig(StrictModel):
+    """Fixed information-coverage gate; no threshold fitting."""
+
+    enabled: bool = False
+    threshold: float = Field(default=0.8, gt=0.0, le=1.0, allow_inf_nan=False)
+
+    @field_validator("threshold", mode="before")
+    @classmethod
+    def reject_boolean_threshold(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("abstention.threshold must be a number in (0, 1]")
+        return value
+
+
 class PreprocessConfig(StrictModel):
     """Preprocessing settings."""
 
     max_pivot_cells: PositiveInt = 50_000_000
     absent_feature_fill: AbsentFeatureFill = 0
+    missing_expression: MissingExpressionConfig = Field(default_factory=MissingExpressionConfig)
     expression_transform: ExpressionTransformConfig = Field(
         default_factory=ExpressionTransformConfig
     )
@@ -494,6 +516,7 @@ class AppConfig(StrictModel):
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     preprocess: PreprocessConfig = Field(default_factory=PreprocessConfig)
     model: ModelConfig = Field(default_factory=ModelConfig)
+    abstention: AbstentionConfig = Field(default_factory=AbstentionConfig)
     model_selection: ModelSelectionConfig = Field(default_factory=ModelSelectionConfig)
     ensemble: EnsembleConfig = Field(default_factory=EnsembleConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
@@ -504,9 +527,27 @@ class AppConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_contrast_pair_dependencies(self) -> AppConfig:
+        missing = self.preprocess.missing_expression
+        if missing.method == "neutral":
+            if (
+                self.model.name != "logistic_elasticnet"
+                or self.preprocess.expression_transform.method != "log1p"
+                or self.preprocess.feature_scaling.method != "standard"
+                or self.preprocess.absent_feature_fill != "nan"
+            ):
+                raise ValueError(
+                    "preprocess.missing_expression.method=neutral requires "
+                    "logistic_elasticnet, log1p, standard scaling, and absent_feature_fill=nan"
+                )
+        elif missing.zero_as_missing or self.abstention.enabled:
+            raise ValueError(
+                "zero_as_missing and abstention require "
+                "preprocess.missing_expression.method=neutral"
+            )
         if (
             self.preprocess.absent_feature_fill == "nan"
             and self.model.name != "random_forest"
+            and missing.method != "neutral"
         ):
             raise ValueError(
                 "preprocess.absent_feature_fill=nan is only supported when "

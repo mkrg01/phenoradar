@@ -100,7 +100,7 @@ Before fold execution:
 - build one shared species x feature matrix by mapping the cached long rows to
   integer coordinates; absent coordinates are initialized according to
   `preprocess.absent_feature_fill` (`0` by default, optionally `nan` for
-  random forest);
+  random forest or neutral logistic regression);
 - retain a small raw-expression table for only the top interpreted features so
   tree heatmaps do not rescan the full TPM input when species coverage matches;
 - retain `preprocess.max_pivot_cells` as the dense-cell limit used to split
@@ -213,6 +213,19 @@ After all folds:
   the TSV remains the detailed source of truth.
 
 ## Model selection behavior details
+
+Neutral logistic regression retains missing values throughout feature filtering
+and fits standardization only on training observations. Its persisted scaler
+replaces missing standardized values with zero immediately before the model.
+The original raw matrix supplies the observation mask for information coverage.
+Final refit, pruned-target prediction, outer-fold inference, and bundle prediction
+all apply the same policy. Information coverage is computed from each prediction's
+own fitted models; no coefficients from other CV folds are used.
+
+When enabled, abstention applies the same configured fixed threshold in every
+fold and in final prediction. It adds no learning or threshold-selection step.
+All-species probability metrics remain available; separate abstention tables
+report selective performance and the number of accepted/rejected species.
 
 Candidate generation strategy:
 

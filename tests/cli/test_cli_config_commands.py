@@ -99,6 +99,7 @@ def _stub_resolved_config(
         figures=SimpleNamespace(top_features=top_features),
         model_selection=SimpleNamespace(),
         preprocess=SimpleNamespace(
+            missing_expression=SimpleNamespace(method="none", zero_as_missing=False),
             sparse_feature_filter=SimpleNamespace(enabled=True),
             low_variance_filter=SimpleNamespace(enabled=True),
             ranked_feature_filter=SimpleNamespace(method="none"),
@@ -515,6 +516,8 @@ def test_run_passes_top_features_to_run_and_tree_figures(
     assert captured_run_kwargs["feature_stability_by_feature"] is not None
     assert captured_run_kwargs["feature_stability_by_fold_pair"] is not None
     assert captured_tree_kwargs["feature_limit"] == 7
+    assert captured_tree_kwargs["preserve_missing"] is False
+    assert captured_tree_kwargs["zero_as_missing"] is False
 
 
 def test_run_rejects_multiple_config_options(tmp_path: Path) -> None:

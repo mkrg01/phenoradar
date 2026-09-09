@@ -27,6 +27,7 @@ from sklearn.metrics import (
     roc_curve,
 )
 
+from phenoradar.abstention import prediction_label_expr
 from phenoradar.colors import CONFUSION_GROUP_COLORS, CONFUSION_GROUP_ORDER
 from phenoradar.group_summary import GroupSummaryError, finite_group_probabilities
 from phenoradar.metrics import (
@@ -1628,6 +1629,8 @@ def _top_feature_expression_by_confusion(
         .iter_rows(named=True)
     }
     annotation_lookup = _orthogroup_annotation_lookup(orthogroup_annotations)
+    if "is_missing" in top_feature_expression.columns:
+        top_feature_expression = top_feature_expression.filter(~pl.col("is_missing"))
     expression = top_feature_expression.select(
         pl.col("species").cast(pl.String, strict=False).str.strip_chars().alias("__species"),
         pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("__feature"),
@@ -1825,6 +1828,22 @@ def _predict_probability_distribution(
     )
     counts = cast(np.ndarray, counts_raw)
     bars = list(cast(Any, bars_raw))
+    if "decision_status" in pred_predict.columns:
+        abstained = pred_predict["decision_status"].to_numpy() == "abstained"
+        missing_counts, _ = np.histogram(probs[abstained & np.isfinite(probs)], bins=bins)
+        ax.bar(
+            np.asarray(bins[:-1]),
+            missing_counts,
+            width=np.diff(bins),
+            align="edge",
+            bottom=counts - missing_counts,
+            color="#999999",
+            hatch="///",
+            linewidth=0,
+            label="Abstained",
+        )
+        bars[0].set_label("Accepted")
+        ax.legend(frameon=False, fontsize=_LABEL_FONTSIZE)
     max_count = int(counts.max()) if counts.size > 0 else 1
     if max_count < 1:
         max_count = 1
@@ -2310,7 +2329,7 @@ def write_group_probability_figure(
         values_by_group.append(np.array(subset.select("prob").to_series().to_list(), dtype=float))
         pred_labels_by_group.append(
             np.array(
-                subset.select("pred_label_fixed_threshold").to_series().to_list(),
+                subset.select(prediction_label_expr(subset)).to_series().to_list(),
                 dtype=float,
             )
         )
@@ -2352,7 +2371,11 @@ def write_group_probability_figure(
     ):
         offsets = _deterministic_offsets(probs.size, 0.18)
         colors = [
-            _TRAIT_POSITIVE_COLOR if int(label) == 1 else _TRAIT_NEGATIVE_COLOR
+            "#999999"
+            if not np.isfinite(label)
+            else _TRAIT_POSITIVE_COLOR
+            if int(label) == 1
+            else _TRAIT_NEGATIVE_COLOR
             for label in pred_labels
         ]
         ax.scatter(
@@ -2398,6 +2421,18 @@ def write_group_probability_figure(
         ),
         Line2D([0], [0], color="#999999", linewidth=0.8, linestyle=(0, (4, 4)), label="0.5"),
     ]
+    if "pred_label_selective" in grouped_predictions.columns:
+        legend_handles.append(
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="none",
+                markerfacecolor="#999999",
+                markersize=4,
+                label="abstained",
+            )
+        )
     ax.legend(
         handles=legend_handles,
         loc="lower center",
@@ -2853,9 +2888,9 @@ def _external_confusion_matrix(pred_external_test: pl.DataFrame, out_path: Path)
 
     data = pred_external_test.select(
         pl.col("true_label").cast(pl.Int64, strict=False).alias("__true_label"),
-        pl.col("pred_label_fixed_threshold").cast(pl.Int64, strict=False).alias("__pred_label"),
+        prediction_label_expr(pred_external_test).alias("__pred_label"),
     ).filter(pl.col("__true_label").is_not_null() & pl.col("__pred_label").is_not_null())
-    if data.height == 0:
+    if data.height == 0 and "decision_status" not in pred_external_test.columns:
         raise FigureError(
             "prediction_external_test.tsv is empty; cannot draw external_confusion_matrix.svg"
         )
@@ -2895,6 +2930,9 @@ def _external_confusion_matrix(pred_external_test: pl.DataFrame, out_path: Path)
     ax.set_yticks([0, 1])
     ax.set_yticklabels(["0", "1"], fontsize=_TICK_FONTSIZE)
     ax.set_xlabel("Predicted label", fontsize=_LABEL_FONTSIZE)
+    if "decision_status" in pred_external_test.columns:
+        n_abstained = pred_external_test.filter(pl.col("decision_status") == "abstained").height
+        ax.set_title(f"Accepted decisions; abstained: {n_abstained}", fontsize=_TICK_FONTSIZE)
     ax.set_ylabel("True label", fontsize=_LABEL_FONTSIZE)
     ax.set_xticks(np.arange(-0.5, 2.0, 1.0), minor=True)
     ax.set_yticks(np.arange(-0.5, 2.0, 1.0), minor=True)
@@ -5192,10 +5230,13 @@ def _candidate_evidence_figure(
         color=_AXIS_COLOR,
     )
     if is_cv_error:
+        decision_text = f"True = {label} | Predicted = {pred_label} | {confusion_group}"
+        if candidate.get("decision_status") == "abstained":
+            decision_text = f"True = {label} | Abstained (raw prediction = {pred_label})"
         fig.text(
             0.98,
             0.905,
-            f"True = {label} | Predicted = {pred_label} | {confusion_group}",
+            decision_text,
             ha="right",
             va="top",
             fontsize=7,

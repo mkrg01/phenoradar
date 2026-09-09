@@ -4,6 +4,11 @@
 
 ### Features
 
+* add observed-only standardization and neutral missing-expression inputs for
+  logistic regression, with optional zero-as-missing handling and fixed 0.8
+  coefficient-weight coverage abstention; persist policies in version 3 model
+  bundles and report selective decisions, missing evidence, and accepted-only
+  evaluation alongside raw predictions
 * add one candidate-evidence-style PDF per misclassified OOF species, with
   held-out-fold ensemble probabilities, signed local linear contributions, and
   expression references restricted to species sampled for that fold's training
