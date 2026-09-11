@@ -4,16 +4,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-import yaml
 from pydantic import ValidationError
 
 from phenoradar.config import (
     AppConfig,
-    ConfigError,
     has_condition_dimensions,
-    load_and_resolve_config,
     load_config_conditions,
-    serialize_resolved_config,
 )
 from phenoradar.cv import CVError, _preprocess_train_and_target, _select_feature_indices
 
@@ -22,84 +18,23 @@ def _config(**settings: object) -> AppConfig:
     return AppConfig.model_validate({"preprocess": {"sparse_feature_filter": settings}})
 
 
-@pytest.mark.parametrize("legacy,scope", [(None, "any_trait"), (0, "trait_0"), (1, "trait_1")])
-def test_legacy_config_resolves_and_serializes_only_new_scope(
-    tmp_path: Path,
-    legacy: int | None,
-    scope: str,
-) -> None:
-    path = tmp_path / "config.yml"
-    source = {"preprocess": {"sparse_feature_filter": {"within_trait": legacy}}}
-    path.write_text(yaml.safe_dump(source))
-    config = load_and_resolve_config([path])
-    assert config == _config(scope=scope)
-    assert config.preprocess.sparse_feature_filter.scope == scope
-    resolved = yaml.safe_load(serialize_resolved_config(config))
-    assert "within_trait" not in resolved["preprocess"]["sparse_feature_filter"]
-    assert resolved["preprocess"]["sparse_feature_filter"]["scope"] == scope
-    assert AppConfig.model_validate(source) == config
-    assert source["preprocess"]["sparse_feature_filter"] == {"within_trait": legacy}
-
-
-@pytest.mark.parametrize("invalid", [True, False, 2, "1", [], {}])
-def test_legacy_scope_rejects_invalid_values(invalid: object) -> None:
-    with pytest.raises(ValidationError, match="within_trait"):
-        _config(within_trait=invalid)
-
-
 @pytest.mark.parametrize("invalid", [None, True, 0, "all", "both_traits"])
 def test_scope_rejects_ambiguous_or_unsupported_values(invalid: object) -> None:
     with pytest.raises(ValidationError, match="scope"):
         _config(scope=invalid)
 
 
-@pytest.mark.parametrize("legacy,scope", [(None, "any_trait"), (1, "trait_1"), (0, "all_samples")])
-def test_new_and_legacy_keys_cannot_be_combined(
-    tmp_path: Path,
-    legacy: int | None,
-    scope: str,
-) -> None:
+def test_scope_comparison_uses_scope_dimension(tmp_path: Path) -> None:
     path = tmp_path / "config.yml"
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "preprocess": {
-                    "sparse_feature_filter": {
-                        "within_trait": legacy,
-                        "scope": scope,
-                    }
-                }
-            }
-        )
-    )
-    for loader in (load_and_resolve_config, load_config_conditions, has_condition_dimensions):
-        with pytest.raises(ConfigError, match="both scope and within_trait"):
-            loader([path])
-
-
-def test_scope_comparison_and_legacy_comparison_have_canonical_dimensions(tmp_path: Path) -> None:
-    path = tmp_path / "config.yml"
-    path.write_text("preprocess:\n  sparse_feature_filter:\n    within_trait: [null, 0, 1]\n")
-    assert has_condition_dimensions([path])
-    legacy = load_config_conditions([path])
-    path.write_text(
-        "preprocess:\n  sparse_feature_filter:\n    scope: [any_trait, trait_0, trait_1]\n"
-    )
-    canonical = load_config_conditions([path])
-    assert legacy == canonical
-    assert canonical.dimensions[0].dotted_path == "preprocess.sparse_feature_filter.scope"
     path.write_text(
         "preprocess:\n  sparse_feature_filter:\n"
         "    scope: [all_samples, any_trait, trait_0, trait_1]\n"
     )
-    assert [
-        c.config.preprocess.sparse_feature_filter.scope
-        for c in load_config_conditions([path]).conditions
-    ] == [
-        "all_samples",
-        "any_trait",
-        "trait_0",
-        "trait_1",
+    assert has_condition_dimensions([path])
+    conditions = load_config_conditions([path])
+    assert conditions.dimensions[0].dotted_path == "preprocess.sparse_feature_filter.scope"
+    assert [c.config.preprocess.sparse_feature_filter.scope for c in conditions.conditions] == [
+        "all_samples", "any_trait", "trait_0", "trait_1",
     ]
 
 

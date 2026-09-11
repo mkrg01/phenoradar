@@ -19,6 +19,9 @@ Resolution and override rules:
 
 - CLI accepts one `-c` file (`run`/`predict` required, `config` optional).
 - Unspecified keys are filled by built-in defaults.
+- Generated YAML explicitly includes every setting, including inactive fields,
+  `null` values, and empty sections. Comments list enum and boolean choices;
+  nullable fields also show `null` or their accepted types.
 - Unknown keys are rejected.
 - `runtime.execution_stage` can be overridden from CLI
   (`phenoradar run -c config.yml --execution-stage ...`).
@@ -101,81 +104,87 @@ phenoradar config
 data:
   metadata_path: testdata/c4_tiny/species_metadata.tsv
   tpm_path: testdata/c4_tiny/tpm.tsv
-  tree_path: null
-  orthogroup_annotation_path: null
+  tree_path: null  # type: string or null
+  orthogroup_annotation_path: null  # type: string or null
   species_col: species
   feature_col: orthogroup
   value_col: tpm
   trait_col: C4
-  contrast_pair_col: contrast_pair_id
+  contrast_pair_col: contrast_pair_id  # type: string or null
 split:
   group_col: contrast_pair_id
-  test_holdout_col: contrast_pair_test_holdout
-  exclude_col: null
-  require_both_labels_per_group: false
-  outer_cv_strategy: logo
-  outer_cv_n_splits: null
+  exclude_col: null  # type: string or null
+  require_both_labels_per_group: false  # choices: true, false
+  outer_cv_strategy: logo  # choices: logo, group_kfold, stratified_group_kfold
+  outer_cv_n_splits: null  # type: integer or null
 sampling:
-  strategy: group_balanced
-  max_samples_per_label_per_group: 1
+  strategy: group_balanced  # choices: all_samples, group_balanced
+  max_samples_per_label_per_group: 1  # type: integer or null
   sampled_set_count: 10
-  training_group_count: null
+  training_group_count: null  # type: integer or null
   group_subsample_repeats: 1
-  weighting: none
+  group_subsample_repeat_index: 1
+  weighting: none  # choices: none, group_label_inverse
 preprocess:
   max_pivot_cells: 50000000
-  absent_feature_fill: 0
+  absent_feature_fill: 0  # choices: 0, nan
+  missing_expression:
+    method: none  # choices: none, neutral
+    zero_as_missing: false  # choices: true, false
   expression_transform:
-    method: log1p
+    method: log1p  # choices: none, log1p, sample_rank, sample_percentile_rank
   sparse_feature_filter:
-    enabled: true
-    min_nonzero_fraction: 0.8
-    scope: any_trait
+    enabled: true  # choices: true, false
+    min_nonzero_fraction: 0.8  # type: number or null
+    scope: any_trait  # choices: all_samples, any_trait, trait_0, trait_1
   low_variance_filter:
-    enabled: false
-    min_variance: null
+    enabled: false  # choices: true, false
+    min_variance: null  # type: number or null
   ranked_feature_filter:
-    method: none
-    max_features: null
+    method: none  # choices: none, pair_aware, unpaired, variance
+    max_features: null  # type: integer or null
     min_contrast_pairs: 1
-    higher_in_trait: null
+    higher_in_trait: null  # choices: 0, 1, null
   correlation_filter:
-    enabled: false
-    method: pearson
-    max_abs_correlation: null
+    enabled: false  # choices: true, false
+    method: pearson  # choices: pearson, spearman
+    max_abs_correlation: null  # type: number or null
   feature_scaling:
-    method: standard
+    method: standard  # choices: none, standard
 model:
-  name: logistic_elasticnet
-  logistic_solver: saga
-  logistic_warm_start_path: false
+  name: logistic_elasticnet  # choices: logistic_elasticnet, linear_svm, random_forest
+  logistic_solver: saga  # choices: saga, liblinear
+  logistic_warm_start_path: false  # choices: true, false
+abstention:
+  enabled: false  # choices: true, false
+  threshold: 0.8
 model_selection:
-  selected_candidate_count: null
-  selected_candidate_percent: null
-  candidate_source_policy: per_sample_set
-  search_strategy: grid
-  trial_count: null
+  selected_candidate_count: null  # type: integer or null
+  selected_candidate_percent: null  # type: number or null
+  candidate_source_policy: per_sample_set  # choices: per_sample_set, reuse_first_sample_set
+  search_strategy: grid  # choices: grid, random, tpe
+  trial_count: null  # type: integer or null
   search_space: {}
-  inner_cv_strategy: null
-  inner_cv_n_splits: null
-  selection_metric: log_loss
-  selection_rule: best
+  inner_cv_strategy: null  # choices: logo, group_kfold, stratified_group_kfold, null
+  inner_cv_n_splits: null  # type: integer or null
+  selection_metric: log_loss  # choices: mcc, balanced_accuracy, log_loss
+  selection_rule: best  # choices: best, one_se
 ensemble:
-  probability_aggregation: mean
+  probability_aggregation: mean  # choices: mean, median
 evaluation:
   group_bootstrap:
-    enabled: false
+    enabled: false  # choices: true, false
     n_resamples: 2000
     confidence_level: 0.95
 summary:
-  group_col: family_id
-  group_name_col: family_name
+  group_col: family
 figures:
   top_features: 30
+report: {}
 runtime:
   seed: 42
   n_jobs: 1
-  execution_stage: cv_only
+  execution_stage: cv_only  # choices: cv_only, full_run
 ```
 
 ## Top-level structure
@@ -185,6 +194,7 @@ runtime:
 - `sampling`
 - `preprocess`
 - `model`
+- `abstention`
 - `model_selection`
 - `ensemble`
 - `evaluation`
@@ -254,33 +264,30 @@ runtime:
   - default: `contrast_pair_id`
   - grouping column used for outer CV, group-balanced sampling, and
     group-label inverse weighting.
-- `split.test_holdout_col`
-  - type: `str | null`
-  - default: `contrast_pair_test_holdout`
-  - metadata column marking labeled species to keep out of CV and evaluate only
-    as `external_test` during `full_run`. Accepted true values are `yes`,
-    `true`, and `1`; false values are `no`, `false`, `0`, empty, or null. When
-    set to `null`, no explicit external-test holdout column is read. Automatic
-    group filtering can still assign species to `external_test`.
+  - when this column matches the non-null `data.contrast_pair_col`, labeled
+    species without a contrast pair automatically enter `external_test`.
+  - with other split groups, labeled species must have a non-empty group
+    unless explicitly excluded. Missing contrast pairs do not affect their
+    pool assignment.
 - `split.exclude_col`
   - type: `str | null`
   - default: `null`
   - optional metadata column marking species to remove from CV, external test,
-    and inference pools. It accepts the same boolean values as
-    `split.test_holdout_col`.
+    and inference pools. Accepted true values are `yes`, `true`, and `1`;
+    false values are `no`, `false`, `0`, empty, or null.
 - `split.require_both_labels_per_group`
   - type: `bool`
   - default: `false`
   - when true, only groups containing both labels (`0` and `1`) are eligible
-    for CV. Eligibility is checked using labeled, non-excluded, non-holdout
-    species grouped by `split.group_col`, before any folds are constructed.
+    for CV. Eligibility is checked using labeled, non-excluded species with
+    a split group, before any folds are constructed.
     Labeled species in single-label groups are assigned to `external_test`
     and are absent from both CV training/validation and final-refit training.
     Trait-missing species remain in `discovery_inference`.
-  - explicit holdouts and exclusions still apply. Inconsistent explicit
-    holdout assignments within a split group remain an error.
-    The default preserves existing pool assignment and permits single-label
-    CV groups when the other configured constraints allow them.
+  - with `false` and `sampling.strategy: all_samples`, single-label groups
+    remain in CV. Validation folds may contain one label; every training fold
+    must contain both. `group_balanced` sampling requires both labels in each
+    group.
 - `split.outer_cv_strategy`
   - type: `logo | group_kfold | stratified_group_kfold`
   - default: `logo`
@@ -295,20 +302,18 @@ runtime:
     - must be `>= 2`
     - must be `null` when `outer_cv_strategy=logo`
 
-For family-level CV using existing `family_id` annotations, without rewriting
-metadata or generating family holdout columns:
+For family-level CV using existing `family` annotations:
 
 ```yaml
 split:
-  group_col: family_id
-  test_holdout_col: null
+  group_col: family
   require_both_labels_per_group: true
 ```
 
-This ignores the explicit contrast-pair holdout column and uses all eligible
-labeled species in families containing both labels. Single-label families
-become `external_test`. This filters the training population before CV; it
-does not merely omit single-label validation folds from the reported metrics.
+This uses all eligible labeled species in families containing both labels,
+including species without contrast pairs. Single-label families become
+`external_test`. This filters the training population before CV; it does not
+merely omit single-label validation folds from the reported metrics.
 
 ## `sampling`
 
@@ -509,11 +514,7 @@ preprocess:
     scope: all_samples
 ```
 
-Legacy `within_trait` inputs are accepted as `null -> any_trait`, `0 -> trait_0`,
-and `1 -> trait_1`. Supplying both `scope` and `within_trait` is an error, even
-when the values agree. Resolved configuration always uses `scope`. Condition
-lists such as `scope: [all_samples, any_trait, trait_1]` are supported; legacy
-`within_trait` lists are also converted to the corresponding `scope` dimension.
+Condition lists such as `scope: [all_samples, any_trait, trait_1]` are supported.
 
 ### `preprocess.low_variance_filter`
 
@@ -890,7 +891,7 @@ Unknown parameter names are rejected at training time.
   - rule: must be strictly between `0` and `1`
 
 The bootstrap group is always `split.group_col`. For example, it is
-`contrast_pair_id`, `family_id`, or `order_id` when that column is selected for
+`contrast_pair_id`, `family`, or `order` when that column is selected for
 the split. If there are `G` unique OOF groups, every replicate draws `G` groups
 with replacement and includes all species in every selected group. The seed is
 derived deterministically from `runtime.seed`.
@@ -899,18 +900,14 @@ derived deterministically from `runtime.seed`.
 
 - `summary.group_col`
   - type: `str`
-  - default: `family_id`
+  - default: `family`
   - behavior:
-    - metadata column used for stage-level grouped prediction summaries.
+    - metadata column used for stage-level grouped prediction summaries and display labels.
+    - values are readable names, such as `Poaceae` in the `family` column;
+      a separate ID or name column is not required.
     - if the column is absent from `data.metadata_path`, grouped summary tables
       and figures are skipped with a warning; model training/prediction still
       proceeds.
-- `summary.group_name_col`
-  - type: `str | null`
-  - default: `family_name`
-  - behavior:
-    - optional metadata column used as the display label for `summary.group_col`.
-    - when null or absent, the group id values are used as labels.
 
 ## `figures`
 

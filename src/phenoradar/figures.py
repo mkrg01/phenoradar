@@ -2392,31 +2392,28 @@ def write_group_probability_figure(
         raise FigureError(f"{source_table_name} is empty; cannot draw {figure_name}")
 
     group_order = (
-        data.group_by(["group_id", "group_name"])
+        data.group_by("group_id")
         .agg(
             pl.col("prob").max().alias("__prob_max"),
             pl.col("prob").mean().alias("__prob_mean"),
             pl.len().alias("__n_species"),
         )
-        .sort(["__prob_max", "__prob_mean", "group_name"], descending=[True, True, False])
+        .sort(["__prob_max", "__prob_mean", "group_id"], descending=[True, True, False])
     )
     if group_order.height == 0:
         raise FigureError(f"{source_table_name} has no groups for {figure_name}")
 
     groups = [
-        (str(row["group_id"]), str(row["group_name"]), int(row["__n_species"]))
+        (str(row["group_id"]), int(row["__n_species"]))
         for row in group_order.iter_rows(named=True)
     ]
-    group_ids = [group_id for group_id, _group_name, _n in groups]
-    data = data.filter(pl.col("group_id").is_in(group_ids))
-
     labels = [
-        f"{_ellipsize_label(group_name, max_chars=34)} (n={n_species})"
-        for _group_id, group_name, n_species in groups
+        f"{_ellipsize_label(group_id, max_chars=34)} (n={n_species})"
+        for group_id, n_species in groups
     ]
     values_by_group: list[np.ndarray] = []
     pred_labels_by_group: list[np.ndarray] = []
-    for group_id, _group_name, _n_species in groups:
+    for group_id, _n_species in groups:
         subset = data.filter(pl.col("group_id") == group_id).sort(["prob", "species"])
         values_by_group.append(np.array(subset.select("prob").to_series().to_list(), dtype=float))
         pred_labels_by_group.append(
@@ -5168,8 +5165,7 @@ def write_run_figures(
 
 _CANDIDATE_MANIFEST_SCHEMA = {
     "species": pl.String,
-    "family_id": pl.String,
-    "family_name": pl.String,
+    "family": pl.String,
     "prob": pl.Float64,
     "probability_bin": pl.String,
     "n_cross_fold_predictions": pl.Int64,
@@ -5319,12 +5315,7 @@ def _candidate_evidence_figure(
         confusion_group = str(candidate["confusion_group"])
         metadata_text = f"Fold: {fold_id} | Group: {group_id}"
     else:
-        family_id = str(candidate.get("family_id") or "unassigned")
-        family_name = str(candidate.get("family_name") or family_id)
-        family_text = family_name
-        if family_id not in {"", "unassigned", family_name}:
-            family_text = f"{family_name} ({family_id})"
-        metadata_text = f"Family: {family_text}"
+        metadata_text = f"Family: {candidate['family']}"
 
     feature_count = len(features)
     figure_height = max(4.8, 1.85 + 0.39 * feature_count)
@@ -5651,7 +5642,7 @@ def write_candidate_evidence_figures(
     """Write one publication-oriented candidate-evidence PDF per positive species."""
     if candidates.height == 0 or features.height == 0:
         return pl.DataFrame(schema=_CANDIDATE_MANIFEST_SCHEMA), []
-    required_candidates = {"species", "prob", "family_id", "family_name"}
+    required_candidates = {"species", "prob", "family"}
     missing_candidates = sorted(required_candidates - set(candidates.columns))
     if missing_candidates:
         raise FigureError(
@@ -5714,8 +5705,7 @@ def write_candidate_evidence_figures(
         manifest_rows.append(
             {
                 "species": species,
-                "family_id": str(candidate["family_id"]),
-                "family_name": str(candidate["family_name"]),
+                "family": str(candidate["family"]),
                 "prob": probability,
                 "probability_bin": bin_name,
                 "n_cross_fold_predictions": int(fold_values.size),

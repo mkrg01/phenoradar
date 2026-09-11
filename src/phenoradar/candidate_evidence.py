@@ -14,7 +14,6 @@ from phenoradar.config import AppConfig
 from phenoradar.cv import (
     CVError,
     ExpressionMatrixBuilder,
-    FinalModelEntry,
     FinalRefitArtifacts,
     apply_expression_transform,
     apply_feature_scaling,
@@ -41,8 +40,7 @@ class CandidateEvidenceArtifacts:
 _CANDIDATE_SCHEMA = {
     "species": pl.String,
     "prob": pl.Float64,
-    "family_id": pl.String,
-    "family_name": pl.String,
+    "family": pl.String,
 }
 _FEATURE_SCHEMA = {
     "species": pl.String,
@@ -135,24 +133,6 @@ def _known_species(split_manifest: pl.DataFrame) -> pl.DataFrame:
     return known.unique("species").sort("species")
 
 
-def _final_model_entries(final_refit: FinalRefitArtifacts) -> list[FinalModelEntry]:
-    entries = list(getattr(final_refit, "model_entries", []))
-    if entries:
-        return entries
-    models = list(getattr(final_refit, "models", []))
-    feature_names = list(getattr(final_refit, "feature_names", []))
-    if not models or not feature_names:
-        return []
-    return [
-        FinalModelEntry(
-            feature_names=feature_names,
-            scaler=getattr(final_refit, "scaler", None),
-            model=model,
-        )
-        for model in models
-    ]
-
-
 def _candidate_family_metadata(
     config: AppConfig,
     candidates: pl.DataFrame,
@@ -171,57 +151,30 @@ def _candidate_family_metadata(
 
     species_col = config.data.species_col
     _require_columns(metadata, {species_col}, "metadata TSV")
-    family_id_col: str | None = "family_id" if "family_id" in metadata.columns else None
-    family_name_col: str | None = "family_name" if "family_name" in metadata.columns else None
-    if family_id_col is None and config.summary.group_col in metadata.columns:
-        family_id_col = config.summary.group_col
-        configured_name = config.summary.group_name_col
-        if configured_name is not None and configured_name in metadata.columns:
-            family_name_col = configured_name
-    if family_id_col is None:
+    if "family" not in metadata.columns:
         warnings.append(
-            "Candidate evidence metadata has no family_id or configured summary group; "
+            "Candidate evidence metadata has no family column; "
             "family labels were emitted as unassigned"
         )
-        family_id_expr = pl.lit("unassigned", dtype=pl.String).alias("family_id")
+        family_expr = pl.lit(None, dtype=pl.String).alias("family")
     else:
-        family_id_expr = (
-            pl.col(family_id_col).cast(pl.String, strict=False).str.strip_chars().alias("family_id")
-        )
-    if family_name_col is None:
-        family_name_expr = family_id_expr.alias("family_name")
-    else:
-        family_name_expr = (
-            pl.col(family_name_col)
-            .cast(pl.String, strict=False)
-            .str.strip_chars()
-            .alias("family_name")
-        )
+        family_expr = pl.col("family").cast(pl.String, strict=False).str.strip_chars()
 
     family = (
         metadata.select(
             pl.col(species_col).cast(pl.String, strict=False).str.strip_chars().alias("species"),
-            family_id_expr,
-            family_name_expr,
+            family_expr,
         )
         .unique("species")
-        .with_columns(
-            pl.when(pl.col("family_id").is_null() | (pl.col("family_id") == ""))
-            .then(pl.lit("unassigned"))
-            .otherwise(pl.col("family_id"))
-            .alias("family_id"),
-            pl.when(pl.col("family_name").is_null() | (pl.col("family_name") == ""))
-            .then(pl.col("family_id"))
-            .otherwise(pl.col("family_name"))
-            .alias("family_name"),
-        )
     )
     return (
         candidates.select("species", "prob")
         .join(family, on="species", how="left")
         .with_columns(
-            pl.col("family_id").fill_null("unassigned"),
-            pl.col("family_name").fill_null("unassigned"),
+            pl.when(pl.col("family").is_null() | (pl.col("family") == ""))
+            .then(pl.lit("unassigned"))
+            .otherwise(pl.col("family"))
+            .alias("family"),
         )
         .sort(["prob", "species"], descending=[True, False]),
         warnings,
@@ -273,7 +226,7 @@ def build_candidate_evidence_artifacts(
         warnings.append("Skipped candidate evidence figures: no inference species predicted as 1")
         return _empty_artifacts(warnings=warnings)
 
-    entries = _final_model_entries(final_refit)
+    entries = final_refit.model_entries
     if not entries:
         warnings.append("Skipped candidate evidence figures: final refit has no fitted models")
         return _empty_artifacts(warnings=warnings)

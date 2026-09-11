@@ -81,7 +81,7 @@ def test_group_bootstrap_is_deterministic_for_runtime_seed() -> None:
     kwargs = {
         "oof_predictions": _oof_predictions(),
         "split_manifest": _split_manifest(),
-        "group_col": "family_id",
+        "group_col": "family",
         "n_resamples": 25,
         "confidence_level": 0.9,
     }
@@ -114,7 +114,7 @@ def test_group_bootstrap_marks_single_label_two_class_metrics_invalid() -> None:
     artifacts = run_oof_group_bootstrap(
         oof_predictions=oof,
         split_manifest=manifest,
-        group_col="family_id",
+        group_col="family",
         n_resamples=200,
         confidence_level=0.95,
         runtime_seed=42,
@@ -135,7 +135,7 @@ def test_group_bootstrap_rejects_oof_split_species_mismatch() -> None:
         run_oof_group_bootstrap(
             oof_predictions=_oof_predictions(),
             split_manifest=manifest,
-            group_col="family_id",
+            group_col="family",
             n_resamples=10,
             confidence_level=0.95,
             runtime_seed=42,
@@ -149,7 +149,7 @@ def test_group_bootstrap_requires_at_least_two_groups() -> None:
         run_oof_group_bootstrap(
             oof_predictions=_oof_predictions(),
             split_manifest=manifest,
-            group_col="family_id",
+            group_col="family",
             n_resamples=10,
             confidence_level=0.95,
             runtime_seed=42,

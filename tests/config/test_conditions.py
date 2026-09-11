@@ -61,7 +61,7 @@ def test_directional_filter_values_expand_with_fixed_supervised_method(
         """
 preprocess:
   sparse_feature_filter:
-    within_trait: [null, 1]
+    scope: [any_trait, trait_1]
   ranked_feature_filter:
     method: pair_aware
     max_features: 100
@@ -200,7 +200,7 @@ def test_split_and_runtime_condition_lists_are_rejected(tmp_path: Path) -> None:
         tmp_path / "config.yml",
         """
 split:
-  group_col: [contrast_pair_id, family_id]
+  group_col: [contrast_pair_id, family]
 runtime:
   seed: [42, 43]
 """.lstrip(),

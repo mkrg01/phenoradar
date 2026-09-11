@@ -278,14 +278,12 @@ def test_build_contrast_pair_tree_annotation_filters_to_grouped_species() -> Non
             "species": "sp1",
             "true_label": 0,
             "group_id": "g1",
-            "group_name": None,
         },
         {
             "label": "sp2",
             "species": "sp2",
             "true_label": 1,
             "group_id": "g1",
-            "group_name": None,
         },
     ]
 
@@ -442,7 +440,6 @@ def test_build_cv_tree_prediction_annotation_filters_to_groups() -> None:
         "pred_label",
         "uncertainty_std",
         "group_id",
-        "group_name",
         "fold_id",
     ]
 
@@ -452,8 +449,7 @@ def test_build_cv_tree_prediction_annotation_uses_taxon_name_for_group_display()
         {
             "species": ["sp1", "sp2"],
             "C4": [0, 1],
-            "family_id": ["100", "100"],
-            "family_name": ["Poaceae", "Poaceae"],
+            "family": ["Poaceae", "Poaceae"],
         }
     )
 
@@ -468,11 +464,11 @@ def test_build_cv_tree_prediction_annotation_uses_taxon_name_for_group_display()
             }
         ),
         thresholds=_thresholds(),
-        group_col="family_id",
+        group_col="family",
     )
 
-    assert annotation.select(["group_id", "group_name"]).unique().to_dicts() == [
-        {"group_id": "100", "group_name": "Poaceae"}
+    assert annotation.select(["group_id"]).unique().to_dicts() == [
+        {"group_id": "Poaceae"}
     ]
 
 
@@ -499,7 +495,6 @@ def test_build_external_tree_prediction_annotation_keeps_external_species() -> N
             "pred_label": 1,
             "uncertainty_std": None,
             "group_id": None,
-            "group_name": None,
         }
     ]
 

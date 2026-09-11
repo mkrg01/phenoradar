@@ -27,8 +27,6 @@ class GroupSummaryArtifacts:
 def group_summary_suffix(group_col: str) -> str:
     """Return a stable artifact-name suffix from a metadata group column."""
     text = group_col.strip()
-    if text.endswith("_id"):
-        text = text[:-3]
     normalized = "".join(ch if ch.isalnum() else "_" for ch in text.lower()).strip("_")
     while "__" in normalized:
         normalized = normalized.replace("__", "_")
@@ -41,7 +39,6 @@ def build_group_summary_artifacts(
     metadata_path: Path,
     species_col: str,
     group_col: str,
-    group_name_col: str | None,
     source_table_name: str,
 ) -> GroupSummaryArtifacts:
     """Join prediction rows to metadata and summarize probabilities by group."""
@@ -68,17 +65,6 @@ def build_group_summary_artifacts(
             + ", ".join(missing)
         )
 
-    group_name_expr: pl.Expr
-    effective_group_name_col = group_name_col
-    if effective_group_name_col is not None and effective_group_name_col not in metadata.columns:
-        effective_group_name_col = None
-    if effective_group_name_col is None:
-        group_name_expr = pl.col(group_col).cast(pl.String, strict=False).alias("__group_name")
-    else:
-        group_name_expr = (
-            pl.col(effective_group_name_col).cast(pl.String, strict=False).alias("__group_name")
-        )
-
     group_metadata = (
         metadata.select(
             [
@@ -89,28 +75,10 @@ def build_group_summary_artifacts(
                 pl.col(group_col)
                 .cast(pl.String, strict=False)
                 .str.strip_chars()
-                .alias("__group_id"),
-                group_name_expr,
+                .alias("group_id"),
             ]
         )
         .unique("species")
-        .with_columns(
-            pl.when(pl.col("__group_id").is_null() | (pl.col("__group_id") == ""))
-            .then(pl.lit("unassigned"))
-            .otherwise(pl.col("__group_id"))
-            .alias("group_id"),
-            pl.when(pl.col("__group_name").is_null() | (pl.col("__group_name") == ""))
-            .then(pl.col("__group_id"))
-            .otherwise(pl.col("__group_name"))
-            .alias("__group_name_filled"),
-        )
-        .with_columns(
-            pl.when(pl.col("__group_name_filled").is_null() | (pl.col("__group_name_filled") == ""))
-            .then(pl.lit("unassigned"))
-            .otherwise(pl.col("__group_name_filled"))
-            .alias("group_name")
-        )
-        .select(["species", "group_id", "group_name"])
     )
 
     normalized = predictions.select(
@@ -131,10 +99,6 @@ def build_group_summary_artifacts(
             .then(pl.lit("unassigned"))
             .otherwise(pl.col("group_id"))
             .alias("group_id"),
-            pl.when(pl.col("group_name").is_null() | (pl.col("group_name") == ""))
-            .then(pl.lit("unassigned"))
-            .otherwise(pl.col("group_name"))
-            .alias("group_name"),
         )
         .filter(pl.col("prob").is_not_null() & pl.col("prob").is_finite())
     )
@@ -147,9 +111,9 @@ def build_group_summary_artifacts(
     suffix = group_summary_suffix(group_col)
     return GroupSummaryArtifacts(
         summary=summary,
-        predictions=joined.sort(["group_name", "species"]),
+        predictions=joined.sort(["group_id", "species"]),
         suffix=suffix,
-        group_label=group_col[:-3] if group_col.endswith("_id") else group_col,
+        group_label=group_col,
     )
 
 
@@ -193,7 +157,7 @@ def _summarize_joined_predictions(joined: pl.DataFrame, *, group_col: str) -> pl
         )
     )
     summary = (
-        joined.group_by(["group_id", "group_name"])
+        joined.group_by("group_id")
         .agg(
             pl.len().alias("n_species"),
             prediction_label_expr(joined).is_not_null().sum().alias("n_accepted"),
@@ -223,7 +187,6 @@ def _summarize_joined_predictions(joined: pl.DataFrame, *, group_col: str) -> pl
             [
                 "group_col",
                 "group_id",
-                "group_name",
                 "n_species",
                 "n_accepted",
                 "n_abstained",
@@ -244,7 +207,7 @@ def _summarize_joined_predictions(joined: pl.DataFrame, *, group_col: str) -> pl
                 "top_prob",
             ]
         )
-        .sort(["prob_mean", "prob_max", "group_name"], descending=[True, True, False])
+        .sort(["prob_mean", "prob_max", "group_id"], descending=[True, True, False])
     )
     if joined.select(pl.col("true_label").is_not_null().any()).item() is False:
         summary = summary.with_columns(
@@ -258,7 +221,7 @@ def _summarize_joined_predictions(joined: pl.DataFrame, *, group_col: str) -> pl
 
 def finite_group_probabilities(predictions: pl.DataFrame) -> pl.DataFrame:
     """Return plotting-ready grouped probabilities."""
-    required = {"species", "prob", "group_id", "group_name", "pred_label_fixed_threshold"}
+    required = {"species", "prob", "group_id", "pred_label_fixed_threshold"}
     missing = sorted(required - set(predictions.columns))
     if missing:
         raise GroupSummaryError(
@@ -270,7 +233,6 @@ def finite_group_probabilities(predictions: pl.DataFrame) -> pl.DataFrame:
                 pl.col("species").cast(pl.String, strict=False).alias("species"),
                 pl.col("prob").cast(pl.Float64, strict=False).alias("prob"),
                 pl.col("group_id").cast(pl.String, strict=False).alias("group_id"),
-                pl.col("group_name").cast(pl.String, strict=False).alias("group_name"),
                 pl.col("pred_label_fixed_threshold")
                 .cast(pl.Int64, strict=False)
                 .alias("pred_label_fixed_threshold"),
@@ -282,12 +244,5 @@ def finite_group_probabilities(predictions: pl.DataFrame) -> pl.DataFrame:
             & pl.col("prob").is_not_null()
             & pl.col("prob").is_finite()
             & pl.col("group_id").is_not_null()
-            & pl.col("group_name").is_not_null()
-        )
-        .with_columns(
-            pl.when(pl.col("group_name") == "")
-            .then(pl.col("group_id"))
-            .otherwise(pl.col("group_name"))
-            .alias("group_name")
         )
     )

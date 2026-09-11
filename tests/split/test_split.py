@@ -32,13 +32,13 @@ def _fixture_data(tmp_path: Path) -> tuple[Path, Path]:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "sp1\t1\tg1\tno",
-                "sp2\t0\tg1\tno",
-                "sp3\t1\tg2\tno",
-                "sp4\t0\tg2\tno",
-                "sp5\t1\t\tyes",
-                "sp6\t\t\tno",
+                "species\tC4\tcontrast_pair_id",
+                "sp1\t1\tg1",
+                "sp2\t0\tg1",
+                "sp3\t1\tg2",
+                "sp4\t0\tg2",
+                "sp5\t1\t",
+                "sp6\t\t",
             ]
         )
         + "\n",
@@ -82,11 +82,11 @@ def test_split_group_col_can_differ_from_contrast_pair_col(tmp_path: Path) -> No
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tfamily_id\tcontrast_pair_test_holdout",
-                "sp1\t1\tcp1\tfamily_a\tno",
-                "sp2\t0\tcp1\tfamily_a\tno",
-                "sp3\t1\tcp2\tfamily_b\tno",
-                "sp4\t0\tcp2\tfamily_b\tno",
+                "species\tC4\tcontrast_pair_id\tfamily",
+                "sp1\t1\tcp1\tfamily_a",
+                "sp2\t0\tcp1\tfamily_a",
+                "sp3\t1\tcp2\tfamily_b",
+                "sp4\t0\tcp2\tfamily_b",
             ]
         )
         + "\n",
@@ -112,7 +112,7 @@ data:
   tpm_path: {tpm}
   contrast_pair_col: contrast_pair_id
 split:
-  group_col: family_id
+  group_col: family
 """.strip()
         + "\n",
     )
@@ -145,11 +145,11 @@ def test_pair_aware_filter_allows_missing_contrast_pairs_for_rank_split(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\torder_id\torder_test_holdout",
-                "sp1\t1\tcp1\torder_a\tno",
-                "sp2\t0\tcp1\torder_a\tno",
-                "sp3\t1\t\torder_b\tno",
-                "sp4\t0\t\torder_b\tno",
+                "species\tC4\tcontrast_pair_id\torder",
+                "sp1\t1\tcp1\torder_a",
+                "sp2\t0\tcp1\torder_a",
+                "sp3\t1\t\torder_b",
+                "sp4\t0\t\torder_b",
             ]
         )
         + "\n",
@@ -175,8 +175,7 @@ data:
   tpm_path: {tpm}
   contrast_pair_col: contrast_pair_id
 split:
-  group_col: order_id
-  test_holdout_col: order_test_holdout
+  group_col: order
 preprocess:
   ranked_feature_filter:
     method: pair_aware
@@ -200,30 +199,27 @@ def _both_label_groups_config(
     outer_cv_n_splits: int | None = None,
     sampling_strategy: str = "all_samples",
     rows: list[str] | None = None,
-    test_holdout_col: str | None = "test_holdout",
 ) -> AppConfig:
     if rows is None:
         rows = [
-            "a_pos\t1\tcp_a\tfamily_a\tno\tno",
-            "a_neg\t0\tcp_a\tfamily_a\tno\tno",
-            "b_pos\t1\t\tfamily_b\tno\tno",
-            "b_neg\t0\t\tfamily_b\tno\tno",
-            "c_pos\t1\tcp_c\tfamily_c\tno\tno",
-            "c_neg\t0\tcp_c\tfamily_c\tno\tno",
-            "positive_1\t1\t\tpositive_only\tno\tno",
-            "positive_2\t1\t\tpositive_only\tno\tno",
-            "negative_1\t0\t\tnegative_only\tno\tno",
-            "negative_2\t0\t\tnegative_only\tno\tno",
-            "remaining_neg\t0\t\texcluded_positive\tno\tno",
-            "excluded_pos\t1\t\texcluded_positive\tno\tyes",
-            "unknown_positive_family\t\t\tpositive_only\tno\tno",
-            "unknown_only\t\t\tunlabeled_family\tno\tno",
-            "holdout_pos\t1\tcp_holdout\tholdout_family\tyes\tno",
-            "holdout_neg\t0\tcp_holdout\tholdout_family\tyes\tno",
+            "a_pos\t1\tcp_a\tfamily_a\tno",
+            "a_neg\t0\tcp_a\tfamily_a\tno",
+            "b_pos\t1\t\tfamily_b\tno",
+            "b_neg\t0\t\tfamily_b\tno",
+            "c_pos\t1\tcp_c\tfamily_c\tno",
+            "c_neg\t0\tcp_c\tfamily_c\tno",
+            "positive_1\t1\t\tpositive_only\tno",
+            "positive_2\t1\t\tpositive_only\tno",
+            "negative_1\t0\t\tnegative_only\tno",
+            "negative_2\t0\t\tnegative_only\tno",
+            "remaining_neg\t0\t\texcluded_positive\tno",
+            "excluded_pos\t1\t\texcluded_positive\tyes",
+            "unknown_positive_family\t\t\tpositive_only\tno",
+            "unknown_only\t\t\t\tno",
         ]
     metadata = _write(
         tmp_path / "species_metadata.tsv",
-        "species\tC4\tcontrast_pair_id\tfamily_id\ttest_holdout\texclude\n"
+        "species\tC4\tcontrast_pair_id\tfamily\texclude\n"
         + "\n".join(rows)
         + "\n",
     )
@@ -246,8 +242,7 @@ def _both_label_groups_config(
   tpm_path: {tpm}
   contrast_pair_col: contrast_pair_id
 split:
-  group_col: family_id
-  test_holdout_col: {test_holdout_col or "null"}
+  group_col: family
   exclude_col: exclude
   outer_cv_strategy: {outer_cv_strategy}
   outer_cv_n_splits: {outer_cv_n_splits or "null"}
@@ -287,7 +282,7 @@ def test_require_both_labels_routes_single_label_groups_before_cv(
     assert artifacts.fold_count == expected_folds
     assert artifacts.pool_counts == {
         "training_validation": 6,
-        "external_test": 7,
+        "external_test": 5,
         "discovery_inference": 2,
         "excluded": 1,
     }
@@ -301,7 +296,6 @@ def test_require_both_labels_routes_single_label_groups_before_cv(
     ).null_count() == 2 * expected_folds
     assert set(manifest.filter(pl.col("pool") == "external_test").get_column("species")) == {
         "positive_1", "positive_2", "negative_1", "negative_2", "remaining_neg",
-        "holdout_pos", "holdout_neg",
     }
     assert set(
         manifest.filter(pl.col("pool") == "discovery_inference").get_column("species")
@@ -317,7 +311,7 @@ def test_require_both_labels_routes_single_label_groups_before_cv(
         assert set(valid.get_column("label")) == {0, 1}
 
 
-def test_require_both_labels_defaults_to_existing_single_label_group_behavior(
+def test_family_split_allows_single_label_validation_groups_by_default(
     tmp_path: Path,
 ) -> None:
     default_config = _both_label_groups_config(tmp_path, require_both_labels=None)
@@ -329,23 +323,13 @@ def test_require_both_labels_defaults_to_existing_single_label_group_behavior(
     assert default_artifacts.split_manifest.equals(disabled_artifacts.split_manifest)
     assert default_artifacts.fold_count == 6
     assert default_artifacts.pool_counts["training_validation"] == 11
-    assert default_artifacts.pool_counts["external_test"] == 2
+    assert default_artifacts.pool_counts["external_test"] == 0
+    assert set(default_artifacts.fold_diagnostics.get_column("validation_label_profile")) == {
+        "both", "positive_only", "negative_only",
+    }
     assert not default_artifacts.fold_diagnostics.get_column(
         "two_class_validation_metrics_defined"
     ).all()
-
-
-def test_require_both_labels_can_route_groups_without_holdout_column(tmp_path: Path) -> None:
-    config = _both_label_groups_config(tmp_path, test_holdout_col=None)
-
-    artifacts = build_split_artifacts(config)
-
-    assert artifacts.fold_count == 4
-    assert artifacts.pool_counts["training_validation"] == 8
-    assert artifacts.pool_counts["external_test"] == 5
-    assert set(
-        artifacts.split_manifest.filter(pl.col("pool") == "external_test").get_column("species")
-    ) == {"positive_1", "positive_2", "negative_1", "negative_2", "remaining_neg"}
 
 
 @pytest.mark.parametrize(
@@ -356,13 +340,13 @@ def test_require_both_labels_rejects_insufficient_remaining_cv_groups(
     tmp_path: Path, remaining_mixed_groups: int, message: str
 ) -> None:
     rows = [
-        "positive\t1\t\tpositive_only\tno\tno",
-        "negative\t0\t\tnegative_only\tno\tno",
+        "positive\t1\t\tpositive_only\tno",
+        "negative\t0\t\tnegative_only\tno",
     ]
     for index in range(remaining_mixed_groups):
         rows.extend([
-            f"mixed_{index}_pos\t1\t\tmixed_{index}\tno\tno",
-            f"mixed_{index}_neg\t0\t\tmixed_{index}\tno\tno",
+            f"mixed_{index}_pos\t1\t\tmixed_{index}\tno",
+            f"mixed_{index}_neg\t0\t\tmixed_{index}\tno",
         ])
     config = _both_label_groups_config(
         tmp_path,
@@ -375,22 +359,19 @@ def test_require_both_labels_rejects_insufficient_remaining_cv_groups(
         build_split_artifacts(config)
 
 
-@pytest.mark.parametrize(
-    ("rows", "message"),
-    [
-        (["missing\t1\t\t\tno\tno"], "non-empty split group"),
-        (
-            ["train\t1\t\tfamily_a\tno\tno", "test\t1\t\tfamily_a\tyes\tno"],
-            "consistent test-holdout assignment",
-        ),
-    ],
-)
-def test_require_both_labels_preserves_metadata_validation(
-    tmp_path: Path, rows: list[str], message: str
+@pytest.mark.parametrize("contrast_pair_col", ["contrast_pair_id", None])
+@pytest.mark.parametrize("require_both_labels", [True, False])
+def test_non_contrast_splits_reject_missing_group_values(
+    tmp_path: Path, contrast_pair_col: str | None, require_both_labels: bool
 ) -> None:
-    config = _both_label_groups_config(tmp_path, rows=rows)
+    config = _both_label_groups_config(
+        tmp_path,
+        rows=["missing\t1\t\t\tno"],
+        require_both_labels=require_both_labels,
+    )
+    config.data.contrast_pair_col = contrast_pair_col
 
-    with pytest.raises(SplitError, match=message):
+    with pytest.raises(SplitError, match="non-empty split group"):
         build_split_artifacts(config)
 
 
@@ -401,11 +382,11 @@ def test_null_contrast_pair_col_uses_split_group_without_contrast_column(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tfamily_id\tcontrast_pair_test_holdout",
-                "sp1\t1\tfamily_a\tno",
-                "sp2\t0\tfamily_a\tno",
-                "sp3\t1\tfamily_b\tno",
-                "sp4\t0\tfamily_b\tno",
+                "species\tC4\tfamily",
+                "sp1\t1\tfamily_a",
+                "sp2\t0\tfamily_a",
+                "sp3\t1\tfamily_b",
+                "sp4\t0\tfamily_b",
             ]
         )
         + "\n",
@@ -431,7 +412,7 @@ data:
   tpm_path: {tpm}
   contrast_pair_col: null
 split:
-  group_col: family_id
+  group_col: family
 """.strip()
         + "\n",
     )
@@ -446,7 +427,7 @@ split:
     assert manifest.get_column("contrast_group_id").null_count() == manifest.height
 
 
-def test_null_test_holdout_col_creates_no_legacy_external_test(tmp_path: Path) -> None:
+def test_paired_labeled_species_and_unknowns_create_no_external_test(tmp_path: Path) -> None:
     metadata = _write(
         tmp_path / "species_metadata.tsv",
         "\n".join(
@@ -481,8 +462,6 @@ def test_null_test_holdout_col_creates_no_legacy_external_test(tmp_path: Path) -
 data:
   metadata_path: {metadata}
   tpm_path: {tpm}
-split:
-  test_holdout_col: null
 """.strip()
         + "\n",
     )
@@ -495,52 +474,42 @@ split:
     assert "external_test" not in set(artifacts.split_manifest.get_column("pool").to_list())
 
 
-def test_null_test_holdout_col_rejects_labeled_species_without_split_group(
-    tmp_path: Path,
+@pytest.mark.parametrize("contrast_pair_col", ["contrast_pair_id", "custom_pair"])
+@pytest.mark.parametrize("require_both_labels", [True, False])
+def test_unpaired_labeled_species_are_automatically_external_test(
+    tmp_path: Path, contrast_pair_col: str, require_both_labels: bool
 ) -> None:
-    metadata = _write(
-        tmp_path / "species_metadata.tsv",
-        "\n".join(
-            [
-                "species\tC4\tcontrast_pair_id",
-                "sp1\t1\tg1",
-                "sp2\t0\tg1",
-                "sp3\t1\tg2",
-                "sp4\t0\tg2",
-                "sp5\t1\t",
-            ]
-        )
-        + "\n",
+    metadata, tpm = _fixture_data(tmp_path)
+    table = pl.read_csv(metadata, separator="\t").rename(
+        {"contrast_pair_id": contrast_pair_col}
     )
-    tpm = _write(
-        tmp_path / "tpm.tsv",
-        "\n".join(
-            [
-                "species\torthogroup\ttpm",
-                "sp1\tOG1\t1.0",
-                "sp2\tOG1\t2.0",
-                "sp3\tOG1\t3.0",
-                "sp4\tOG1\t4.0",
-                "sp5\tOG1\t5.0",
-            ]
-        )
-        + "\n",
+    table = table.with_columns(
+        pl.when(pl.col("species") == "sp5")
+        .then(pl.lit("   "))
+        .otherwise(pl.col(contrast_pair_col))
+        .alias(contrast_pair_col)
     )
-    cfg = _write(
-        tmp_path / "config.yml",
-        f"""
-data:
-  metadata_path: {metadata}
-  tpm_path: {tpm}
-split:
-  test_holdout_col: null
-""".strip()
-        + "\n",
-    )
-    config = load_and_resolve_config([cfg])
+    table.write_csv(metadata, separator="\t")
+    config = load_and_resolve_config([_write_config(tmp_path, metadata, tpm)])
+    config.data.contrast_pair_col = contrast_pair_col
+    config.split.group_col = contrast_pair_col
+    config.split.require_both_labels_per_group = require_both_labels
 
-    with pytest.raises(SplitError, match="Labeled non-holdout species"):
-        build_split_artifacts(config)
+    artifacts = build_split_artifacts(config)
+
+    assert artifacts.pool_counts == {
+        "training_validation": 4,
+        "external_test": 1,
+        "discovery_inference": 1,
+        "excluded": 0,
+    }
+    manifest = artifacts.split_manifest
+    assert manifest.filter(pl.col("species") == "sp5").get_column("pool").to_list() == [
+        "external_test"
+    ]
+    assert manifest.filter(pl.col("species") == "sp6").get_column("pool").to_list() == [
+        "discovery_inference"
+    ]
 
 
 def test_exclude_col_removes_species_from_all_pools_and_expression_requirements(
@@ -550,12 +519,12 @@ def test_exclude_col_removes_species_from_all_pools_and_expression_requirements(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\ttaxon_exclude",
-                "sp1\t1\tg1\tno\tno",
-                "sp2\t0\tg1\tno\tno",
-                "sp3\t1\tg2\tno\tno",
-                "sp4\t0\tg2\tno\tno",
-                "excluded_sp\t1\t\tno\tyes",
+                "species\tC4\tcontrast_pair_id\ttaxon_exclude",
+                "sp1\t1\tg1\tno",
+                "sp2\t0\tg1\tno",
+                "sp3\t1\tg2\tno",
+                "sp4\t0\tg2\tno",
+                "excluded_sp\t1\t\tyes",
             ]
         )
         + "\n",
@@ -597,9 +566,9 @@ def test_invalid_exclude_col_values_are_rejected(tmp_path: Path) -> None:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\ttaxon_exclude",
-                "sp1\t1\tg1\tno\tmaybe",
-                "sp2\t0\tg1\tno\tno",
+                "species\tC4\tcontrast_pair_id\ttaxon_exclude",
+                "sp1\t1\tg1\tmaybe",
+                "sp2\t0\tg1\tno",
             ]
         )
         + "\n",
@@ -702,8 +671,8 @@ def test_invalid_trait_values_are_rejected(tmp_path: Path) -> None:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "sp1\tmaybe\tg1\tno",
+                "species\tC4\tcontrast_pair_id",
+                "sp1\tmaybe\tg1",
             ]
         )
         + "\n",
@@ -752,13 +721,13 @@ def test_single_class_validation_groups_are_allowed_and_diagnosed(tmp_path: Path
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "sp1\t1\tg1\tno",
-                "sp2\t1\tg1\tno",
-                "sp3\t0\tg2\tno",
-                "sp4\t0\tg2\tno",
-                "sp5\t0\tg3\tno",
-                "sp6\t1\tg3\tno",
+                "species\tC4\tcontrast_pair_id",
+                "sp1\t1\tg1",
+                "sp2\t1\tg1",
+                "sp3\t0\tg2",
+                "sp4\t0\tg2",
+                "sp5\t0\tg3",
+                "sp6\t1\tg3",
             ]
         )
         + "\n",
@@ -814,11 +783,11 @@ def test_single_class_training_fold_is_still_rejected(tmp_path: Path) -> None:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "sp1\t1\tg1\tno",
-                "sp2\t1\tg1\tno",
-                "sp3\t0\tg2\tno",
-                "sp4\t0\tg2\tno",
+                "species\tC4\tcontrast_pair_id",
+                "sp1\t1\tg1",
+                "sp2\t1\tg1",
+                "sp3\t0\tg2",
+                "sp4\t0\tg2",
             ]
         )
         + "\n",
@@ -852,12 +821,12 @@ def test_stratified_group_kfold_keeps_groups_disjoint_and_balances_labels(
     tmp_path: Path,
 ) -> None:
     species_rows = [
-        f"sp{index}\t{1 if index <= 5 else 0}\tg{index}\tno"
+        f"sp{index}\t{1 if index <= 5 else 0}\tg{index}"
         for index in range(1, 11)
     ]
     metadata = _write(
         tmp_path / "species_metadata.tsv",
-        "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\n"
+        "species\tC4\tcontrast_pair_id\n"
         + "\n".join(species_rows)
         + "\n",
     )
@@ -918,9 +887,9 @@ def test_invalid_trait_values_error_lists_offending_values(tmp_path: Path) -> No
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "sp1\tmaybe\tg1\tno",
-                "sp2\t2\tg1\tno",
+                "species\tC4\tcontrast_pair_id",
+                "sp1\tmaybe\tg1",
+                "sp2\t2\tg1",
             ]
         )
         + "\n",
@@ -947,9 +916,9 @@ def test_duplicate_species_in_metadata_is_rejected(tmp_path: Path) -> None:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "sp1\t1\tg1\tno",
-                "sp1\t0\tg1\tno",
+                "species\tC4\tcontrast_pair_id",
+                "sp1\t1\tg1",
+                "sp1\t0\tg1",
             ]
         )
         + "\n",
@@ -975,9 +944,9 @@ def test_empty_species_identifier_in_metadata_is_rejected(tmp_path: Path) -> Non
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "\t1\tg1\tno",
-                "sp2\t0\tg1\tno",
+                "species\tC4\tcontrast_pair_id",
+                "\t1\tg1",
+                "sp2\t0\tg1",
             ]
         )
         + "\n",
@@ -1023,13 +992,13 @@ def test_split_manifest_is_sorted_by_contract_keys(tmp_path: Path) -> None:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "z_sp\t1\tg1\tno",
-                "a_sp\t0\tg1\tno",
-                "y_sp\t1\tg2\tno",
-                "b_sp\t0\tg2\tno",
-                "ext\t1\t\tyes",
-                "inf\t\t\tno",
+                "species\tC4\tcontrast_pair_id",
+                "z_sp\t1\tg1",
+                "a_sp\t0\tg1",
+                "y_sp\t1\tg2",
+                "b_sp\t0\tg2",
+                "ext\t1\t",
+                "inf\t\t",
             ]
         )
         + "\n",
@@ -1139,9 +1108,9 @@ def test_no_training_validation_pool_is_rejected(tmp_path: Path) -> None:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "sp1\t1\t\tyes",
-                "sp2\t\t\tno",
+                "species\tC4\tcontrast_pair_id",
+                "sp1\t1\t",
+                "sp2\t\t",
             ]
         )
         + "\n",

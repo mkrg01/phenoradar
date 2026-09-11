@@ -28,12 +28,12 @@ def _candidate_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
         tmp_path / "metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tfamily_id\tfamily_name",
-                "known_0a\t0\tf1\tFamily one",
-                "known_0b\t0\tf1\tFamily one",
-                "known_1a\t1\tf2\tFamily two",
-                "known_1b\t1\tf2\tFamily two",
-                "candidate_a\t\tf3\tFamily three",
+                "species\tC4\tfamily",
+                "known_0a\t0\tFamily one",
+                "known_0b\t0\tFamily one",
+                "known_1a\t1\tFamily two",
+                "known_1b\t1\tFamily two",
+                "candidate_a\t\tFamily three",
             ]
         )
         + "\n",
@@ -72,11 +72,13 @@ preprocess:
     return metadata, tpm, config
 
 
+@pytest.mark.parametrize("group_col", ["family", "order"])
 def test_build_candidate_evidence_uses_candidate_local_contribution(
-    tmp_path: Path,
+    tmp_path: Path, group_col: str
 ) -> None:
     _metadata, _tpm, config_path = _candidate_fixture(tmp_path)
     config = load_and_resolve_config([config_path])
+    config.summary.group_col = group_col
     split_manifest = pl.DataFrame(
         {
             "species": ["known_0a", "known_0b", "known_1a", "known_1b"],
@@ -121,7 +123,8 @@ def test_build_candidate_evidence_uses_candidate_local_contribution(
         top_features=1,
     )
 
-    assert artifacts.candidates.row(0, named=True)["family_name"] == "Family three"
+    assert artifacts.candidates.row(0, named=True)["family"] == "Family three"
+    assert artifacts.warnings == []
     assert artifacts.features.height == 1
     assert artifacts.features.row(0, named=True)["feature"] == "OG1"
     assert artifacts.features.row(0, named=True)["local_rank"] == 1
@@ -136,8 +139,7 @@ def test_write_candidate_evidence_figures_writes_probability_bin_pdf_and_manifes
         {
             "species": ["Candidate species"],
             "prob": [0.97],
-            "family_id": ["f3"],
-            "family_name": ["Family three"],
+            "family": ["Family three"],
         }
     )
     features = pl.DataFrame(

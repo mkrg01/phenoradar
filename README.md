@@ -8,6 +8,8 @@
 ## Overview
 
 PhenoRadar is a CLI tool for binary phenotype prediction from orthogroup-level TPM.
+Prepare input data in the separate `phenoradar_prep` repository, then supply the
+metadata and expression TSVs to PhenoRadar.
 
 ## Install
 

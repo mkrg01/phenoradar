@@ -17,20 +17,23 @@ def _write(path: Path, text: str) -> Path:
     return path
 
 
-def test_group_summary_suffix_strips_id_suffix() -> None:
-    assert group_summary_suffix("family_id") == "family"
+def test_group_summary_suffix_normalizes_column_name() -> None:
+    assert group_summary_suffix("family") == "family"
     assert group_summary_suffix("source_project") == "source_project"
 
 
-def test_build_group_summary_artifacts_joins_metadata_and_summarizes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("group_col", ["family", "order"])
+def test_build_group_summary_artifacts_joins_metadata_and_summarizes(
+    tmp_path: Path, group_col: str
+) -> None:
     metadata = _write(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tfamily_id\tfamily_name",
-                "sp1\tf1\tFamily 1",
-                "sp2\tf1\tFamily 1",
-                "sp3\tf2\tFamily 2",
+                f"species\t{group_col}",
+                "sp1\tFamily 1",
+                "sp2\tFamily 1",
+                "sp3\tFamily 2",
             ]
         )
         + "\n",
@@ -48,23 +51,44 @@ def test_build_group_summary_artifacts_joins_metadata_and_summarizes(tmp_path: P
         predictions=predictions,
         metadata_path=metadata,
         species_col="species",
-        group_col="family_id",
-        group_name_col="family_name",
+        group_col=group_col,
         source_table_name="prediction_inference.tsv",
     )
 
-    assert artifacts.suffix == "family"
-    assert artifacts.group_label == "family"
+    assert artifacts.suffix == group_col
+    assert artifacts.group_label == group_col
     rows = artifacts.summary.sort("group_id").to_dicts()
-    assert rows[0]["group_id"] == "f1"
-    assert rows[0]["group_name"] == "Family 1"
+    assert rows[0]["group_id"] == "Family 1"
     assert rows[0]["n_species"] == 2
     assert rows[0]["n_true_positive"] == 1
     assert rows[0]["n_true_negative"] == 1
     assert rows[0]["n_pred_positive"] == 1
     assert rows[0]["top_species"] == "sp1"
-    assert rows[1]["group_id"] == "f2"
+    assert rows[1]["group_id"] == "Family 2"
     assert rows[1]["top_prob"] == pytest.approx(0.7)
+
+
+def test_build_group_summary_normalizes_names_and_missing_values(tmp_path: Path) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "species\tfamily\nsp1\t Poaceae \nsp2\tPoaceae\nsp3\t\nsp4\t   \n",
+    )
+    artifacts = build_group_summary_artifacts(
+        predictions=pl.DataFrame(
+            {"species": ["sp1", "sp2", "sp3", "sp4", "sp5"], "prob": [0.8] * 5}
+        ),
+        metadata_path=metadata,
+        species_col="species",
+        group_col="family",
+        source_table_name="prediction_inference.tsv",
+    )
+
+    assert artifacts.summary.select("group_id", "n_species").sort(
+        "group_id"
+    ).to_dicts() == [
+        {"group_id": "Poaceae", "n_species": 2},
+        {"group_id": "unassigned", "n_species": 3},
+    ]
 
 
 def test_build_group_summary_artifacts_skips_missing_group_column(tmp_path: Path) -> None:
@@ -77,7 +101,6 @@ def test_build_group_summary_artifacts_skips_missing_group_column(tmp_path: Path
             predictions=pl.DataFrame({"species": ["sp1"], "prob": [0.8]}),
             metadata_path=metadata,
             species_col="species",
-            group_col="family_id",
-            group_name_col="family_name",
+            group_col="family",
             source_table_name="prediction_inference.tsv",
         )

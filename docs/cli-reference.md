@@ -10,11 +10,13 @@ Both commands are equivalent:
 ```text
 phenoradar run
 phenoradar config
-phenoradar metadata
 phenoradar dataset
 phenoradar predict
 phenoradar report
 ```
+
+Input preparation belongs in the separate `phenoradar_prep` repository.
+See [data-format.md](data-format.md) for the input files accepted by PhenoRadar.
 
 Global options:
 
@@ -153,7 +155,9 @@ Conditionally written:
 
 ## `config`
 
-Resolve and validate config without running the pipeline.
+Resolve and validate config without running the pipeline. The output includes
+every setting with defaults filled in, plus comments listing available choices
+and nullable value types.
 
 ```bash
 phenoradar config [-c config.yml] [--out config.yml]
@@ -165,76 +169,6 @@ Options:
 - `--out` (optional): output YAML path (default: `config.yml`)
 - `--verbose`, `-v`: detailed stage-level logs
 - `--quiet`, `-q`: suppress progress logs
-
-## `metadata`
-
-Generate metadata-adjacent artifacts from a raw species trait table.
-
-```bash
-phenoradar metadata \
-  --species-trait species_trait.tsv \
-  --tree-out ncbi_tree.nwk \
-  --out species_metadata.tsv
-```
-
-This command uses the external `nwkit` executable. Taxonomic-rank blocking also uses
-`ete4.NCBITaxa`, which is included in standard PhenoRadar installs. For a local uv
-environment, install the recorded `nwkit` dependency group with:
-
-```bash
-uv sync --group taxonomy
-```
-
-For conda-based environments, install `nwkit` from Bioconda. For pip-only environments,
-install `nwkit` directly from the upstream repository. Make sure the executable is on
-`PATH` or pass `--nwkit-bin`.
-Tree retrieval uses the default `nwkit constrain` taxonomy depth; taxonomic-rank split
-blocks are controlled separately with `--taxon-block-rank`.
-
-Options:
-
-- `--species-trait`: input TSV containing species and binary trait columns (default: `species_trait.tsv`)
-- `--species-taxid`: optional TSV containing species and NCBI taxid columns for tree retrieval, taxonomic-rank annotation, and taxonomic-rank blocking
-- `--species-taxid-out`: output generated species/taxid TSV when `--species-taxid` is omitted; defaults to `species_taxid.tsv` next to `--out` when taxonomic-rank annotation or blocking needs it
-- `--out`: output PhenoRadar metadata TSV (default: `species_metadata.tsv`)
-- `--tree-in`: existing Newick tree to use for group assignment; skips NCBI tree retrieval
-- `--tree-out`: output Newick tree path when retrieving from NCBI Taxonomy (default: `ncbi_tree.nwk`)
-- `--species-col`: species column name in `species_trait.tsv` and `species_taxid.tsv` (default: `species`)
-- `--taxid-col`: taxid column name in `species_taxid.tsv` (default: `taxid`)
-- `--trait-col`: binary trait column name in `species_trait.tsv` and output metadata (default: `C4`)
-- `--contrast-pair-col`: output contrast-pair column name (default: `contrast_pair_id`)
-- `--contrast-pair-test-holdout-col`: output column marking known-trait species without a contrast pair as test holdouts (default: `contrast_pair_test_holdout`)
-- `--taxon-annotation-rank`: NCBI taxonomy rank to emit as `<rank>_id` / `<rank>_name` annotation columns; repeat for multiple ranks (default: `order`, `family`)
-- `--taxon-block-rank`: NCBI taxonomy rank to emit as a split block; repeat for multiple ranks such as `family` and `order`
-- `--taxon-block-min-species-per-label`: minimum labeled species per trait value required for a taxon block to enter CV (default: `1`)
-- `--taxon-block-mixed-test-fraction`: fraction of mixed-label taxon blocks to reserve as external test blocks (default: `0.0`)
-- `--taxon-block-mixed-test-seed`: random seed for selecting mixed-label test blocks (default: `42`)
-- `--ncbi-taxonomy-db`: optional ete4 NCBI taxonomy SQLite database path
-- `--nwkit-bin`: `nwkit` executable path (default: `nwkit`)
-- `--force`: overwrite existing tree or metadata outputs
-- `--tree-only`: fetch/write only the tree and skip metadata generation
-- `--verbose`, `-v`: detailed stage-level logs
-- `--quiet`, `-q`: suppress progress logs
-
-Group assignment uses `nwkit skim --only-contrastive-clades yes --output-groupfile yes`.
-Species that are not present in the tree are excluded from the generated metadata. The
-generated `contrast_pair_id` is based on `contrastive_clade`, so each assigned training
-contrast pair contains both non-missing trait labels (`0` and `1`). Known-trait species
-without an assigned contrast pair are marked in `contrast_pair_test_holdout`.
-
-By default, `phenoradar metadata` writes `order_id`, `order_name`,
-`family_id`, and `family_name` when species taxids can be resolved. Additional
-annotation ranks can be selected with `--taxon-annotation-rank`. When
-`--taxon-block-rank` is supplied, the command also writes
-`<rank>_test_holdout` and `<rank>_exclude` for that rank. If `--species-taxid`
-is omitted, `phenoradar metadata` first resolves species names with
-`ete4.NCBITaxa`, writes a generated `species_taxid.tsv` (or
-`--species-taxid-out`), and reuses that file for rank annotation/blocking. Rank
-blocks with both labels are usable as CV groups. Single-label rank blocks are
-marked as test holdout, while labeled species with missing taxid/rank are
-marked as excluded. The `<rank>_id` and `<rank>_name` columns keep the resolved
-annotation even when that rank block is held out; use the matching
-holdout/exclude columns for split behavior.
 
 ## `predict`
 

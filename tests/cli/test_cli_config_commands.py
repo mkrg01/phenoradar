@@ -16,7 +16,7 @@ import phenoradar.cli as cli_mod
 from phenoradar import __version__
 from phenoradar.bundle import BundleError
 from phenoradar.cli import app
-from phenoradar.config import ConfigConditionSet, ConfigError
+from phenoradar.config import AppConfig, ConfigConditionSet, ConfigError
 from phenoradar.cv import CVError
 from phenoradar.figures import FigureError
 from phenoradar.provenance import ProvenanceError
@@ -49,13 +49,13 @@ def _write_split_fixture(tmp_path: Path) -> tuple[Path, Path]:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\tfamily_id\tfamily_name",
-                "sp1\t1\tg1\tno\tf1\tFamily 1",
-                "sp2\t0\tg1\tno\tf1\tFamily 1",
-                "sp3\t1\tg2\tno\tf2\tFamily 2",
-                "sp4\t0\tg2\tno\tf2\tFamily 2",
-                "sp5\t1\t\tyes\tf3\tFamily 3",
-                "sp6\t\t\tno\tf3\tFamily 3",
+                "species\tC4\tcontrast_pair_id\tfamily",
+                "sp1\t1\tg1\tFamily 1",
+                "sp2\t0\tg1\tFamily 1",
+                "sp3\t1\tg2\tFamily 2",
+                "sp4\t0\tg2\tFamily 2",
+                "sp5\t1\t\tFamily 3",
+                "sp6\t\t\tFamily 3",
             ]
         )
         + "\n",
@@ -95,7 +95,7 @@ def _stub_resolved_config(
             )
         ),
         report=SimpleNamespace(),
-        summary=SimpleNamespace(group_col="family_id", group_name_col="family_name"),
+        summary=SimpleNamespace(group_col="family"),
         figures=SimpleNamespace(top_features=top_features),
         model_selection=SimpleNamespace(),
         preprocess=SimpleNamespace(
@@ -347,6 +347,7 @@ def _stub_cv_artifacts(
 
 def _stub_final_refit_artifacts() -> SimpleNamespace:
     return SimpleNamespace(
+        model_entries=[],
         pred_external_test=pl.DataFrame(
             {
                 "species": ["sp1"],
@@ -421,7 +422,9 @@ sampling:
 
     assert result.exit_code == 0, result.output
     assert out.exists()
-    payload = yaml.safe_load(out.read_text(encoding="utf-8"))
+    rendered = out.read_text(encoding="utf-8")
+    payload = yaml.safe_load(rendered)
+    assert "weighting: group_label_inverse  # choices: none, group_label_inverse" in rendered
     assert payload["runtime"]["seed"] == 123
     assert "search_seed" not in payload["model_selection"]
     assert payload["sampling"]["weighting"] == "group_label_inverse"
@@ -450,12 +453,12 @@ def test_config_without_config_writes_default_yaml(
     assert payload["data"]["orthogroup_annotation_path"] is None
     assert payload["preprocess"]["absent_feature_fill"] == 0
     assert payload["preprocess"]["sparse_feature_filter"]["scope"] == "any_trait"
-    assert "within_trait" not in payload["preprocess"]["sparse_feature_filter"]
     assert (
         payload["preprocess"]["ranked_feature_filter"]["higher_in_trait"]
         is None
     )
     assert payload["figures"]["top_features"] == 30
+    assert payload == AppConfig().model_dump(mode="python")
 
 
 def test_run_passes_top_features_to_run_and_tree_figures(
@@ -561,16 +564,6 @@ def test_config_rejects_multiple_config_options(tmp_path: Path) -> None:
 
     assert result.exit_code != 0
     assert "can be specified at most once" in result.output
-
-
-def test_compose_config_alias_is_not_available() -> None:
-    runner = CliRunner()
-
-    result = runner.invoke(app, ["compose-config"])
-
-    assert result.exit_code != 0
-    assert "No such command" in result.output
-    assert "compose-config" in result.output
 
 
 def test_predict_rejects_multiple_config_options(tmp_path: Path) -> None:
@@ -1141,17 +1134,17 @@ def test_run_emits_model_selection_artifacts_when_selection_active(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout\tfamily_id\tfamily_name",
-                "g1_pos\t1\tg1\tno\tf1\tFamily 1",
-                "g1_neg\t0\tg1\tno\tf1\tFamily 1",
-                "g2_pos\t1\tg2\tno\tf2\tFamily 2",
-                "g2_neg\t0\tg2\tno\tf2\tFamily 2",
-                "g3_pos\t1\tg3\tno\tf3\tFamily 3",
-                "g3_neg\t0\tg3\tno\tf3\tFamily 3",
-                "g4_pos\t1\tg4\tno\tf4\tFamily 4",
-                "g4_neg\t0\tg4\tno\tf4\tFamily 4",
-                "ext1\t1\t\tyes\tf5\tFamily 5",
-                "inf1\t\t\tno\tf5\tFamily 5",
+                "species\tC4\tcontrast_pair_id\tfamily",
+                "g1_pos\t1\tg1\tFamily 1",
+                "g1_neg\t0\tg1\tFamily 1",
+                "g2_pos\t1\tg2\tFamily 2",
+                "g2_neg\t0\tg2\tFamily 2",
+                "g3_pos\t1\tg3\tFamily 3",
+                "g3_neg\t0\tg3\tFamily 3",
+                "g4_pos\t1\tg4\tFamily 4",
+                "g4_neg\t0\tg4\tFamily 4",
+                "ext1\t1\t\tFamily 5",
+                "inf1\t\t\tFamily 5",
             ]
         )
         + "\n",

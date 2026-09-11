@@ -44,33 +44,30 @@ Metadata normalization:
 
 - species IDs are trimmed and must be non-empty and unique.
 - trait must be `0/1` or null/empty.
-- `split.group_col` is required for labeled species unless
-  `split.test_holdout_col` marks the species as a test holdout.
-- `split.test_holdout_col` is optional; when it is `null`, no external-test
-  holdout column is read.
+- the `split.group_col` column is required. For contrast-pair splits (the
+  column matches non-null `data.contrast_pair_col`), labeled species with
+  missing group values automatically enter `external_test`.
+- for other split groups, labeled, non-excluded species with missing group
+  values cause an error; missing contrast pairs do not affect pool assignment.
 - `split.exclude_col` is optional; rows marked true are removed before pool
   assignment and expression coverage checks.
 
 Pool assignment:
 
 - exclude true -> removed from all pools
-- trait present + test holdout true -> `external_test`
-- trait present + test holdout false + split group present -> `training_validation`
 - trait missing -> `discovery_inference`
+- trait present + contrast-pair split + pair missing -> `external_test`
+- trait present + split group present -> `training_validation`
 
 When `split.require_both_labels_per_group=true`, inspect the provisional
 `training_validation` pool by `split.group_col` before constructing folds.
 Only groups with both `0` and `1` remain eligible; labeled species in
-single-label groups move to `external_test`. Explicit holdouts, excluded
-species, and trait-missing species do not contribute to that check. Existing
-validation of consistent explicit holdout assignments within each split group
-still runs. The default `false` preserves the original pool assignment.
+single-label groups move to `external_test`. Excluded species, unpaired
+external-test species, and trait-missing species do not contribute to that
+check. The default `false` preserves the pool assignment above.
 
-This is a filter on CV eligibility, not a filter on completed folds or their
-metrics: moved species are absent from all CV training and validation sets
-and from final-refit training. Setting `split.test_holdout_col=null` only
-disables explicit holdout flags; automatic group filtering can still create
-an `external_test` pool.
+This filters CV eligibility before training: moved species are absent from
+all CV training and validation sets and from final-refit training.
 
 `training_validation` is an internal pool label before fold expansion.
 In `split/tables/split_manifest.tsv`, these species appear as `train` and `validation`.

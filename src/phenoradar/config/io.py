@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 from pydantic import ValidationError
+from yaml.nodes import MappingNode, ScalarNode
 
 from .schema import AppConfig, ExecutionStage
 
@@ -70,15 +71,92 @@ def load_and_resolve_config(
         raise ConfigError(str(exc)) from exc
 
 
+def _schema_variants(
+    schema: dict[str, Any], definitions: dict[str, Any]
+) -> list[dict[str, Any]]:
+    if "$ref" in schema:
+        return _schema_variants(definitions[schema["$ref"].rsplit("/", 1)[-1]], definitions)
+    if "anyOf" in schema:
+        return [
+            variant
+            for member in schema["anyOf"]
+            for variant in _schema_variants(member, definitions)
+        ]
+    return [schema]
+
+
+def _schema_value_comment(variants: list[dict[str, Any]]) -> str | None:
+    choices: list[str] = []
+    for variant in variants:
+        if "enum" in variant:
+            values = variant["enum"]
+        elif "const" in variant:
+            values = [variant["const"]]
+        elif variant.get("type") == "boolean":
+            values = [True, False]
+        elif variant.get("type") == "null":
+            values = [None]
+        else:
+            types = list(dict.fromkeys(member.get("type", "any") for member in variants))
+            return "type: " + " or ".join(types) if "null" in types else None
+        for value in values:
+            if value is None:
+                choices.append("null")
+            elif isinstance(value, bool):
+                choices.append(str(value).lower())
+            else:
+                choices.append(str(value))
+    return "choices: " + ", ".join(dict.fromkeys(choices)) if choices else None
+
+
 def serialize_resolved_config(config: AppConfig) -> str:
-    """Serialize a validated config into deterministic YAML."""
-    config_dict = config.model_dump(mode="python")
-    return yaml.safe_dump(
-        config_dict,
+    """Serialize every config field, with schema-derived choices in YAML comments."""
+    serialized = yaml.safe_dump(
+        config.model_dump(mode="python"),
         sort_keys=False,
         default_flow_style=False,
         allow_unicode=False,
     )
+    schema = type(config).model_json_schema()
+    definitions = schema.get("$defs", {})
+    inline_comments: dict[int, str] = {}
+    preceding_comments: dict[int, str] = {}
+
+    def annotate(node: MappingNode, variants: list[dict[str, Any]]) -> None:
+        for key, value in node.value:
+            field_variants = [
+                expanded
+                for variant in variants
+                if isinstance(
+                    field_schema := variant.get("properties", {}).get(
+                        key.value, variant.get("additionalProperties")
+                    ),
+                    dict,
+                )
+                for expanded in _schema_variants(field_schema, definitions)
+            ]
+            if isinstance(value, MappingNode):
+                annotate(value, field_variants)
+            elif isinstance(value, ScalarNode):
+                comment = _schema_value_comment(field_variants)
+                if comment is not None:
+                    if key.start_mark.line == value.end_mark.line:
+                        inline_comments[key.start_mark.line] = comment
+                    else:
+                        preceding_comments[key.start_mark.line] = comment
+
+    root = yaml.compose(serialized, Loader=yaml.SafeLoader)
+    if isinstance(root, MappingNode):
+        annotate(root, [schema])
+    lines: list[str] = []
+    for index, line in enumerate(serialized.splitlines()):
+        if index in preceding_comments:
+            indent = len(line) - len(line.lstrip())
+            lines.append(" " * indent + "# " + preceding_comments[index])
+        if index in inline_comments:
+            line += "  # " + inline_comments[index]
+        lines.append(line)
+    return "\n".join(lines) + "\n"
 
 
 def write_resolved_config(config: AppConfig, output_path: Path) -> None:

@@ -239,9 +239,9 @@ Always written:
   - optional `uncertainty_std` (ensemble size > 1)
 - `<stage>/tables/group_summary_<group>.tsv` (when `summary.group_col` is present in metadata)
   - written for `cv`; also for `external_test` and `inference` in `full_run` when those prediction pools are non-empty
-  - `<group>` is derived from `summary.group_col`; for example `family_id` writes `group_summary_family.tsv`
+  - `<group>` is derived from `summary.group_col`; for example `family` writes `group_summary_family.tsv`
   - columns:
-    - `group_col`, `group_id`, `group_name`
+    - `group_col`, `group_id` (the selected metadata column value)
     - `n_species`, `n_true_positive`, `n_true_negative`, `n_pred_positive`,
       `pred_positive_rate`
     - `prob_min`, `prob_q1`, `prob_median`, `prob_mean`, `prob_q3`, `prob_max`
@@ -424,7 +424,8 @@ Conditionally written:
     a formal confidence interval for the inference species
 - `inference/tables/candidate_evidence_candidates.tsv` (`full_run`, linear final model,
   and at least one inference species predicted as `1`)
-  - one row per plotted candidate with `species`, `prob`, `family_id`, and `family_name`
+  - one row per plotted candidate with `species`, `prob`, and `family`
+  - `family` contains the metadata family name, or `unassigned` when unavailable
 - `inference/tables/candidate_feature_evidence.tsv` (same condition)
   - one row per candidate-local top feature, ordered by mean absolute local contribution
   - the maximum features per candidate is `figures.top_features`
@@ -523,8 +524,9 @@ when individual folds are single-label.
 
 - `pool`:
   - `train` / `validation`: species used in outer CV (same species appears across folds).
-  - `external_test`: labeled species marked by `split.test_holdout_col`;
-    evaluated only in `full_run`.
+  - `external_test`: labeled species without a pair when splitting by the
+    configured contrast-pair column, or species in single-label groups when
+    `split.require_both_labels_per_group=true`; evaluated only in `full_run`.
   - `discovery_inference`: unlabeled species; inference target in `full_run`.
   - `train` / `validation` are the per-fold representation of the internal
     `training_validation` pool.
@@ -569,7 +571,7 @@ when individual folds are single-label.
 #### `group_bootstrap_metrics.tsv` and `group_bootstrap_replicates.tsv` (optional)
 
 - The resampling unit is the actual `split.group_col`, not necessarily family.
-  For example, selecting `contrast_pair_id` or `order_id` bootstraps contrast
+  For example, selecting `contrast_pair_id` or `order` bootstraps contrast
   pairs or orders, respectively.
 - With `G` unique OOF groups, each replicate draws `G` groups with replacement
   and includes all member species. Repeated groups contribute their species
@@ -628,9 +630,8 @@ when individual folds are single-label.
 - ggtree/Toytree-friendly tip annotation for CV species with non-empty
   `split.group_col`.
 - Columns: `label`, `species`, `true_label`, `prob`, `pred_label`, `uncertainty_std`,
-  `group_id`, `group_name`, `fold_id`.
-- `group_id` is the `split.group_col` value. `group_name` is populated when a matching
-  name column is available, such as `family_name` for `family_id`.
+  `group_id`, `fold_id`.
+- `group_id` contains the `split.group_col` value, also used as the display label.
 - `pred_label` uses the fixed threshold recorded in `thresholds.tsv` (currently `0.5`).
 
 #### `tree_contrast_pairs_annotation.tsv` (optional)
@@ -638,7 +639,7 @@ when individual folds are single-label.
 - Written when `data.tree_path` is set.
 - ggtree/Toytree-friendly metadata QC annotation for all species with non-empty
   `split.group_col`.
-- Columns: `label`, `species`, `true_label`, `group_id`, `group_name`.
+- Columns: `label`, `species`, `true_label`, `group_id`.
 - Use this file to inspect which tree tips participate in split groups before
   interpreting prediction probabilities.
 
@@ -647,7 +648,7 @@ when individual folds are single-label.
 - Written when `data.tree_path` is set.
 - Long-form ggtree/Toytree-friendly feature heatmap values for species with non-empty
   `split.group_col` and the top `figures.top_features` features by `importance_mean`.
-- Columns: `label`, `species`, `true_label`, `prob`, `group_id`, `group_name`, `feature_rank`,
+- Columns: `label`, `species`, `true_label`, `prob`, `group_id`, `feature_rank`,
   `feature`, `orthogroup_annotation_taxid`, `orthogroup_annotation`, `importance_mean`,
   `coef_mean`, `tpm`, `log2_tpm_plus1`, `z_score_log2_tpm`.
 - `prob` is the out-of-fold predicted probability of label `1` when available.
@@ -671,9 +672,9 @@ when individual folds are single-label.
 
 - Written when `data.tree_path` is set and the corresponding prediction table exists.
 - External-test columns: `label`, `species`, `true_label`, `prob`, `pred_label`,
-  `uncertainty_std`, `group_id`, `group_name`.
+  `uncertainty_std`, `group_id`.
 - Predict columns: `label`, `species`, `true_label`, `prob`,
-  `pred_label_fixed_threshold`, `uncertainty_std`, `group_id`, `group_name`.
+  `pred_label_fixed_threshold`, `uncertainty_std`, `group_id`.
 - The annotation TSV retains predicted species even when a species is absent from the tree;
   Toytree SVG output is pruned to species present in the tree.
 
@@ -1015,8 +1016,8 @@ when individual folds are single-label.
   - Each panel shows `log2(TPM + 1)` values in external-test TP, FN, TN, and FP groups.
 - `<stage>/figures/probability_by_<group>.svg` (when `summary.group_col` is present in metadata)
   - Group-wise predicted probability distributions for the configured summary group.
-  - Uses `summary.group_name_col` for y-axis labels when available.
-  - For example, `summary.group_col: family_id` writes `probability_by_family.svg`.
+  - Uses the values of `summary.group_col` directly for y-axis labels.
+  - For example, `summary.group_col: family` writes `probability_by_family.svg`.
 - `inference/figures/inference_probability_distribution.svg` (`full_run` with inference samples)
   - Histogram of `prediction_inference.tsv` probabilities in bins
     `[0.0, 0.1), ... , [0.9, 1.0]`.

@@ -68,7 +68,10 @@ For development or mirrors, `--base-url URL` (or
 `PHENORADAR_TESTDATA_BASE_URL`) selects an external source. Every copied or
 downloaded file is checked against the bundled `SHA256SUMS` manifest.
 
-You can also supply your own files; see [data-format.md](data-format.md) for required columns.
+For your own data, use the separate `phenoradar_prep` repository for preprocessing
+and supply the prepared files to PhenoRadar. See [data-format.md](data-format.md)
+for required columns; grouped summaries use a single `family` column containing
+family names by default.
 
 ## 3) Generate `config.yml`
 
@@ -78,7 +81,8 @@ If you want to use custom files/settings, generate a config first:
 phenoradar config
 ```
 
-This writes `config.yml` by default.
+This writes `config.yml` with every setting explicitly listed. Comments show
+available choices, including booleans and nullable values.
 
 Then edit `config.yml` as needed. For example, change `runtime.n_jobs` from `1` to `4`:
 

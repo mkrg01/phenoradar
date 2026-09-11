@@ -97,7 +97,7 @@ def _minimal_group_bootstrap_metrics() -> pl.DataFrame:
             "n_valid_resamples": [1980, 2000],
             "valid_resample_fraction": [0.99, 1.0],
             "n_groups": [20, 20],
-            "group_col": ["family_id", "family_id"],
+            "group_col": ["family", "family"],
             "bootstrap_method": ["percentile_group", "percentile_group"],
             "seed": [123, 123],
         }
@@ -565,7 +565,7 @@ def test_write_run_figures_writes_group_bootstrap_confidence_intervals(
     assert figure_path.exists()
     svg_text = figure_path.read_text(encoding="utf-8")
     assert "OOF group-bootstrap confidence intervals" in svg_text
-    assert "family_id" in svg_text
+    assert "family" in svg_text
     assert warnings == []
 
 
@@ -1426,8 +1426,7 @@ def test_group_probability_figure_writes_all_groups(tmp_path: Path) -> None:
         {
             "species": f"sp{i:02d}",
             "prob": 1.0 - (i * 0.01),
-            "group_id": f"f{i:02d}",
-            "group_name": f"Family {i:02d}",
+            "group_id": f"Family {i:02d}",
             "pred_label_fixed_threshold": 1 if i <= 20 else 0,
         }
         for i in range(1, 32)

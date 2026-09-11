@@ -175,12 +175,12 @@ def test_supervised_filtering_does_not_treat_missing_label_as_low_expression(met
 
 @pytest.mark.parametrize("prune", [True, False])
 def test_cv_refit_bundle_with_real_missingness(tmp_path: Path, prune: bool) -> None:
-    metadata = ["species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout"]
+    metadata = ["species\tC4\tcontrast_pair_id"]
     expression = ["species\torthogroup\ttpm"]
     for group in range(4):
         for label in (0, 1):
             species = f"s{group}_{label}"
-            metadata.append(f"{species}\t{label}\tg{group}\tno")
+            metadata.append(f"{species}\t{label}\tg{group}")
             down = 1 + group / 10 if label else 10 + group
             up = 10 + group if label else 1 + group / 10
             # Natural missing entries; one explicit zero and one absent coordinate.
@@ -188,7 +188,7 @@ def test_cv_refit_bundle_with_real_missingness(tmp_path: Path, prune: bool) -> N
             if not (group == 1 and label == 0):
                 expression.append(f"{species}\tUP\t{up}")
             expression.append(f"{species}\tCONSTANT\t7")
-    metadata.extend(["external\t1\t\tyes", "missing\t\t\tno"])
+    metadata.extend(["external\t1\t", "missing\t\t"])
     expression.extend(
         [
             "external\tDOWN\t1.1",
@@ -264,20 +264,20 @@ def test_cli_run_and_predict_preserve_abstention_and_missing_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    metadata = ["species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout"]
+    metadata = ["species\tC4\tcontrast_pair_id"]
     expression = ["species\torthogroup\ttpm"]
     species_names = []
     for group in range(3):
         for label in (0, 1):
             species = f"s{group}_{label}"
             species_names.append(species)
-            metadata.append(f"{species}\t{label}\tg{group}\tno")
+            metadata.append(f"{species}\t{label}\tg{group}")
             down = 0 if group == label == 0 else 1 + group if label else 10 + group
             expression.append(f"{species}\tDOWN\t{down}")
             expression.append(f"{species}\tUP\t{10 + group if label else 1 + group}")
-    for species, label, holdout in [("external", "1", "yes"), ("missing", "", "no")]:
+    for species, label in [("external", "1"), ("missing", "")]:
         species_names.append(species)
-        metadata.append(f"{species}\t{label}\ttarget\t{holdout}")
+        metadata.append(f"{species}\t{label}\t")
         expression.append(f"{species}\tDOWN\t0")  # UP is completely absent.
     metadata_path = tmp_path / "metadata.tsv"
     tpm_path = tmp_path / "tpm.tsv"
@@ -293,7 +293,7 @@ def test_cli_run_and_predict_preserve_abstention_and_missing_evidence(
         },
         runtime={"execution_stage": "full_run"},
         figures={"top_features": 2},
-        summary={"group_col": "contrast_pair_id", "group_name_col": None},
+        summary={"group_col": "contrast_pair_id"},
     )
     config_path = tmp_path / "config.yml"
     write_resolved_config(config, config_path)
@@ -341,7 +341,7 @@ def test_cli_run_and_predict_preserve_abstention_and_missing_evidence(
         assert overall["n_accepted"].item() == 0
         assert overall["error_rate"].item() is None
         grouped = pl.read_csv(
-            tables / "group_summary_contrast_pair.tsv", separator="\t", null_values="NA"
+            tables / "group_summary_contrast_pair_id.tsv", separator="\t", null_values="NA"
         )
         assert grouped["n_abstained"].sum() == 1
         assert grouped["n_pred_positive"].sum() == 0

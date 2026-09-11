@@ -57,7 +57,7 @@ def _hold_out_single_label_groups(metadata: pl.DataFrame) -> pl.DataFrame:
     """Reserve single-label CV groups without changing explicit exclusions or unknowns."""
     candidate = (
         pl.col("__label").is_not_null()
-        & ~pl.col("__test_holdout")
+        & ~pl.col("__external_test")
         & ~pl.col("__exclude")
     )
     single_label_groups = (
@@ -72,9 +72,9 @@ def _hold_out_single_label_groups(metadata: pl.DataFrame) -> pl.DataFrame:
         return metadata
     return metadata.with_columns(
         (
-            pl.col("__test_holdout")
+            pl.col("__external_test")
             | (candidate & pl.col("__group").is_in(single_label_groups).fill_null(False))
-        ).alias("__test_holdout")
+        ).alias("__external_test")
     )
 
 
@@ -84,14 +84,11 @@ def _normalize_metadata(config: AppConfig) -> pl.DataFrame:
     trait_col = config.data.trait_col
     split_group_col = config.split.group_col
     contrast_pair_col = config.data.contrast_pair_col
-    test_holdout_col = config.split.test_holdout_col
     exclude_col = config.split.exclude_col
 
     required = [species_col, trait_col, split_group_col]
     if contrast_pair_col is not None:
         required.append(contrast_pair_col)
-    if test_holdout_col is not None:
-        required.append(test_holdout_col)
     if exclude_col is not None:
         required.append(exclude_col)
     _require_columns(metadata, required, "metadata")
@@ -105,10 +102,6 @@ def _normalize_metadata(config: AppConfig) -> pl.DataFrame:
         columns.append(pl.lit(None, dtype=pl.String).alias("__contrast_group_raw"))
     else:
         columns.append(_normalized_string_expr(contrast_pair_col, "__contrast_group_raw"))
-    if test_holdout_col is None:
-        columns.append(pl.lit("no", dtype=pl.String).alias("__test_holdout_raw"))
-    else:
-        columns.append(_normalized_string_expr(test_holdout_col, "__test_holdout_raw"))
     if exclude_col is None:
         columns.append(pl.lit("no", dtype=pl.String).alias("__exclude_raw"))
     else:
@@ -154,29 +147,8 @@ def _normalize_metadata(config: AppConfig) -> pl.DataFrame:
         )
 
     normalized = metadata.with_columns(
-        pl.col("__test_holdout_raw").str.to_lowercase().alias("__test_holdout_norm"),
         pl.col("__exclude_raw").str.to_lowercase().alias("__exclude_norm"),
     )
-    invalid_holdout_values = (
-        normalized.filter(
-            pl.col("__test_holdout_norm").is_not_null()
-            & ~pl.col("__test_holdout_norm").is_in(
-                sorted(_TRUE_FLAG_VALUES | _FALSE_FLAG_VALUES)
-            )
-        )
-        .select("__test_holdout_raw")
-        .unique()
-        .sort("__test_holdout_raw")
-        .to_series()
-        .to_list()
-    )
-    if invalid_holdout_values:
-        invalid = ", ".join(str(v) for v in invalid_holdout_values)
-        holdout_name = "split.test_holdout_col" if test_holdout_col is None else test_holdout_col
-        raise SplitError(
-            f"Holdout column {holdout_name} must contain yes/no, true/false, 1/0, "
-            f"or null/empty values; offending values: {invalid}"
-        )
     invalid_exclude_values = (
         normalized.filter(
             pl.col("__exclude_norm").is_not_null()
@@ -211,48 +183,27 @@ def _normalize_metadata(config: AppConfig) -> pl.DataFrame:
         .then(None)
         .otherwise(pl.col("__contrast_group_raw"))
         .alias("__contrast_group"),
-        pl.col("__test_holdout_norm")
-        .is_in(sorted(_TRUE_FLAG_VALUES))
-        .fill_null(False)
-        .alias("__test_holdout"),
         pl.col("__exclude_norm")
         .is_in(sorted(_TRUE_FLAG_VALUES))
         .fill_null(False)
         .alias("__exclude"),
     )
 
-    unlabeled_holdouts = normalized.filter(
-        pl.col("__label").is_null() & pl.col("__test_holdout") & ~pl.col("__exclude")
-    ).height
-    if unlabeled_holdouts > 0:
-        raise SplitError(
-            f"Holdout column marks {unlabeled_holdouts} trait-missing species as test holdout"
-        )
-
-    mixed_holdout_groups = (
-        normalized.filter(
-            pl.col("__group").is_not_null()
+    # A missing contrast pair denotes an unpaired species. Other missing split
+    # groups remain input errors, even when a contrast column is available.
+    normalized = normalized.with_columns(
+        (
+            pl.lit(contrast_pair_col is not None and split_group_col == contrast_pair_col)
             & pl.col("__label").is_not_null()
+            & pl.col("__group").is_null()
             & ~pl.col("__exclude")
-        )
-        .group_by("__group")
-        .agg(pl.col("__test_holdout").n_unique().alias("n_holdout_values"))
-        .filter(pl.col("n_holdout_values") > 1)
-        .select("__group")
-        .to_series()
-        .to_list()
+        ).alias("__external_test")
     )
-    if mixed_holdout_groups:
-        groups_str = ", ".join(str(v) for v in sorted(mixed_holdout_groups)[:10])
-        raise SplitError(
-            "Each split group must have a consistent test-holdout assignment; "
-            f"offending groups: {groups_str}"
-        )
 
     missing_training_groups = (
         normalized.filter(
             pl.col("__label").is_not_null()
-            & ~pl.col("__test_holdout")
+            & ~pl.col("__external_test")
             & ~pl.col("__exclude")
             & pl.col("__group").is_null()
         )
@@ -263,7 +214,7 @@ def _normalize_metadata(config: AppConfig) -> pl.DataFrame:
     if missing_training_groups:
         species_str = ", ".join(str(v) for v in sorted(missing_training_groups)[:10])
         raise SplitError(
-            "Labeled non-holdout species must have a non-empty split group; "
+            "Labeled species must have a non-empty split group for non-contrast splits; "
             f"offending species: {species_str}"
         )
 
@@ -271,18 +222,13 @@ def _normalize_metadata(config: AppConfig) -> pl.DataFrame:
         normalized = _hold_out_single_label_groups(normalized)
 
     return normalized.with_columns(
-        pl.when(
-            pl.col("__label").is_not_null()
-            & ~pl.col("__test_holdout")
-            & ~pl.col("__exclude")
-            & pl.col("__group").is_not_null()
-        )
-        .then(pl.lit(_POOL_TRAINING_VALIDATION))
-        .when(pl.col("__label").is_not_null() & pl.col("__test_holdout") & ~pl.col("__exclude"))
-        .then(pl.lit(_POOL_EXTERNAL_TEST))
-        .when(pl.col("__exclude"))
+        pl.when(pl.col("__exclude"))
         .then(pl.lit(_POOL_EXCLUDED))
-        .otherwise(pl.lit(_POOL_DISCOVERY_INFERENCE))
+        .when(pl.col("__label").is_null())
+        .then(pl.lit(_POOL_DISCOVERY_INFERENCE))
+        .when(pl.col("__external_test"))
+        .then(pl.lit(_POOL_EXTERNAL_TEST))
+        .otherwise(pl.lit(_POOL_TRAINING_VALIDATION))
         .alias("__pool")
     )
 
@@ -339,7 +285,7 @@ def _preflight_training_pool(config: AppConfig, training_df: pl.DataFrame) -> No
         if config.split.require_both_labels_per_group:
             raise SplitError(
                 "No species available in training and validation pool after applying "
-                "split.require_both_labels_per_group=true; no non-held-out, non-excluded "
+                "split.require_both_labels_per_group=true; no non-excluded "
                 "split group contains both labels"
             )
         raise SplitError("No species available in training and validation pool")
@@ -350,7 +296,7 @@ def _preflight_training_pool(config: AppConfig, training_df: pl.DataFrame) -> No
     ):
         raise SplitError(
             "CV requires at least two split groups containing both labels after applying "
-            "split.require_both_labels_per_group=true and holdout/exclude flags"
+            "split.require_both_labels_per_group=true and exclusions"
         )
 
     if training_df.select(pl.col("__label").n_unique()).item() < 2:

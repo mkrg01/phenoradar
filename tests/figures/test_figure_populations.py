@@ -67,7 +67,7 @@ def test_accepted_curves_explain_undefined_populations(tmp_path: Path, all_absta
 
 def test_histogram_and_group_counts_exclude_abstained_species(tmp_path: Path) -> None:
     frame = predictions().with_columns(
-        pl.lit("family").alias("group_id"), pl.lit("Family").alias("group_name")
+        pl.lit("Family").alias("group_id")
     )
     figures._predict_probability_distribution(frame, tmp_path / "hist.svg")
     figures.write_group_probability_figure(

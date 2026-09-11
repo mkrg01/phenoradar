@@ -392,7 +392,7 @@ def build_contrast_pair_tree_annotation(
             pl.col("species").alias("label"),
             pl.col("true_label").cast(pl.Int8, strict=False).alias("true_label"),
         )
-        .select(["label", "species", "true_label", "group_id", "group_name"])
+        .select(["label", "species", "true_label", "group_id"])
         .sort(["group_id", "species"])
     )
 
@@ -429,7 +429,6 @@ def build_tree_feature_heatmap_annotation(
                 "species",
                 "true_label",
                 "group_id",
-                "group_name",
             ]
         )
         .unique("species")
@@ -541,7 +540,6 @@ def build_tree_feature_heatmap_annotation(
                 "true_label",
                 "prob",
                 "group_id",
-                "group_name",
                 "feature_rank",
                 "feature",
                 "orthogroup_annotation_taxid",
@@ -603,7 +601,6 @@ def build_cv_tree_prediction_annotation(
                 "pred_label",
                 "uncertainty_std",
                 "group_id",
-                "group_name",
                 "fold_id",
                 *[
                     name
@@ -654,7 +651,6 @@ def build_external_tree_prediction_annotation(
                 "pred_label",
                 "uncertainty_std",
                 "group_id",
-                "group_name",
                 *[
                     name
                     for name in ("decision_status", "information_coverage")
@@ -711,7 +707,6 @@ def build_predict_tree_prediction_annotation(
                 "pred_label_fixed_threshold",
                 "uncertainty_std",
                 "group_id",
-                "group_name",
                 *[
                     name
                     for name in ("decision_status", "information_coverage")
@@ -754,17 +749,6 @@ def _load_metadata(
 
 
 def _metadata_group_lookup(metadata: pl.DataFrame, *, group_col: str) -> pl.DataFrame:
-    group_name_col = _group_name_column(group_col, metadata.columns)
-    group_name_expr: pl.Expr
-    if group_name_col is None:
-        group_name_expr = pl.lit(None, dtype=pl.String).alias("group_name")
-    else:
-        group_name_expr = (
-            pl.col(group_name_col)
-            .cast(pl.String, strict=False)
-            .str.strip_chars()
-            .alias("group_name")
-        )
     return (
         metadata.select(
             [
@@ -773,24 +757,11 @@ def _metadata_group_lookup(metadata: pl.DataFrame, *, group_col: str) -> pl.Data
                 .cast(pl.String, strict=False)
                 .str.strip_chars()
                 .alias("group_id"),
-                group_name_expr,
             ]
         )
         .unique("species")
         .sort("species")
     )
-
-
-def _group_name_column(group_col: str, columns: Iterable[str]) -> str | None:
-    column_set = set(columns)
-    candidates: list[str] = []
-    if group_col.endswith("_id"):
-        candidates.append(f"{group_col[:-3]}_name")
-    candidates.append(f"{group_col}_name")
-    for candidate in candidates:
-        if candidate in column_set:
-            return candidate
-    return None
 
 
 def _cached_expression_for_heatmap(
@@ -986,7 +957,6 @@ def _empty_feature_heatmap_annotation() -> pl.DataFrame:
             "true_label": pl.Int8,
             "prob": pl.Float64,
             "group_id": pl.String,
-            "group_name": pl.String,
             "feature_rank": pl.UInt32,
             "feature": pl.String,
             "orthogroup_annotation_taxid": pl.String,
@@ -1241,7 +1211,7 @@ def _draw_toytree_heatmap(
         values = cell_text_by_track[track]
         for species in tip_labels:
             row = by_species.get(species)
-            value = _track_title_value(track, row)
+            value = _track_display_value(track, row)
             titles.append(f"{species} {_track_label(track)}={_format_value(value)}")
         axes.text(
             [x] * len(tip_labels),
@@ -1738,21 +1708,7 @@ def _track_display_value(track: str, row: dict[str, Any] | None) -> object:
         return None
     if track.startswith("pred_label") and row.get("decision_status") == "abstained":
         return "abstained"
-    if track == "group_id" and _has_text(row.get("group_name")):
-        return row.get("group_name")
     return row.get(track)
-
-
-def _track_title_value(track: str, row: dict[str, Any] | None) -> object:
-    if row is None:
-        return None
-    value = _track_display_value(track, row)
-    if track != "group_id":
-        return value
-    group_id = row.get("group_id")
-    if _has_text(value) and _has_text(group_id) and str(value) != str(group_id):
-        return f"{value} (id={group_id})"
-    return value
 
 
 def _has_text(value: object) -> bool:

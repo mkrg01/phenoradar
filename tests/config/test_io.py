@@ -3,13 +3,87 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
-from phenoradar.config import ConfigError, load_and_resolve_config
+from phenoradar.config import (
+    AppConfig,
+    ConfigError,
+    load_and_resolve_config,
+    serialize_resolved_config,
+)
 
 
 def _write(path: Path, text: str) -> Path:
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def test_annotated_config_round_trips_all_fields_and_quoted_values() -> None:
+    config = AppConfig.model_validate(
+        {
+            "data": {
+                "metadata_path": "data/種: # metadata.tsv",
+                "tree_path": "data/first line\nsecond line.nwk",
+                "species_col": "null",
+            }
+        }
+    )
+
+    rendered = serialize_resolved_config(config)
+
+    assert yaml.safe_load(rendered) == config.model_dump(mode="python")
+    assert serialize_resolved_config(config) == rendered
+    assert "require_both_labels_per_group: false  # choices: true, false" in rendered
+    assert "logistic_solver: saga  # choices: saga, liblinear" in rendered
+    assert "logistic_warm_start_path: false  # choices: true, false" in rendered
+    assert "higher_in_trait: null  # choices: 0, 1, null" in rendered
+    assert (
+        "inner_cv_strategy: null  # choices: logo, group_kfold, stratified_group_kfold, null"
+    ) in rendered
+    assert "tree_path:" in rendered and "# type: string or null" in rendered
+    assert "group_subsample_repeat_index: 1" in rendered
+    assert "report: {}" in rendered
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"type": "range", "start": 0.1, "end": 1.0, "step": 0.1},
+        {"type": "int_range", "start": 1, "end": 3, "step": 1},
+        {"type": "log_range", "base": 10, "start_exp": -2, "end_exp": 2, "step_exp": 1},
+        {"type": "continuous_range", "start": 0.1, "end": 1.0},
+        {"type": "continuous_log_range", "base": 10, "start_exp": -2, "end_exp": 2},
+    ],
+)
+def test_annotated_search_space_preserves_values_and_lists_range_types(
+    spec: dict[str, object],
+) -> None:
+    config = AppConfig.model_validate(
+        {
+            "model_selection": {
+                "search_strategy": "tpe",
+                "trial_count": 3,
+                "search_space": {"C": spec, "l1_ratio": [0.0, 1.0]},
+            }
+        }
+    )
+
+    rendered = serialize_resolved_config(config)
+
+    assert yaml.safe_load(rendered) == config.model_dump(mode="python")
+    assert (
+        f"type: {spec['type']}  # choices: range, int_range, log_range, "
+        "continuous_range, continuous_log_range"
+    ) in rendered
+    if not str(spec["type"]).startswith("continuous"):
+        assert "inclusive_end: false  # choices: true, false" in rendered
+
+
+def test_checked_in_config_explicitly_contains_all_resolved_fields() -> None:
+    path = Path(__file__).resolve().parents[2] / "config.yml"
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    assert payload == load_and_resolve_config([path]).model_dump(mode="python")
 
 
 def test_deep_merge_and_seed_default(tmp_path: Path) -> None:
@@ -83,8 +157,7 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.evaluation.group_bootstrap.enabled is False
     assert resolved.evaluation.group_bootstrap.n_resamples == 2000
     assert resolved.evaluation.group_bootstrap.confidence_level == 0.95
-    assert resolved.summary.group_col == "family_id"
-    assert resolved.summary.group_name_col == "family_name"
+    assert resolved.summary.group_col == "family"
     assert resolved.figures.top_features == 30
 
 
@@ -118,26 +191,23 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
     assert resolved.evaluation.group_bootstrap.enabled is False
     assert resolved.evaluation.group_bootstrap.n_resamples == 2000
     assert resolved.evaluation.group_bootstrap.confidence_level == 0.95
-    assert resolved.summary.group_col == "family_id"
-    assert resolved.summary.group_name_col == "family_name"
+    assert resolved.summary.group_col == "family"
     assert resolved.figures.top_features == 30
 
 
-def test_summary_group_columns_are_configurable(tmp_path: Path) -> None:
+def test_summary_group_column_is_configurable(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path / "config.yml",
         """
 summary:
-  group_col: order_id
-  group_name_col: order_name
+  group_col: order
 """.strip()
         + "\n",
     )
 
     resolved = load_and_resolve_config([cfg])
 
-    assert resolved.summary.group_col == "order_id"
-    assert resolved.summary.group_name_col == "order_name"
+    assert resolved.summary.group_col == "order"
 
 
 def test_group_bootstrap_is_configurable(tmp_path: Path) -> None:
@@ -519,13 +589,13 @@ model:
         load_and_resolve_config([cfg])
 
 
-def test_preprocess_sparse_feature_accepts_binary_within_trait(tmp_path: Path) -> None:
+def test_preprocess_sparse_feature_accepts_trait_scope(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path / "valid.yml",
         """
 preprocess:
   sparse_feature_filter:
-    within_trait: 1
+    scope: trait_1
 """.strip()
         + "\n",
     )
@@ -533,21 +603,6 @@ preprocess:
     resolved = load_and_resolve_config([cfg])
 
     assert resolved.preprocess.sparse_feature_filter.scope == "trait_1"
-
-
-def test_preprocess_sparse_feature_rejects_nonbinary_within_trait(tmp_path: Path) -> None:
-    cfg = _write(
-        tmp_path / "invalid.yml",
-        """
-preprocess:
-  sparse_feature_filter:
-    within_trait: 2
-""".strip()
-        + "\n",
-    )
-
-    with pytest.raises(ConfigError, match="within_trait"):
-        load_and_resolve_config([cfg])
 
 
 def test_preprocess_low_variance_requires_min_variance_when_enabled(tmp_path: Path) -> None:
@@ -694,7 +749,7 @@ def test_generic_group_options_allow_null_contrast_pair_col(tmp_path: Path) -> N
 data:
   contrast_pair_col: null
 split:
-  group_col: family_id
+  group_col: family
 sampling:
   weighting: group_label_inverse
 """.strip()
@@ -704,7 +759,7 @@ sampling:
     resolved = load_and_resolve_config([cfg])
 
     assert resolved.data.contrast_pair_col is None
-    assert resolved.split.group_col == "family_id"
+    assert resolved.split.group_col == "family"
     assert resolved.sampling.weighting == "group_label_inverse"
 
 
@@ -735,7 +790,7 @@ def test_pair_aware_group_balanced_allows_split_group_to_differ_from_contrast_pa
 data:
   contrast_pair_col: contrast_pair_id
 split:
-  group_col: family_id
+  group_col: family
 preprocess:
   ranked_feature_filter:
     method: pair_aware
@@ -747,7 +802,7 @@ preprocess:
     resolved = load_and_resolve_config([cfg])
 
     assert resolved.data.contrast_pair_col == "contrast_pair_id"
-    assert resolved.split.group_col == "family_id"
+    assert resolved.split.group_col == "family"
     assert resolved.preprocess.ranked_feature_filter.min_contrast_pairs == 1
 
 

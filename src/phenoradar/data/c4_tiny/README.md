@@ -9,6 +9,9 @@ Compact test dataset for PhenoRadar.
 - `ncbi_tree.nwk`: NCBI taxonomy constrained tree used to assign contrast groups
 - `tpm.tsv`: 1,515 long-format expression rows
 
+The metadata uses one column per taxonomic rank: `order` and `family` contain
+the names used for grouping and display labels.
+
 ## Origin
 
 This dataset is a compact subset derived from `c4_dataset/` for smoke testing and documentation examples.
