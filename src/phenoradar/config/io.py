@@ -109,10 +109,13 @@ def _schema_value_comment(variants: list[dict[str, Any]]) -> str | None:
     return "choices: " + ", ".join(dict.fromkeys(choices)) if choices else None
 
 
-def serialize_resolved_config(config: AppConfig) -> str:
-    """Serialize every config field, with schema-derived choices in YAML comments."""
+def serialize_resolved_config(config: AppConfig, *, include_internal: bool = True) -> str:
+    """Serialize config with choices in comments, optionally omitting internal state."""
+    payload = config.model_dump(mode="python")
+    if not include_internal:
+        payload["sampling"].pop("group_subsample_repeat_index", None)
     serialized = yaml.safe_dump(
-        config.model_dump(mode="python"),
+        payload,
         sort_keys=False,
         default_flow_style=False,
         allow_unicode=False,
@@ -159,7 +162,11 @@ def serialize_resolved_config(config: AppConfig) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_resolved_config(config: AppConfig, output_path: Path) -> None:
+def write_resolved_config(
+    config: AppConfig, output_path: Path, *, include_internal: bool = True
+) -> None:
     """Write resolved YAML config to disk."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(serialize_resolved_config(config), encoding="utf-8")
+    output_path.write_text(
+        serialize_resolved_config(config, include_internal=include_internal), encoding="utf-8"
+    )

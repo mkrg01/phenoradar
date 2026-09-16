@@ -19,9 +19,11 @@ Resolution and override rules:
 
 - CLI accepts one `-c` file (`run`/`predict` required, `config` optional).
 - Unspecified keys are filled by built-in defaults.
-- Generated YAML explicitly includes every setting, including inactive fields,
+- Generated YAML explicitly includes every user-facing setting, including inactive fields,
   `null` values, and empty sections. Comments list enum and boolean choices;
   nullable fields also show `null` or their accepted types.
+- Internal group-subsampling repeat indices are generated automatically and
+  recorded in each run's `resolved_config.yml` for reproducibility.
 - Unknown keys are rejected.
 - `runtime.execution_stage` can be overridden from CLI
   (`phenoradar run -c config.yml --execution-stage ...`).
@@ -123,7 +125,6 @@ sampling:
   sampled_set_count: 10
   training_group_count: null  # type: integer or null
   group_subsample_repeats: 1
-  group_subsample_repeat_index: 1
   weighting: none  # choices: none, group_label_inverse
 preprocess:
   max_pivot_cells: 50000000

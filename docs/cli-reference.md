@@ -156,8 +156,9 @@ Conditionally written:
 ## `config`
 
 Resolve and validate config without running the pipeline. The output includes
-every setting with defaults filled in, plus comments listing available choices
-and nullable value types.
+every user-facing setting with defaults filled in, plus comments listing
+available choices and nullable value types. Internal repeat indices are omitted;
+set `sampling.group_subsample_repeats` to control repeated group subsampling.
 
 ```bash
 phenoradar config [-c config.yml] [--out config.yml]

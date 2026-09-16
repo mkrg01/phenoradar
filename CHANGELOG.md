@@ -53,6 +53,8 @@
 
 ### Bug Fixes
 
+* omit the internal group-subsampling repeat index from config templates so
+  increasing `group_subsample_repeats` works without removing internal fields
 * preserve the complete pre-transform feature schema in model bundles so sample-rank predictions
   are invariant to unrelated input features
 

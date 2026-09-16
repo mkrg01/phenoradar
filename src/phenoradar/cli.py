@@ -2199,7 +2199,7 @@ def config_command(
         start_time=start_time,
         log_verbosity=log_verbosity,
     )
-    write_resolved_config(resolved, out)
+    write_resolved_config(resolved, out, include_internal=False)
     typer.echo(f"Wrote resolved config: {out}")
     _progress_log(
         "config",

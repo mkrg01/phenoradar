@@ -428,6 +428,7 @@ sampling:
     assert payload["runtime"]["seed"] == 123
     assert "search_seed" not in payload["model_selection"]
     assert payload["sampling"]["weighting"] == "group_label_inverse"
+    assert "group_subsample_repeat_index" not in payload["sampling"]
 
 
 def test_config_without_config_writes_default_yaml(
@@ -458,7 +459,9 @@ def test_config_without_config_writes_default_yaml(
         is None
     )
     assert payload["figures"]["top_features"] == 30
-    assert payload == AppConfig().model_dump(mode="python")
+    assert payload == AppConfig().model_dump(
+        mode="python", exclude={"sampling": {"group_subsample_repeat_index"}}
+    )
 
 
 def test_run_passes_top_features_to_run_and_tree_figures(
@@ -1791,19 +1794,17 @@ def test_run_fails_when_config_resolution_raises(
     assert "config failure" in result.output
 
 
-def test_run_expands_group_subsample_repeat_count_into_study(
+def test_generated_config_can_increase_group_subsample_repeats_and_run_study(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    config = _write(
-        tmp_path / "config.yml",
-        """
-sampling:
-  training_group_count: 5
-  group_subsample_repeats: 3
-""".lstrip(),
-    )
+    config = tmp_path / "config.yml"
+    result = runner.invoke(app, ["config", "--out", str(config)])
+    assert result.exit_code == 0, result.output
+    payload = yaml.safe_load(config.read_text(encoding="utf-8"))
+    payload["sampling"].update(training_group_count=5, group_subsample_repeats=3)
+    config.write_text(yaml.safe_dump(payload), encoding="utf-8")
     captured_indices: list[int] = []
 
     def _study(**kwargs: object) -> Path:

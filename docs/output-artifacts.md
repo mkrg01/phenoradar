@@ -168,6 +168,8 @@ Always written:
 
 - `resolved_config.yml`
   - composed + validated config used in execution
+  - includes the generated `sampling.group_subsample_repeat_index` so each
+    group-subsampling condition can be reproduced
 - `split/tables/split_manifest.tsv`
   - columns: `species`, `pool`, `fold_id`, `group_id`, `contrast_group_id`, `label`
   - pools: `train`, `validation`, `external_test`, `discovery_inference`

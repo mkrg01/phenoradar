@@ -25,13 +25,15 @@ def test_annotated_config_round_trips_all_fields_and_quoted_values() -> None:
                 "metadata_path": "data/種: # metadata.tsv",
                 "tree_path": "data/first line\nsecond line.nwk",
                 "species_col": "null",
-            }
+            },
+            "sampling": {"training_group_count": 5, "group_subsample_repeat_index": 3},
         }
     )
 
     rendered = serialize_resolved_config(config)
 
     assert yaml.safe_load(rendered) == config.model_dump(mode="python")
+    assert AppConfig.model_validate(yaml.safe_load(rendered)) == config
     assert serialize_resolved_config(config) == rendered
     assert "require_both_labels_per_group: false  # choices: true, false" in rendered
     assert "logistic_solver" not in rendered
@@ -41,7 +43,7 @@ def test_annotated_config_round_trips_all_fields_and_quoted_values() -> None:
         "inner_cv_strategy: null  # choices: logo, group_kfold, stratified_group_kfold, null"
     ) in rendered
     assert "tree_path:" in rendered and "# type: string or null" in rendered
-    assert "group_subsample_repeat_index: 1" in rendered
+    assert "group_subsample_repeat_index: 3" in rendered
     assert "report: {}" in rendered
 
 
@@ -79,11 +81,13 @@ def test_annotated_search_space_preserves_values_and_lists_range_types(
         assert "inclusive_end: false  # choices: true, false" in rendered
 
 
-def test_checked_in_config_explicitly_contains_all_resolved_fields() -> None:
+def test_checked_in_config_explicitly_contains_all_user_fields() -> None:
     path = Path(__file__).resolve().parents[2] / "config.yml"
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
 
-    assert payload == load_and_resolve_config([path]).model_dump(mode="python")
+    assert payload == load_and_resolve_config([path]).model_dump(
+        mode="python", exclude={"sampling": {"group_subsample_repeat_index"}}
+    )
 
 
 def test_deep_merge_and_seed_default(tmp_path: Path) -> None:
