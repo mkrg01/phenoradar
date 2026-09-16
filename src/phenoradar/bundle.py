@@ -3,21 +3,22 @@
 from __future__ import annotations
 
 import json
-import platform
 import shutil
-import subprocess
 from dataclasses import dataclass
 from hashlib import sha256
-from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Any
 
 import joblib
 import numpy as np
 import polars as pl
+from glum import GeneralizedLinearRegressor
+from pydantic import ValidationError
 from sklearn.preprocessing import StandardScaler
 
+from phenoradar.abstention import annotate_abstention
 from phenoradar.config import AppConfig
+from phenoradar.config.schema import AbstentionConfig, MissingExpressionConfig
 from phenoradar.cv import (
     CVError,
     ExpressionMatrixBuilder,
@@ -26,11 +27,34 @@ from phenoradar.cv import (
     apply_expression_transform,
     apply_feature_scaling,
 )
+from phenoradar.metrics import (
+    FIXED_PROBABILITY_THRESHOLD_DERIVED_FROM_CV,
+    FIXED_PROBABILITY_THRESHOLD_NAME,
+    FIXED_PROBABILITY_THRESHOLD_POLICY,
+)
+from phenoradar.missing_expression import NeutralStandardScaler
+from phenoradar.provenance import phenoradar_build_snapshot, runtime_environment_snapshot
 
-BUNDLE_FORMAT_VERSION = "1"
+BUNDLE_FORMAT_VERSION = "3"
+_LEGACY_BUNDLE_FORMAT_VERSION = "1"
+_SUPPORTED_BUNDLE_FORMAT_VERSIONS = {
+    _LEGACY_BUNDLE_FORMAT_VERSION,
+    "2",
+    BUNDLE_FORMAT_VERSION,
+}
 _BUNDLE_DIRNAME = "model_bundle"
 _SELF_SHA256_PLACEHOLDER = "0" * 64
+_CONTEXTUAL_EXPRESSION_TRANSFORMS = {"sample_rank", "sample_percentile_rank"}
 _REQUIRED_FILES = [
+    "bundle_manifest.json",
+    "feature_schema.tsv",
+    "transform_feature_schema.tsv",
+    "preprocess_state.joblib",
+    "model_state.joblib",
+    "thresholds.tsv",
+    "resolved_config.yml",
+]
+_LEGACY_REQUIRED_FILES = [
     "bundle_manifest.json",
     "feature_schema.tsv",
     "preprocess_state.joblib",
@@ -60,15 +84,21 @@ class LoadedBundle:
     manifest: dict[str, Any]
     manifest_sha256: str
     feature_names: list[str]
+    transform_feature_names: list[str]
     scaler: FeatureScaler
     model_preprocess: list[ModelPreprocessEntry]
     models: list[Any]
     probability_aggregation: str
     threshold_fixed: float
-    threshold_cv_derived: float
     source_run_id: str
     expression_transform: str
     feature_scaling: str
+    absent_feature_fill: int | str = 0
+    missing_expression_method: str = "none"
+    zero_as_missing: bool = False
+    abstention_enabled: bool = False
+    abstention_threshold: float = 0.8
+    abstention_top_features: int = 30
 
 
 @dataclass(frozen=True)
@@ -137,31 +167,6 @@ def _manifest_canonical_self_sha(manifest_base: dict[str, Any], manifest_size: i
     return sha256(rendered.encode("utf-8")).hexdigest()
 
 
-def _run_git(args: list[str], cwd: Path) -> str | None:
-    try:
-        result = subprocess.run(
-            args,
-            cwd=cwd,
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-    except FileNotFoundError:
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
-
-
-def _git_metadata(cwd: Path) -> tuple[str, bool, str]:
-    commit = _run_git(["git", "rev-parse", "HEAD"], cwd=cwd) or "unknown"
-    status = _run_git(["git", "status", "--porcelain"], cwd=cwd)
-    dirty = bool(status) if status is not None else False
-    patch = _run_git(["git", "diff", "HEAD"], cwd=cwd)
-    patch_sha = sha256((patch or "").encode("utf-8")).hexdigest()
-    return commit, dirty, patch_sha
-
-
 def _calibration_for_model(model_name: str) -> str:
     if model_name == "linear_svm":
         return "sigmoid"
@@ -206,6 +211,18 @@ def _preprocess_methods(preprocess_state: dict[str, Any]) -> tuple[str, str]:
     return expression_transform, feature_scaling
 
 
+def _absent_feature_fill(preprocess_state: dict[str, Any]) -> int | str:
+    value = preprocess_state.get("absent_feature_fill", 0)
+    if isinstance(value, int) and not isinstance(value, bool) and value == 0:
+        return 0
+    if value == "nan":
+        return "nan"
+    raise BundleError(
+        "preprocess_state.joblib has unsupported absent_feature_fill: "
+        f"{value}"
+    )
+
+
 def _validate_scaler_state(
     scaler: Any,
     *,
@@ -243,6 +260,7 @@ def export_model_bundle(
     bundle_dir.mkdir(parents=True, exist_ok=False)
 
     feature_schema_path = bundle_dir / "feature_schema.tsv"
+    transform_feature_schema_path = bundle_dir / "transform_feature_schema.tsv"
     preprocess_state_path = bundle_dir / "preprocess_state.joblib"
     model_state_path = bundle_dir / "model_state.joblib"
     thresholds_path = bundle_dir / "thresholds.tsv"
@@ -280,6 +298,21 @@ def export_model_bundle(
     if not feature_schema:
         raise BundleError("Final refit artifacts produced zero bundle features")
 
+    transform_feature_schema = [
+        str(feature) for feature in final_refit_artifacts.transform_feature_names
+    ]
+    if not transform_feature_schema:
+        raise BundleError("Final refit artifacts produced zero transform input features")
+    if any(not feature.strip() for feature in transform_feature_schema):
+        raise BundleError("Final refit artifacts contain an empty transform input feature")
+    if len(set(transform_feature_schema)) != len(transform_feature_schema):
+        raise BundleError("Final refit artifacts contain duplicate transform input features")
+    transform_feature_set = set(transform_feature_schema)
+    if any(feature not in transform_feature_set for feature in feature_schema):
+        raise BundleError(
+            "Final refit model features are not contained in the transform input schema"
+        )
+
     feature_schema_df = pl.DataFrame(
         {
             "feature": feature_schema,
@@ -287,14 +320,25 @@ def export_model_bundle(
         }
     )
     feature_schema_df.write_csv(feature_schema_path, separator="\t")
+    pl.DataFrame(
+        {
+            "feature": transform_feature_schema,
+            "feature_index": list(range(len(transform_feature_schema))),
+        }
+    ).write_csv(transform_feature_schema_path, separator="\t")
 
     joblib.dump(
         {
             "feature_names": feature_schema,
+            "transform_feature_names": transform_feature_schema,
             "scaler": final_refit_artifacts.scaler,
             "transform": _preprocess_transform_label(config),
             "expression_transform": config.preprocess.expression_transform.method,
             "feature_scaling": config.preprocess.feature_scaling.method,
+            "absent_feature_fill": config.preprocess.absent_feature_fill,
+            "missing_expression": config.preprocess.missing_expression.model_dump(),
+            "abstention": config.abstention.model_dump(),
+            "abstention_top_features": config.figures.top_features,
             "model_preprocess": [
                 {
                     "feature_names": entry.feature_names,
@@ -321,35 +365,37 @@ def export_model_bundle(
     )
     shutil.copy2(resolved_config_path, resolved_copy_path)
 
-    commit, dirty, patch_sha = _git_metadata(run_dir)
+    build = phenoradar_build_snapshot()
+    environment = runtime_environment_snapshot()
     files_info: dict[str, dict[str, int | str]] = {}
     for filename in _REQUIRED_FILES:
         if filename == "bundle_manifest.json":
             continue
         files_info[filename] = _file_info(bundle_dir / filename)
 
-    threshold_fixed = _threshold_value(thresholds, "fixed_probability_threshold")
-    threshold_cv = _threshold_value(thresholds, "cv_derived_threshold")
+    threshold_fixed = _threshold_value(thresholds, FIXED_PROBABILITY_THRESHOLD_NAME)
     manifest_base = {
         "bundle_format_version": BUNDLE_FORMAT_VERSION,
         "source_run_dir": str(run_dir),
         "source_run_id": run_dir.name,
-        "source_git_commit": commit,
-        "source_git_dirty": dirty,
-        "source_git_worktree_patch_sha256": patch_sha,
+        "source_provenance_schema_version": build["provenance_schema_version"],
+        "source_phenoradar_version": build["phenoradar_version"],
+        "source_phenoradar_install_type": build["phenoradar_install_type"],
+        "source_git_source": build["git_source"],
+        "source_git_commit": build["git_commit"],
+        "source_git_dirty": build["git_dirty"],
+        "source_git_worktree_patch_sha256": build["git_worktree_patch_sha256"],
         "model_name": config.model.name,
         "calibration": _calibration_for_model(config.model.name),
         "ensemble_size": final_refit_artifacts.ensemble_size,
         "ensemble_probability_aggregation": config.ensemble.probability_aggregation,
+        "absent_feature_fill": config.preprocess.absent_feature_fill,
         "threshold_fixed": threshold_fixed,
-        "threshold_cv_derived": threshold_cv,
-        "python_version": platform.python_version(),
-        "library_versions": {
-            "polars": package_version("polars"),
-            "scikit-learn": package_version("scikit-learn"),
-            "pydantic": package_version("pydantic"),
-            "typer": package_version("typer"),
-        },
+        "threshold_name": FIXED_PROBABILITY_THRESHOLD_NAME,
+        "threshold_policy": FIXED_PROBABILITY_THRESHOLD_POLICY,
+        "threshold_derived_from_cv": FIXED_PROBABILITY_THRESHOLD_DERIVED_FROM_CV,
+        "python_version": environment["python_version"],
+        "library_versions": environment["library_versions"],
         "files": files_info,
     }
     manifest_size = _resolve_manifest_size(manifest_base)
@@ -371,12 +417,18 @@ def export_model_bundle(
     return BundleExportResult(bundle_dir=bundle_dir, manifest_sha256=manifest_sha)
 
 
-def _verify_file_inventory(bundle_dir: Path, manifest: dict[str, Any]) -> None:
+def _verify_file_inventory(
+    bundle_dir: Path,
+    manifest: dict[str, Any],
+    *,
+    required_files: list[str] | None = None,
+) -> None:
     files = manifest.get("files")
     if not isinstance(files, dict):
         raise BundleError("bundle_manifest.json is missing 'files' inventory")
 
-    for filename in _REQUIRED_FILES:
+    resolved_required_files = _REQUIRED_FILES if required_files is None else required_files
+    for filename in resolved_required_files:
         path = bundle_dir / filename
         if not path.exists():
             raise BundleError(f"Bundle is missing required file: {filename}")
@@ -423,17 +475,26 @@ def _verify_file_inventory(bundle_dir: Path, manifest: dict[str, Any]) -> None:
 
 
 def _load_feature_schema(path: Path) -> list[str]:
+    schema_name = path.name
     schema = pl.read_csv(path, separator="\t")
     if not {"feature", "feature_index"}.issubset(schema.columns):
-        raise BundleError("feature_schema.tsv must contain 'feature' and 'feature_index' columns")
+        raise BundleError(
+            f"{schema_name} must contain 'feature' and 'feature_index' columns"
+        )
     sorted_schema = schema.sort("feature_index")
     expected_indices = list(range(sorted_schema.height))
     actual_indices = [int(v) for v in sorted_schema.select("feature_index").to_series().to_list()]
     if actual_indices != expected_indices:
-        raise BundleError("feature_schema.tsv has non-contiguous or unordered feature_index values")
+        raise BundleError(
+            f"{schema_name} has non-contiguous or unordered feature_index values"
+        )
     features = [str(v) for v in sorted_schema.select("feature").to_series().to_list()]
     if not features:
-        raise BundleError("feature_schema.tsv does not contain any features")
+        raise BundleError(f"{schema_name} does not contain any features")
+    if any(not feature.strip() for feature in features):
+        raise BundleError(f"{schema_name} contains an empty feature identifier")
+    if len(set(features)) != len(features):
+        raise BundleError(f"{schema_name} contains duplicate feature identifiers")
     return features
 
 
@@ -449,23 +510,57 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
         raise BundleError(f"Invalid bundle_manifest.json: {manifest_path}") from exc
 
     version_value = manifest.get("bundle_format_version")
-    if version_value != BUNDLE_FORMAT_VERSION:
+    if (
+        not isinstance(version_value, str)
+        or version_value not in _SUPPORTED_BUNDLE_FORMAT_VERSIONS
+    ):
         raise BundleError(
             f"Unsupported bundle_format_version: {version_value} "
-            f"(expected {BUNDLE_FORMAT_VERSION})"
+            f"(supported: {', '.join(sorted(_SUPPORTED_BUNDLE_FORMAT_VERSIONS))})"
         )
 
-    _verify_file_inventory(bundle_dir, manifest)
+    required_files = (
+        _LEGACY_REQUIRED_FILES
+        if version_value == _LEGACY_BUNDLE_FORMAT_VERSION
+        else _REQUIRED_FILES
+    )
+    _verify_file_inventory(bundle_dir, manifest, required_files=required_files)
 
     feature_names = _load_feature_schema(bundle_dir / "feature_schema.tsv")
     preprocess_state = joblib.load(bundle_dir / "preprocess_state.joblib")
     model_state = joblib.load(bundle_dir / "model_state.joblib")
     if not isinstance(preprocess_state, dict):
         raise BundleError("preprocess_state.joblib must contain a mapping")
+    if not isinstance(model_state, dict):
+        raise BundleError("model_state.joblib must contain a mapping")
 
     expression_transform, feature_scaling = _preprocess_methods(preprocess_state)
+    absent_feature_fill = _absent_feature_fill(preprocess_state)
+    try:
+        missing_policy = MissingExpressionConfig.model_validate(
+            preprocess_state.get("missing_expression", {})
+        )
+        abstention = AbstentionConfig.model_validate(preprocess_state.get("abstention", {}))
+    except ValidationError as exc:
+        raise BundleError(f"Invalid bundled missing-expression/abstention policy: {exc}") from exc
+    top_features = preprocess_state.get("abstention_top_features", 30)
+    if isinstance(top_features, bool) or not isinstance(top_features, int) or top_features < 1:
+        raise BundleError("Invalid bundled abstention_top_features")
+    if version_value == _LEGACY_BUNDLE_FORMAT_VERSION:
+        if expression_transform in _CONTEXTUAL_EXPRESSION_TRANSFORMS:
+            raise BundleError(
+                "Bundle format version 1 does not preserve the complete transform input "
+                f"schema required for {expression_transform}; rerun full_run and export the "
+                "model bundle with the current PhenoRadar version"
+            )
+        transform_feature_names = feature_names
+    else:
+        transform_feature_names = _load_feature_schema(
+            bundle_dir / "transform_feature_schema.tsv"
+        )
     scaler = preprocess_state.get("scaler")
     state_features = preprocess_state.get("feature_names")
+    state_transform_features = preprocess_state.get("transform_feature_names")
     scaler = _validate_scaler_state(
         scaler,
         feature_scaling=feature_scaling,
@@ -474,7 +569,27 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
     )
     if state_features != feature_names:
         raise BundleError("preprocess_state feature_names do not match feature_schema.tsv")
+    if (
+        version_value != _LEGACY_BUNDLE_FORMAT_VERSION
+        and state_transform_features != transform_feature_names
+    ):
+        raise BundleError(
+            "preprocess_state transform_feature_names do not match "
+            "transform_feature_schema.tsv"
+        )
+    transform_feature_set = set(transform_feature_names)
+    if any(feature not in transform_feature_set for feature in feature_names):
+        raise BundleError(
+            "feature_schema.tsv features are not contained in "
+            "transform_feature_schema.tsv"
+        )
 
+    if version_value == BUNDLE_FORMAT_VERSION and not {
+        "missing_expression",
+        "abstention",
+        "abstention_top_features",
+    }.issubset(preprocess_state):
+        raise BundleError("Bundle format 3 is missing its missing-expression/abstention policy")
     models = model_state.get("models")
     aggregation = model_state.get("probability_aggregation")
     if not isinstance(models, list) or not models:
@@ -516,6 +631,10 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
                     "preprocess_state.joblib model_preprocess entry feature_names is invalid"
                 )
             normalized_features = [str(value) for value in entry_features]
+            if len(set(normalized_features)) != len(normalized_features):
+                raise BundleError(
+                    "preprocess_state.joblib model_preprocess feature_names contain duplicates"
+                )
             if any(feature not in schema_feature_set for feature in normalized_features):
                 raise BundleError(
                     "preprocess_state.joblib model_preprocess feature_names are not "
@@ -528,9 +647,28 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
                 )
             )
 
+    if missing_policy.method == "neutral":
+        if (
+            expression_transform != "log1p"
+            or feature_scaling != "standard"
+            or absent_feature_fill != "nan"
+            or model_state.get("model_name") != "logistic_elasticnet"
+            or not isinstance(scaler, NeutralStandardScaler)
+            or any(
+                not isinstance(entry.scaler, NeutralStandardScaler) for entry in model_preprocess
+            )
+        ):
+            raise BundleError("Neutral bundle has inconsistent model or preprocessing state")
+    elif (
+        missing_policy.zero_as_missing
+        or abstention.enabled
+        or isinstance(scaler, NeutralStandardScaler)
+        or any(isinstance(entry.scaler, NeutralStandardScaler) for entry in model_preprocess)
+    ):
+        raise BundleError("Bundled neutral scaler/abstention requires the neutral policy")
+
     thresholds = pl.read_csv(bundle_dir / "thresholds.tsv", separator="\t")
-    threshold_fixed = _threshold_value(thresholds, "fixed_probability_threshold")
-    threshold_cv = _threshold_value(thresholds, "cv_derived_threshold")
+    threshold_fixed = _threshold_value(thresholds, FIXED_PROBABILITY_THRESHOLD_NAME)
 
     source_run_id_raw = manifest.get("source_run_id")
     source_run_id = str(source_run_id_raw) if source_run_id_raw is not None else "unknown"
@@ -540,19 +678,30 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
         manifest=manifest,
         manifest_sha256=_sha256_file(manifest_path),
         feature_names=feature_names,
+        transform_feature_names=transform_feature_names,
         scaler=scaler,
         model_preprocess=model_preprocess,
         models=models,
         probability_aggregation=aggregation,
         threshold_fixed=threshold_fixed,
-        threshold_cv_derived=threshold_cv,
         source_run_id=source_run_id,
         expression_transform=expression_transform,
         feature_scaling=feature_scaling,
+        absent_feature_fill=absent_feature_fill,
+        missing_expression_method=missing_policy.method,
+        zero_as_missing=missing_policy.zero_as_missing,
+        abstention_enabled=abstention.enabled,
+        abstention_threshold=abstention.threshold,
+        abstention_top_features=top_features,
     )
 
 
 def _predict_probability(estimator: Any, x: np.ndarray) -> np.ndarray:
+    if isinstance(estimator, GeneralizedLinearRegressor):
+        probability = np.asarray(estimator.predict(x), dtype=float)
+        if probability.shape != (x.shape[0],):
+            raise BundleError("Loaded binomial GLM returned invalid probability shape")
+        return probability
     probabilities = np.asarray(estimator.predict_proba(x), dtype=float)
     if probabilities.ndim != 2 or probabilities.shape[1] < 2:
         raise BundleError("Loaded model returned invalid probability shape")
@@ -594,34 +743,66 @@ def predict_with_bundle(
     if not species_list:
         raise BundleError("Predict metadata produced zero valid species")
 
-    matrix_builder = ExpressionMatrixBuilder(config)
-    x_raw, input_features = matrix_builder.build_matrix(species_list)
     try:
-        x_transformed = apply_expression_transform(x_raw, bundle.expression_transform)
+        matrix_config = config.model_copy(
+            update={
+                "preprocess": config.preprocess.model_copy(
+                    update={"absent_feature_fill": bundle.absent_feature_fill}
+                )
+            }
+        )
+        matrix_builder = ExpressionMatrixBuilder(matrix_config)
+        x_raw, input_features = matrix_builder.build_matrix(species_list)
     except CVError as exc:
         raise BundleError(str(exc)) from exc
     input_index = {feature: idx for idx, feature in enumerate(input_features)}
     bundle_features = bundle.feature_names
+    input_feature_set = set(input_features)
+    model_overlap_count = len(input_feature_set.intersection(bundle_features))
+    if model_overlap_count == 0 and bundle.missing_expression_method != "neutral":
+        raise BundleError("No bundle features were available in prediction input after alignment")
 
-    aligned = np.zeros((len(species_list), len(bundle_features)), dtype=float)
-    overlap_count = 0
-    for feature_idx, feature_name in enumerate(bundle_features):
+    if bundle.expression_transform in _CONTEXTUAL_EXPRESSION_TRANSFORMS:
+        alignment_features = bundle.transform_feature_names
+    else:
+        # Feature-wise transforms commute with feature selection, so aligning only
+        # the model-feature union avoids materializing unused input columns.
+        alignment_features = bundle_features
+    alignment_feature_set = set(alignment_features)
+
+    absent_feature_fill_value = (
+        0.0 if bundle.absent_feature_fill == 0 else float("nan")
+    )
+    aligned_raw = np.full(
+        (len(species_list), len(alignment_features)),
+        absent_feature_fill_value,
+        dtype=float,
+    )
+    alignment_overlap_count = 0
+    for feature_idx, feature_name in enumerate(alignment_features):
         input_idx = input_index.get(feature_name)
         if input_idx is None:
             continue
-        aligned[:, feature_idx] = x_transformed[:, input_idx]
-        overlap_count += 1
+        aligned_raw[:, feature_idx] = x_raw[:, input_idx]
+        alignment_overlap_count += 1
 
-    if overlap_count == 0:
-        raise BundleError("No bundle features were available in prediction input after alignment")
+    try:
+        transformed = apply_expression_transform(
+            aligned_raw,
+            bundle.expression_transform,
+            zero_as_missing=bundle.zero_as_missing,
+        )
+    except CVError as exc:
+        raise BundleError(str(exc)) from exc
 
-    missing_count = len(bundle_features) - overlap_count
-    extra_count = len(set(input_features) - set(bundle_features))
+    missing_count = len(alignment_features) - alignment_overlap_count
+    extra_count = len(input_feature_set - alignment_feature_set)
     warnings: list[str] = []
     if missing_count > 0:
+        fill_label = "0" if bundle.absent_feature_fill == 0 else "NA"
         warnings.append(
             "Prediction input is missing bundle features; "
-            f"filled with 0 for {missing_count} features"
+            f"filled with {fill_label} for {missing_count} features"
         )
     if extra_count > 0:
         warnings.append(
@@ -629,7 +810,7 @@ def predict_with_bundle(
             f"ignored {extra_count} features"
         )
 
-    schema_index = {feature: idx for idx, feature in enumerate(bundle_features)}
+    schema_index = {feature: idx for idx, feature in enumerate(alignment_features)}
 
     model_probs: list[np.ndarray] = []
     if len(bundle.model_preprocess) == len(bundle.models):
@@ -643,7 +824,7 @@ def predict_with_bundle(
         selected_indices = np.array(
             [schema_index[feature] for feature in preprocess.feature_names], dtype=int
         )
-        x_model = aligned[:, selected_indices]
+        x_model = transformed[:, selected_indices]
         try:
             x_model_scaled = apply_feature_scaling(
                 x_model,
@@ -662,12 +843,23 @@ def predict_with_bundle(
         "species": species_list,
         "prob": prob.astype(float, copy=False).tolist(),
         "pred_label_fixed_threshold": pred_label.astype(int, copy=False).tolist(),
-        "pred_label_cv_derived_threshold": (
-            prob >= bundle.threshold_cv_derived
-        ).astype(int).tolist(),
     }
     if uncertainty_std is not None:
         payload["uncertainty_std"] = uncertainty_std.astype(float, copy=False).tolist()
 
     pred_df = pl.DataFrame(payload).sort("species")
+    if bundle.abstention_enabled:
+        pred_df = annotate_abstention(
+            pred_df,
+            species=species_list,
+            matrix=aligned_raw,
+            feature_names=alignment_features,
+            model_coefficients=[
+                (entry.feature_names, model.coef_)
+                for entry, model in zip(preprocess_entries, bundle.models, strict=True)
+            ],
+            zero_as_missing=bundle.zero_as_missing,
+            threshold=bundle.abstention_threshold,
+            top_features=bundle.abstention_top_features,
+        )
     return pred_df, warnings

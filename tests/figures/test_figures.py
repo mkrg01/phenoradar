@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import numpy as np
 import polars as pl
 import pytest
+from matplotlib.colors import to_hex
 
 import phenoradar.figures as figures_mod
 from phenoradar.figures import (
@@ -13,6 +16,39 @@ from phenoradar.figures import (
     write_report_figures,
     write_run_figures,
 )
+
+
+def _svg_text_y_and_viewbox_height(svg_path: Path, text: str) -> tuple[float, float]:
+    root = ET.parse(svg_path).getroot()
+    viewbox_height = float(root.attrib["viewBox"].split()[3])
+    for element in root.iter():
+        if element.tag.endswith("text") and "".join(element.itertext()) == text:
+            return float(element.attrib["y"]), viewbox_height
+    raise AssertionError(f"{text!r} not found in {svg_path}")
+
+
+def _svg_text_values(svg_path: Path) -> set[str]:
+    root = ET.parse(svg_path).getroot()
+    return {"".join(element.itertext()) for element in root.iter() if element.tag.endswith("text")}
+
+
+def _svg_viewbox_size(svg_path: Path) -> tuple[float, float]:
+    root = ET.parse(svg_path).getroot()
+    _, _, width, height = root.attrib["viewBox"].split()
+    return float(width), float(height)
+
+
+def _svg_text_translate_y_values(svg_path: Path, text: str) -> list[float]:
+    root = ET.parse(svg_path).getroot()
+    values: list[float] = []
+    for element in root.iter():
+        if not element.tag.endswith("text") or "".join(element.itertext()) != text:
+            continue
+        transform = element.attrib.get("transform", "")
+        match = re.search(r"translate\([^ ,]+[ ,]+([^ )]+)\)", transform)
+        if match is not None:
+            values.append(float(match.group(1)))
+    return values
 
 
 def _minimal_metrics_cv() -> pl.DataFrame:
@@ -49,6 +85,25 @@ def _minimal_metrics_cv() -> pl.DataFrame:
     )
 
 
+def _minimal_group_bootstrap_metrics() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "metric": ["roc_auc", "brier"],
+            "point_estimate": [0.8, 0.15],
+            "ci_lower": [0.65, 0.1],
+            "ci_upper": [0.9, 0.22],
+            "confidence_level": [0.95, 0.95],
+            "n_resamples": [2000, 2000],
+            "n_valid_resamples": [1980, 2000],
+            "valid_resample_fraction": [0.99, 1.0],
+            "n_groups": [20, 20],
+            "group_col": ["family", "family"],
+            "bootstrap_method": ["percentile_group", "percentile_group"],
+            "seed": [123, 123],
+        }
+    )
+
+
 def test_write_predict_figures_requires_uncertainty_when_requested(tmp_path) -> None:
     with pytest.raises(FigureError):
         write_predict_figures(
@@ -58,7 +113,6 @@ def test_write_predict_figures_requires_uncertainty_when_requested(tmp_path) -> 
                     "species": ["sp1", "sp2"],
                     "prob": [0.1, 0.9],
                     "pred_label_fixed_threshold": [0, 1],
-                    "pred_label_cv_derived_threshold": [0, 1],
                 }
             ),
             require_uncertainty=True,
@@ -71,26 +125,7 @@ def test_write_run_figures_does_not_emit_ensemble_uncertainty(
     warnings = write_run_figures(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
-        oof_predictions=pl.DataFrame(
-            {
-                "fold_id": ["0", "0"],
-                "species": ["sp1", "sp2"],
-                "label": [0, 1],
-                "prob": [0.2, 0.8],
-            }
-        ),
-        thresholds=pl.DataFrame(
-            {
-                "threshold_name": [
-                    "fixed_probability_threshold",
-                    "cv_derived_threshold",
-                ],
-                "threshold_value": [0.5, 0.4],
-                "source": ["config", "oof_predictions"],
-                "selection_metric": ["NA", "mcc"],
-                "selection_scope": ["NA", "outer_cv"],
-            }
-        ),
+        oof_predictions=_minimal_oof(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=pl.DataFrame(
@@ -102,10 +137,9 @@ def test_write_run_figures_does_not_emit_ensemble_uncertainty(
             }
         ),
         model_selection_trials=None,
-        auto_threshold_metric="mcc",
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     assert not (figures_dir / "ensemble_uncertainty.svg").exists()
     assert warnings == []
 
@@ -121,17 +155,32 @@ def _minimal_oof() -> pl.DataFrame:
     )
 
 
-def _minimal_thresholds() -> pl.DataFrame:
+def _confusion_oof() -> pl.DataFrame:
     return pl.DataFrame(
         {
-            "threshold_name": [
-                "fixed_probability_threshold",
-                "cv_derived_threshold",
+            "fold_id": ["0", "0", "0", "0"],
+            "species": ["sp_tp", "sp_fn", "sp_tn", "sp_fp"],
+            "label": [1, 1, 0, 0],
+            "prob": [0.8, 0.2, 0.2, 0.8],
+        }
+    )
+
+
+def _minimal_top_feature_expression() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "species": [
+                "sp_tp",
+                "sp_tp",
+                "sp_fn",
+                "sp_fn",
+                "sp_tn",
+                "sp_tn",
+                "sp_fp",
+                "sp_fp",
             ],
-            "threshold_value": [0.5, 0.4],
-            "source": ["config", "oof_predictions"],
-            "selection_metric": ["NA", "mcc"],
-            "selection_scope": ["NA", "outer_cv"],
+            "feature": ["OG1", "OG2"] * 4,
+            "tpm": [15.0, 2.0, 1.0, 8.0, 0.0, 12.0, 6.0, 3.0],
         }
     )
 
@@ -157,6 +206,30 @@ def _minimal_final_refit_loss_by_split() -> pl.DataFrame:
     )
 
 
+def _minimal_classification_summary() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "pool": ["validation_oof", "external_test"],
+            "fold_id": ["NA", "NA"],
+            "threshold_name": [
+                "fixed_probability_threshold",
+                "fixed_probability_threshold",
+            ],
+            "threshold_value": [0.5, 0.5],
+            "n_total": [4, 2],
+            "tp": [2, 1],
+            "fp": [0, 0],
+            "tn": [2, 1],
+            "fn": [0, 0],
+            "accuracy": [1.0, 1.0],
+            "precision": [1.0, 1.0],
+            "recall": [1.0, 1.0],
+            "f1": [1.0, 1.0],
+            "mcc": [1.0, 1.0],
+        }
+    )
+
+
 def _minimal_feature_importance() -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -169,6 +242,53 @@ def _minimal_feature_importance() -> pl.DataFrame:
     )
 
 
+def _minimal_orthogroup_annotations() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "feature": ["OG1", "OG2"],
+            "orthogroup_annotation_taxid": ["3193", "3193"],
+            "orthogroup_annotation": [
+                "beta carbonic anhydrase with a deliberately long wrapped "
+                "photosynthetic annotation",
+                "hypothetical protein",
+            ],
+        }
+    )
+
+
+def _minimal_feature_importance_by_fold() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "fold_id": ["0", "1", "0", "1"],
+            "feature": ["OG1", "OG1", "OG2", "OG2"],
+            "importance_mean": [0.8, 0.6, 0.2, 0.4],
+            "n_models": [1, 1, 1, 1],
+            "method": ["coef_abs_l1_norm"] * 4,
+        }
+    )
+
+
+def _minimal_feature_stability_by_feature() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "feature": ["OG1", "OG2"],
+            "retained_frequency": [1.0, 1.0],
+            "selection_frequency": [1.0, 0.5],
+            "dominant_sign": ["positive", "negative"],
+        }
+    )
+
+
+def _minimal_feature_stability_by_fold_pair() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "fold_id_a": ["0"],
+            "fold_id_b": ["1"],
+            "jaccard": [0.5],
+        }
+    )
+
+
 def _minimal_feature_filter_counts() -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -176,7 +296,7 @@ def _minimal_feature_filter_counts() -> pl.DataFrame:
             "fold_id": ["0", "0", "1", "1"],
             "sample_set_id": [0, 1, 0, 1],
             "n_features_before": [100, 100, 100, 100],
-            "n_features_after_low_prevalence": [80, 82, 78, 79],
+            "n_features_after_sparse_feature_filter": [80, 82, 78, 79],
             "n_features_after_low_variance": [60, 61, 59, 60],
             "n_features_after_correlation": [52, 53, 50, 52],
             "n_features_after_all": [52, 53, 50, 52],
@@ -187,36 +307,57 @@ def _minimal_feature_filter_counts() -> pl.DataFrame:
 def _minimal_feature_filter_counts_summary() -> pl.DataFrame:
     return pl.DataFrame(
         {
-            "scope": ["outer_fold"] * 5,
+            "scope": ["outer_fold"] * 6,
             "stage": [
                 "n_features_before",
-                "n_features_after_low_prevalence",
+                "n_features_after_sparse_feature_filter",
                 "n_features_after_low_variance",
+                "n_features_after_ranked_feature_filter",
                 "n_features_after_correlation",
                 "n_features_after_all",
             ],
-            "n_records": [4, 4, 4, 4, 4],
-            "n_features_min": [100, 78, 59, 50, 50],
-            "n_features_median": [100.0, 79.5, 60.0, 52.0, 52.0],
-            "n_features_mean": [100.0, 79.75, 60.0, 51.75, 51.75],
-            "n_features_max": [100, 82, 61, 53, 53],
-            "retained_ratio_min": [1.0, 0.78, 0.59, 0.50, 0.50],
-            "retained_ratio_median": [1.0, 0.795, 0.60, 0.52, 0.52],
-            "retained_ratio_mean": [1.0, 0.7975, 0.60, 0.5175, 0.5175],
-            "retained_ratio_max": [1.0, 0.82, 0.61, 0.53, 0.53],
+            "n_records": [4, 4, 4, 4, 4, 4],
+            "n_features_min": [100, 78, 59, 58, 50, 50],
+            "n_features_q1": [100.0, 78.75, 59.75, 58.5, 51.5, 51.5],
+            "n_features_median": [100.0, 79.5, 60.0, 59.0, 52.0, 52.0],
+            "n_features_mean": [100.0, 79.75, 60.0, 59.0, 51.75, 51.75],
+            "n_features_q3": [100.0, 80.5, 60.25, 59.5, 52.25, 52.25],
+            "n_features_max": [100, 82, 61, 60, 53, 53],
+            "retained_ratio_min": [1.0, 0.78, 0.59, 0.58, 0.50, 0.50],
+            "retained_ratio_q1": [1.0, 0.7875, 0.5975, 0.585, 0.515, 0.515],
+            "retained_ratio_median": [1.0, 0.795, 0.60, 0.59, 0.52, 0.52],
+            "retained_ratio_mean": [1.0, 0.7975, 0.60, 0.59, 0.5175, 0.5175],
+            "retained_ratio_q3": [1.0, 0.805, 0.6025, 0.595, 0.5225, 0.5225],
+            "retained_ratio_max": [1.0, 0.82, 0.61, 0.60, 0.53, 0.53],
         }
     )
 
 
-def _minimal_retained_features_summary() -> pl.DataFrame:
+def _minimal_final_refit_feature_filter_counts_summary() -> pl.DataFrame:
     return pl.DataFrame(
         {
-            "scope": ["outer_fold", "outer_fold", "outer_fold", "outer_fold"],
-            "fold_id": ["0", "0", "1", "1"],
-            "feature": ["OG1", "OG2", "OG1", "OG3"],
-            "retained_count": [2, 1, 2, 1],
-            "n_sample_sets": [2, 2, 2, 2],
-            "retained_rate": [1.0, 0.5, 1.0, 0.5],
+            "scope": ["final_refit"] * 6,
+            "stage": [
+                "n_features_before",
+                "n_features_after_sparse_feature_filter",
+                "n_features_after_low_variance",
+                "n_features_after_ranked_feature_filter",
+                "n_features_after_correlation",
+                "n_features_after_all",
+            ],
+            "n_records": [2, 2, 2, 2, 2, 2],
+            "n_features_min": [120, 90, 70, 52, 48, 48],
+            "n_features_q1": [122.0, 94.0, 73.0, 53.0, 49.0, 49.0],
+            "n_features_median": [123.4, 98.7, 75.5, 54.3, 50.5, 50.5],
+            "n_features_mean": [123.4, 98.7, 75.5, 54.3, 50.5, 50.5],
+            "n_features_q3": [125.0, 101.0, 78.0, 55.0, 52.0, 52.0],
+            "n_features_max": [127, 104, 81, 56, 53, 53],
+            "retained_ratio_min": [1.0, 0.75, 0.58, 0.43, 0.40, 0.40],
+            "retained_ratio_q1": [1.0, 0.77, 0.60, 0.44, 0.41, 0.41],
+            "retained_ratio_median": [1.0, 0.80, 0.61, 0.44, 0.41, 0.41],
+            "retained_ratio_mean": [1.0, 0.80, 0.61, 0.44, 0.41, 0.41],
+            "retained_ratio_q3": [1.0, 0.82, 0.63, 0.45, 0.42, 0.42],
+            "retained_ratio_max": [1.0, 0.84, 0.65, 0.46, 0.43, 0.43],
         }
     )
 
@@ -243,16 +384,14 @@ def test_format_float_returns_nan_for_none_and_nan() -> None:
     assert figures_mod._format_float(float("nan")) == "NaN"
 
 
-def test_metric_score_supports_balanced_accuracy() -> None:
-    y_true = [0, 0, 1, 1]
-    prob = [0.1, 0.7, 0.4, 0.9]
-    score = figures_mod._metric_score(
-        y_true=np.array(y_true, dtype=int),
-        prob=np.array(prob, dtype=float),
-        threshold=0.5,
-        metric="balanced_accuracy",
-    )
-    assert score == pytest.approx(0.5)
+def test_place_x_axis_at_zero_moves_bottom_spine() -> None:
+    fig, ax = figures_mod.plt.subplots()
+    try:
+        figures_mod._place_x_axis_at_zero(ax)
+
+        assert ax.spines["bottom"].get_position() == ("data", 0.0)
+    finally:
+        figures_mod.plt.close(fig)
 
 
 def _minimal_coefficients() -> pl.DataFrame:
@@ -276,14 +415,13 @@ def test_write_predict_figures_writes_uncertainty_when_available(tmp_path: Path)
                 "species": ["sp1", "sp2"],
                 "prob": [0.1, 0.9],
                 "pred_label_fixed_threshold": [0, 1],
-                "pred_label_cv_derived_threshold": [0, 1],
                 "uncertainty_std": [0.01, 0.02],
             }
         ),
         require_uncertainty=True,
     )
 
-    figures_dir = tmp_path / "predict_run" / "figures"
+    figures_dir = tmp_path / "predict_run" / "inference" / "figures"
     assert (figures_dir / "predict_probability_distribution.svg").exists()
     assert (figures_dir / "predict_uncertainty.svg").exists()
 
@@ -296,13 +434,12 @@ def test_write_predict_figures_skips_uncertainty_when_not_required(tmp_path: Pat
                 "species": ["sp1", "sp2"],
                 "prob": [0.1, 0.9],
                 "pred_label_fixed_threshold": [0, 1],
-                "pred_label_cv_derived_threshold": [0, 1],
             }
         ),
         require_uncertainty=False,
     )
 
-    figures_dir = tmp_path / "predict_run" / "figures"
+    figures_dir = tmp_path / "predict_run" / "inference" / "figures"
     assert (figures_dir / "predict_probability_distribution.svg").exists()
     assert not (figures_dir / "predict_uncertainty.svg").exists()
 
@@ -312,26 +449,180 @@ def test_write_run_figures_writes_required_artifacts(tmp_path: Path) -> None:
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
+        feature_importance=_minimal_feature_importance(),
+        feature_importance_by_fold=_minimal_feature_importance_by_fold(),
+        coefficients=_minimal_coefficients(),
+        feature_stability_by_feature=_minimal_feature_stability_by_feature(),
+        feature_stability_by_fold_pair=_minimal_feature_stability_by_fold_pair(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        loss_by_split_cv=_minimal_loss_by_split(),
+    )
+
+    cv_figures_dir = tmp_path / "run" / "cv" / "figures"
+    external_figures_dir = tmp_path / "run" / "external_test" / "figures"
+    inference_figures_dir = tmp_path / "run" / "inference" / "figures"
+    assert cv_figures_dir.is_dir()
+    assert external_figures_dir.is_dir()
+    assert inference_figures_dir.is_dir()
+    assert (cv_figures_dir / "cv_metrics_overview.svg").exists()
+    cv_loss_path = cv_figures_dir / "cv_loss_by_split.svg"
+    assert cv_loss_path.exists()
+    label_y, viewbox_height = _svg_text_y_and_viewbox_height(cv_loss_path, "Log loss")
+    assert label_y < viewbox_height
+    assert (cv_figures_dir / "feature_importance_top.svg").exists()
+    assert (cv_figures_dir / "feature_importance_by_fold_heatmap.svg").exists()
+    assert (cv_figures_dir / "coefficients_signed_top.svg").exists()
+    assert (cv_figures_dir / "feature_stability_top.svg").exists()
+    assert (cv_figures_dir / "feature_set_jaccard_heatmap.svg").exists()
+    assert (cv_figures_dir / "cv_species_probability_by_trait.svg").exists()
+    assert (cv_figures_dir / "cv_fold_trait_probability.svg").exists()
+    assert (cv_figures_dir / "roc_curve_cv.svg").exists()
+    assert (cv_figures_dir / "pr_curve_cv.svg").exists()
+    assert not (external_figures_dir / "final_refit_loss_by_split.svg").exists()
+    assert not (external_figures_dir / "external_species_probability_by_trait.svg").exists()
+    assert not (inference_figures_dir / "inference_probability_distribution.svg").exists()
+    assert not (inference_figures_dir / "species_probability_cv_and_inference.svg").exists()
+    assert warnings == []
+
+
+def test_write_run_figures_writes_top_feature_expression_by_confusion(
+    tmp_path: Path,
+) -> None:
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_confusion_oof(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
         model_selection_trials=None,
-        auto_threshold_metric="mcc",
-        loss_by_split_cv=_minimal_loss_by_split(),
+        top_feature_expression=_minimal_top_feature_expression(),
+        trait_name="C4",
+        orthogroup_annotations=_minimal_orthogroup_annotations(),
     )
 
-    figures_dir = tmp_path / "run" / "figures"
-    assert (figures_dir / "cv_metrics_overview.svg").exists()
-    assert (figures_dir / "cv_loss_by_split.svg").exists()
-    assert (figures_dir / "threshold_selection_curve.svg").exists()
-    assert (figures_dir / "feature_importance_top.svg").exists()
-    assert (figures_dir / "coefficients_signed_top.svg").exists()
-    assert (figures_dir / "cv_species_probability_by_trait.svg").exists()
-    assert (figures_dir / "cv_fold_trait_probability.svg").exists()
-    assert (figures_dir / "roc_pr_curves_cv.svg").exists()
-    assert not (figures_dir / "final_refit_loss_by_split.svg").exists()
-    assert not (figures_dir / "external_species_probability_by_trait.svg").exists()
+    figure_path = tmp_path / "run" / "cv" / "figures" / "top_feature_expression_by_confusion.svg"
+    assert figure_path.exists()
+    svg_text = figure_path.read_text(encoding="utf-8")
+    assert "Top-feature expression by OOF confusion group" not in svg_text
+    assert "Features ordered by mean CV importance" not in svg_text
+    assert "log2(TPM + 1)" in svg_text
+    assert "beta carbonic anhydrase" in svg_text
+    assert "photosynthetic annotation" in svg_text
+    assert "(OG1)" in svg_text
+    assert "importance=0.7" in svg_text
+    assert "β=+0.2" in svg_text
+    assert "higher" not in svg_text
+    assert "C4=1" not in svg_text
+    for group in ["TP", "FN", "TN", "FP"]:
+        assert group in svg_text
+    upper_label_y = _svg_text_translate_y_values(
+        figure_path,
+        "beta carbonic anhydrase with a",
+    )
+    count_label_y = _svg_text_translate_y_values(figure_path, "n=1")
+    x_label_y, viewbox_height = _svg_text_y_and_viewbox_height(
+        figure_path,
+        "OOF confusion group",
+    )
+    assert upper_label_y and min(upper_label_y) > 0
+    assert count_label_y and max(count_label_y) + 8 < x_label_y < viewbox_height
+    assert warnings == []
+
+
+def test_top_feature_expression_by_confusion_rejects_duplicate_cv_species(
+    tmp_path: Path,
+) -> None:
+    duplicate_oof = pl.concat([_confusion_oof(), _confusion_oof().head(1)])
+
+    with pytest.raises(FigureError, match="one row per species"):
+        figures_mod._top_feature_expression_by_confusion(
+            oof_predictions=duplicate_oof,
+            top_feature_expression=_minimal_top_feature_expression(),
+            feature_importance=_minimal_feature_importance(),
+            coefficients=_minimal_coefficients(),
+            out_path=tmp_path / "figure.svg",
+        )
+
+
+def test_write_run_figures_writes_group_bootstrap_confidence_intervals(
+    tmp_path: Path,
+) -> None:
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_minimal_oof(),
+        feature_importance=_minimal_feature_importance(),
+        feature_importance_by_fold=_minimal_feature_importance_by_fold(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        group_bootstrap_metrics=_minimal_group_bootstrap_metrics(),
+    )
+
+    figure_path = tmp_path / "run" / "cv" / "figures" / "group_bootstrap_metrics.svg"
+    assert figure_path.exists()
+    svg_text = figure_path.read_text(encoding="utf-8")
+    assert "OOF group-bootstrap confidence intervals" in svg_text
+    assert "family" in svg_text
+    assert warnings == []
+
+
+def test_write_run_figures_parallel_workers_write_required_artifacts(tmp_path: Path) -> None:
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_minimal_oof(),
+        feature_importance=_minimal_feature_importance(),
+        feature_importance_by_fold=_minimal_feature_importance_by_fold(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        loss_by_split_cv=_minimal_loss_by_split(),
+        parallel_workers=2,
+    )
+
+    cv_figures_dir = tmp_path / "run" / "cv" / "figures"
+    assert (cv_figures_dir / "cv_metrics_overview.svg").exists()
+    assert (cv_figures_dir / "feature_importance_top.svg").exists()
+    assert (cv_figures_dir / "feature_importance_by_fold_heatmap.svg").exists()
+    assert (cv_figures_dir / "coefficients_signed_top.svg").exists()
+    assert (cv_figures_dir / "roc_curve_cv.svg").exists()
+    assert (cv_figures_dir / "pr_curve_cv.svg").exists()
+    assert warnings == []
+
+
+def test_write_run_figures_uses_annotations_in_standard_feature_figures(
+    tmp_path: Path,
+) -> None:
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_minimal_oof(),
+        feature_importance=_minimal_feature_importance(),
+        feature_importance_by_fold=_minimal_feature_importance_by_fold(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        orthogroup_annotations=_minimal_orthogroup_annotations(),
+    )
+
+    cv_figures_dir = tmp_path / "run" / "cv" / "figures"
+    feature_importance_svg = (cv_figures_dir / "feature_importance_top.svg").read_text(
+        encoding="utf-8"
+    )
+    heatmap_svg = (cv_figures_dir / "feature_importance_by_fold_heatmap.svg").read_text(
+        encoding="utf-8"
+    )
+    coefficients_svg = (cv_figures_dir / "coefficients_signed_top.svg").read_text(encoding="utf-8")
+    assert "beta carbonic anhydrase" in feature_importance_svg
+    assert "(OG1)" in feature_importance_svg
+    assert "beta carbonic anhydrase" in heatmap_svg
+    assert "beta carbonic anhydrase" in coefficients_svg
+    assert not (cv_figures_dir / "feature_importance_top_annotated.svg").exists()
+    assert not (cv_figures_dir / "feature_importance_by_fold_heatmap_annotated.svg").exists()
+    assert not (cv_figures_dir / "coefficients_signed_top_annotated.svg").exists()
     assert warnings == []
 
 
@@ -340,21 +631,63 @@ def test_write_run_figures_writes_feature_filter_and_sparsity_figures(tmp_path: 
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
         model_selection_trials=None,
-        auto_threshold_metric="mcc",
-        feature_filter_counts_summary=_minimal_feature_filter_counts_summary(),
-        retained_features_summary=_minimal_retained_features_summary(),
+        feature_filter_counts_summary=pl.concat(
+            [
+                _minimal_feature_filter_counts_summary(),
+                _minimal_final_refit_feature_filter_counts_summary(),
+            ],
+            how="vertical_relaxed",
+        ),
+        feature_filter_funnel_stage_order=[
+            "n_features_before",
+            "n_features_after_sparse_feature_filter",
+            "n_features_after_ranked_feature_filter",
+        ],
         model_sparsity=_minimal_model_sparsity(),
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
+    model_figures_dir = tmp_path / "run" / "model" / "figures"
     assert (figures_dir / "feature_filter_funnel.svg").exists()
-    assert (figures_dir / "retained_features_by_fold.svg").exists()
-    assert (figures_dir / "model_sparsity_scatter.svg").exists()
+    funnel_svg = (figures_dir / "feature_filter_funnel.svg").read_text(encoding="utf-8")
+    final_refit_funnel_path = model_figures_dir / "final_refit_feature_filter_funnel.svg"
+    assert final_refit_funnel_path.exists()
+    final_refit_funnel_svg = final_refit_funnel_path.read_text(encoding="utf-8")
+    funnel_text = _svg_text_values(figures_dir / "feature_filter_funnel.svg")
+    final_refit_funnel_text = _svg_text_values(final_refit_funnel_path)
+    assert "Feature selection step" in funnel_svg
+    assert "Number of selected features" in funnel_svg
+    assert "Number of features" not in funnel_svg
+    assert "Feature Count" not in funnel_svg
+    assert "n=4" not in funnel_svg
+    assert "median" in funnel_svg
+    assert "IQR (25-75%)" in funnel_svg
+    assert "min-max" in funnel_svg
+    assert "outer_fold (median" not in funnel_svg
+    assert "Input" in funnel_svg
+    assert "Sparse feature" in funnel_svg
+    assert "Ranked filter" in funnel_svg
+    assert "sparse_feature" not in funnel_svg
+    assert "Low variance" not in funnel_svg
+    assert "Correlation" not in funnel_svg
+    assert "Final" not in funnel_svg
+    assert "123.4" in final_refit_funnel_svg
+    assert "79.5" in funnel_text
+    assert "123.4" not in funnel_text
+    assert "123.4" in final_refit_funnel_text
+    assert "79.5" not in final_refit_funnel_text
+    assert not (figures_dir / "selected_features_by_fold_after_preprocessing.svg").exists()
+    assert not (figures_dir / "selected_features_after_preprocessing.svg").exists()
+    assert not (figures_dir / "selected_features_by_fold.svg").exists()
+    assert (figures_dir / "non_zero_feature_count_by_fold.svg").exists()
+    assert not (figures_dir / "selected_feature_count_by_fold.svg").exists()
+    count_svg = (figures_dir / "non_zero_feature_count_by_fold.svg").read_text(encoding="utf-8")
+    assert "Number of non-zero features per model" in count_svg
+    assert not (figures_dir / "model_sparsity_scatter.svg").exists()
     assert warnings == []
 
 
@@ -363,25 +696,90 @@ def test_write_run_figures_writes_external_trait_probability_when_available(tmp_
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
         model_selection_trials=None,
-        auto_threshold_metric="mcc",
         loss_by_split_final_refit=_minimal_final_refit_loss_by_split(),
+        classification_summary=_minimal_classification_summary(),
         pred_external_test=pl.DataFrame(
             {
                 "species": ["sp5", "sp6"],
                 "true_label": [0, 1],
                 "prob": [0.3, 0.7],
+                "pred_label_fixed_threshold": [0, 1],
+            }
+        ),
+        pred_inference=pl.DataFrame(
+            {
+                "species": ["sp7", "sp8", "sp9"],
+                "true_label": [None, None, None],
+                "prob": [0.1, 0.55, 0.9],
+            }
+        ),
+        final_refit_feature_importance=_minimal_feature_importance(),
+        final_refit_coefficients=_minimal_coefficients(),
+        final_refit_feature_importance_by_model=pl.DataFrame(
+            {
+                "model_index": [0, 0],
+                "feature": ["OG1", "OG2"],
+                "importance": [0.7, 0.3],
+                "method": ["coef_abs_l1_norm", "coef_abs_l1_norm"],
+            }
+        ),
+        final_refit_coefficients_by_model=pl.DataFrame(
+            {
+                "model_index": [0, 0],
+                "feature": ["OG1", "OG2"],
+                "coefficient": [0.2, -0.1],
+                "method": ["coef_signed", "coef_signed"],
+                "reason": ["NA", "NA"],
+            }
+        ),
+        final_refit_top_feature_expression_external=pl.DataFrame(
+            {
+                "species": ["sp5", "sp5", "sp6", "sp6"],
+                "feature": ["OG1", "OG2", "OG1", "OG2"],
+                "tpm": [2.0, 8.0, 15.0, 1.0],
             }
         ),
     )
 
-    figures_dir = tmp_path / "run" / "figures"
-    assert (figures_dir / "final_refit_loss_by_split.svg").exists()
-    assert (figures_dir / "external_species_probability_by_trait.svg").exists()
+    external_figures_dir = tmp_path / "run" / "external_test" / "figures"
+    inference_figures_dir = tmp_path / "run" / "inference" / "figures"
+    final_refit_loss_path = external_figures_dir / "final_refit_loss_by_split.svg"
+    assert final_refit_loss_path.exists()
+    label_y, viewbox_height = _svg_text_y_and_viewbox_height(final_refit_loss_path, "Log Loss")
+    assert label_y < viewbox_height
+    assert (external_figures_dir / "external_species_probability_by_trait.svg").exists()
+    assert (external_figures_dir / "external_confusion_matrix.svg").exists()
+    assert (external_figures_dir / "external_roc_curve.svg").exists()
+    assert (external_figures_dir / "external_pr_curve.svg").exists()
+    assert (external_figures_dir / "top_feature_expression_by_confusion.svg").exists()
+    model_figures_dir = tmp_path / "run" / "model" / "figures"
+    final_importance_path = model_figures_dir / "final_refit_feature_importance_top.svg"
+    final_coefficients_path = model_figures_dir / "final_refit_coefficients_signed_top.svg"
+    assert final_importance_path.exists()
+    assert final_coefficients_path.exists()
+    assert "Normalized feature importance per final model" in final_importance_path.read_text(
+        encoding="utf-8"
+    )
+    assert "Signed coefficient per final model" in final_coefficients_path.read_text(
+        encoding="utf-8"
+    )
+    comparison_path = external_figures_dir / "cv_external_metric_comparison.svg"
+    assert comparison_path.exists()
+    comparison_svg = comparison_path.read_text(encoding="utf-8")
+    assert "Validation OOF" in comparison_svg
+    assert "External test" in comparison_svg
+    assert "MCC" in comparison_svg
+    assert (inference_figures_dir / "inference_probability_distribution.svg").exists()
+    cv_inference_path = inference_figures_dir / "species_probability_cv_and_inference.svg"
+    assert cv_inference_path.exists()
+    cv_inference_svg = cv_inference_path.read_text(encoding="utf-8")
+    assert "unannotated" in cv_inference_svg
+    assert "n=3" in cv_inference_svg
+    assert not (tmp_path / "run" / "figures" / "cv_metrics_overview.svg").exists()
     assert warnings == []
 
 
@@ -393,6 +791,7 @@ def test_write_report_figures_stage_breakdown_is_conditional(tmp_path: Path) -> 
             {
                 "run_id": ["r1"],
                 "metric_value": [0.9],
+                "primary_metric": ["mcc"],
                 "start_time": ["2026-01-01T00:00:00+00:00"],
                 "execution_stage": ["full_run"],
             }
@@ -401,6 +800,7 @@ def test_write_report_figures_stage_breakdown_is_conditional(tmp_path: Path) -> 
             {
                 "rank": [1],
                 "run_id": ["r1"],
+                "metric_name": ["mcc"],
                 "metric_value": [0.9],
             }
         ),
@@ -414,6 +814,7 @@ def test_write_report_figures_stage_breakdown_is_conditional(tmp_path: Path) -> 
             {
                 "run_id": ["r1", "r2"],
                 "metric_value": [0.9, 0.8],
+                "primary_metric": ["mcc", "mcc"],
                 "start_time": ["2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"],
                 "execution_stage": ["full_run", "predict"],
             }
@@ -422,11 +823,41 @@ def test_write_report_figures_stage_breakdown_is_conditional(tmp_path: Path) -> 
             {
                 "rank": [1, 2],
                 "run_id": ["r1", "r2"],
+                "metric_name": ["mcc", "mcc"],
                 "metric_value": [0.9, 0.8],
             }
         ),
     )
     assert (report_dir_multi / "figures" / "report_stage_breakdown.svg").exists()
+
+
+def test_report_metric_comparison_sorts_brier_lower_values_first() -> None:
+    report_runs = pl.DataFrame(
+        {
+            "run_id": ["run_mid", "run_worst", "run_best"],
+            "metric_value": [0.20, 0.40, 0.05],
+            "primary_metric": ["brier", "brier", "brier"],
+            "start_time": [
+                "2026-01-02T00:00:00+00:00",
+                "2026-01-03T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+            ],
+        }
+    )
+
+    comparable = figures_mod._sorted_report_metric_rows(report_runs)
+
+    assert comparable.select("run_id").to_series().to_list() == [
+        "run_best",
+        "run_mid",
+        "run_worst",
+    ]
+    assert comparable.select("metric_value").to_series().to_list() == [0.05, 0.20, 0.40]
+    assert figures_mod._report_metric_axis_label("brier") == "brier (lower is better)"
+    assert (
+        figures_mod._report_metric_axis_label("brier", "Brier score loss")
+        == "Brier score loss [brier] (lower is better)"
+    )
 
 
 def test_write_report_figures_rejects_invalid_ranking_schema(tmp_path: Path) -> None:
@@ -437,6 +868,7 @@ def test_write_report_figures_rejects_invalid_ranking_schema(tmp_path: Path) -> 
                 {
                     "run_id": ["r1"],
                     "metric_value": [0.9],
+                    "primary_metric": ["mcc"],
                     "start_time": ["2026-01-01T00:00:00+00:00"],
                     "execution_stage": ["full_run"],
                 }
@@ -457,7 +889,6 @@ def test_write_run_figures_ignores_empty_model_selection_trials_when_provided(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
@@ -471,10 +902,9 @@ def test_write_run_figures_ignores_empty_model_selection_trials_when_provided(
                 "metric_value": pl.Float64,
             }
         ),
-        auto_threshold_metric="mcc",
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     assert not (figures_dir / "model_selection_trials.svg").exists()
     assert warnings == []
 
@@ -486,7 +916,6 @@ def test_write_run_figures_writes_model_selection_trials_when_summary_provided(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
@@ -497,20 +926,19 @@ def test_write_run_figures_writes_model_selection_trials_when_summary_provided(
                 "sample_set_id": [0, 0, 0, 0],
                 "candidate_index": [0, 1, 0, 1],
                 "metric_name": ["mcc", "mcc", "mcc", "mcc"],
-                "params_json": ["{}", "{\"C\":1.0}", "{}", "{\"C\":1.0}"],
+                "params_json": ["{}", '{"alpha":1.0}', "{}", '{"alpha":1.0}'],
                 "n_inner_folds": [2, 2, 2, 2],
                 "n_valid_inner_folds": [2, 2, 2, 2],
                 "metric_value_mean": [0.40, 0.55, 0.38, 0.52],
                 "metric_value_std": [0.02, 0.03, 0.01, 0.02],
             }
         ),
-        auto_threshold_metric="mcc",
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
     assert (figures_dir / "model_selection_trials.svg").exists()
-    assert '1: {"C":1.0}' in svg_text
+    assert '1: {"alpha":1.0}' in svg_text
     assert warnings == []
 
 
@@ -521,7 +949,6 @@ def test_write_run_figures_uses_log_loss_axis_label_for_model_selection_trials(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
@@ -532,17 +959,16 @@ def test_write_run_figures_uses_log_loss_axis_label_for_model_selection_trials(
                 "sample_set_id": [0, 0],
                 "candidate_index": [0, 1],
                 "metric_name": ["log_loss", "log_loss"],
-                "params_json": ["{}", "{\"C\":1.0}"],
+                "params_json": ["{}", '{"alpha":1.0}'],
                 "n_inner_folds": [2, 2],
                 "n_valid_inner_folds": [2, 2],
                 "metric_value_mean": [0.40, 0.55],
                 "metric_value_std": [0.02, 0.03],
             }
         ),
-        auto_threshold_metric="mcc",
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
     assert "Log Loss" in svg_text
     assert warnings == []
@@ -555,7 +981,6 @@ def test_write_run_figures_hides_fixed_params_in_model_selection_labels(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
@@ -567,8 +992,8 @@ def test_write_run_figures_hides_fixed_params_in_model_selection_labels(
                 "candidate_index": [0, 1],
                 "metric_name": ["mcc", "mcc"],
                 "params_json": [
-                    "{\"C\":1.0,\"l1_ratio\":0.5}",
-                    "{\"C\":2.0,\"l1_ratio\":0.5}",
+                    '{"alpha":1.0,"l1_ratio":0.5}',
+                    '{"alpha":2.0,"l1_ratio":0.5}',
                 ],
                 "n_inner_folds": [2, 2],
                 "n_valid_inner_folds": [2, 2],
@@ -576,14 +1001,80 @@ def test_write_run_figures_hides_fixed_params_in_model_selection_labels(
                 "metric_value_std": [0.02, 0.03],
             }
         ),
-        auto_threshold_metric="mcc",
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
-    assert '0: {"C":1.0}' in svg_text
-    assert '1: {"C":2.0}' in svg_text
+    assert '0: {"alpha":1.0}' in svg_text
+    assert '1: {"alpha":2.0}' in svg_text
     assert "l1_ratio" not in svg_text
+    assert warnings == []
+
+
+def test_write_run_figures_writes_one_se_model_selection_figure(
+    tmp_path: Path,
+) -> None:
+    summary = pl.DataFrame(
+        {
+            "fold_id": ["0", "0", "0", "1", "1", "1"],
+            "sample_set_id": [0, 0, 0, 0, 0, 0],
+            "candidate_index": [0, 1, 2, 0, 1, 2],
+            "metric_name": ["log_loss"] * 6,
+            "params_json": [
+                '{"alpha":1.0}',
+                '{"alpha":0.1}',
+                '{"alpha":0.01}',
+                '{"alpha":1.0}',
+                '{"alpha":0.1}',
+                '{"alpha":0.01}',
+            ],
+            "n_inner_folds": [2] * 6,
+            "n_valid_inner_folds": [2] * 6,
+            "metric_value_mean": [0.40, 0.23, 0.20, 0.35, 0.24, 0.21],
+            "metric_value_std": [0.01, 0.01, 0.07, 0.01, 0.01, 0.08],
+            "metric_value_se": [0.007, 0.007, 0.049, 0.007, 0.007, 0.057],
+        }
+    )
+    selected = pl.DataFrame(
+        {
+            "selection_scope": ["outer_fold", "outer_fold", "final_refit"],
+            "fold_id": ["0", "1", "NA"],
+            "sample_set_id": [0, 0, 0],
+            "selection_source_sample_set_id": [0, 0, 0],
+            "rank": [1, 1, 1],
+            "candidate_index": [1, 1, 1],
+            "metric_name": ["log_loss", "log_loss", "log_loss"],
+            "metric_value": [0.23, 0.24, 0.22],
+            "metric_value_se": [0.007, 0.007, 0.006],
+            "selection_rule": ["one_se", "one_se", "one_se"],
+            "n_available_candidates": [3, 3, 3],
+            "n_scored_candidates": [3, 3, 3],
+            "selected_candidate_count_requested": [1, 1, 1],
+            "selected_candidate_count_effective": [1, 1, 1],
+            "params_json": ['{"alpha":0.1}', '{"alpha":0.1}', '{"alpha":0.1}'],
+        }
+    )
+
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_minimal_oof(),
+        feature_importance=_minimal_feature_importance(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        model_selection_trials_summary=summary,
+        model_selection_selected=selected,
+    )
+
+    figures_dir = tmp_path / "run" / "cv" / "figures"
+    one_se_svg = (figures_dir / "model_selection_one_se_curve.svg").read_text(encoding="utf-8")
+    assert "one-SE threshold" in one_se_svg
+    assert "Selected candidate" in one_se_svg
+    assert "log10(alpha)" in one_se_svg
+    assert "Log loss mean" in one_se_svg
+    assert "Log Loss mean" not in one_se_svg
+    assert not (figures_dir / "selected_hyperparameter_stability.svg").exists()
     assert warnings == []
 
 
@@ -599,11 +1090,7 @@ def test_write_run_figures_limits_model_selection_sample_sets_per_fold(
                     "sample_set_id": sample_set_id,
                     "candidate_index": candidate_index,
                     "metric_name": "mcc",
-                    "params_json": (
-                        "{\"panel_param\":"
-                        f"{sample_set_id * 10 + candidate_index}"
-                        "}"
-                    ),
+                    "params_json": (f'{{"panel_param":{sample_set_id * 10 + candidate_index}}}'),
                     "n_inner_folds": 2,
                     "n_valid_inner_folds": 2,
                     "metric_value_mean": 0.3 + sample_set_id * 0.01 + candidate_index * 0.02,
@@ -616,18 +1103,16 @@ def test_write_run_figures_limits_model_selection_sample_sets_per_fold(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
         model_selection_trials=None,
         model_selection_trials_summary=summary,
-        auto_threshold_metric="mcc",
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
-    assert "fold=0" in svg_text
+    assert "fold=0" not in svg_text
     assert '0: {"panel_param":0}' in svg_text
     assert '"panel_param":10' not in svg_text
     assert warnings == []
@@ -638,7 +1123,6 @@ def test_write_run_figures_ignores_empty_ensemble_inputs(tmp_path: Path) -> None
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=pl.DataFrame(
@@ -650,10 +1134,9 @@ def test_write_run_figures_ignores_empty_ensemble_inputs(tmp_path: Path) -> None
             }
         ),
         model_selection_trials=None,
-        auto_threshold_metric="mcc",
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     assert not (figures_dir / "ensemble_uncertainty.svg").exists()
     assert warnings == []
 
@@ -670,17 +1153,42 @@ def test_write_run_figures_collects_warning_when_roc_curves_cannot_be_drawn(tmp_
                 "prob": [0.2, 0.8, 0.3, 0.7],
             }
         ),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
         model_selection_trials=None,
-        auto_threshold_metric="mcc",
     )
 
     assert any("no folds with both labels" in warning for warning in warnings)
-    figures_dir = tmp_path / "run" / "figures"
-    assert (figures_dir / "threshold_selection_curve.svg").exists()
+
+
+def test_write_run_figures_skips_external_curves_for_single_class_external_test(
+    tmp_path: Path,
+) -> None:
+    warnings = write_run_figures(
+        run_dir=tmp_path / "run",
+        metrics_cv=_minimal_metrics_cv(),
+        oof_predictions=_minimal_oof(),
+        feature_importance=_minimal_feature_importance(),
+        coefficients=_minimal_coefficients(),
+        ensemble_model_probs=None,
+        model_selection_trials=None,
+        pred_external_test=pl.DataFrame(
+            {
+                "species": ["sp5", "sp6"],
+                "true_label": [1, 1],
+                "prob": [0.7, 0.9],
+                "pred_label_fixed_threshold": [1, 1],
+            }
+        ),
+    )
+
+    external_figures_dir = tmp_path / "run" / "external_test" / "figures"
+    assert (external_figures_dir / "external_confusion_matrix.svg").exists()
+    assert (external_figures_dir / "external_species_probability_by_trait.svg").exists()
+    assert not (external_figures_dir / "external_roc_curve.svg").exists()
+    assert not (external_figures_dir / "external_pr_curve.svg").exists()
+    assert any("external_test requires both labels" in warning for warning in warnings)
 
 
 def test_write_run_figures_rejects_invalid_metrics_schema(tmp_path: Path) -> None:
@@ -689,12 +1197,10 @@ def test_write_run_figures_rejects_invalid_metrics_schema(tmp_path: Path) -> Non
             run_dir=tmp_path / "run",
             metrics_cv=pl.DataFrame({"aggregate_scope": ["macro"]}),
             oof_predictions=_minimal_oof(),
-            thresholds=_minimal_thresholds(),
             feature_importance=_minimal_feature_importance(),
             coefficients=_minimal_coefficients(),
             ensemble_model_probs=None,
             model_selection_trials=None,
-            auto_threshold_metric="mcc",
         )
 
 
@@ -711,12 +1217,10 @@ def test_write_run_figures_rejects_metrics_without_aggregate_rows(tmp_path: Path
                 }
             ),
             oof_predictions=_minimal_oof(),
-            thresholds=_minimal_thresholds(),
             feature_importance=_minimal_feature_importance(),
             coefficients=_minimal_coefficients(),
             ensemble_model_probs=None,
             model_selection_trials=None,
-            auto_threshold_metric="mcc",
         )
 
 
@@ -729,7 +1233,6 @@ def test_write_predict_figures_rejects_empty_prediction_table(tmp_path: Path) ->
                     "species": pl.String,
                     "prob": pl.Float64,
                     "pred_label_fixed_threshold": pl.Int64,
-                    "pred_label_cv_derived_threshold": pl.Int64,
                 }
             ),
             require_uncertainty=False,
@@ -753,6 +1256,7 @@ def test_write_report_figures_rejects_invalid_run_schema_for_metric_comparison(
                 {
                     "rank": [1],
                     "run_id": ["r1"],
+                    "metric_name": ["mcc"],
                     "metric_value": [0.9],
                 }
             ),
@@ -767,6 +1271,7 @@ def test_write_report_figures_rejects_missing_execution_stage_column(tmp_path: P
                 {
                     "run_id": ["r1"],
                     "metric_value": [0.9],
+                    "primary_metric": ["mcc"],
                     "start_time": ["2026-01-01T00:00:00+00:00"],
                 }
             ),
@@ -774,6 +1279,7 @@ def test_write_report_figures_rejects_missing_execution_stage_column(tmp_path: P
                 {
                     "rank": [1],
                     "run_id": ["r1"],
+                    "metric_name": ["mcc"],
                     "metric_value": [0.9],
                 }
             ),
@@ -787,7 +1293,6 @@ def test_write_run_figures_ignores_ensemble_model_probs_for_figure_generation(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=pl.DataFrame(
@@ -799,10 +1304,9 @@ def test_write_run_figures_ignores_ensemble_model_probs_for_figure_generation(
             }
         ),
         model_selection_trials=None,
-        auto_threshold_metric="mcc",
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     assert not (figures_dir / "ensemble_uncertainty.svg").exists()
     assert warnings == []
 
@@ -814,7 +1318,6 @@ def test_write_run_figures_ignores_model_selection_trials_with_all_null_metrics(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
         oof_predictions=_minimal_oof(),
-        thresholds=_minimal_thresholds(),
         feature_importance=_minimal_feature_importance(),
         coefficients=_minimal_coefficients(),
         ensemble_model_probs=None,
@@ -828,53 +1331,11 @@ def test_write_run_figures_ignores_model_selection_trials_with_all_null_metrics(
                 "metric_value": [None],
             }
         ),
-        auto_threshold_metric="mcc",
     )
 
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     assert not (figures_dir / "model_selection_trials.svg").exists()
     assert warnings == []
-
-
-def test_threshold_selection_curve_rejects_invalid_schema(tmp_path: Path) -> None:
-    with pytest.raises(FigureError, match="prediction_cv.tsv schema is invalid"):
-        figures_mod._threshold_selection_curve(
-            oof_predictions=pl.DataFrame({"prob": [0.1, 0.9]}),
-            thresholds=_minimal_thresholds(),
-            selection_metric="mcc",
-            out_path=tmp_path / "threshold_selection_curve.svg",
-        )
-
-
-def test_threshold_selection_curve_rejects_empty_predictions(tmp_path: Path) -> None:
-    with pytest.raises(FigureError, match="prediction_cv.tsv is empty"):
-        figures_mod._threshold_selection_curve(
-            oof_predictions=pl.DataFrame(
-                schema={
-                    "label": pl.Int64,
-                    "prob": pl.Float64,
-                }
-            ),
-            thresholds=_minimal_thresholds(),
-            selection_metric="mcc",
-            out_path=tmp_path / "threshold_selection_curve.svg",
-        )
-
-
-def test_threshold_selection_curve_handles_all_nan_scores(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(figures_mod, "_metric_score", lambda *_args, **_kwargs: float("nan"))
-    out_path = tmp_path / "threshold_selection_curve.svg"
-
-    figures_mod._threshold_selection_curve(
-        oof_predictions=pl.DataFrame({"label": [0, 1], "prob": [0.1, 0.9]}),
-        thresholds=_minimal_thresholds(),
-        selection_metric="mcc",
-        out_path=out_path,
-    )
-
-    assert "No valid threshold scores" in out_path.read_text(encoding="utf-8")
 
 
 def test_species_probability_by_trait_rejects_invalid_schema(tmp_path: Path) -> None:
@@ -925,6 +1386,67 @@ def test_species_probability_by_trait_writes_svg(tmp_path: Path) -> None:
         figure_name="cv_species_probability_by_trait.svg",
     )
     assert out_path.exists()
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "n=2" in svg_text
+    assert "mean=" not in svg_text
+    assert "stroke-dasharray" in svg_text
+
+
+def test_species_probability_cv_and_inference_writes_svg(tmp_path: Path) -> None:
+    out_path = tmp_path / "species_probability_cv_and_inference.svg"
+    figures_mod._species_probability_cv_and_inference(
+        oof_predictions=pl.DataFrame(
+            {
+                "species": ["sp1", "sp2", "sp3", "sp4"],
+                "label": [0, 0, 1, 1],
+                "prob": [0.2, 0.4, 0.7, 0.9],
+            }
+        ),
+        pred_inference=pl.DataFrame(
+            {
+                "species": ["sp5", "sp6", "sp7"],
+                "prob": [0.1, 0.55, 0.95],
+            }
+        ),
+        trait_name="C4",
+        out_path=out_path,
+    )
+
+    assert out_path.exists()
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "C4" in svg_text
+    assert "unannotated" in svg_text
+    assert "n=3" in svg_text
+    assert "stroke-dasharray" in svg_text
+
+
+def test_group_probability_figure_writes_all_groups(tmp_path: Path) -> None:
+    out_path = tmp_path / "probability_by_family.svg"
+    rows = [
+        {
+            "species": f"sp{i:02d}",
+            "prob": 1.0 - (i * 0.01),
+            "group_id": f"Family {i:02d}",
+            "pred_label_fixed_threshold": 1 if i <= 20 else 0,
+        }
+        for i in range(1, 32)
+    ]
+
+    figures_mod.write_group_probability_figure(
+        grouped_predictions=pl.DataFrame(rows),
+        out_path=out_path,
+        group_label="family",
+        source_table_name="prediction_inference.tsv",
+        figure_name="probability_by_family.svg",
+    )
+
+    assert out_path.exists()
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "Family 01" in svg_text
+    assert "Family 31" in svg_text
+    first_group_y, _ = _svg_text_y_and_viewbox_height(out_path, "Family 01 (n=1)")
+    legend_y, _ = _svg_text_y_and_viewbox_height(out_path, "pred 0")
+    assert 0 < legend_y < first_group_y < 45
 
 
 def test_cv_fold_trait_probability_rejects_invalid_schema(tmp_path: Path) -> None:
@@ -960,25 +1482,39 @@ def test_cv_fold_trait_probability_writes_svg(tmp_path: Path) -> None:
             }
         ),
         out_path=out_path,
+        trait_name="C4",
     )
     assert out_path.exists()
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "CV Fold Trait Probability" not in svg_text
+    assert "Fold-wise probability distribution" not in svg_text
+    assert "fold=0" not in svg_text
+    assert "fold=1" not in svg_text
+    assert "C4" in svg_text
+    assert "C4=0" not in svg_text
+    assert "C4=1" not in svg_text
+    assert "#f7f7f7" in svg_text
+    assert "#d9d9d9" in svg_text
 
 
-def test_retained_features_by_fold_rejects_invalid_schema(tmp_path: Path) -> None:
+def test_non_zero_feature_count_by_fold_rejects_invalid_schema(tmp_path: Path) -> None:
     with pytest.raises(FigureError, match="schema is invalid"):
-        figures_mod._retained_features_by_fold(
-            retained_features_summary=pl.DataFrame({"feature": ["OG1"]}),
-            out_path=tmp_path / "retained_features_by_fold.svg",
+        figures_mod._non_zero_feature_count_by_fold(
+            model_sparsity=pl.DataFrame({"fold_id": ["0"]}),
+            out_path=tmp_path / "non_zero_feature_count_by_fold.svg",
         )
 
 
-def test_retained_features_by_fold_writes_svg(tmp_path: Path) -> None:
-    out_path = tmp_path / "retained_features_by_fold.svg"
-    figures_mod._retained_features_by_fold(
-        retained_features_summary=_minimal_retained_features_summary(),
+def test_non_zero_feature_count_by_fold_writes_svg(tmp_path: Path) -> None:
+    out_path = tmp_path / "non_zero_feature_count_by_fold.svg"
+    figures_mod._non_zero_feature_count_by_fold(
+        model_sparsity=_minimal_model_sparsity(),
         out_path=out_path,
     )
     assert out_path.exists()
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "Number of non-zero features per model" in svg_text
+    assert "CV fold" in svg_text
 
 
 def test_feature_importance_top_rejects_invalid_schema(tmp_path: Path) -> None:
@@ -1014,6 +1550,159 @@ def test_feature_importance_top_handles_zero_importances(tmp_path: Path) -> None
         out_path=out_path,
     )
     assert out_path.exists()
+    svg_text = out_path.read_text()
+    assert "Feature Importance Top" not in svg_text
+    assert "importance_mean" not in svg_text
+    assert "Orthogroup" in svg_text
+    assert "Mean feature importance per fold" in svg_text
+    assert "#009e73" not in svg_text
+    assert "#666666" in svg_text
+
+
+def test_feature_importance_top_uses_requested_feature_limit(tmp_path: Path) -> None:
+    out_path = tmp_path / "feature_importance_top.svg"
+    figures_mod._feature_importance_top(
+        feature_importance=pl.DataFrame(
+            {
+                "feature": ["OG1", "OG2", "OG3"],
+                "importance_mean": [0.2, 0.9, 0.1],
+            }
+        ),
+        out_path=out_path,
+        top_features=1,
+    )
+
+    svg_text = out_path.read_text()
+    assert "OG2" in svg_text
+    assert "OG1" not in svg_text
+    assert "OG3" not in svg_text
+
+
+def test_feature_importance_top_fold_points_use_neutral_styling(tmp_path: Path) -> None:
+    out_path = tmp_path / "feature_importance_top.svg"
+    figures_mod._feature_importance_top(
+        feature_importance=pl.DataFrame(
+            {
+                "feature": ["OG1", "OG2"],
+                "importance_mean": [0.4, 0.3],
+            }
+        ),
+        feature_importance_by_fold=pl.DataFrame(
+            {
+                "fold_id": ["0", "1", "0", "1"],
+                "feature": ["OG1", "OG1", "OG2", "OG2"],
+                "importance_mean": [0.5, 0.3, 0.2, 0.4],
+            }
+        ),
+        out_path=out_path,
+    )
+
+    svg_text = out_path.read_text()
+    assert "Feature Importance Top" not in svg_text
+    assert "fold-level importance_mean" not in svg_text
+    assert "Orthogroup" in svg_text
+    assert "Mean feature importance per fold" in svg_text
+    assert "#009e73" not in svg_text
+    assert "#d9f0e6" not in svg_text
+    assert "#eeeeee" in svg_text
+    assert "#666666" in svg_text
+
+
+def test_feature_importance_top_writes_annotation_labels(tmp_path: Path) -> None:
+    out_path = tmp_path / "feature_importance_top.svg"
+    figures_mod._feature_importance_top(
+        feature_importance=_minimal_feature_importance(),
+        out_path=out_path,
+        orthogroup_annotations=_minimal_orthogroup_annotations(),
+    )
+
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "Orthogroup" in svg_text
+    assert "beta carbonic anhydrase" in svg_text
+    assert "(OG1)" in svg_text
+    assert "carbonic" in svg_text
+    assert "photosynthetic" in svg_text
+    assert "annotation" in svg_text
+
+
+def test_feature_importance_by_fold_heatmap_rejects_invalid_schema(tmp_path: Path) -> None:
+    with pytest.raises(FigureError, match="feature_importance_by_fold.tsv schema is invalid"):
+        figures_mod._feature_importance_by_fold_heatmap(
+            feature_importance=_minimal_feature_importance(),
+            feature_importance_by_fold=pl.DataFrame({"feature": ["OG1"]}),
+            out_path=tmp_path / "feature_importance_by_fold_heatmap.svg",
+        )
+
+
+def test_feature_importance_by_fold_heatmap_writes_svg(tmp_path: Path) -> None:
+    out_path = tmp_path / "feature_importance_by_fold_heatmap.svg"
+    figures_mod._feature_importance_by_fold_heatmap(
+        feature_importance=_minimal_feature_importance(),
+        feature_importance_by_fold=_minimal_feature_importance_by_fold(),
+        out_path=out_path,
+    )
+
+    assert out_path.exists()
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "CV fold" in svg_text
+    assert "Orthogroup" in svg_text
+    assert "Mean feature importance per fold" in svg_text
+    assert "OG1" in svg_text
+    assert "OG2" in svg_text
+
+
+def test_feature_importance_by_fold_heatmap_writes_annotation_labels(
+    tmp_path: Path,
+) -> None:
+    out_path = tmp_path / "feature_importance_by_fold_heatmap.svg"
+    figures_mod._feature_importance_by_fold_heatmap(
+        feature_importance=_minimal_feature_importance(),
+        feature_importance_by_fold=_minimal_feature_importance_by_fold(),
+        out_path=out_path,
+        orthogroup_annotations=_minimal_orthogroup_annotations(),
+    )
+
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "Orthogroup" in svg_text
+    assert "beta carbonic anhydrase" in svg_text
+    assert "(OG1)" in svg_text
+    assert "carbonic" in svg_text
+    assert "photosynthetic" in svg_text
+
+
+def test_feature_importance_by_fold_heatmap_colormap_starts_at_white() -> None:
+    cmap = figures_mod._FEATURE_IMPORTANCE_HEATMAP_CMAP
+
+    assert to_hex(cmap(0.0)) == "#ffffff"
+    assert to_hex(cmap(0.5)) != "#ffffff"
+
+
+def test_feature_importance_by_fold_heatmap_uses_requested_feature_limit(
+    tmp_path: Path,
+) -> None:
+    out_path = tmp_path / "feature_importance_by_fold_heatmap.svg"
+    figures_mod._feature_importance_by_fold_heatmap(
+        feature_importance=pl.DataFrame(
+            {
+                "feature": ["OG1", "OG2", "OG3"],
+                "importance_mean": [0.2, 0.9, 0.1],
+            }
+        ),
+        feature_importance_by_fold=pl.DataFrame(
+            {
+                "fold_id": ["0", "0", "0"],
+                "feature": ["OG1", "OG2", "OG3"],
+                "importance_mean": [0.2, 0.9, 0.1],
+            }
+        ),
+        out_path=out_path,
+        top_features=1,
+    )
+
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "OG2" in svg_text
+    assert "OG1" not in svg_text
+    assert "OG3" not in svg_text
 
 
 def test_coefficients_signed_top_rejects_invalid_schema(tmp_path: Path) -> None:
@@ -1052,6 +1741,79 @@ def test_coefficients_signed_top_handles_zero_coefficients(tmp_path: Path) -> No
         out_path=out_path,
     )
     assert out_path.exists()
+    svg_text = out_path.read_text()
+    assert "Coefficients Signed Top" not in svg_text
+    assert "Top 30 by |coef_mean|" not in svg_text
+    assert "Orthogroup" in svg_text
+    assert "#1f77b4" not in svg_text
+    assert "#d62728" not in svg_text
+
+
+def test_coefficients_signed_top_uses_requested_feature_limit(tmp_path: Path) -> None:
+    out_path = tmp_path / "coefficients_signed_top.svg"
+    figures_mod._coefficients_signed_top(
+        coefficients=pl.DataFrame(
+            {
+                "feature": ["OG1", "OG2", "OG3"],
+                "coef_mean": [0.2, -0.9, 0.1],
+                "method": ["coef_signed", "coef_signed", "coef_signed"],
+            }
+        ),
+        out_path=out_path,
+        top_features=1,
+    )
+
+    svg_text = out_path.read_text()
+    assert "OG2" in svg_text
+    assert "OG1" not in svg_text
+    assert "OG3" not in svg_text
+
+
+def test_coefficients_signed_top_fold_points_use_neutral_styling(tmp_path: Path) -> None:
+    out_path = tmp_path / "coefficients_signed_top.svg"
+    figures_mod._coefficients_signed_top(
+        coefficients=pl.DataFrame(
+            {
+                "feature": ["OG1", "OG2"],
+                "coef_mean": [0.4, -0.3],
+                "method": ["coef_signed", "coef_signed"],
+            }
+        ),
+        coefficients_by_fold=pl.DataFrame(
+            {
+                "fold_id": ["0", "1", "0", "1"],
+                "feature": ["OG1", "OG1", "OG2", "OG2"],
+                "coef_mean": [0.5, 0.3, -0.2, -0.4],
+                "method": ["coef_signed", "coef_signed", "coef_signed", "coef_signed"],
+            }
+        ),
+        out_path=out_path,
+    )
+
+    svg_text = out_path.read_text()
+    assert "Coefficients Signed Top" not in svg_text
+    assert "Top 30 by |mean fold-level coef|" not in svg_text
+    assert "Orthogroup" in svg_text
+    assert "#1f77b4" not in svg_text
+    assert "#d62728" not in svg_text
+    assert "#eeeeee" in svg_text
+    assert "#666666" in svg_text
+
+
+def test_coefficients_signed_top_writes_annotation_labels(tmp_path: Path) -> None:
+    out_path = tmp_path / "coefficients_signed_top.svg"
+    figures_mod._coefficients_signed_top(
+        coefficients=_minimal_coefficients(),
+        out_path=out_path,
+        orthogroup_annotations=_minimal_orthogroup_annotations(),
+    )
+
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "Orthogroup" in svg_text
+    assert "beta carbonic anhydrase" in svg_text
+    assert "(OG1)" in svg_text
+    assert "carbonic" in svg_text
+    assert "photosynthetic" in svg_text
 
 
 def test_predict_probability_distribution_rejects_missing_prob_column(tmp_path: Path) -> None:
@@ -1062,12 +1824,50 @@ def test_predict_probability_distribution_rejects_missing_prob_column(tmp_path: 
         )
 
 
+def test_predict_probability_distribution_uses_contiguous_histogram_bins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+    original_subplots = figures_mod.plt.subplots
+
+    def subplots_spy(*args, **kwargs):
+        fig, ax = original_subplots(*args, **kwargs)
+        original_hist = ax.hist
+
+        def hist_spy(x, *hist_args, **hist_kwargs):
+            captured["bins"] = np.asarray(hist_kwargs["bins"], dtype=float)
+            result = original_hist(x, *hist_args, **hist_kwargs)
+            bars = list(result[2])
+            captured["bar_lefts"] = np.array([bar.get_x() for bar in bars], dtype=float)
+            captured["bar_widths"] = np.array([bar.get_width() for bar in bars], dtype=float)
+            return result
+
+        ax.hist = hist_spy
+        return fig, ax
+
+    monkeypatch.setattr(figures_mod.plt, "subplots", subplots_spy)
+    out_path = tmp_path / "predict_probability_distribution.svg"
+
+    figures_mod._predict_probability_distribution(
+        pred_predict=pl.DataFrame({"prob": [0.01, 0.11, 0.92]}),
+        out_path=out_path,
+    )
+
+    np.testing.assert_allclose(captured["bins"], np.linspace(0.0, 1.0, 11))
+    bar_lefts = np.asarray(captured["bar_lefts"], dtype=float)
+    bar_widths = np.asarray(captured["bar_widths"], dtype=float)
+    np.testing.assert_allclose(bar_widths, np.diff(np.linspace(0.0, 1.0, 11)))
+    np.testing.assert_allclose(bar_lefts[1:], bar_lefts[:-1] + bar_widths[:-1])
+
+    svg_text = out_path.read_text(encoding="utf-8")
+    assert "Predicted probability" in svg_text
+    assert "Number of species" in svg_text
+
+
 def test_predict_uncertainty_rejects_empty_table_when_required(tmp_path: Path) -> None:
     with pytest.raises(FigureError, match="prediction_inference.tsv is empty"):
         figures_mod._predict_uncertainty(
-            pred_predict=pl.DataFrame(
-                schema={"species": pl.String, "uncertainty_std": pl.Float64}
-            ),
+            pred_predict=pl.DataFrame(schema={"species": pl.String, "uncertainty_std": pl.Float64}),
             out_path=tmp_path / "predict_uncertainty.svg",
             required=True,
         )
@@ -1092,7 +1892,8 @@ def test_roc_pr_curves_rejects_invalid_schema(tmp_path: Path) -> None:
     with pytest.raises(FigureError, match="prediction_cv.tsv schema is invalid"):
         figures_mod._roc_pr_curves_cv(
             oof_predictions=pl.DataFrame({"label": [0, 1], "prob": [0.2, 0.8]}),
-            out_path=tmp_path / "roc_pr_curves_cv.svg",
+            roc_out_path=tmp_path / "roc_curve_cv.svg",
+            pr_out_path=tmp_path / "pr_curve_cv.svg",
         )
 
 
@@ -1106,8 +1907,72 @@ def test_roc_pr_curves_rejects_empty_table(tmp_path: Path) -> None:
                     "prob": pl.Float64,
                 }
             ),
-            out_path=tmp_path / "roc_pr_curves_cv.svg",
+            roc_out_path=tmp_path / "roc_curve_cv.svg",
+            pr_out_path=tmp_path / "pr_curve_cv.svg",
         )
+
+
+def test_roc_pr_curves_preserves_pr_curve_threshold_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, np.ndarray | str] = {}
+    original_subplots = figures_mod.plt.subplots
+
+    def subplots_spy(*args, **kwargs):
+        fig, ax = original_subplots(*args, **kwargs)
+        original_plot = ax.plot
+
+        def plot_spy(x, y, *plot_args, **plot_kwargs):
+            if plot_kwargs.get("color") == figures_mod._COLOR_ORANGE:
+                captured["recall"] = np.asarray(x, dtype=float)
+                captured["precision"] = np.asarray(y, dtype=float)
+                captured["drawstyle"] = plot_kwargs.get("drawstyle")
+            return original_plot(x, y, *plot_args, **plot_kwargs)
+
+        ax.plot = plot_spy
+        return fig, ax
+
+    monkeypatch.setattr(figures_mod.plt, "subplots", subplots_spy)
+    oof_predictions = pl.DataFrame(
+        {
+            "fold_id": ["0"] * 6,
+            "label": [1, 1, 1, 0, 0, 0],
+            "prob": [0.02, 0.81, 0.91, 0.61, 0.73, 0.54],
+        }
+    )
+
+    figures_mod._roc_pr_curves_cv(
+        oof_predictions=oof_predictions,
+        roc_out_path=tmp_path / "roc_curve_cv.svg",
+        pr_out_path=tmp_path / "pr_curve_cv.svg",
+    )
+
+    precision, recall, _ = figures_mod.precision_recall_curve(
+        np.array([1, 1, 1, 0, 0, 0]),
+        np.array([0.02, 0.81, 0.91, 0.61, 0.73, 0.54]),
+    )
+    recall_order = np.argsort(recall)
+    assert not np.array_equal(precision[recall_order], precision)
+    np.testing.assert_allclose(captured["recall"], recall)
+    np.testing.assert_allclose(captured["precision"], precision)
+    assert captured["drawstyle"] == "steps-post"
+
+
+def test_roc_pr_curves_cv_use_square_publication_panels(tmp_path: Path) -> None:
+    figures_mod._roc_pr_curves_cv(
+        oof_predictions=pl.DataFrame(
+            {
+                "fold_id": ["0"] * 6,
+                "label": [0, 0, 0, 1, 1, 1],
+                "prob": [0.1, 0.2, 0.3, 0.7, 0.8, 0.9],
+            }
+        ),
+        roc_out_path=tmp_path / "roc_curve_cv.svg",
+        pr_out_path=tmp_path / "pr_curve_cv.svg",
+    )
+
+    assert _svg_viewbox_size(tmp_path / "roc_curve_cv.svg") == pytest.approx((252.0, 252.0))
+    assert _svg_viewbox_size(tmp_path / "pr_curve_cv.svg") == pytest.approx((252.0, 252.0))
 
 
 def test_predict_probability_distribution_handles_nan_only_probabilities(tmp_path: Path) -> None:

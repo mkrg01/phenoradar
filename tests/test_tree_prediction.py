@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import polars as pl
+import pytest
 
 from phenoradar.tree_prediction import (
+    TreePredictionError,
+    _ensure_svg_white_background,
+    _load_expression_for_heatmap,
+    _oof_confusion_group,
     build_contrast_pair_tree_annotation,
     build_cv_tree_prediction_annotation,
     build_external_tree_prediction_annotation,
@@ -12,6 +19,27 @@ from phenoradar.tree_prediction import (
     build_tree_feature_heatmap_annotation,
     write_run_tree_prediction_artifacts,
 )
+
+
+def _svg_text_absolute_y(svg_text: str, text: str) -> float:
+    root = ET.fromstring(svg_text)
+    parent_by_child = {child: parent for parent in root.iter() for child in parent}
+    element = next(
+        element
+        for element in root.iter()
+        if element.tag.endswith("text") and "".join(element.itertext()) == text
+    )
+    y = float(element.attrib.get("y", "0"))
+    current = element
+    while current in parent_by_child:
+        current = parent_by_child[current]
+        for match in re.finditer(
+            r"translate\([^ ,]+(?:[ ,]+([^ )]+))?\)",
+            current.attrib.get("transform", ""),
+        ):
+            if match.group(1) is not None:
+                y += float(match.group(1))
+    return y
 
 
 def _metadata() -> pl.DataFrame:
@@ -27,8 +55,8 @@ def _metadata() -> pl.DataFrame:
 def _thresholds() -> pl.DataFrame:
     return pl.DataFrame(
         {
-            "threshold_name": ["fixed_probability_threshold", "cv_derived_threshold"],
-            "threshold_value": [0.5, 0.7],
+            "threshold_name": ["fixed_probability_threshold"],
+            "threshold_value": [0.5],
         }
     )
 
@@ -58,6 +86,19 @@ def _coefficients() -> pl.DataFrame:
     )
 
 
+def _orthogroup_annotations() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "feature": ["OG1", "OG2"],
+            "orthogroup_annotation_taxid": ["3193", "3193"],
+            "orthogroup_annotation": [
+                "beta carbonic anhydrase with a deliberately long wrapped annotation",
+                "hypothetical protein",
+            ],
+        }
+    )
+
+
 def _write_tpm(path: Path) -> None:
     pl.DataFrame(
         {
@@ -66,6 +107,161 @@ def _write_tpm(path: Path) -> None:
             "tpm": [0.0, 3.0, 3.0, 15.0, 7.0, 0.0],
         }
     ).write_csv(path, separator="\t")
+
+
+@pytest.mark.parametrize(
+    ("true_label", "probability", "expected"),
+    [
+        (1, 0.8, "TP"),
+        (1, 0.2, "FN"),
+        (0, 0.2, "TN"),
+        (0, 0.8, "FP"),
+        (None, 0.8, None),
+        (1, float("nan"), None),
+    ],
+)
+def test_oof_confusion_group(
+    true_label: object,
+    probability: object,
+    expected: str | None,
+) -> None:
+    assert _oof_confusion_group(true_label, probability) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "reason"),
+    [
+        ("", "missing"),
+        ("bad", "non-numeric"),
+        ("NaN", "non-finite"),
+        ("-0.1", "negative"),
+    ],
+)
+def test_load_expression_for_heatmap_rejects_invalid_tpm(
+    tmp_path: Path,
+    raw_value: str,
+    reason: str,
+) -> None:
+    tpm_path = tmp_path / "invalid_tpm.tsv"
+    tpm_path.write_text(
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                f"sp1\tOG1\t{raw_value}",
+                "sp2\tOG1\t1.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        TreePredictionError,
+        match=rf"first_invalid_line=2.*\({reason}\)",
+    ):
+        _load_expression_for_heatmap(
+            tpm_path=tpm_path,
+            species=["sp1"],
+            features=["OG1"],
+            species_col="species",
+            feature_col="orthogroup",
+            value_col="tpm",
+        )
+
+
+def test_load_expression_for_heatmap_sums_valid_duplicate_rows(tmp_path: Path) -> None:
+    tpm_path = tmp_path / "duplicate_tpm.tsv"
+    tpm_path.write_text(
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp1\tOG1\t2.0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = _load_expression_for_heatmap(
+        tpm_path=tpm_path,
+        species=["sp1"],
+        features=["OG1"],
+        species_col="species",
+        feature_col="orthogroup",
+        value_col="tpm",
+    )
+
+    assert data.select("tpm").item() == 3.0
+
+
+def test_load_expression_for_heatmap_rejects_non_finite_duplicate_sum(
+    tmp_path: Path,
+) -> None:
+    tpm_path = tmp_path / "overflow_duplicate_tpm.tsv"
+    tpm_path.write_text(
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1e308",
+                "sp1\tOG1\t1e308",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        TreePredictionError,
+        match=r"first_invalid_line=2.*\(non-finite-after-sum\)",
+    ):
+        _load_expression_for_heatmap(
+            tpm_path=tpm_path,
+            species=["sp1"],
+            features=["OG1"],
+            species_col="species",
+            feature_col="orthogroup",
+            value_col="tpm",
+        )
+
+
+def test_load_expression_for_heatmap_wraps_ragged_expression_row(tmp_path: Path) -> None:
+    tpm_path = tmp_path / "ragged_tpm.tsv"
+    tpm_path.write_text(
+        "species\torthogroup\ttpm\nsp1\tOG1\t1.0\textra\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TreePredictionError, match="Failed to read expression TSV"):
+        _load_expression_for_heatmap(
+            tpm_path=tpm_path,
+            species=["sp1"],
+            features=["OG1"],
+            species_col="species",
+            feature_col="orthogroup",
+            value_col="tpm",
+        )
+
+
+def test_ensure_svg_white_background_inserts_single_root_rect(tmp_path: Path) -> None:
+    svg_path = tmp_path / "tree.svg"
+    svg_path.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><g id="content" /></svg>',
+        encoding="utf-8",
+    )
+
+    _ensure_svg_white_background(svg_path)
+    _ensure_svg_white_background(svg_path)
+
+    root = ET.parse(svg_path).getroot()
+    children = list(root)
+    backgrounds = [child for child in children if child.get("id") == "phenoradar-svg-background"]
+    assert len(backgrounds) == 1
+    assert children[0] is backgrounds[0]
+    assert backgrounds[0].tag == "{http://www.w3.org/2000/svg}rect"
+    assert backgrounds[0].get("fill") == "#ffffff"
+    assert backgrounds[0].get("width") == "100%"
+    assert backgrounds[0].get("height") == "100%"
 
 
 def test_build_contrast_pair_tree_annotation_filters_to_grouped_species() -> None:
@@ -81,13 +277,13 @@ def test_build_contrast_pair_tree_annotation_filters_to_grouped_species() -> Non
             "label": "sp1",
             "species": "sp1",
             "true_label": 0,
-            "contrast_pair_id": "g1",
+            "group_id": "g1",
         },
         {
             "label": "sp2",
             "species": "sp2",
             "true_label": 1,
-            "contrast_pair_id": "g1",
+            "group_id": "g1",
         },
     ]
 
@@ -116,6 +312,7 @@ def test_build_tree_feature_heatmap_annotation_outputs_log2_and_zscore(tmp_path:
     assert annotation.height == 4
     first = annotation.filter((pl.col("species") == "sp1") & (pl.col("feature") == "OG2"))
     assert first.select("feature_rank").item() == 1
+    assert first.select("prob").item() is None
     assert first.select("log2_tpm_plus1").item() == 2.0
     assert first.select("coef_mean").item() == -0.4
     zscore_sum = (
@@ -124,7 +321,101 @@ def test_build_tree_feature_heatmap_annotation_outputs_log2_and_zscore(tmp_path:
     assert zscore_sum == 0.0
 
 
-def test_build_cv_tree_prediction_annotation_filters_to_contrast_pairs() -> None:
+def test_build_tree_feature_heatmap_annotation_reuses_complete_expression_cache(
+    tmp_path: Path,
+) -> None:
+    tpm_path = tmp_path / "tpm.tsv"
+    _write_tpm(tpm_path)
+    metadata = _metadata().with_columns(pl.col("C4").alias("true_label"))
+    expected = build_tree_feature_heatmap_annotation(
+        metadata=metadata,
+        tpm_path=tpm_path,
+        species_col="species",
+        feature_col="orthogroup",
+        value_col="tpm",
+        group_col="contrast_pair_id",
+        feature_importance=_feature_importance(),
+        coefficients=_coefficients(),
+        feature_limit=2,
+    )
+    cached_expression = pl.DataFrame(
+        {
+            "species": ["sp1", "sp1", "sp2", "sp2"],
+            "feature": ["OG1", "OG2", "OG1", "OG2"],
+            "tpm": [0.0, 3.0, 3.0, 15.0],
+        }
+    )
+
+    cached = build_tree_feature_heatmap_annotation(
+        metadata=metadata,
+        tpm_path=tmp_path / "not_read.tsv",
+        species_col="species",
+        feature_col="orthogroup",
+        value_col="tpm",
+        group_col="contrast_pair_id",
+        feature_importance=_feature_importance(),
+        coefficients=_coefficients(),
+        feature_limit=2,
+        top_feature_expression=cached_expression,
+    )
+
+    assert cached.to_dicts() == expected.to_dicts()
+
+
+def test_build_tree_feature_heatmap_annotation_falls_back_for_incomplete_cache(
+    tmp_path: Path,
+) -> None:
+    tpm_path = tmp_path / "tpm.tsv"
+    _write_tpm(tpm_path)
+    metadata = _metadata().with_columns(pl.col("C4").alias("true_label"))
+
+    annotation = build_tree_feature_heatmap_annotation(
+        metadata=metadata,
+        tpm_path=tpm_path,
+        species_col="species",
+        feature_col="orthogroup",
+        value_col="tpm",
+        group_col="contrast_pair_id",
+        feature_importance=_feature_importance(),
+        coefficients=_coefficients(),
+        feature_limit=2,
+        top_feature_expression=pl.DataFrame(
+            {"species": ["sp1"], "feature": ["OG1"], "tpm": [0.0]}
+        ),
+    )
+
+    assert annotation.height == 4
+    assert annotation.filter(
+        (pl.col("species") == "sp2") & (pl.col("feature") == "OG2")
+    ).get_column("tpm").item() == 15.0
+
+
+def test_build_tree_feature_heatmap_annotation_joins_orthogroup_annotations(
+    tmp_path: Path,
+) -> None:
+    tpm_path = tmp_path / "tpm.tsv"
+    _write_tpm(tpm_path)
+    metadata = _metadata().with_columns(pl.col("C4").alias("true_label"))
+
+    annotation = build_tree_feature_heatmap_annotation(
+        metadata=metadata,
+        tpm_path=tpm_path,
+        species_col="species",
+        feature_col="orthogroup",
+        value_col="tpm",
+        group_col="contrast_pair_id",
+        feature_importance=_feature_importance(),
+        coefficients=_coefficients(),
+        feature_limit=2,
+        orthogroup_annotations=_orthogroup_annotations(),
+    )
+
+    first = annotation.filter((pl.col("species") == "sp1") & (pl.col("feature") == "OG1"))
+    assert first.select("orthogroup_annotation_taxid").item() == "3193"
+    assert "carbonic anhydrase" in first.select("orthogroup_annotation").item()
+
+
+def test_build_cv_tree_prediction_annotation_filters_to_groups() -> None:
     annotation = build_cv_tree_prediction_annotation(
         metadata=_metadata(),
         oof_predictions=pl.DataFrame(
@@ -148,8 +439,36 @@ def test_build_cv_tree_prediction_annotation_filters_to_contrast_pairs() -> None
         "prob",
         "pred_label",
         "uncertainty_std",
-        "contrast_pair_id",
+        "group_id",
         "fold_id",
+    ]
+
+
+def test_build_cv_tree_prediction_annotation_uses_taxon_name_for_group_display() -> None:
+    metadata = pl.DataFrame(
+        {
+            "species": ["sp1", "sp2"],
+            "C4": [0, 1],
+            "family": ["Poaceae", "Poaceae"],
+        }
+    )
+
+    annotation = build_cv_tree_prediction_annotation(
+        metadata=metadata,
+        oof_predictions=pl.DataFrame(
+            {
+                "fold_id": ["0", "0"],
+                "species": ["sp1", "sp2"],
+                "label": [0, 1],
+                "prob": [0.2, 0.8],
+            }
+        ),
+        thresholds=_thresholds(),
+        group_col="family",
+    )
+
+    assert annotation.select(["group_id"]).unique().to_dicts() == [
+        {"group_id": "Poaceae"}
     ]
 
 
@@ -162,7 +481,6 @@ def test_build_external_tree_prediction_annotation_keeps_external_species() -> N
                 "true_label": [0],
                 "prob": [0.9],
                 "pred_label_fixed_threshold": [1],
-                "pred_label_cv_derived_threshold": [1],
             }
         ),
         group_col="contrast_pair_id",
@@ -176,12 +494,12 @@ def test_build_external_tree_prediction_annotation_keeps_external_species() -> N
             "prob": 0.9,
             "pred_label": 1,
             "uncertainty_std": None,
-            "contrast_pair_id": None,
+            "group_id": None,
         }
     ]
 
 
-def test_build_predict_tree_prediction_annotation_preserves_both_prediction_labels() -> None:
+def test_build_predict_tree_prediction_annotation_preserves_fixed_prediction_label() -> None:
     annotation = build_predict_tree_prediction_annotation(
         metadata=_metadata(),
         pred_predict=pl.DataFrame(
@@ -190,7 +508,6 @@ def test_build_predict_tree_prediction_annotation_preserves_both_prediction_labe
                 "true_label": [0, None],
                 "prob": [0.2, 0.6],
                 "pred_label_fixed_threshold": [0, 1],
-                "pred_label_cv_derived_threshold": [0, 0],
             }
         ),
         group_col="contrast_pair_id",
@@ -198,7 +515,6 @@ def test_build_predict_tree_prediction_annotation_preserves_both_prediction_labe
 
     assert annotation.select("species").to_series().to_list() == ["sp1", "sp4"]
     assert annotation.select("pred_label_fixed_threshold").to_series().to_list() == [0, 1]
-    assert annotation.select("pred_label_cv_derived_threshold").to_series().to_list() == [0, 0]
 
 
 def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extra(
@@ -210,7 +526,7 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
     _metadata().write_csv(metadata_path, separator="\t")
     _write_tpm(tpm_path)
     tree_path.write_text("(sp1,sp2,sp3);\n", encoding="utf-8")
-    figures_dir = tmp_path / "run" / "figures"
+    figures_dir = tmp_path / "run" / "cv" / "figures"
     figures_dir.mkdir(parents=True)
 
     warnings = write_run_tree_prediction_artifacts(
@@ -237,8 +553,222 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
         pred_external_test=None,
     )
 
-    assert (tmp_path / "run" / "tree_prediction_cv_annotation.tsv").exists()
-    assert (tmp_path / "run" / "tree_contrast_pairs_annotation.tsv").exists()
-    assert (tmp_path / "run" / "tree_feature_heatmap_annotation.tsv").exists()
-    if not (figures_dir / "tree_prediction_cv.svg").exists():
-        assert any("phenoradar[tree]" in warning for warning in warnings)
+    cv_tables_dir = tmp_path / "run" / "cv" / "tables"
+    assert (cv_tables_dir / "tree_prediction_cv_annotation.tsv").exists()
+    assert (cv_tables_dir / "tree_contrast_pairs_annotation.tsv").exists()
+    assert (cv_tables_dir / "tree_feature_heatmap_annotation.tsv").exists()
+    cv_figures_dir = figures_dir
+    assert not (cv_figures_dir / "tree_contrast_pairs.svg").exists()
+    group_svg = cv_figures_dir / "tree_group.svg"
+    if group_svg.exists():
+        group_svg_text = group_svg.read_text(encoding="utf-8")
+        assert "Tree Contrast Pairs" not in group_svg_text
+        assert "The Contrast Pairs" not in group_svg_text
+        assert "rotate(-90.0)" in group_svg_text
+        assert 'rotate(-90.0)"><text x="0"' in group_svg_text
+        assert "rotate(45.0)" not in group_svg_text
+    else:
+        assert any("Toytree is unavailable" in warning for warning in warnings)
+    cv_svg = cv_figures_dir / "tree_prediction_cv.svg"
+    if cv_svg.exists():
+        svg_text = cv_svg.read_text(encoding="utf-8")
+        assert "CV Tree Prediction" not in svg_text
+        assert "rotate(-90.0)" in svg_text
+        assert 'rotate(-90.0)"><text x="0"' in svg_text
+        assert "rotate(45.0)" not in svg_text
+        assert ">trait<" in svg_text
+        assert ">group<" in svg_text
+        assert ">contrast<" not in svg_text
+        assert "toyplot-mark-Point" not in svg_text
+        assert ">0.200<" in svg_text
+        assert ">sp1<" in svg_text
+    else:
+        assert any("Toytree is unavailable" in warning for warning in warnings)
+    log2_heatmap_svg = cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg"
+    if log2_heatmap_svg.exists():
+        svg_text = log2_heatmap_svg.read_text(encoding="utf-8")
+        assert "Tree Feature Heatmap (log2 TPM + 1)" not in svg_text
+        assert "rotate(-90.0)" in svg_text
+        assert 'rotate(-90.0)"><text x="0"' in svg_text
+        assert "rotate(90.0)" not in svg_text
+        assert "rotate(65.0)" not in svg_text
+        assert ">trait<" in svg_text
+        assert "sp1 trait=0" in svg_text
+        assert "sp2 trait=1" in svg_text
+        assert ">prob<" in svg_text
+        assert ">0.20<" in svg_text
+        assert ">0.80<" in svg_text
+        assert "sp1 prob=0.2000" in svg_text
+        assert "sp2 prob=0.8000" in svg_text
+        assert ">OG1<" in svg_text
+        assert ">OG2<" in svg_text
+        assert "linearGradient" in svg_text
+        assert ">log2(TPM + 1)<" in svg_text
+        assert ">0.00<" in svg_text
+        assert ">4.00<" in svg_text
+        assert "Missing value" in svg_text
+        assert ">NA<" in svg_text
+        assert "OOF confusion group" in svg_text
+        assert "TP: true positive" in svg_text
+        assert "FN: false negative" in svg_text
+        assert "TN: true negative" in svg_text
+        assert "FP: false positive" in svg_text
+        assert "sp1 OOF confusion group=TN" in svg_text
+        assert "sp2 OOF confusion group=TP" in svg_text
+        heatmap_legend_y = _svg_text_absolute_y(svg_text, "log2(TPM + 1)")
+        confusion_legend_y = _svg_text_absolute_y(svg_text, "OOF confusion group")
+        assert confusion_legend_y - heatmap_legend_y >= 30
+        svg_root = ET.fromstring(svg_text)
+        text_styles = {
+            element.text: element.get("style", "")
+            for element in svg_root.iter()
+            if element.tag.endswith("text") and element.text is not None
+        }
+        assert "fill:rgb(0%,62%,45.1%)" in text_styles["sp1"]
+        assert "fill:rgb(0%,44.7%,69.8%)" in text_styles["sp2"]
+        assert "fill:rgb(0%,44.7%,69.8%)" in text_styles["TP: true positive"]
+        assert "fill:rgb(80%,47.5%,65.5%)" in text_styles["FN: false negative"]
+        assert "fill:rgb(0%,62%,45.1%)" in text_styles["TN: true negative"]
+        assert "fill:rgb(90.2%,62.4%,0%)" in text_styles["FP: false positive"]
+    else:
+        assert any("Toytree is unavailable" in warning for warning in warnings)
+
+
+def test_write_run_tree_prediction_artifacts_parallel_workers_write_outputs(
+    tmp_path: Path,
+) -> None:
+    metadata_path = tmp_path / "metadata.tsv"
+    tpm_path = tmp_path / "tpm.tsv"
+    tree_path = tmp_path / "tree.nwk"
+    _metadata().write_csv(metadata_path, separator="\t")
+    _write_tpm(tpm_path)
+    tree_path.write_text("(sp1,sp2,sp3);\n", encoding="utf-8")
+
+    warnings = write_run_tree_prediction_artifacts(
+        run_dir=tmp_path / "run",
+        tree_path=tree_path,
+        metadata_path=metadata_path,
+        tpm_path=tpm_path,
+        species_col="species",
+        feature_col="orthogroup",
+        value_col="tpm",
+        trait_col="C4",
+        group_col="contrast_pair_id",
+        oof_predictions=pl.DataFrame(
+            {
+                "fold_id": ["0", "0", "1"],
+                "species": ["sp1", "sp2", "sp3"],
+                "label": [0, 1, 0],
+                "prob": [0.2, 0.8, 0.9],
+            }
+        ),
+        thresholds=_thresholds(),
+        feature_importance=_feature_importance(),
+        coefficients=_coefficients(),
+        pred_external_test=None,
+        parallel_workers=2,
+    )
+
+    cv_tables_dir = tmp_path / "run" / "cv" / "tables"
+    cv_figures_dir = tmp_path / "run" / "cv" / "figures"
+    assert (cv_tables_dir / "tree_contrast_pairs_annotation.tsv").exists()
+    assert (cv_tables_dir / "tree_feature_heatmap_annotation.tsv").exists()
+    assert (cv_tables_dir / "tree_prediction_cv_annotation.tsv").exists()
+    if (cv_figures_dir / "tree_prediction_cv.svg").exists():
+        assert (cv_figures_dir / "tree_group.svg").exists()
+        assert (cv_figures_dir / "tree_feature_heatmap_zscore.svg").exists()
+        assert (cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg").exists()
+    else:
+        assert any("Toytree is unavailable" in warning for warning in warnings)
+
+
+def test_write_run_tree_prediction_artifacts_uses_requested_feature_limit(
+    tmp_path: Path,
+) -> None:
+    metadata_path = tmp_path / "metadata.tsv"
+    tpm_path = tmp_path / "tpm.tsv"
+    tree_path = tmp_path / "tree.nwk"
+    _metadata().write_csv(metadata_path, separator="\t")
+    _write_tpm(tpm_path)
+    tree_path.write_text("(sp1,sp2,sp3);\n", encoding="utf-8")
+    figures_dir = tmp_path / "run" / "cv" / "figures"
+    figures_dir.mkdir(parents=True)
+
+    write_run_tree_prediction_artifacts(
+        run_dir=tmp_path / "run",
+        tree_path=tree_path,
+        metadata_path=metadata_path,
+        tpm_path=tpm_path,
+        species_col="species",
+        feature_col="orthogroup",
+        value_col="tpm",
+        trait_col="C4",
+        group_col="contrast_pair_id",
+        oof_predictions=pl.DataFrame(
+            {
+                "fold_id": ["0", "0", "1"],
+                "species": ["sp1", "sp2", "sp3"],
+                "label": [0, 1, 0],
+                "prob": [0.2, 0.8, 0.9],
+            }
+        ),
+        thresholds=_thresholds(),
+        feature_importance=_feature_importance(),
+        coefficients=_coefficients(),
+        pred_external_test=None,
+        feature_limit=1,
+    )
+
+    annotation = pl.read_csv(
+        tmp_path / "run" / "cv" / "tables" / "tree_feature_heatmap_annotation.tsv",
+        separator="\t",
+        null_values=["NA"],
+    )
+    assert annotation.select("feature").unique().to_series().to_list() == ["OG2"]
+
+
+def test_write_run_tree_prediction_artifacts_uses_annotations_in_standard_heatmaps(
+    tmp_path: Path,
+) -> None:
+    metadata_path = tmp_path / "metadata.tsv"
+    tpm_path = tmp_path / "tpm.tsv"
+    tree_path = tmp_path / "tree.nwk"
+    _metadata().write_csv(metadata_path, separator="\t")
+    _write_tpm(tpm_path)
+    tree_path.write_text("(sp1,sp2,sp3);\n", encoding="utf-8")
+
+    warnings = write_run_tree_prediction_artifacts(
+        run_dir=tmp_path / "run",
+        tree_path=tree_path,
+        metadata_path=metadata_path,
+        tpm_path=tpm_path,
+        species_col="species",
+        feature_col="orthogroup",
+        value_col="tpm",
+        trait_col="C4",
+        group_col="contrast_pair_id",
+        oof_predictions=pl.DataFrame(
+            {
+                "fold_id": ["0", "0", "1"],
+                "species": ["sp1", "sp2", "sp3"],
+                "label": [0, 1, 0],
+                "prob": [0.2, 0.8, 0.9],
+            }
+        ),
+        thresholds=_thresholds(),
+        feature_importance=_feature_importance(),
+        coefficients=_coefficients(),
+        pred_external_test=None,
+        orthogroup_annotations=_orthogroup_annotations(),
+    )
+
+    cv_figures_dir = tmp_path / "run" / "cv" / "figures"
+    log2_svg = cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg"
+    if log2_svg.exists():
+        svg_text = log2_svg.read_text(encoding="utf-8")
+        assert "OG1: beta carbonic" in svg_text
+        assert (cv_figures_dir / "tree_feature_heatmap_zscore.svg").exists()
+        assert not (cv_figures_dir / "tree_feature_heatmap_log2_tpm_annotated.svg").exists()
+        assert not (cv_figures_dir / "tree_feature_heatmap_zscore_annotated.svg").exists()
+    else:
+        assert any("Toytree is unavailable" in warning for warning in warnings)

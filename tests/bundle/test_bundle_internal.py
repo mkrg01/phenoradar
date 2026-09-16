@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import polars as pl
@@ -31,13 +30,13 @@ def _fixture_data(tmp_path: Path) -> tuple[Path, Path]:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "sp1\t1\tg1\tno",
-                "sp2\t0\tg1\tno",
-                "sp3\t1\tg2\tno",
-                "sp4\t0\tg2\tno",
-                "sp5\t1\t\tyes",
-                "sp6\t\t\tno",
+                "species\tC4\tcontrast_pair_id",
+                "sp1\t1\tg1",
+                "sp2\t0\tg1",
+                "sp3\t1\tg2",
+                "sp4\t0\tg2",
+                "sp5\t1\t",
+                "sp6\t\t",
             ]
         )
         + "\n",
@@ -82,13 +81,7 @@ def _export_and_load_bundle(tmp_path: Path, metadata: Path, tpm: Path) -> tuple[
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     split_artifacts = build_split_artifacts(config)
     cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
-    cv_threshold = (
-        cv_artifacts.thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
-        .select("threshold_value")
-        .to_series()
-        .item()
-    )
-    refit = run_final_refit(config, split_artifacts.split_manifest, float(cv_threshold))
+    refit = run_final_refit(config, split_artifacts.split_manifest)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     resolved_config_path = run_dir / "resolved_config.yml"
@@ -110,13 +103,7 @@ def _prepare_export_inputs(
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     split_artifacts = build_split_artifacts(config)
     cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
-    cv_threshold = (
-        cv_artifacts.thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
-        .select("threshold_value")
-        .to_series()
-        .item()
-    )
-    refit = run_final_refit(config, split_artifacts.split_manifest, float(cv_threshold))
+    refit = run_final_refit(config, split_artifacts.split_manifest)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     resolved_config_path = run_dir / "resolved_config.yml"
@@ -155,38 +142,6 @@ def test_resolve_manifest_size_raises_when_not_converged(monkeypatch: pytest.Mon
 
     with pytest.raises(BundleError, match="Failed to resolve deterministic"):
         bundle_mod._resolve_manifest_size({"files": {}})
-
-
-def test_run_git_returns_none_on_file_not_found(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    def _raise_file_not_found(*_args: object, **_kwargs: object) -> object:
-        raise FileNotFoundError
-
-    monkeypatch.setattr(bundle_mod.subprocess, "run", _raise_file_not_found)
-    assert bundle_mod._run_git(["git", "status"], cwd=tmp_path) is None
-
-
-def test_run_git_returns_none_on_non_zero_exit(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(
-        bundle_mod.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout=""),
-    )
-    assert bundle_mod._run_git(["git", "status"], cwd=tmp_path) is None
-
-
-def test_run_git_returns_stripped_stdout_on_success(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(
-        bundle_mod.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="  abc123\n"),
-    )
-    assert bundle_mod._run_git(["git", "rev-parse", "HEAD"], cwd=tmp_path) == "abc123"
 
 
 def test_threshold_value_raises_when_not_exactly_one_row() -> None:
@@ -254,6 +209,20 @@ def test_export_model_bundle_rejects_manifest_size_mismatch(
             resolved_config_path=resolved_config_path,
             config=config,  # type: ignore[arg-type]
             final_refit_artifacts=refit,  # type: ignore[arg-type]
+            thresholds=cv_artifacts.thresholds,  # type: ignore[attr-defined]
+        )
+
+
+def test_export_model_bundle_rejects_empty_transform_feature_schema(tmp_path: Path) -> None:
+    config, cv_artifacts, refit, run_dir, resolved_config_path = _prepare_export_inputs(tmp_path)
+    invalid_refit = replace(refit, transform_feature_names=[])
+
+    with pytest.raises(BundleError, match="zero transform input features"):
+        export_model_bundle(
+            run_dir=run_dir,
+            resolved_config_path=resolved_config_path,
+            config=config,  # type: ignore[arg-type]
+            final_refit_artifacts=invalid_refit,  # type: ignore[arg-type]
             thresholds=cv_artifacts.thresholds,  # type: ignore[attr-defined]
         )
 

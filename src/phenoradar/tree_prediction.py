@@ -3,14 +3,35 @@
 from __future__ import annotations
 
 import importlib
-from collections.abc import Iterable
+import math
+from collections.abc import Callable, Iterable
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import suppress
+from functools import wraps
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree as ET
 
 import matplotlib
 import matplotlib.colors
 import polars as pl
+
+from phenoradar.abstention import prediction_label_expr
+from phenoradar.colors import (
+    CONFUSION_GROUP_COLORS,
+    CONFUSION_GROUP_LABELS,
+    CONFUSION_GROUP_ORDER,
+)
+from phenoradar.figure_population import (
+    population_figure_path,
+    prediction_figure_populations,
+    write_population_message_svg,
+)
+from phenoradar.metrics import (
+    FIXED_PROBABILITY_THRESHOLD_NAME,
+    FIXED_PROBABILITY_THRESHOLD_VALUE,
+)
 
 
 class TreePredictionError(ValueError):
@@ -18,21 +39,87 @@ class TreePredictionError(ValueError):
 
 
 _MISSING_COLOR = "#eeeeee"
-_LABEL_COLORS = {0: "#d62728", 1: "#1f77b4"}
-_PRED_COLORS = {0: "#f4a3a3", 1: "#8ecae6"}
-_PALETTE = [
-    "#4e79a7",
-    "#f28e2b",
-    "#59a14f",
-    "#e15759",
-    "#76b7b2",
-    "#edc948",
-    "#b07aa1",
-    "#ff9da7",
-    "#9c755f",
-    "#bab0ac",
-]
+_TEXT_COLOR = "#000000"
 _FEATURE_HEATMAP_LIMIT = 30
+_SVG_NS = "http://www.w3.org/2000/svg"
+_SVG_BACKGROUND_ID = "phenoradar-svg-background"
+_SVG_BACKGROUND_FILL = "#ffffff"
+_EXPRESSION_SOURCE_LINE_COL = "__phenoradar_tree_source_line"
+_INVALID_TPM_REASON_LABELS = (
+    (1, "missing"),
+    (2, "non-numeric"),
+    (4, "non-finite"),
+    (8, "negative"),
+    (16, "non-finite-after-sum"),
+)
+type _TreeSvgJob = tuple[str, Callable[..., list[str]], dict[str, Any]]
+
+
+def _tree_population_figures(func: Callable[..., list[str]]) -> Callable[..., list[str]]:
+    @wraps(func)
+    def render(**kwargs: Any) -> list[str]:
+        warnings = []
+        for suffix, frames in prediction_figure_populations(
+            {"annotation": kwargs["annotation"]}
+        ):
+            annotation = frames["annotation"]
+            path = population_figure_path(kwargs["out_path"], suffix)
+            if suffix and annotation["species"].n_unique() < 2:
+                write_population_message_svg(
+                    path, "Fewer than two accepted species; tree unavailable."
+                )
+            else:
+                warnings.extend(func(**{**kwargs, "annotation": annotation, "out_path": path}))
+        return warnings
+
+    return render
+
+
+def _stage_figures_dir(run_dir: Path, stage: str) -> Path:
+    figures_dir = run_dir / stage / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    return figures_dir
+
+
+def _stage_tables_dir(run_dir: Path, stage: str) -> Path:
+    tables_dir = run_dir / stage / "tables"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    return tables_dir
+
+
+def _execute_tree_svg_job(
+    name: str,
+    func: Callable[..., list[str]],
+    kwargs: dict[str, Any],
+) -> tuple[str, list[str]]:
+    return name, func(**kwargs)
+
+
+def _run_tree_svg_jobs(
+    jobs: list[_TreeSvgJob],
+    *,
+    parallel_workers: int,
+) -> list[list[str]]:
+    if not jobs:
+        return []
+    worker_count = max(1, min(int(parallel_workers), len(jobs)))
+    if worker_count == 1:
+        return [_execute_tree_svg_job(name, func, kwargs)[1] for name, func, kwargs in jobs]
+
+    warnings_by_index: dict[int, list[str]] = {}
+    with ProcessPoolExecutor(
+        max_workers=worker_count,
+        mp_context=get_context("spawn"),
+    ) as executor:
+        future_to_index = {
+            executor.submit(_execute_tree_svg_job, name, func, kwargs): index
+            for index, (name, func, kwargs) in enumerate(jobs)
+        }
+        for future in as_completed(future_to_index):
+            index = future_to_index[future]
+            _job_name, job_warnings = future.result()
+            warnings_by_index[index] = job_warnings
+    return [warnings_by_index.get(index, []) for index in range(len(jobs))]
 
 
 def write_run_tree_prediction_artifacts(
@@ -51,6 +138,12 @@ def write_run_tree_prediction_artifacts(
     feature_importance: pl.DataFrame,
     coefficients: pl.DataFrame,
     pred_external_test: pl.DataFrame | None,
+    top_feature_expression: pl.DataFrame | None = None,
+    feature_limit: int = _FEATURE_HEATMAP_LIMIT,
+    orthogroup_annotations: pl.DataFrame | None = None,
+    parallel_workers: int = 1,
+    preserve_missing: bool = False,
+    zero_as_missing: bool = False,
 ) -> list[str]:
     """Write run-level tree annotation TSVs and optional Toytree SVG figures."""
     if tree_path is None:
@@ -62,31 +155,48 @@ def write_run_tree_prediction_artifacts(
         trait_col=trait_col,
         group_col=group_col,
     )
-    warnings: list[str] = []
+    ordered_steps: list[tuple[str, int]] = []
+    warning_steps: list[list[str]] = []
+    svg_jobs: list[_TreeSvgJob] = []
+
+    def add_warning(message: str) -> None:
+        warning_steps.append([message])
+        ordered_steps.append(("warning", len(warning_steps) - 1))
+
+    def add_svg_job(
+        name: str,
+        func: Callable[..., list[str]],
+        kwargs: dict[str, Any],
+    ) -> None:
+        svg_jobs.append((name, func, kwargs))
+        ordered_steps.append(("job", len(svg_jobs) - 1))
+
     contrast_annotation = build_contrast_pair_tree_annotation(
         metadata=metadata,
         group_col=group_col,
     )
     if contrast_annotation.height > 0:
+        cv_figures_dir = _stage_figures_dir(run_dir, "cv")
+        cv_tables_dir = _stage_tables_dir(run_dir, "cv")
         contrast_annotation.write_csv(
-            run_dir / "tree_contrast_pairs_annotation.tsv",
+            cv_tables_dir / "tree_contrast_pairs_annotation.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
         )
-        warnings.extend(
-            _write_tree_prediction_svg(
-                tree_path=tree_path,
-                annotation=contrast_annotation,
-                out_path=run_dir / "figures" / "tree_contrast_pairs.svg",
-                title="Tree Contrast Pairs",
-                tracks=["true_label", "contrast_pair_id"],
-            )
+        add_svg_job(
+            "tree_group",
+            _write_tree_prediction_svg,
+            {
+                "tree_path": tree_path,
+                "annotation": contrast_annotation,
+                "out_path": cv_figures_dir / "tree_group.svg",
+                "title": "",
+                "tracks": ["true_label", "group_id"],
+            },
         )
     else:
-        warnings.append(
-            "Skipped tree_contrast_pairs.svg: metadata contains no non-empty contrast_pair_id."
-        )
+        add_warning("Skipped tree_group.svg: metadata contains no non-empty split group.")
 
     feature_annotation = build_tree_feature_heatmap_annotation(
         metadata=metadata,
@@ -95,38 +205,52 @@ def write_run_tree_prediction_artifacts(
         feature_col=feature_col,
         value_col=value_col,
         group_col=group_col,
+        oof_predictions=oof_predictions,
         feature_importance=feature_importance,
         coefficients=coefficients,
+        feature_limit=feature_limit,
+        orthogroup_annotations=orthogroup_annotations,
+        top_feature_expression=top_feature_expression,
+        preserve_missing=preserve_missing,
+        zero_as_missing=zero_as_missing,
     )
     if feature_annotation.height > 0:
+        cv_figures_dir = _stage_figures_dir(run_dir, "cv")
+        cv_tables_dir = _stage_tables_dir(run_dir, "cv")
         feature_annotation.write_csv(
-            run_dir / "tree_feature_heatmap_annotation.tsv",
+            cv_tables_dir / "tree_feature_heatmap_annotation.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
         )
-        warnings.extend(
-            _write_tree_feature_heatmap_svg(
-                tree_path=tree_path,
-                annotation=feature_annotation,
-                value_col="z_score_log2_tpm",
-                out_path=run_dir / "figures" / "tree_feature_heatmap_zscore.svg",
-                title="Tree Feature Heatmap (z-score)",
-                cmap_name="coolwarm",
-            )
+        add_svg_job(
+            "tree_feature_heatmap_zscore",
+            _write_tree_feature_heatmap_svg,
+            {
+                "tree_path": tree_path,
+                "annotation": feature_annotation,
+                "value_col": "z_score_log2_tpm",
+                "out_path": cv_figures_dir / "tree_feature_heatmap_zscore.svg",
+                "title": "",
+                "cmap_name": "coolwarm",
+                "annotate_features": orthogroup_annotations is not None,
+            },
         )
-        warnings.extend(
-            _write_tree_feature_heatmap_svg(
-                tree_path=tree_path,
-                annotation=feature_annotation,
-                value_col="log2_tpm_plus1",
-                out_path=run_dir / "figures" / "tree_feature_heatmap_log2_tpm.svg",
-                title="Tree Feature Heatmap (log2 TPM + 1)",
-                cmap_name="viridis",
-            )
+        add_svg_job(
+            "tree_feature_heatmap_log2_tpm",
+            _write_tree_feature_heatmap_svg,
+            {
+                "tree_path": tree_path,
+                "annotation": feature_annotation,
+                "value_col": "log2_tpm_plus1",
+                "out_path": cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg",
+                "title": "",
+                "cmap_name": "viridis",
+                "annotate_features": orthogroup_annotations is not None,
+            },
         )
     else:
-        warnings.append("Skipped tree_feature_heatmap.svg: no top features were available.")
+        add_warning("Skipped tree_feature_heatmap.svg: no top features were available.")
 
     cv_annotation = build_cv_tree_prediction_annotation(
         metadata=metadata,
@@ -135,60 +259,73 @@ def write_run_tree_prediction_artifacts(
         group_col=group_col,
     )
     if cv_annotation.height > 0:
+        cv_figures_dir = _stage_figures_dir(run_dir, "cv")
+        cv_tables_dir = _stage_tables_dir(run_dir, "cv")
         cv_annotation.write_csv(
-            run_dir / "tree_prediction_cv_annotation.tsv",
+            cv_tables_dir / "tree_prediction_cv_annotation.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
         )
-        warnings.extend(
-            _write_tree_prediction_svg(
-                tree_path=tree_path,
-                annotation=cv_annotation,
-                out_path=run_dir / "figures" / "tree_prediction_cv.svg",
-                title="CV Tree Prediction",
-                tracks=[
+        add_svg_job(
+            "tree_prediction_cv",
+            _write_tree_prediction_svg,
+            {
+                "tree_path": tree_path,
+                "annotation": cv_annotation,
+                "out_path": cv_figures_dir / "tree_prediction_cv.svg",
+                "title": "",
+                "tracks": [
                     "true_label",
                     "prob",
                     "pred_label",
                     "uncertainty_std",
-                    "contrast_pair_id",
+                    "group_id",
                     "fold_id",
                 ],
-            )
+            },
         )
     else:
-        warnings.append(
-            "Skipped tree_prediction_cv.svg: no CV predictions with non-empty contrast_pair_id."
-        )
+        add_warning("Skipped tree_prediction_cv.svg: no CV predictions with non-empty split group.")
 
     if pred_external_test is not None and pred_external_test.height > 0:
+        external_test_figures_dir = _stage_figures_dir(run_dir, "external_test")
+        external_test_tables_dir = _stage_tables_dir(run_dir, "external_test")
         external_annotation = build_external_tree_prediction_annotation(
             metadata=metadata,
             pred_external_test=pred_external_test,
             group_col=group_col,
         )
         external_annotation.write_csv(
-            run_dir / "tree_prediction_external_annotation.tsv",
+            external_test_tables_dir / "tree_prediction_external_annotation.tsv",
             separator="\t",
             float_precision=8,
             null_value="NA",
         )
-        warnings.extend(
-            _write_tree_prediction_svg(
-                tree_path=tree_path,
-                annotation=external_annotation,
-                out_path=run_dir / "figures" / "tree_prediction_external.svg",
-                title="External Test Tree Prediction",
-                tracks=[
+        add_svg_job(
+            "tree_prediction_external",
+            _write_tree_prediction_svg,
+            {
+                "tree_path": tree_path,
+                "annotation": external_annotation,
+                "out_path": external_test_figures_dir / "tree_prediction_external.svg",
+                "title": "External Test Tree Prediction",
+                "tracks": [
                     "true_label",
                     "prob",
                     "pred_label",
                     "uncertainty_std",
-                    "contrast_pair_id",
+                    "group_id",
                 ],
-            )
+            },
         )
+    svg_warnings = _run_tree_svg_jobs(svg_jobs, parallel_workers=parallel_workers)
+    warnings: list[str] = []
+    for step_type, index in ordered_steps:
+        if step_type == "warning":
+            warnings.extend(warning_steps[index])
+        else:
+            warnings.extend(svg_warnings[index])
     return warnings
 
 
@@ -219,22 +356,23 @@ def write_predict_tree_prediction_artifacts(
         group_col=group_col,
     )
     annotation.write_csv(
-        run_dir / "tree_prediction_predict_annotation.tsv",
+        _stage_tables_dir(run_dir, "inference") / "tree_prediction_predict_annotation.tsv",
         separator="\t",
         float_precision=8,
         null_value="NA",
     )
+    inference_figures_dir = _stage_figures_dir(run_dir, "inference")
     return _write_tree_prediction_svg(
         tree_path=tree_path,
         annotation=annotation,
-        out_path=run_dir / "figures" / "tree_prediction_predict.svg",
+        out_path=inference_figures_dir / "tree_prediction_predict.svg",
         title="Prediction Tree",
         tracks=[
             "true_label",
             "prob",
-            "pred_label_cv_derived_threshold",
+            "pred_label_fixed_threshold",
             "uncertainty_std",
-            "contrast_pair_id",
+            "group_id",
         ],
     )
 
@@ -244,17 +382,18 @@ def build_contrast_pair_tree_annotation(
     metadata: pl.DataFrame,
     group_col: str,
 ) -> pl.DataFrame:
-    """Build ggtree-friendly metadata annotation for contrast-pair species."""
+    """Build ggtree-friendly metadata annotation for grouped species."""
     _require_columns(metadata, {"species", "true_label", group_col}, "metadata TSV")
+    group_lookup = _metadata_group_lookup(metadata, group_col=group_col)
     return (
-        metadata.filter(pl.col(group_col).is_not_null() & (pl.col(group_col) != ""))
+        group_lookup.join(metadata.select(["species", "true_label"]), on="species", how="left")
+        .filter(pl.col("group_id").is_not_null() & (pl.col("group_id") != ""))
         .with_columns(
             pl.col("species").alias("label"),
             pl.col("true_label").cast(pl.Int8, strict=False).alias("true_label"),
-            pl.col(group_col).cast(pl.String, strict=False).alias("contrast_pair_id"),
         )
-        .select(["label", "species", "true_label", "contrast_pair_id"])
-        .sort(["contrast_pair_id", "species"])
+        .select(["label", "species", "true_label", "group_id"])
+        .sort(["group_id", "species"])
     )
 
 
@@ -268,7 +407,12 @@ def build_tree_feature_heatmap_annotation(
     group_col: str,
     feature_importance: pl.DataFrame,
     coefficients: pl.DataFrame,
+    oof_predictions: pl.DataFrame | None = None,
     feature_limit: int = _FEATURE_HEATMAP_LIMIT,
+    orthogroup_annotations: pl.DataFrame | None = None,
+    top_feature_expression: pl.DataFrame | None = None,
+    preserve_missing: bool = False,
+    zero_as_missing: bool = False,
 ) -> pl.DataFrame:
     """Build long-form feature heatmap values for grouped species and top features."""
     _require_columns(metadata, {"species", "true_label", group_col}, "metadata TSV")
@@ -277,19 +421,42 @@ def build_tree_feature_heatmap_annotation(
         raise TreePredictionError("feature heatmap limit must be >= 1")
 
     species_meta = (
-        metadata.filter(pl.col(group_col).is_not_null() & (pl.col(group_col) != ""))
+        _metadata_group_lookup(metadata, group_col=group_col)
+        .join(metadata.select(["species", "true_label"]), on="species", how="left")
+        .filter(pl.col("group_id").is_not_null() & (pl.col("group_id") != ""))
         .select(
             [
                 "species",
                 "true_label",
-                pl.col(group_col).cast(pl.String, strict=False).alias("contrast_pair_id"),
+                "group_id",
             ]
         )
         .unique("species")
-        .sort(["contrast_pair_id", "species"])
+        .sort(["group_id", "species"])
     )
     if species_meta.height == 0:
         return _empty_feature_heatmap_annotation()
+    if oof_predictions is None:
+        species_meta = species_meta.with_columns(pl.lit(None, dtype=pl.Float64).alias("prob"))
+    else:
+        _require_columns(oof_predictions, {"species", "prob"}, "prediction_cv.tsv")
+        prediction_probs = (
+            oof_predictions.with_columns(
+                pl.col("species").cast(pl.String, strict=False).str.strip_chars().alias("species"),
+                pl.col("prob").cast(pl.Float64, strict=False).alias("prob"),
+            )
+            .drop_nulls(["species"])
+            .group_by("species")
+            .agg(
+                pl.col("prob").mean().alias("prob"),
+                *(
+                    [pl.col("decision_status").first()]
+                    if "decision_status" in oof_predictions.columns
+                    else []
+                ),
+            )
+        )
+        species_meta = species_meta.join(prediction_probs, on="species", how="left")
 
     top_features = (
         feature_importance.drop_nulls(["feature", "importance_mean"])
@@ -305,22 +472,49 @@ def build_tree_feature_heatmap_annotation(
     )
     if top_features.height == 0:
         return _empty_feature_heatmap_annotation()
+    top_features = _join_orthogroup_annotations(
+        top_features,
+        orthogroup_annotations=orthogroup_annotations,
+    )
 
     coef_lookup = _coefficient_lookup(coefficients)
     grid = species_meta.join(top_features, how="cross")
-    expression = _load_expression_for_heatmap(
-        tpm_path=tpm_path,
-        species=list(species_meta.select("species").to_series().to_list()),
-        features=list(top_features.select("feature").to_series().to_list()),
-        species_col=species_col,
-        feature_col=feature_col,
-        value_col=value_col,
+    requested_species = list(species_meta.select("species").to_series().to_list())
+    requested_features = list(top_features.select("feature").to_series().to_list())
+    expression = _cached_expression_for_heatmap(
+        top_feature_expression,
+        species=requested_species,
+        features=requested_features,
+        preserve_missing=preserve_missing,
     )
+    if expression is None:
+        expression = _load_expression_for_heatmap(
+            tpm_path=tpm_path,
+            species=requested_species,
+            features=requested_features,
+            species_col=species_col,
+            feature_col=feature_col,
+            value_col=value_col,
+        )
     annotated = (
         grid.join(expression, on=["species", "feature"], how="left")
-        .with_columns(pl.col("tpm").fill_null(0.0))
+        .with_columns(
+            pl.col("tpm").fill_nan(None) if preserve_missing else pl.col("tpm").fill_null(0.0)
+        )
         .join(coef_lookup, on="feature", how="left")
-        .with_columns((pl.col("tpm") + 1.0).log(base=2.0).alias("log2_tpm_plus1"))
+        .with_columns(
+            (
+                pl.col("tpm").is_null()
+                | ~pl.col("tpm").is_finite()
+                | (pl.lit(zero_as_missing) & (pl.col("tpm") == 0))
+            ).alias("is_missing")
+        )
+        .with_columns(
+            pl.when(pl.col("is_missing"))
+            .then(None)
+            .otherwise((pl.col("tpm") + 1.0).log(base=2.0))
+            .alias("log2_tpm_plus1")
+        )
     )
     stats = annotated.group_by("feature").agg(
         pl.col("log2_tpm_plus1").mean().alias("__feature_mean"),
@@ -329,11 +523,12 @@ def build_tree_feature_heatmap_annotation(
     return (
         annotated.join(stats, on="feature", how="left")
         .with_columns(
-            pl.when(pl.col("__feature_std").is_null() | (pl.col("__feature_std") <= 0.0))
+            pl.when(pl.col("is_missing"))
+            .then(None)
+            .when(pl.col("__feature_std").is_null() | (pl.col("__feature_std") <= 0.0))
             .then(0.0)
             .otherwise(
-                (pl.col("log2_tpm_plus1") - pl.col("__feature_mean"))
-                / pl.col("__feature_std")
+                (pl.col("log2_tpm_plus1") - pl.col("__feature_mean")) / pl.col("__feature_std")
             )
             .alias("z_score_log2_tpm"),
             pl.col("species").alias("label"),
@@ -343,17 +538,22 @@ def build_tree_feature_heatmap_annotation(
                 "label",
                 "species",
                 "true_label",
-                "contrast_pair_id",
+                "prob",
+                "group_id",
                 "feature_rank",
                 "feature",
+                "orthogroup_annotation_taxid",
+                "orthogroup_annotation",
                 "importance_mean",
                 "coef_mean",
                 "tpm",
                 "log2_tpm_plus1",
                 "z_score_log2_tpm",
+                *(["is_missing"] if preserve_missing else []),
+                *(["decision_status"] if "decision_status" in annotated.columns else []),
             ]
         )
-        .sort(["feature_rank", "contrast_pair_id", "species"])
+        .sort(["feature_rank", "group_id", "species"])
     )
 
 
@@ -364,9 +564,9 @@ def build_cv_tree_prediction_annotation(
     thresholds: pl.DataFrame,
     group_col: str,
 ) -> pl.DataFrame:
-    """Build ggtree-friendly CV annotation for contrast-pair validation species."""
+    """Build ggtree-friendly CV annotation for grouped validation species."""
     _require_columns(oof_predictions, {"fold_id", "species", "label", "prob"}, "prediction_cv.tsv")
-    threshold = _cv_derived_threshold(thresholds)
+    threshold = _fixed_probability_threshold(thresholds)
     predictions = oof_predictions.with_columns(
         pl.col("species").cast(pl.String, strict=False).str.strip_chars().alias("species"),
         pl.col("fold_id").cast(pl.String, strict=False).alias("fold_id"),
@@ -377,17 +577,20 @@ def build_cv_tree_prediction_annotation(
         predictions = predictions.with_columns(
             pl.lit(None, dtype=pl.Float64).alias("uncertainty_std")
         )
-    joined = predictions.join(
-        metadata.select(["species", group_col]),
-        on="species",
-        how="left",
+    joined = predictions.drop("group_id", strict=False).join(
+        _metadata_group_lookup(metadata, group_col=group_col), on="species", how="left"
     )
     return (
-        joined.filter(pl.col(group_col).is_not_null() & (pl.col(group_col) != ""))
+        joined.filter(pl.col("group_id").is_not_null() & (pl.col("group_id") != ""))
         .with_columns(
             pl.col("species").alias("label"),
-            (pl.col("prob") >= threshold).cast(pl.Int8).alias("pred_label"),
-            pl.col(group_col).cast(pl.String, strict=False).alias("contrast_pair_id"),
+            (
+                prediction_label_expr(oof_predictions)
+                if "pred_label_selective" in oof_predictions.columns
+                else (pl.col("prob") >= threshold)
+            )
+            .cast(pl.Int8)
+            .alias("pred_label"),
         )
         .select(
             [
@@ -397,11 +600,16 @@ def build_cv_tree_prediction_annotation(
                 "prob",
                 "pred_label",
                 "uncertainty_std",
-                "contrast_pair_id",
+                "group_id",
                 "fold_id",
+                *[
+                    name
+                    for name in ("decision_status", "information_coverage")
+                    if name in predictions.columns
+                ],
             ]
         )
-        .sort(["contrast_pair_id", "fold_id", "species"])
+        .sort(["group_id", "fold_id", "species"])
     )
 
 
@@ -414,26 +622,25 @@ def build_external_tree_prediction_annotation(
     """Build ggtree-friendly external-test annotation."""
     _require_columns(
         pred_external_test,
-        {"species", "true_label", "prob", "pred_label_cv_derived_threshold"},
+        {"species", "true_label", "prob", "pred_label_fixed_threshold"},
         "prediction_external_test.tsv",
     )
     predictions = pred_external_test.with_columns(
         pl.col("species").cast(pl.String, strict=False).str.strip_chars().alias("species"),
         pl.col("true_label").cast(pl.Int8, strict=False).alias("true_label"),
         pl.col("prob").cast(pl.Float64, strict=False).alias("prob"),
-        pl.col("pred_label_cv_derived_threshold")
-        .cast(pl.Int8, strict=False)
-        .alias("pred_label"),
+        prediction_label_expr(pred_external_test).cast(pl.Int8, strict=False).alias("pred_label"),
     )
     if "uncertainty_std" not in predictions.columns:
         predictions = predictions.with_columns(
             pl.lit(None, dtype=pl.Float64).alias("uncertainty_std")
         )
     return (
-        predictions.join(metadata.select(["species", group_col]), on="species", how="left")
+        predictions.join(
+            _metadata_group_lookup(metadata, group_col=group_col), on="species", how="left"
+        )
         .with_columns(
             pl.col("species").alias("label"),
-            pl.col(group_col).cast(pl.String, strict=False).alias("contrast_pair_id"),
         )
         .select(
             [
@@ -443,7 +650,12 @@ def build_external_tree_prediction_annotation(
                 "prob",
                 "pred_label",
                 "uncertainty_std",
-                "contrast_pair_id",
+                "group_id",
+                *[
+                    name
+                    for name in ("decision_status", "information_coverage")
+                    if name in predictions.columns
+                ],
             ]
         )
         .sort("species")
@@ -464,7 +676,6 @@ def build_predict_tree_prediction_annotation(
             "true_label",
             "prob",
             "pred_label_fixed_threshold",
-            "pred_label_cv_derived_threshold",
         },
         "prediction_inference.tsv",
     )
@@ -472,22 +683,20 @@ def build_predict_tree_prediction_annotation(
         pl.col("species").cast(pl.String, strict=False).str.strip_chars().alias("species"),
         pl.col("true_label").cast(pl.Int8, strict=False).alias("true_label"),
         pl.col("prob").cast(pl.Float64, strict=False).alias("prob"),
-        pl.col("pred_label_fixed_threshold")
+        prediction_label_expr(pred_predict)
         .cast(pl.Int8, strict=False)
         .alias("pred_label_fixed_threshold"),
-        pl.col("pred_label_cv_derived_threshold")
-        .cast(pl.Int8, strict=False)
-        .alias("pred_label_cv_derived_threshold"),
     )
     if "uncertainty_std" not in predictions.columns:
         predictions = predictions.with_columns(
             pl.lit(None, dtype=pl.Float64).alias("uncertainty_std")
         )
     return (
-        predictions.join(metadata.select(["species", group_col]), on="species", how="left")
+        predictions.join(
+            _metadata_group_lookup(metadata, group_col=group_col), on="species", how="left"
+        )
         .with_columns(
             pl.col("species").alias("label"),
-            pl.col(group_col).cast(pl.String, strict=False).alias("contrast_pair_id"),
         )
         .select(
             [
@@ -496,9 +705,13 @@ def build_predict_tree_prediction_annotation(
                 "true_label",
                 "prob",
                 "pred_label_fixed_threshold",
-                "pred_label_cv_derived_threshold",
                 "uncertainty_std",
-                "contrast_pair_id",
+                "group_id",
+                *[
+                    name
+                    for name in ("decision_status", "information_coverage")
+                    if name in predictions.columns
+                ],
             ]
         )
         .sort("species")
@@ -535,6 +748,66 @@ def _load_metadata(
     return normalized
 
 
+def _metadata_group_lookup(metadata: pl.DataFrame, *, group_col: str) -> pl.DataFrame:
+    return (
+        metadata.select(
+            [
+                pl.col("species"),
+                pl.col(group_col)
+                .cast(pl.String, strict=False)
+                .str.strip_chars()
+                .alias("group_id"),
+            ]
+        )
+        .unique("species")
+        .sort("species")
+    )
+
+
+def _cached_expression_for_heatmap(
+    expression: pl.DataFrame | None,
+    *,
+    species: list[str],
+    features: list[str],
+    preserve_missing: bool = False,
+) -> pl.DataFrame | None:
+    if expression is None:
+        return None
+    required = {"species", "feature", "tpm"}
+    if not required.issubset(expression.columns):
+        raise TreePredictionError("Cached feature expression table schema is invalid")
+    requested_species = set(species)
+    requested_features = set(features)
+    normalized = (
+        expression.select(
+            pl.col("species").cast(pl.String, strict=False).str.strip_chars().alias("species"),
+            pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("feature"),
+            pl.col("tpm").cast(pl.Float64, strict=False).alias("tpm"),
+        )
+        .filter(
+            pl.col("species").is_in(species)
+            & pl.col("feature").is_in(features)
+        )
+    )
+    cached_species = set(normalized.get_column("species").drop_nulls().to_list())
+    cached_features = set(normalized.get_column("feature").drop_nulls().to_list())
+    if not requested_species.issubset(cached_species) or not requested_features.issubset(
+        cached_features
+    ):
+        return None
+    invalid = pl.col("tpm").is_infinite() | (pl.col("tpm") < 0.0)
+    if not preserve_missing:
+        invalid = invalid | pl.col("tpm").is_null() | pl.col("tpm").is_nan()
+    if normalized.filter(invalid).height:
+        raise TreePredictionError(
+            "Cached feature expression table contains invalid TPM values"
+        )
+    total = pl.col("tpm").sum()
+    if preserve_missing:
+        total = pl.when(pl.col("tpm").is_null().all()).then(None).otherwise(total)
+    return normalized.group_by(["species", "feature"]).agg(total.alias("tpm"))
+
+
 def _load_expression_for_heatmap(
     *,
     tpm_path: Path,
@@ -545,12 +818,11 @@ def _load_expression_for_heatmap(
     value_col: str,
 ) -> pl.DataFrame:
     try:
-        expression = pl.scan_csv(tpm_path, separator="\t")
+        schema_scan = pl.scan_csv(tpm_path, separator="\t")
+        schema_columns = set(schema_scan.collect_schema().names())
     except FileNotFoundError as exc:
         raise TreePredictionError(f"Expression file not found: {tpm_path}") from exc
-    try:
-        schema_columns = set(expression.collect_schema().names())
-    except Exception as exc:
+    except (OSError, pl.exceptions.PolarsError) as exc:
         raise TreePredictionError(f"Failed to read expression TSV: {tpm_path}") from exc
     required = {species_col, feature_col, value_col}
     missing = sorted(required - schema_columns)
@@ -558,21 +830,108 @@ def _load_expression_for_heatmap(
         raise TreePredictionError(
             f"Missing required columns in expression TSV: {', '.join(missing)}"
         )
+    if _EXPRESSION_SOURCE_LINE_COL in schema_columns:
+        raise TreePredictionError(
+            "Expression TSV uses a reserved internal column name: "
+            f"{_EXPRESSION_SOURCE_LINE_COL}"
+        )
 
-    data = (
+    try:
+        expression = pl.scan_csv(
+            tpm_path,
+            separator="\t",
+            schema_overrides={value_col: pl.String},
+            row_index_name=_EXPRESSION_SOURCE_LINE_COL,
+            row_index_offset=2,
+        )
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise TreePredictionError(f"Failed to read expression TSV: {tpm_path}") from exc
+
+    species_value = pl.col(species_col).cast(pl.String, strict=False).str.strip_chars()
+    feature_value = pl.col(feature_col).cast(pl.String, strict=False).str.strip_chars()
+    raw_value = pl.col(value_col).cast(pl.String, strict=False).str.strip_chars()
+    parsed_value = raw_value.cast(pl.Float64, strict=False)
+    invalid_reason_mask = (
+        pl.when(raw_value.is_null() | (raw_value == ""))
+        .then(pl.lit(1, dtype=pl.UInt8))
+        .when(parsed_value.is_null())
+        .then(pl.lit(2, dtype=pl.UInt8))
+        .when(~parsed_value.is_finite())
+        .then(pl.lit(4, dtype=pl.UInt8))
+        .when(parsed_value < 0.0)
+        .then(pl.lit(8, dtype=pl.UInt8))
+        .otherwise(pl.lit(0, dtype=pl.UInt8))
+    )
+    normalized = (
         expression.select(
-            pl.col(species_col).cast(pl.String, strict=False).str.strip_chars().alias("species"),
-            pl.col(feature_col).cast(pl.String, strict=False).str.strip_chars().alias("feature"),
-            pl.col(value_col).cast(pl.Float64, strict=False).fill_null(0.0).alias("tpm"),
+            species_value.alias("species"),
+            feature_value.alias("feature"),
+            parsed_value.alias("__parsed_value"),
+            invalid_reason_mask.alias("__invalid_reason_mask"),
+            pl.col(_EXPRESSION_SOURCE_LINE_COL).alias("__source_line"),
         )
         .filter(pl.col("species").is_in(species) & pl.col("feature").is_in(features))
-        .group_by(["species", "feature"])
-        .agg(pl.col("tpm").sum())
-        .collect()
+        .with_columns(
+            pl.when(pl.col("__invalid_reason_mask") == 0)
+            .then(pl.col("__parsed_value"))
+            .otherwise(pl.lit(float("nan")))
+            .alias("tpm")
+        )
     )
-    if data.filter(pl.col("tpm") < 0.0).height > 0:
-        raise TreePredictionError("Expression TSV contains negative TPM values")
-    return data
+    invalid = pl.col("__invalid_reason_mask") != 0
+    data_scan = (
+        normalized
+        .group_by(["species", "feature"])
+        .agg(
+            pl.col("tpm").sum(),
+            invalid.sum().alias("__invalid_count"),
+            pl.col("__source_line").min().alias("__group_first_line"),
+            pl.col("__source_line").filter(invalid).min().alias("__invalid_line"),
+            pl.col("__invalid_reason_mask").max().alias("__invalid_reason_mask"),
+        )
+    )
+    aggregate_overflow = (pl.col("__invalid_count") == 0) & ~pl.col("tpm").is_finite()
+    data_scan = (
+        data_scan.with_columns(
+            pl.when(aggregate_overflow)
+            .then(pl.lit(1, dtype=pl.UInt32))
+            .otherwise(pl.col("__invalid_count"))
+            .alias("__invalid_count"),
+            pl.when(aggregate_overflow)
+            .then(pl.col("__group_first_line"))
+            .otherwise(pl.col("__invalid_line"))
+            .alias("__invalid_line"),
+            pl.when(aggregate_overflow)
+            .then(pl.lit(16, dtype=pl.UInt8))
+            .otherwise(pl.col("__invalid_reason_mask"))
+            .alias("__invalid_reason_mask"),
+        ).drop("__group_first_line")
+    )
+    try:
+        data = data_scan.collect()
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise TreePredictionError(f"Failed to read expression TSV: {tpm_path}: {exc}") from exc
+
+    invalid_rows = (
+        data.filter(pl.col("__invalid_count") > 0).sort("__invalid_line").head(10)
+    )
+    if invalid_rows.height > 0:
+        total = int(data.select(pl.col("__invalid_count").sum()).item())
+        examples: list[str] = []
+        for row in invalid_rows.iter_rows(named=True):
+            reason_mask = int(row["__invalid_reason_mask"])
+            reasons = ",".join(
+                label for flag, label in _INVALID_TPM_REASON_LABELS if reason_mask & flag
+            )
+            examples.append(
+                f"first_invalid_line={row['__invalid_line']}: species={row['species']!r}, "
+                f"feature={row['feature']!r}, example_reasons_in_coordinate=({reasons})"
+            )
+        raise TreePredictionError(
+            "Invalid expression TSV: consumed TPM values must be non-negative finite numbers; "
+            f"invalid_rows={total}; examples: {'; '.join(examples)}"
+        )
+    return data.select(["species", "feature", "tpm"])
 
 
 def _coefficient_lookup(coefficients: pl.DataFrame) -> pl.DataFrame:
@@ -596,9 +955,12 @@ def _empty_feature_heatmap_annotation() -> pl.DataFrame:
             "label": pl.String,
             "species": pl.String,
             "true_label": pl.Int8,
-            "contrast_pair_id": pl.String,
+            "prob": pl.Float64,
+            "group_id": pl.String,
             "feature_rank": pl.UInt32,
             "feature": pl.String,
+            "orthogroup_annotation_taxid": pl.String,
+            "orthogroup_annotation": pl.String,
             "importance_mean": pl.Float64,
             "coef_mean": pl.Float64,
             "tpm": pl.Float64,
@@ -606,6 +968,41 @@ def _empty_feature_heatmap_annotation() -> pl.DataFrame:
             "z_score_log2_tpm": pl.Float64,
         }
     )
+
+
+def _join_orthogroup_annotations(
+    top_features: pl.DataFrame,
+    *,
+    orthogroup_annotations: pl.DataFrame | None,
+) -> pl.DataFrame:
+    if orthogroup_annotations is None:
+        return top_features.with_columns(
+            [
+                pl.lit(None, dtype=pl.String).alias("orthogroup_annotation_taxid"),
+                pl.lit(None, dtype=pl.String).alias("orthogroup_annotation"),
+            ]
+        )
+    required = {"feature", "orthogroup_annotation_taxid", "orthogroup_annotation"}
+    if not required.issubset(orthogroup_annotations.columns):
+        raise TreePredictionError("orthogroup annotation table schema is invalid")
+    annotations = (
+        orthogroup_annotations.select(
+            [
+                pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("feature"),
+                pl.col("orthogroup_annotation_taxid")
+                .cast(pl.String, strict=False)
+                .str.strip_chars()
+                .alias("orthogroup_annotation_taxid"),
+                pl.col("orthogroup_annotation")
+                .cast(pl.String, strict=False)
+                .str.strip_chars()
+                .alias("orthogroup_annotation"),
+            ]
+        )
+        .filter(pl.col("feature").is_not_null() & (pl.col("feature") != ""))
+        .unique("feature")
+    )
+    return top_features.join(annotations, on="feature", how="left")
 
 
 def _require_tree(tree_path: Path) -> None:
@@ -621,14 +1018,14 @@ def _require_columns(frame: pl.DataFrame, required: set[str], context: str) -> N
         raise TreePredictionError(f"Missing required columns in {context}: {', '.join(missing)}")
 
 
-def _cv_derived_threshold(thresholds: pl.DataFrame) -> float:
+def _fixed_probability_threshold(thresholds: pl.DataFrame) -> float:
     _require_columns(thresholds, {"threshold_name", "threshold_value"}, "thresholds.tsv")
-    row = thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
-    if row.height == 0:
-        row = thresholds.filter(pl.col("threshold_name") == "fixed_probability_threshold")
+    row = thresholds.filter(
+        pl.col("threshold_name") == FIXED_PROBABILITY_THRESHOLD_NAME
+    )
     if row.height == 0:
         raise TreePredictionError(
-            "thresholds.tsv must contain cv_derived_threshold or fixed_probability_threshold"
+            f"thresholds.tsv must contain {FIXED_PROBABILITY_THRESHOLD_NAME}"
         )
     raw = row.select("threshold_value").to_series().to_list()[0]
     if raw is None:
@@ -636,6 +1033,7 @@ def _cv_derived_threshold(thresholds: pl.DataFrame) -> float:
     return float(raw)
 
 
+@_tree_population_figures
 def _write_tree_prediction_svg(
     *,
     tree_path: Path,
@@ -650,7 +1048,8 @@ def _write_tree_prediction_svg(
         toytree = importlib.import_module("toytree")
     except ImportError:
         return [
-            f"Skipped {out_path.name}: install phenoradar[tree] to enable Toytree SVG output."
+            f"Skipped {out_path.name}: Toytree is unavailable. Reinstall phenoradar or "
+            "install toytree manually to enable SVG output."
         ]
 
     try:
@@ -696,6 +1095,7 @@ def _write_tree_prediction_svg(
     return warnings
 
 
+@_tree_population_figures
 def _write_tree_feature_heatmap_svg(
     *,
     tree_path: Path,
@@ -704,6 +1104,7 @@ def _write_tree_feature_heatmap_svg(
     out_path: Path,
     title: str,
     cmap_name: str,
+    annotate_features: bool = False,
 ) -> list[str]:
     if annotation.height == 0:
         return [f"Skipped {out_path.name}: annotation table is empty."]
@@ -711,7 +1112,8 @@ def _write_tree_feature_heatmap_svg(
         toytree = importlib.import_module("toytree")
     except ImportError:
         return [
-            f"Skipped {out_path.name}: install phenoradar[tree] to enable Toytree SVG output."
+            f"Skipped {out_path.name}: Toytree is unavailable. Reinstall phenoradar or "
+            "install toytree manually to enable SVG output."
         ]
 
     try:
@@ -754,6 +1156,7 @@ def _write_tree_feature_heatmap_svg(
         out_path=out_path,
         title=title,
         cmap_name=cmap_name,
+        annotate_features=annotate_features,
         toytree_module=toytree,
     )
     return warnings
@@ -770,55 +1173,103 @@ def _draw_toytree_heatmap(
 ) -> None:
     tip_labels = [str(v) for v in tree.get_tip_labels()]
     track_count = len(tracks)
+    by_species = {str(row["species"]): row for row in annotation.iter_rows(named=True)}
+    cell_text_by_track: dict[str, list[str]] = {}
+    for track in tracks:
+        values: list[str] = []
+        for species in tip_labels:
+            row = by_species.get(species)
+            value = _track_display_value(track, row)
+            values.append(_format_cell_value(track, value))
+        cell_text_by_track[track] = values
+    track_widths = [
+        _text_column_width_px([_track_label(track), *cell_text_by_track[track]])
+        for track in tracks
+    ]
+    annotation_width = sum(track_widths)
+    species_label_width = _text_column_width_px(tip_labels, min_width=120, padding=28)
     height = max(360, 34 + 18 * len(tip_labels))
-    width = max(900, 560 + 58 * track_count)
-    label_shift = 56 + 44 * track_count
+    width = max(900, 560 + annotation_width + species_label_width)
     canvas, axes, _mark = tree.draw(
         width=width,
         height=height,
         layout="r",
-        tip_labels=True,
-        tip_labels_align=True,
-        tip_labels_style={"font-size": "9px", "-toyplot-anchor-shift": f"{label_shift}px"},
+        tip_labels=False,
         node_sizes=0,
         scale_bar=False,
     )
     axes.show = False
-    axes.x.domain.max = max(track_count + 2.0, float(track_count) + 1.2)
+    axes.x.domain.max = max(track_count + 2.8, (annotation_width + species_label_width) / 68.0)
 
-    by_species = {str(row["species"]): row for row in annotation.iter_rows(named=True)}
+    column_start_px = 18
+    column_scale_px = 88.0
+    column_cursor_px = column_start_px
     for track_index, track in enumerate(tracks):
-        x = 0.45 + track_index * 0.52
-        colors: list[str] = []
+        track_width = track_widths[track_index]
+        x = (column_cursor_px + track_width / 2.0) / column_scale_px
         titles: list[str] = []
+        values = cell_text_by_track[track]
         for species in tip_labels:
             row = by_species.get(species)
-            value = None if row is None else row.get(track)
-            colors.append(_track_color(track, value, annotation))
-            titles.append(f"{species} {track}={_format_value(value)}")
-        axes.scatterplot(
+            value = _track_display_value(track, row)
+            titles.append(f"{species} {_track_label(track)}={_format_value(value)}")
+        axes.text(
             [x] * len(tip_labels),
             list(range(len(tip_labels))),
-            marker="s",
-            size=10,
-            color=colors,
+            values,
+            color=_TEXT_COLOR,
             title=titles,
+            style={"font-size": "8px", "text-anchor": "middle"},
         )
         axes.text(
             x,
             len(tip_labels) + 0.35,
             _track_label(track),
-            angle=-45,
-            style={"font-size": "9px", "text-anchor": "end"},
+            angle=90,
+            color=_TEXT_COLOR,
+            style={"font-size": "9px", "text-anchor": "start"},
         )
+        column_cursor_px += track_width
+    species_x = (column_cursor_px + 16) / column_scale_px
     axes.text(
-        -0.05,
-        len(tip_labels) + 1.1,
-        title,
-        style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
+        [species_x] * len(tip_labels),
+        list(range(len(tip_labels))),
+        tip_labels,
+        color=_TEXT_COLOR,
+        title=tip_labels,
+        style={"font-size": "9px", "text-anchor": "start"},
     )
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    toytree_module.save(canvas, str(out_path))
+    if title:
+        axes.text(
+            -0.05,
+            len(tip_labels) + 1.1,
+            title,
+            color=_TEXT_COLOR,
+            style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
+        )
+    _save_toytree_svg(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
+
+
+def _feature_heatmap_label(feature: object, annotation: object) -> str:
+    feature_text = str(feature)
+    if not _has_text(annotation):
+        return feature_text
+    return f"{feature_text}: {' '.join(str(annotation).split())}"
+
+
+def _feature_heatmap_title(feature: object, annotation: object) -> str:
+    feature_text = str(feature)
+    if not _has_text(annotation):
+        return feature_text
+    return f"{feature_text}: {' '.join(str(annotation).split())}"
+
+
+def _feature_label_depth_px(labels: list[str]) -> int:
+    longest_line = max(
+        (len(line) for label in labels for line in label.splitlines()),
+        default=0,
+    )
+    return max(0, 7 * longest_line + 10)
 
 
 def _draw_toytree_feature_heatmap(
@@ -829,28 +1280,48 @@ def _draw_toytree_feature_heatmap(
     out_path: Path,
     title: str,
     cmap_name: str,
+    annotate_features: bool,
     toytree_module: Any,
 ) -> None:
     tip_labels = [str(v) for v in tree.get_tip_labels()]
-    features = (
-        annotation.select(["feature_rank", "feature"])
+    feature_rows = (
+        annotation.select(["feature_rank", "feature", "orthogroup_annotation"])
         .unique("feature")
         .sort("feature_rank")
-        .select("feature")
-        .to_series()
-        .to_list()
+        .iter_rows(named=True)
     )
-    feature_labels = [str(v) for v in features]
-    height = max(420, 58 + 18 * len(tip_labels))
+    feature_records = list(feature_rows)
+    features = [str(row["feature"]) for row in feature_records]
+    if annotate_features:
+        feature_labels = [
+            _feature_heatmap_label(row["feature"], row.get("orthogroup_annotation"))
+            for row in feature_records
+        ]
+        feature_titles = [
+            _feature_heatmap_title(row["feature"], row.get("orthogroup_annotation"))
+            for row in feature_records
+        ]
+    else:
+        feature_labels = features
+        feature_titles = features
+    feature_step = 0.48
+    trait_x = 0.45
+    prob_x = trait_x + feature_step
+    feature_start_x = prob_x + feature_step
+    feature_xs = [
+        feature_start_x + feature_index * feature_step
+        for feature_index in range(len(feature_labels))
+    ]
+    heatmap_end_x = feature_xs[-1] + feature_step / 2.0
+    species_x = heatmap_end_x + 0.28
+    feature_label_depth_px = _feature_label_depth_px(feature_labels)
+    height = max(420, 88 + feature_label_depth_px + 18 * len(tip_labels))
     width = max(1040, 620 + 28 * len(feature_labels))
-    label_shift = 70 + 24 * len(feature_labels)
     canvas, axes, _mark = tree.draw(
         width=width,
         height=height,
         layout="r",
-        tip_labels=True,
-        tip_labels_align=True,
-        tip_labels_style={"font-size": "9px", "-toyplot-anchor-shift": f"{label_shift}px"},
+        tip_labels=False,
         node_sizes=0,
         scale_bar=False,
     )
@@ -858,18 +1329,76 @@ def _draw_toytree_feature_heatmap(
     axes.x.domain.max = max(len(feature_labels) + 3.0, 4.0)
 
     value_lookup: dict[tuple[str, str], object] = {}
+    trait_lookup: dict[str, object] = {}
+    prob_lookup: dict[str, object] = {}
+    status_lookup: dict[str, object] = {}
     for row in annotation.iter_rows(named=True):
-        value_lookup[(str(row["species"]), str(row["feature"]))] = row.get(value_col)
+        species = str(row["species"])
+        value_lookup[(species, str(row["feature"]))] = row.get(value_col)
+        trait_lookup.setdefault(species, row.get("true_label"))
+        prob_lookup.setdefault(species, row.get("prob"))
+        status_lookup.setdefault(species, row.get("decision_status"))
+    confusion_groups = [
+        "abstained"
+        if status_lookup.get(species) == "abstained"
+        else _oof_confusion_group(trait_lookup.get(species), prob_lookup.get(species))
+        for species in tip_labels
+    ]
     finite_values = _finite_values(annotation, value_col)
     vmin, vmax = _heatmap_domain(value_col, finite_values)
-    for feature_index, feature in enumerate(feature_labels):
-        x = 0.45 + feature_index * 0.42
+    trait_values = [
+        _format_cell_value("true_label", trait_lookup.get(species)) for species in tip_labels
+    ]
+    axes.text(
+        [trait_x] * len(tip_labels),
+        list(range(len(tip_labels))),
+        trait_values,
+        color=_TEXT_COLOR,
+        title=[
+            f"{species} trait={_format_value(trait_lookup.get(species))}" for species in tip_labels
+        ],
+        style={"font-size": "8px", "text-anchor": "middle"},
+    )
+    axes.text(
+        trait_x,
+        len(tip_labels) + 0.35,
+        "trait",
+        angle=90,
+        color=_TEXT_COLOR,
+        style={"font-size": "7px", "text-anchor": "start"},
+    )
+    prob_values = [_format_heatmap_prob_value(prob_lookup.get(species)) for species in tip_labels]
+    axes.text(
+        [prob_x] * len(tip_labels),
+        list(range(len(tip_labels))),
+        prob_values,
+        color=_TEXT_COLOR,
+        title=[
+            f"{species} prob={_format_value(prob_lookup.get(species))}" for species in tip_labels
+        ],
+        style={"font-size": "8px", "text-anchor": "middle"},
+    )
+    axes.text(
+        prob_x,
+        len(tip_labels) + 0.35,
+        "prob",
+        angle=90,
+        color=_TEXT_COLOR,
+        style={"font-size": "7px", "text-anchor": "start"},
+    )
+    for x, feature, feature_label, feature_title in zip(
+        feature_xs,
+        features,
+        feature_labels,
+        feature_titles,
+        strict=True,
+    ):
         colors: list[str] = []
         titles: list[str] = []
         for species in tip_labels:
             value = value_lookup.get((species, feature))
             colors.append(_continuous_color(value, vmin=vmin, vmax=vmax, cmap_name=cmap_name))
-            titles.append(f"{species} {feature} {value_col}={_format_value(value)}")
+            titles.append(f"{species} {feature_title} {value_col}={_format_value(value)}")
         axes.scatterplot(
             [x] * len(tip_labels),
             list(range(len(tip_labels))),
@@ -881,53 +1410,227 @@ def _draw_toytree_feature_heatmap(
         axes.text(
             x,
             len(tip_labels) + 0.35,
-            feature,
-            angle=-65,
-            style={"font-size": "7px", "text-anchor": "end"},
+            feature_label,
+            angle=90,
+            color=_TEXT_COLOR,
+            style={"font-size": "7px", "text-anchor": "start"},
         )
     axes.text(
-        -0.05,
-        len(tip_labels) + 1.1,
-        title,
-        style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
+        [species_x] * len(tip_labels),
+        list(range(len(tip_labels))),
+        [
+            f"{species} (abstained)" if group == "abstained" else species
+            for species, group in zip(tip_labels, confusion_groups, strict=True)
+        ],
+        color=[
+            CONFUSION_GROUP_COLORS.get(group, "#999999") if group is not None else _TEXT_COLOR
+            for group in confusion_groups
+        ],
+        title=[
+            (f"{species} OOF confusion group={group}" if group is not None else species)
+            for species, group in zip(tip_labels, confusion_groups, strict=True)
+        ],
+        style={"font-size": "9px", "text-anchor": "start"},
     )
+    _draw_heatmap_legend(
+        canvas=canvas,
+        width=width,
+        value_col=value_col,
+        vmin=vmin,
+        vmax=vmax,
+        cmap_name=cmap_name,
+    )
+    _draw_confusion_group_legend(canvas=canvas, width=width)
+    if title:
+        axes.text(
+            -0.05,
+            len(tip_labels) + 1.45,
+            title,
+            color=_TEXT_COLOR,
+            style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
+        )
+    _save_toytree_svg(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
+
+
+def _save_toytree_svg(*, canvas: Any, out_path: Path, toytree_module: Any) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     toytree_module.save(canvas, str(out_path))
+    _ensure_svg_white_background(out_path)
 
 
-def _track_color(track: str, value: object, annotation: pl.DataFrame) -> str:
-    if value is None:
-        return _MISSING_COLOR
-    if track == "true_label":
-        label_value = _int_or_none(value)
-        return (
-            _MISSING_COLOR
-            if label_value is None
-            else _LABEL_COLORS.get(label_value, _MISSING_COLOR)
+def _ensure_svg_white_background(svg_path: Path) -> None:
+    ET.register_namespace("", _SVG_NS)
+    try:
+        tree = ET.parse(svg_path)
+    except ET.ParseError as exc:
+        raise TreePredictionError(f"Failed to parse SVG output: {svg_path}") from exc
+    except OSError as exc:
+        raise TreePredictionError(f"Failed to read SVG output: {svg_path}") from exc
+
+    root = tree.getroot()
+    if _xml_local_name(root.tag) != "svg":
+        raise TreePredictionError(f"SVG output root is not <svg>: {svg_path}")
+
+    namespace = _xml_namespace(root.tag)
+    rect_tag = f"{{{namespace}}}rect" if namespace else "rect"
+    for child in list(root):
+        if child.get("id") == _SVG_BACKGROUND_ID:
+            root.remove(child)
+    root.insert(
+        0,
+        ET.Element(
+            rect_tag,
+            {
+                "id": _SVG_BACKGROUND_ID,
+                "x": "0",
+                "y": "0",
+                "width": "100%",
+                "height": "100%",
+                "fill": _SVG_BACKGROUND_FILL,
+            },
+        ),
+    )
+    try:
+        tree.write(svg_path, encoding="utf-8", xml_declaration=True)
+    except OSError as exc:
+        raise TreePredictionError(f"Failed to write SVG output: {svg_path}") from exc
+
+
+def _xml_namespace(tag: str) -> str:
+    if tag.startswith("{"):
+        return tag[1:].partition("}")[0]
+    return ""
+
+
+def _xml_local_name(tag: str) -> str:
+    if tag.startswith("{"):
+        return tag.partition("}")[2]
+    return tag
+
+
+def _draw_heatmap_legend(
+    *,
+    canvas: Any,
+    width: int,
+    value_col: str,
+    vmin: float,
+    vmax: float,
+    cmap_name: str,
+) -> None:
+    toyplot_locator = importlib.import_module("toyplot.locator")
+    tick_locations = [vmin] if vmin == vmax else [vmin, vmax]
+    tick_labels = [_format_legend_value(value) for value in tick_locations]
+    canvas.color_scale(
+        _toyplot_linear_colormap(cmap_name=cmap_name, vmin=vmin, vmax=vmax),
+        x1=width - 270,
+        y1=82,
+        x2=width - 105,
+        y2=82,
+        width=12,
+        label=_heatmap_legend_label(value_col),
+        min=vmin,
+        max=vmax,
+        ticklocator=toyplot_locator.Explicit(tick_locations, tick_labels),
+    )
+    missing_axes = canvas.cartesian(
+        bounds=(width - 92, width - 35, 50, 112),
+        show=False,
+        xmin=0,
+        xmax=1,
+        ymin=0,
+        ymax=1,
+    )
+    missing_axes.show = False
+    missing_axes.rectangle(
+        [0.06],
+        [0.28],
+        [0.42],
+        [0.58],
+        color=[_MISSING_COLOR],
+        title=["Missing value"],
+        style={"stroke": "none"},
+    )
+    missing_axes.text(
+        0.36,
+        0.5,
+        "NA",
+        color=_TEXT_COLOR,
+        style={"font-size": "7px", "text-anchor": "start"},
+    )
+
+
+def _draw_confusion_group_legend(*, canvas: Any, width: int) -> None:
+    legend_axes = canvas.cartesian(
+        bounds=(width - 270, width - 35, 150, 266),
+        show=False,
+        xmin=0,
+        xmax=1,
+        ymin=0,
+        ymax=1,
+    )
+    legend_axes.show = False
+    legend_axes.text(
+        0.02,
+        0.92,
+        "OOF confusion group",
+        color=_TEXT_COLOR,
+        style={"font-size": "8px", "font-weight": "bold", "text-anchor": "start"},
+    )
+    y_positions = [0.70, 0.51, 0.32, 0.13]
+    for group, y in zip(CONFUSION_GROUP_ORDER, y_positions, strict=True):
+        color = CONFUSION_GROUP_COLORS[group]
+        legend_axes.rectangle(
+            [0.03],
+            [0.09],
+            [y - 0.055],
+            [y + 0.055],
+            color=[color],
+            title=[f"{group}: {CONFUSION_GROUP_LABELS[group]}"],
+            style={"stroke": "none"},
         )
-    if track.startswith("pred_label"):
-        pred_value = _int_or_none(value)
-        return (
-            _MISSING_COLOR
-            if pred_value is None
-            else _PRED_COLORS.get(pred_value, _MISSING_COLOR)
+        legend_axes.text(
+            0.13,
+            y,
+            f"{group}: {CONFUSION_GROUP_LABELS[group]}",
+            color=color,
+            style={"font-size": "7px", "text-anchor": "start"},
         )
-    if track == "prob":
-        return _continuous_color(value, vmin=0.0, vmax=1.0, cmap_name="viridis")
-    if track == "uncertainty_std":
-        numeric_values = _finite_values(annotation, track)
-        vmax = max(numeric_values) if numeric_values else 1.0
-        return _continuous_color(value, vmin=0.0, vmax=max(vmax, 1e-12), cmap_name="Greys")
-    if track in {"contrast_pair_id", "fold_id"}:
-        category_values: list[str] = sorted(
-            str(v) for v in annotation.select(track).drop_nulls().to_series().to_list()
-        )
-        unique_values = list(dict.fromkeys(category_values))
-        mapping: dict[str, str] = {
-            v: _PALETTE[idx % len(_PALETTE)] for idx, v in enumerate(unique_values)
-        }
-        return mapping.get(str(value), _MISSING_COLOR)
-    return _MISSING_COLOR
+
+
+def _oof_confusion_group(true_label: object, probability: object) -> str | None:
+    try:
+        label_value = float(true_label)  # type: ignore[arg-type]
+        probability_value = float(probability)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if label_value not in {0.0, 1.0} or not math.isfinite(probability_value):
+        return None
+    predicted_label = int(probability_value >= FIXED_PROBABILITY_THRESHOLD_VALUE)
+    return {
+        (1, 1): "TP",
+        (1, 0): "FN",
+        (0, 0): "TN",
+        (0, 1): "FP",
+    }[(int(label_value), predicted_label)]
+
+
+def _heatmap_legend_label(value_col: str) -> str:
+    return {
+        "log2_tpm_plus1": "log2(TPM + 1)",
+        "z_score_log2_tpm": "within-feature z-score",
+    }.get(value_col, value_col)
+
+
+def _toyplot_linear_colormap(*, cmap_name: str, vmin: float, vmax: float) -> Any:
+    toyplot_color = importlib.import_module("toyplot.color")
+    cmap = matplotlib.colormaps[cmap_name]
+    colors = [matplotlib.colors.to_hex(cmap(index / 255.0)) for index in range(256)]
+    palette = toyplot_color.Palette(colors)
+    return toyplot_color.LinearMap(
+        palette=palette,
+        domain_min=vmin,
+        domain_max=vmax,
+    )
 
 
 def _continuous_color(value: object, *, vmin: float, vmax: float, cmap_name: str) -> str:
@@ -965,6 +1668,24 @@ def _finite_values(annotation: pl.DataFrame, column: str) -> list[float]:
     return values
 
 
+def _format_legend_value(value: float) -> str:
+    if abs(value) < 100:
+        return f"{value:.2f}"
+    return f"{value:.3g}"
+
+
+def _format_heatmap_prob_value(value: object) -> str:
+    if value is None:
+        return "NA"
+    try:
+        numeric = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "NA"
+    if numeric != numeric:
+        return "NA"
+    return f"{numeric:.2f}"
+
+
 def _int_or_none(value: object) -> int | None:
     if not isinstance(value, int | float | str):
         return None
@@ -982,14 +1703,52 @@ def _format_value(value: object) -> str:
     return str(value)
 
 
+def _track_display_value(track: str, row: dict[str, Any] | None) -> object:
+    if row is None:
+        return None
+    if track.startswith("pred_label") and row.get("decision_status") == "abstained":
+        return "abstained"
+    return row.get(track)
+
+
+def _has_text(value: object) -> bool:
+    return value is not None and str(value).strip() != ""
+
+
+def _format_cell_value(track: str, value: object) -> str:
+    if value is None:
+        return "NA"
+    if track == "true_label" or track.startswith("pred_label"):
+        if value == "abstained":
+            return "abstained"
+        label_value = _int_or_none(value)
+        return "NA" if label_value is None else str(label_value)
+    if track in {"prob", "uncertainty_std"}:
+        try:
+            numeric = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return "NA"
+        if numeric != numeric:
+            return "NA"
+        return f"{numeric:.3f}"
+    return str(value)
+
+
+def _text_column_width_px(
+    values: Iterable[str], *, min_width: int = 42, padding: int = 18
+) -> int:
+    max_chars = max((len(value) for value in values), default=0)
+    return max(min_width, padding + 7 * max_chars)
+
+
 def _track_label(track: str) -> str:
     return {
-        "true_label": "true",
+        "true_label": "trait",
         "prob": "prob",
         "pred_label": "pred",
-        "pred_label_cv_derived_threshold": "pred_cv",
+        "pred_label_fixed_threshold": "pred",
         "uncertainty_std": "uncert",
-        "contrast_pair_id": "contrast",
+        "group_id": "group",
         "fold_id": "fold",
     }.get(track, track)
 

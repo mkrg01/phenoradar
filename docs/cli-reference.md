@@ -10,11 +10,13 @@ Both commands are equivalent:
 ```text
 phenoradar run
 phenoradar config
-phenoradar metadata
 phenoradar dataset
 phenoradar predict
 phenoradar report
 ```
+
+Input preparation belongs in the separate `phenoradar_prep` repository.
+See [data-format.md](data-format.md) for the input files accepted by PhenoRadar.
 
 Global options:
 
@@ -43,6 +45,7 @@ Run training/evaluation pipeline.
 
 ```bash
 phenoradar run -c config.yml [--execution-stage cv_only|full_run]
+phenoradar run -c config.yml --resume runs/<study_id>
 ```
 
 Options:
@@ -51,63 +54,110 @@ Options:
 - `--execution-stage`: temporary override of `runtime.execution_stage`
 - `--verbose`, `-v`: detailed stage-level logs
 - `--quiet`, `-q`: suppress progress logs
+- `--resume`: resume a multi-condition study directory generated from the same
+  ordered conditions
+
+When a schema-scalar config field contains a list, `run` expands the values into
+ordered conditions, reuses one outer split for every condition, and writes a
+study directory. All conditions are reported symmetrically; there is no default
+or reference condition.
 
 Always written:
 
 - `resolved_config.yml`
-- `split_manifest.tsv`
-- `fold_validation_groups.tsv`
-- `metrics_cv.tsv`
-- `loss_by_split_cv.tsv`
-- `thresholds.tsv`
-- `feature_importance.tsv`
-- `feature_importance_by_fold.tsv`
-- `coefficients.tsv`
-- `coefficients_by_fold.tsv`
-- `prediction_cv.tsv`
-- `feature_filter_counts.tsv`
-- `feature_filter_counts_summary.tsv`
-- `retained_features.tsv`
-- `retained_features_summary.tsv`
-- `model_sparsity.tsv`
-- `model_sparsity_summary.tsv`
-- `classification_summary.tsv`
+- `split/tables/split_manifest.tsv`
+- `split/tables/fold_validation_groups.tsv`
+- `split/tables/fold_diagnostics.tsv`
+- `cv/tables/metrics_cv.tsv`
+- `cv/tables/loss_by_split_cv.tsv`
+- `cv/tables/feature_importance.tsv`
+- `cv/tables/feature_importance_by_fold.tsv`
+- `cv/tables/coefficients.tsv`
+- `cv/tables/coefficients_by_fold.tsv`
+- `cv/tables/feature_stability_by_feature.tsv`
+- `cv/tables/feature_stability_by_fold_pair.tsv`
+- `cv/tables/feature_stability_summary.tsv`
+- `cv/tables/prediction_cv.tsv`
+- `model/tables/thresholds.tsv`
+- `model/tables/evaluation_contract.tsv`
+- `model/tables/feature_filter_counts.tsv`
+- `model/tables/feature_filter_counts_summary.tsv`
+- `model/tables/retained_features.tsv`
+- `model/tables/retained_features_summary.tsv`
+- `model/tables/model_sparsity.tsv`
+- `model/tables/model_sparsity_summary.tsv`
+- `model/tables/convergence_diagnostics.tsv`
+- `summary/tables/classification_summary.tsv`
+- `runtime/tables/timing.tsv`
 - `run_metadata.json`
-- `figures/` (SVG files)
+- stage-specific figure directories (`cv/figures/`, `model/figures/`,
+  `external_test/figures/`, `inference/figures/`)
 
 Notes:
 
 - `prediction_cv.tsv` may include optional `uncertainty_std` when ensemble size > 1.
-- `figures/` includes:
-  - `cv_metrics_overview.svg`
-  - `cv_loss_by_split.svg`
-  - `threshold_selection_curve.svg`
-  - `feature_importance_top.svg`
-  - `coefficients_signed_top.svg`
-  - `cv_species_probability_by_trait.svg`
-  - `cv_fold_trait_probability.svg`
-  - `feature_filter_funnel.svg`
-  - `retained_features_by_fold.svg`
-  - `model_sparsity_scatter.svg`
-  - `model_selection_trials.svg` (model selection enabled)
-  - `roc_pr_curves_cv.svg` (may be skipped when degenerate)
-  - `final_refit_loss_by_split.svg` (`full_run`)
-  - `external_species_probability_by_trait.svg` (`full_run` when external test rows exist)
+- Timing rows use one monotonic clock. Parallel fold/sample/candidate intervals
+  can overlap and should not be summed as elapsed wall time.
+- Stage figure directories include:
+  - `cv/figures/cv_metrics_overview.svg`
+  - `cv/figures/cv_loss_by_split.svg`
+  - `cv/figures/feature_importance_top.svg`
+  - `cv/figures/top_feature_expression_by_confusion.svg`
+  - `cv/figures/feature_importance_by_fold_heatmap.svg`
+  - `cv/figures/coefficients_signed_top.svg`
+  - `cv/figures/feature_stability_top.svg`
+  - `cv/figures/feature_set_jaccard_heatmap.svg`
+  - `cv/figures/cv_species_probability_by_trait.svg`
+  - `cv/figures/cv_fold_trait_probability.svg`
+  - `cv/figures/feature_filter_funnel.svg`
+  - `cv/figures/non_zero_feature_count_by_fold.svg`
+  - `cv/figures/probability_by_<group>.svg` (when `summary.group_col` is present in metadata)
+  - `cv/figures/model_selection_trials.svg` (model selection enabled)
+  - `cv/figures/roc_curve_cv.svg` (may be skipped when degenerate)
+  - `cv/figures/pr_curve_cv.svg` (may be skipped when degenerate)
+  - `model/figures/final_refit_feature_importance_top.svg` (`full_run`)
+  - `model/figures/final_refit_coefficients_signed_top.svg` (`full_run`, linear model)
+  - `model/figures/final_refit_feature_filter_funnel.svg` (`full_run`)
+  - `model/figures/final_refit_model_selection_trials.svg` (model selection enabled)
+  - `model/figures/final_refit_model_selection_one_se_curve.svg` (model selection enabled)
+  - `external_test/figures/final_refit_loss_by_split.svg` (`full_run`)
+  - `external_test/figures/top_feature_expression_by_confusion.svg` (`full_run` when external test rows exist)
+  - `external_test/figures/external_species_probability_by_trait.svg` (`full_run` when external test rows exist)
+  - `external_test/figures/external_confusion_matrix.svg` (`full_run` when external test rows exist)
+  - `external_test/figures/cv_external_metric_comparison.svg` (`full_run` when external test rows exist)
+  - `external_test/figures/external_roc_curve.svg` / `external_test/figures/external_pr_curve.svg` (`full_run` when external test rows contain both labels)
+  - `inference/figures/inference_probability_distribution.svg` (`full_run` when inference rows exist)
+  - `inference/figures/species_probability_cv_and_inference.svg` (`full_run` when inference rows exist)
+  - `<stage>/figures/probability_by_<group>.svg` (`full_run` prediction stages when `summary.group_col` is present in metadata)
 
 Conditionally written:
 
-- `prediction_external_test.tsv` (`full_run` only)
-- `prediction_inference.tsv` (`full_run` only)
-- `loss_by_split_final_refit.tsv` (`full_run` only)
+- `cv/tables/group_bootstrap_metrics.tsv`,
+  `cv/tables/group_bootstrap_replicates.tsv`, and
+  `cv/figures/group_bootstrap_metrics.svg`
+  (`evaluation.group_bootstrap.enabled=true`)
+- `external_test/tables/prediction_external_test.tsv` (`full_run` only)
+- `inference/tables/prediction_inference.tsv` (`full_run` only)
+- `external_test/tables/loss_by_split_final_refit.tsv` (`full_run` only)
 - `model_bundle/` (`full_run` only)
-- `ensemble_model_probs.tsv` (ensemble size > 1)
-- `model_selection_trials.tsv` (model selection enabled)
-- `model_selection_trials_summary.tsv` (model selection enabled)
-- `model_selection_selected.tsv` (candidate selection enabled)
+- `cv/tables/ensemble_model_probs.tsv` (ensemble size > 1)
+- `cv/tables/model_selection_trials.tsv` (model selection enabled)
+- `cv/tables/model_selection_trials_summary.tsv` (model selection enabled)
+- `model/tables/model_selection_selected.tsv` (candidate selection enabled)
+- `model/tables/final_refit_feature_importance.tsv` /
+  `model/tables/final_refit_feature_importance_by_model.tsv` (`full_run`)
+- `model/tables/final_refit_coefficients.tsv` /
+  `model/tables/final_refit_coefficients_by_model.tsv` (`full_run`)
+- `model/tables/final_refit_model_selection_trials.tsv` /
+  `model/tables/final_refit_model_selection_trials_summary.tsv`
+  (candidate selection enabled in `full_run`)
+- `cv/figures/model_selection_one_se_curve.svg` (candidate selection enabled)
 
 ## `config`
 
-Resolve and validate config without running the pipeline.
+Resolve and validate config without running the pipeline. The output includes
+every setting with defaults filled in, plus comments listing available choices
+and nullable value types.
 
 ```bash
 phenoradar config [-c config.yml] [--out config.yml]
@@ -119,67 +169,6 @@ Options:
 - `--out` (optional): output YAML path (default: `config.yml`)
 - `--verbose`, `-v`: detailed stage-level logs
 - `--quiet`, `-q`: suppress progress logs
-
-## `metadata`
-
-Generate metadata-adjacent artifacts from a raw species trait table.
-
-```bash
-phenoradar metadata \
-  --species-trait species_trait.tsv \
-  --tree-out ncbi_tree.nwk \
-  --out species_metadata.tsv
-```
-
-This command requires the external `nwkit` executable. Taxonomic-rank blocking also uses
-`ete4.NCBITaxa`. For a local uv environment, install the recorded dependency group with:
-
-```bash
-uv sync --group taxonomy
-```
-
-For conda-based environments, install `nwkit` from Bioconda and `ete4` from PyPI or conda.
-For pip-only environments, install `nwkit` directly from the upstream repository.
-
-Options:
-
-- `--species-trait`: input TSV containing species and binary trait columns (default: `species_trait.tsv`)
-- `--species-taxid`: optional TSV containing species and NCBI taxid columns for tree retrieval and taxonomic-rank blocking
-- `--species-taxid-out`: output generated species/taxid TSV when `--species-taxid` is omitted; defaults to `species_taxid.tsv` next to `--out` when taxonomic-rank blocking needs it
-- `--out`: output PhenoRadar metadata TSV (default: `species_metadata.tsv`)
-- `--tree-in`: existing Newick tree to use for group assignment; skips NCBI tree retrieval
-- `--tree-out`: output Newick tree path when retrieving from NCBI Taxonomy (default: `ncbi_tree.nwk`)
-- `--species-col`: species column name in `species_trait.tsv` and `species_taxid.tsv` (default: `species`)
-- `--taxid-col`: taxid column name in `species_taxid.tsv` (default: `taxid`)
-- `--trait-col`: binary trait column name in `species_trait.tsv` and output metadata (default: `C4`)
-- `--contrast-pair-col`: output contrast-pair column name (default: `contrast_pair_id`)
-- `--contrast-pair-test-holdout-col`: output column marking known-trait species without a contrast pair as test holdouts (default: `contrast_pair_test_holdout`)
-- `--taxon-block-rank`: NCBI taxonomy rank to emit as a split block; repeat for multiple ranks such as `family` and `order`
-- `--taxon-block-min-species-per-label`: minimum labeled species per trait value required for a taxon block to enter CV (default: `1`)
-- `--taxon-block-mixed-test-fraction`: fraction of mixed-label taxon blocks to reserve as external test blocks (default: `0.0`)
-- `--taxon-block-mixed-test-seed`: random seed for selecting mixed-label test blocks (default: `42`)
-- `--ncbi-taxonomy-db`: optional ete4 NCBI taxonomy SQLite database path
-- `--rank`: NCBI taxonomy rank passed to `nwkit constrain --rank` (default: `family`)
-- `--nwkit-bin`: `nwkit` executable path (default: `nwkit`)
-- `--force`: overwrite existing tree or metadata outputs
-- `--tree-only`: fetch/write only the tree and skip metadata generation
-- `--verbose`, `-v`: detailed stage-level logs
-- `--quiet`, `-q`: suppress progress logs
-
-Group assignment uses `nwkit skim --only-contrastive-clades yes --output-groupfile yes`.
-Species that are not present in the tree are excluded from the generated metadata. The
-generated `contrast_pair_id` is based on `contrastive_clade`, so each assigned training
-contrast pair contains both non-missing trait labels (`0` and `1`). Known-trait species
-without an assigned contrast pair are marked in `contrast_pair_test_holdout`.
-
-When `--taxon-block-rank` is supplied, the command also writes
-`taxon_<rank>_id`, `taxon_<rank>_name`, `taxon_<rank>_test_holdout`, and
-`taxon_<rank>_exclude`. If `--species-taxid` is omitted, `phenoradar metadata`
-first resolves species names with `ete4.NCBITaxa`, writes a generated
-`species_taxid.tsv` (or `--species-taxid-out`), and reuses that file for rank
-blocking. Rank blocks with both labels are usable as CV groups. Single-label
-rank blocks are marked as test holdout, while labeled species with missing
-taxid/rank are marked as excluded.
 
 ## `predict`
 
@@ -199,21 +188,27 @@ Options:
 Outputs:
 
 - `resolved_config.yml`
-- `prediction_inference.tsv`
+- `inference/tables/prediction_inference.tsv`
 - `run_metadata.json`
-- `figures/`
+- `inference/figures/`
   - `predict_probability_distribution.svg`
   - optional `predict_uncertainty.svg` (bundle ensemble size > 1)
 
 Prediction-time feature alignment policy:
 
-- bundle features missing in input -> filled with `0`
-- extra input features not in bundle -> ignored
-- zero overlap with bundle feature schema -> error
+- rank transforms align raw input to the complete bundled transform schema before ranking
+- for rank transforms, transform-schema features missing in input -> filled
+  with the bundle's training-time `preprocess.absent_feature_fill` policy before ranking
+- for rank transforms, extra input features outside the transform schema -> ignored before ranking
+- feature-wise transforms may align directly to the model-feature union; missing
+  model features use the same bundled fill policy (`0` or `NA`)
+- missing bundled features produce a warning, but prediction continues when at
+  least one model feature overlaps
+- zero overlap with the model-feature union -> error
 
 ## `dataset`
 
-Download compact test data from GitHub raw content.
+Install compact test data bundled with PhenoRadar.
 
 ```bash
 phenoradar dataset [--out testdata/c4_tiny] [--base-url URL] [--force]
@@ -222,10 +217,15 @@ phenoradar dataset [--out testdata/c4_tiny] [--base-url URL] [--force]
 Options:
 
 - `--out`: output directory (default: `testdata/c4_tiny`)
-- `--base-url`: alternate source URL containing the c4_tiny dataset files
+- `--base-url`: optional external source URL containing the c4_tiny dataset files;
+  `PHENORADAR_TESTDATA_BASE_URL` provides the same override
 - `--force`: overwrite existing files if checksum does not match expected values
 - `--verbose`, `-v`: detailed stage-level logs
 - `--quiet`, `-q`: suppress progress logs
+
+Without an external source override, this command copies package resources and
+does not access the network. All files are checked against the bundled
+`SHA256SUMS` manifest.
 
 ## `report`
 
@@ -245,9 +245,15 @@ Selection options:
 Ranking options:
 
 - `--primary-metric`: `mcc|balanced_accuracy|roc_auc|pr_auc|brier`
+  - `pr_auc` is the compatibility key for Average Precision computed by
+    `sklearn.metrics.average_precision_score`
+  - ranking is descending for `mcc`, `balanced_accuracy`, `roc_auc`, and `pr_auc`, and
+    ascending for `brier`
 - `--aggregate-scope`: `macro|micro`
 - `--include-stage`: `cv_only|full_run|predict|all`
 - `--strict`: fail instead of non-strict warn-and-continue behavior
+- `--allow-mixed-experiments`: explicitly allow ranking runs whose experiment
+  fingerprints differ or cannot be verified
 - `--output-format`: `tsv|md|html|json`
 - `--out`: output directory (default auto-generated under `reports/`)
 - `--verbose`, `-v`: detailed stage-level logs
@@ -262,3 +268,14 @@ Outputs:
 - optional narrative file (`report.md`, `report.html`, or `report.json`)
 - `figures/` (`report_metric_ranking.svg`, `report_metric_comparison.svg`,
   and `report_stage_breakdown.svg` when more than one stage appears)
+
+By default, ranked runs must share one experiment fingerprint. The fingerprint is based on
+the metadata/TPM file contents, the realized split manifest, and the evaluation contract;
+file paths and model hyperparameters are excluded. Legacy runs without fingerprints remain
+reportable in non-strict mode with warnings, while `--strict` rejects them. Report metric
+definitions are read from each run's persisted contract, so missing legacy definitions are
+left unknown rather than inferred from the installed version.
+The report also carries each run's persisted PhenoRadar version/build fields and emits
+`mixed_phenoradar_versions`, `missing_phenoradar_version`, or `dirty_phenoradar_build`
+warnings when applicable. The report-generating build is recorded separately under
+`report_manifest.json.generated_by`.

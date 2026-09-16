@@ -11,11 +11,12 @@ from pydantic import (
     NonNegativeFloat,
     PositiveFloat,
     PositiveInt,
+    field_validator,
     model_validator,
 )
 
 ExecutionStage = Literal["cv_only", "full_run"]
-OuterCvStrategy = Literal["logo", "group_kfold"]
+OuterCvStrategy = Literal["logo", "group_kfold", "stratified_group_kfold"]
 SamplingStrategy = Literal["all_samples", "group_balanced"]
 WeightingMode = Literal["none", "group_label_inverse"]
 ModelName = Literal["logistic_elasticnet", "linear_svm", "random_forest"]
@@ -23,10 +24,13 @@ ProbabilityAggregation = Literal["mean", "median"]
 SearchStrategy = Literal["grid", "random", "tpe"]
 CandidateSourcePolicy = Literal["per_sample_set", "reuse_first_sample_set"]
 SelectionMetricName = Literal["mcc", "balanced_accuracy", "log_loss"]
-ThresholdSelectionMetricName = Literal["mcc", "balanced_accuracy"]
+SelectionRule = Literal["best", "one_se"]
 CorrelationMethod = Literal["pearson", "spearman"]
 ExpressionTransformMethod = Literal["none", "log1p", "sample_rank", "sample_percentile_rank"]
 FeatureScalingMethod = Literal["none", "standard"]
+RankedFeatureFilterMethod = Literal["none", "pair_aware", "unpaired", "variance"]
+AbsentFeatureFill = Literal[0, "nan"]
+SparseFeatureScope = Literal["all_samples", "any_trait", "trait_0", "trait_1"]
 
 
 class StrictModel(BaseModel):
@@ -133,6 +137,7 @@ class DataConfig(StrictModel):
     metadata_path: str = "testdata/c4_tiny/species_metadata.tsv"
     tpm_path: str = "testdata/c4_tiny/tpm.tsv"
     tree_path: str | None = None
+    orthogroup_annotation_path: str | None = None
     species_col: str = "species"
     feature_col: str = "orthogroup"
     value_col: str = "tpm"
@@ -144,40 +149,50 @@ class SplitConfig(StrictModel):
     """Data split and CV controls."""
 
     group_col: str = "contrast_pair_id"
-    test_holdout_col: str | None = "contrast_pair_test_holdout"
     exclude_col: str | None = None
+    require_both_labels_per_group: bool = False
     outer_cv_strategy: OuterCvStrategy = "logo"
     outer_cv_n_splits: PositiveInt | None = None
 
     @model_validator(mode="after")
     def validate_group_kfold_args(self) -> SplitConfig:
-        if self.outer_cv_strategy == "group_kfold":
+        split_count_strategies = {"group_kfold", "stratified_group_kfold"}
+        if self.outer_cv_strategy in split_count_strategies:
             if self.outer_cv_n_splits is None:
                 raise ValueError(
                     "split.outer_cv_n_splits is required "
-                    "when outer_cv_strategy=group_kfold"
+                    "when outer_cv_strategy=group_kfold|stratified_group_kfold"
                 )
             if self.outer_cv_n_splits < 2:
-                raise ValueError("split.outer_cv_n_splits must be >= 2 for group_kfold")
+                raise ValueError(
+                    "split.outer_cv_n_splits must be >= 2 for "
+                    "group_kfold|stratified_group_kfold"
+                )
         elif self.outer_cv_n_splits is not None:
             raise ValueError(
                 "split.outer_cv_n_splits is only valid "
-                "when outer_cv_strategy=group_kfold"
+                "when outer_cv_strategy=group_kfold|stratified_group_kfold"
             )
         return self
 
 
-class LowPrevalenceFilterConfig(StrictModel):
-    """Low prevalence feature filter settings."""
+class SparseFeatureFilterConfig(StrictModel):
+    """Sparse feature filter settings."""
 
     enabled: bool = True
-    min_species_per_feature: PositiveInt | None = 2
+    min_nonzero_fraction: float | None = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+    )
+    scope: SparseFeatureScope = "any_trait"
 
     @model_validator(mode="after")
-    def validate_enabled_args(self) -> LowPrevalenceFilterConfig:
-        if self.enabled and self.min_species_per_feature is None:
+    def validate_enabled_args(self) -> SparseFeatureFilterConfig:
+        if self.enabled and self.min_nonzero_fraction is None:
             raise ValueError(
-                "preprocess.low_prevalence_filter.min_species_per_feature "
+                "preprocess.sparse_feature_filter."
+                "min_nonzero_fraction "
                 "is required when enabled=true"
             )
         return self
@@ -217,17 +232,37 @@ class CorrelationFilterConfig(StrictModel):
         return self
 
 
-class PairAwareFilterConfig(StrictModel):
-    """Train-only group-contrast feature filter settings."""
+class RankedFeatureFilterConfig(StrictModel):
+    """Train-only ranked feature filter settings."""
 
-    enabled: bool = False
+    method: RankedFeatureFilterMethod = "none"
     max_features: PositiveInt | None = None
+    min_contrast_pairs: PositiveInt = 1
+    higher_in_trait: Literal[0, 1] | None = None
+
+    @field_validator("higher_in_trait", mode="before")
+    @classmethod
+    def reject_boolean_higher_in_trait(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError(
+                "preprocess.ranked_feature_filter.higher_in_trait must be 0, 1, or null"
+            )
+        return value
 
     @model_validator(mode="after")
-    def validate_enabled_args(self) -> PairAwareFilterConfig:
-        if self.enabled and self.max_features is None:
+    def validate_method_args(self) -> RankedFeatureFilterConfig:
+        if self.method != "none" and self.max_features is None:
             raise ValueError(
-                "preprocess.pair_aware_filter.max_features is required when enabled=true"
+                "preprocess.ranked_feature_filter.max_features is required "
+                "when method is not none"
+            )
+        if (
+            self.higher_in_trait is not None
+            and self.method not in {"pair_aware", "unpaired"}
+        ):
+            raise ValueError(
+                "preprocess.ranked_feature_filter.higher_in_trait is only configurable "
+                "for method=pair_aware|unpaired"
             )
         return self
 
@@ -244,26 +279,59 @@ class FeatureScalingConfig(StrictModel):
     method: FeatureScalingMethod = "standard"
 
 
+class MissingExpressionConfig(StrictModel):
+    """Optional observed-only standardization and neutral missing inputs."""
+
+    method: Literal["none", "neutral"] = "none"
+    zero_as_missing: bool = False
+
+
+class AbstentionConfig(StrictModel):
+    """Fixed information-coverage gate; no threshold fitting."""
+
+    enabled: bool = False
+    threshold: float = Field(default=0.8, gt=0.0, le=1.0, allow_inf_nan=False)
+
+    @field_validator("threshold", mode="before")
+    @classmethod
+    def reject_boolean_threshold(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("abstention.threshold must be a number in (0, 1]")
+        return value
+
+
 class PreprocessConfig(StrictModel):
     """Preprocessing settings."""
 
     max_pivot_cells: PositiveInt = 50_000_000
+    absent_feature_fill: AbsentFeatureFill = 0
+    missing_expression: MissingExpressionConfig = Field(default_factory=MissingExpressionConfig)
     expression_transform: ExpressionTransformConfig = Field(
         default_factory=ExpressionTransformConfig
     )
-    low_prevalence_filter: LowPrevalenceFilterConfig = Field(
-        default_factory=LowPrevalenceFilterConfig
+    sparse_feature_filter: SparseFeatureFilterConfig = Field(
+        default_factory=SparseFeatureFilterConfig
     )
     low_variance_filter: LowVarianceFilterConfig = Field(default_factory=LowVarianceFilterConfig)
-    pair_aware_filter: PairAwareFilterConfig = Field(default_factory=PairAwareFilterConfig)
+    ranked_feature_filter: RankedFeatureFilterConfig = Field(
+        default_factory=RankedFeatureFilterConfig
+    )
     correlation_filter: CorrelationFilterConfig = Field(default_factory=CorrelationFilterConfig)
     feature_scaling: FeatureScalingConfig = Field(default_factory=FeatureScalingConfig)
+
+    @field_validator("absent_feature_fill", mode="before")
+    @classmethod
+    def reject_boolean_absent_feature_fill(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("preprocess.absent_feature_fill must be 0 or nan")
+        return value
 
 
 class ModelConfig(StrictModel):
     """Model family selection."""
 
     name: ModelName = "logistic_elasticnet"
+    logistic_warm_start_path: bool = False
 
 
 class SamplingConfig(StrictModel):
@@ -272,6 +340,9 @@ class SamplingConfig(StrictModel):
     strategy: SamplingStrategy = "group_balanced"
     max_samples_per_label_per_group: PositiveInt | None = 1
     sampled_set_count: PositiveInt = 10
+    training_group_count: PositiveInt | None = None
+    group_subsample_repeats: PositiveInt = 1
+    group_subsample_repeat_index: PositiveInt = 1
     weighting: WeightingMode = "none"
 
     @model_validator(mode="after")
@@ -308,6 +379,7 @@ class ModelSelectionConfig(StrictModel):
     inner_cv_strategy: OuterCvStrategy | None = None
     inner_cv_n_splits: PositiveInt | None = None
     selection_metric: SelectionMetricName = "log_loss"
+    selection_rule: SelectionRule = "best"
 
     @property
     def has_continuous_search_space(self) -> bool:
@@ -351,17 +423,22 @@ class ModelSelectionConfig(StrictModel):
                 "continuous_range/continuous_log_range"
             )
 
-        if self.inner_cv_strategy == "group_kfold":
+        split_count_strategies = {"group_kfold", "stratified_group_kfold"}
+        if self.inner_cv_strategy in split_count_strategies:
             if self.inner_cv_n_splits is None:
                 raise ValueError(
                     "model_selection.inner_cv_n_splits is required "
-                    "when inner_cv_strategy=group_kfold"
+                    "when inner_cv_strategy=group_kfold|stratified_group_kfold"
                 )
             if self.inner_cv_n_splits < 2:
-                raise ValueError("model_selection.inner_cv_n_splits must be >= 2 for group_kfold")
+                raise ValueError(
+                    "model_selection.inner_cv_n_splits must be >= 2 for "
+                    "group_kfold|stratified_group_kfold"
+                )
         elif self.inner_cv_n_splits is not None:
             raise ValueError(
-                "model_selection.inner_cv_n_splits is only valid when inner_cv_strategy=group_kfold"
+                "model_selection.inner_cv_n_splits is only valid when "
+                "inner_cv_strategy=group_kfold|stratified_group_kfold"
             )
 
         if (
@@ -377,16 +454,35 @@ class ModelSelectionConfig(StrictModel):
 
 
 class ReportConfig(StrictModel):
-    """Threshold derivation settings."""
+    """Prediction threshold settings."""
 
-    fixed_probability_threshold: float = 0.5
-    auto_threshold_selection_metric: ThresholdSelectionMetricName = "mcc"
+    pass
 
-    @model_validator(mode="after")
-    def validate_thresholds(self) -> ReportConfig:
-        if not (0 <= self.fixed_probability_threshold <= 1):
-            raise ValueError("report.fixed_probability_threshold must be between 0 and 1")
-        return self
+
+class GroupBootstrapConfig(StrictModel):
+    """OOF group-bootstrap confidence interval controls."""
+
+    enabled: bool = False
+    n_resamples: PositiveInt = 2000
+    confidence_level: float = Field(default=0.95, gt=0.0, lt=1.0)
+
+
+class EvaluationConfig(StrictModel):
+    """Evaluation uncertainty controls."""
+
+    group_bootstrap: GroupBootstrapConfig = Field(default_factory=GroupBootstrapConfig)
+
+
+class SummaryConfig(StrictModel):
+    """Stage-level grouped summary controls."""
+
+    group_col: str = Field(default="family", min_length=1)
+
+
+class FiguresConfig(StrictModel):
+    """Figure output controls."""
+
+    top_features: PositiveInt = Field(default=30, le=100)
 
 
 class RuntimeConfig(StrictModel):
@@ -411,25 +507,88 @@ class AppConfig(StrictModel):
     sampling: SamplingConfig = Field(default_factory=SamplingConfig)
     preprocess: PreprocessConfig = Field(default_factory=PreprocessConfig)
     model: ModelConfig = Field(default_factory=ModelConfig)
+    abstention: AbstentionConfig = Field(default_factory=AbstentionConfig)
     model_selection: ModelSelectionConfig = Field(default_factory=ModelSelectionConfig)
     ensemble: EnsembleConfig = Field(default_factory=EnsembleConfig)
+    evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
+    summary: SummaryConfig = Field(default_factory=SummaryConfig)
+    figures: FiguresConfig = Field(default_factory=FiguresConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
 
     @model_validator(mode="after")
     def validate_contrast_pair_dependencies(self) -> AppConfig:
-        if self.preprocess.pair_aware_filter.enabled and self.data.contrast_pair_col is None:
+        missing = self.preprocess.missing_expression
+        if missing.method == "neutral":
+            if (
+                self.model.name != "logistic_elasticnet"
+                or self.preprocess.expression_transform.method != "log1p"
+                or self.preprocess.feature_scaling.method != "standard"
+                or self.preprocess.absent_feature_fill != "nan"
+            ):
+                raise ValueError(
+                    "preprocess.missing_expression.method=neutral requires "
+                    "logistic_elasticnet, log1p, standard scaling, and absent_feature_fill=nan"
+                )
+        elif missing.zero_as_missing or self.abstention.enabled:
             raise ValueError(
-                "preprocess.pair_aware_filter requires data.contrast_pair_col"
+                "zero_as_missing and abstention require "
+                "preprocess.missing_expression.method=neutral"
             )
         if (
-            self.preprocess.pair_aware_filter.enabled
-            and self.sampling.strategy == "group_balanced"
-            and self.data.contrast_pair_col != self.split.group_col
+            self.preprocess.absent_feature_fill == "nan"
+            and self.model.name != "random_forest"
+            and missing.method != "neutral"
         ):
             raise ValueError(
-                "preprocess.pair_aware_filter with sampling.strategy=group_balanced "
-                "requires split.group_col to match data.contrast_pair_col; use "
-                "sampling.strategy=all_samples when splitting by broader phylogenetic groups"
+                "preprocess.absent_feature_fill=nan is only supported when "
+                "model.name=random_forest"
             )
+        if (
+            self.preprocess.ranked_feature_filter.method == "pair_aware"
+            and self.data.contrast_pair_col is None
+        ):
+            raise ValueError(
+                "preprocess.ranked_feature_filter.method=pair_aware requires "
+                "data.contrast_pair_col"
+            )
+        selection_active = (
+            self.model_selection.selected_candidate_count is not None
+            or self.model_selection.selected_candidate_percent is not None
+        )
+        training_group_count = self.sampling.training_group_count
+        if selection_active and training_group_count is not None:
+            inner_strategy = self.model_selection.inner_cv_strategy
+            required_groups = (
+                2
+                if inner_strategy == "logo"
+                else self.model_selection.inner_cv_n_splits
+            )
+            if required_groups is not None and training_group_count < required_groups:
+                raise ValueError(
+                    "sampling.training_group_count must be at least the number of "
+                    "groups required by model-selection inner CV; "
+                    f"required={required_groups}"
+                )
+        if self.model.name == "logistic_elasticnet":
+            supported = {"alpha", "l1_ratio", "max_iter", "gradient_tol"}
+            unsupported = sorted(set(self.model_selection.search_space) - supported)
+            if unsupported:
+                raise ValueError(
+                    "Unsupported model_selection.search_space parameter(s) for "
+                    f"logistic_elasticnet: {', '.join(unsupported)}. "
+                    "Use glum parameters alpha, l1_ratio, max_iter, gradient_tol; "
+                    "alpha controls regularization directly (larger means stronger)."
+                )
+        if self.model.logistic_warm_start_path:
+            if self.model.name != "logistic_elasticnet":
+                raise ValueError(
+                    "model.logistic_warm_start_path=true is only valid when "
+                    "model.name=logistic_elasticnet"
+                )
+            if self.model_selection.search_strategy != "grid":
+                raise ValueError(
+                    "model.logistic_warm_start_path=true currently requires "
+                    "model_selection.search_strategy=grid"
+                )
         return self

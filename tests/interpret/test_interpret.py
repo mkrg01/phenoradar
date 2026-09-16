@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from glum import GeneralizedLinearRegressor
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
 from sklearn.svm import LinearSVC
 
 import phenoradar.interpret as interpret_mod
@@ -15,7 +15,7 @@ from phenoradar.interpret import (
 )
 
 
-def _fit_linear_model() -> LogisticRegression:
+def _fit_linear_model() -> GeneralizedLinearRegressor:
     x = np.array(
         [
             [0.0, 0.0],
@@ -26,7 +26,15 @@ def _fit_linear_model() -> LogisticRegression:
         dtype=float,
     )
     y = np.array([0, 1, 1, 0], dtype=int)
-    model = LogisticRegression(solver="liblinear", random_state=0)
+    model = GeneralizedLinearRegressor(
+        family="binomial",
+        solver="irls-cd",
+        alpha=0.01,
+        l1_ratio=0.5,
+        fit_intercept=True,
+        scale_predictors=False,
+        gradient_tol=1e-6,
+    )
     model.fit(x, y)
     return model
 
@@ -51,12 +59,12 @@ def test_build_interpretation_tables_for_linear_model_outputs_coefficients() -> 
 
 
 def test_build_interpretation_tables_summarizes_fold_level_means() -> None:
-    fold0_model_a = LogisticRegression()
-    fold0_model_a.coef_ = np.array([[1.0, 0.0]], dtype=float)
-    fold0_model_b = LogisticRegression()
-    fold0_model_b.coef_ = np.array([[1.0, 0.0]], dtype=float)
-    fold1_model = LogisticRegression()
-    fold1_model.coef_ = np.array([[0.0, 1.0]], dtype=float)
+    fold0_model_a = GeneralizedLinearRegressor(family="binomial")
+    fold0_model_a.coef_ = np.array([1.0, 0.0], dtype=float)
+    fold0_model_b = GeneralizedLinearRegressor(family="binomial")
+    fold0_model_b.coef_ = np.array([1.0, 0.0], dtype=float)
+    fold1_model = GeneralizedLinearRegressor(family="binomial")
+    fold1_model.coef_ = np.array([0.0, 1.0], dtype=float)
 
     artifacts = build_interpretation_tables(
         [
@@ -138,7 +146,7 @@ def test_build_interpretation_tables_warns_when_raw_importance_sum_is_zero() -> 
 
 def test_build_interpretation_tables_rejects_importance_width_mismatch() -> None:
     model = _fit_linear_model()
-    model.coef_ = np.array([[0.1, 0.2, 0.3]], dtype=float)
+    model.coef_ = np.array([0.1, 0.2, 0.3], dtype=float)
 
     with pytest.raises(InterpretationError, match="Importance vector width"):
         build_interpretation_tables([ModelFeatureEntry(feature_names=["OG1", "OG2"], model=model)])
@@ -158,7 +166,7 @@ def test_raw_importance_rejects_unsupported_model_type() -> None:
 
 def test_linear_coefficients_returns_none_for_invalid_logistic_coef_shape() -> None:
     model = _fit_linear_model()
-    model.coef_ = np.array([0.1, 0.2], dtype=float)
+    model.coef_ = np.array([[0.1, 0.2]], dtype=float)
 
     assert interpret_mod._linear_coefficients(model) is None
 

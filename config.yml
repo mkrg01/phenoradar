@@ -1,0 +1,107 @@
+# Fully expanded working configuration.
+# Adapted to the current PhenoRadar config schema.
+data:
+  metadata_path: c4_dataset/species_metadata.tsv
+  tpm_path: c4_dataset/tpm.tsv
+  tree_path: c4_dataset/ncbi_tree.nwk  # type: string or null
+  orthogroup_annotation_path: c4_dataset/odb12v2_OGs.tab.gz  # type: string or null
+  species_col: species
+  feature_col: orthogroup
+  value_col: tpm
+  trait_col: C4
+  contrast_pair_col: contrast_pair_id  # type: string or null
+
+split:
+  group_col: contrast_pair_id
+  exclude_col: null  # type: string or null
+  require_both_labels_per_group: false  # choices: true, false
+  outer_cv_strategy: logo  # choices: logo, group_kfold, stratified_group_kfold
+  outer_cv_n_splits: null  # type: integer or null
+
+sampling:
+  strategy: all_samples  # choices: all_samples, group_balanced
+  max_samples_per_label_per_group: null  # type: integer or null
+  sampled_set_count: 1
+  training_group_count: null  # type: integer or null
+  group_subsample_repeats: 1
+  group_subsample_repeat_index: 1
+  weighting: group_label_inverse  # choices: none, group_label_inverse
+
+preprocess:
+  max_pivot_cells: 50000000
+  absent_feature_fill: nan  # choices: 0, nan; nan supports random_forest or neutral LR
+  missing_expression:
+    method: neutral  # choices: none, neutral; neutral requires logistic_elasticnet/log1p/standard
+    zero_as_missing: true  # choices: true, false; explicit TPM=0 is unknown; raw TPM is retained in evidence
+  expression_transform:
+    method: log1p  # choices: none, log1p, sample_rank, sample_percentile_rank
+  sparse_feature_filter:
+    enabled: true  # choices: true, false
+    min_nonzero_fraction: 0.9  # type: number or null
+    scope: all_samples  # choices: all_samples, any_trait, trait_0, trait_1
+  low_variance_filter:
+    enabled: false  # choices: true, false
+    min_variance: null  # type: number or null
+  ranked_feature_filter:
+    method: pair_aware  # choices: none, pair_aware, unpaired, variance
+    max_features: 200  # type: integer or null
+    min_contrast_pairs: 1
+    higher_in_trait: 1  # choices: 0, 1, null; null keeps either direction
+  correlation_filter:
+    enabled: false  # choices: true, false
+    method: pearson  # choices: pearson, spearman
+    max_abs_correlation: null  # type: number or null
+  feature_scaling:
+    method: standard  # choices: none, standard
+
+model:
+  name: logistic_elasticnet  # choices: logistic_elasticnet, linear_svm, random_forest
+  logistic_warm_start_path: false  # choices: true, false
+
+model_selection:
+  selected_candidate_count: 1  # type: integer or null
+  selected_candidate_percent: null  # type: number or null
+  candidate_source_policy: per_sample_set  # choices: per_sample_set, reuse_first_sample_set
+  search_strategy: grid  # choices: grid, random, tpe
+  trial_count: null  # type: integer or null
+  search_space:
+    alpha:
+      type: log_range  # choices: range, int_range, log_range, continuous_range, continuous_log_range
+      base: 10
+      start_exp: -5
+      end_exp: -1
+      step_exp: 0.5
+      inclusive_end: true  # choices: true, false
+    l1_ratio: [1]
+    max_iter: [100]
+    gradient_tol: [1.0e-6]
+  inner_cv_strategy: stratified_group_kfold  # choices: logo, group_kfold, stratified_group_kfold, null
+  inner_cv_n_splits: 5  # type: integer or null
+  selection_metric: log_loss  # choices: mcc, balanced_accuracy, log_loss
+  selection_rule: best  # choices: best, one_se
+
+abstention:
+  enabled: true  # choices: true, false
+  threshold: 0.8  # fixed observed coefficient fraction; not a probability threshold
+
+ensemble:
+  probability_aggregation: mean  # choices: mean, median
+
+evaluation:
+  group_bootstrap:
+    enabled: true  # choices: true, false
+    n_resamples: 2000
+    confidence_level: 0.95
+
+figures:
+  top_features: 30
+
+summary:
+  group_col: family
+
+report: {}
+
+runtime:
+  seed: 42
+  n_jobs: 32
+  execution_stage: cv_only  # choices: cv_only, full_run

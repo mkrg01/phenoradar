@@ -48,22 +48,30 @@ Check installed version:
 phenoradar --version
 ```
 
-## 2) Fetch compact test data
+## 2) Install compact test data
 
-Use the built-in download command:
+Use the built-in dataset command:
 
 ```bash
 phenoradar dataset
 ```
 
-This downloads a compact dataset from GitHub into `testdata/c4_tiny/`:
+This copies the compact dataset bundled with the installed PhenoRadar package into
+`testdata/c4_tiny/`; the default operation does not require network access:
 
 - `testdata/c4_tiny/species_metadata.tsv`
 - `testdata/c4_tiny/species_trait.tsv`
 - `testdata/c4_tiny/ncbi_tree.nwk`
 - `testdata/c4_tiny/tpm.tsv`
 
-You can also supply your own files; see [data-format.md](data-format.md) for required columns.
+For development or mirrors, `--base-url URL` (or
+`PHENORADAR_TESTDATA_BASE_URL`) selects an external source. Every copied or
+downloaded file is checked against the bundled `SHA256SUMS` manifest.
+
+For your own data, use the separate `phenoradar_prep` repository for preprocessing
+and supply the prepared files to PhenoRadar. See [data-format.md](data-format.md)
+for required columns; grouped summaries use a single `family` column containing
+family names by default.
 
 ## 3) Generate `config.yml`
 
@@ -73,7 +81,8 @@ If you want to use custom files/settings, generate a config first:
 phenoradar config
 ```
 
-This writes `config.yml` by default.
+This writes `config.yml` with every setting explicitly listed. Comments show
+available choices, including booleans and nullable values.
 
 Then edit `config.yml` as needed. For example, change `runtime.n_jobs` from `1` to `4`:
 
@@ -114,24 +123,79 @@ This writes artifacts under a new run directory:
 runs/<timestamp>_run_<id>/
 ```
 
+To compare multiple values with the same split, replace a schema-scalar value
+with an ordered list, for example:
+
+```yaml
+preprocess:
+  ranked_feature_filter:
+    method: [none, pair_aware, unpaired, variance]
+    max_features: 100
+```
+
+The same `phenoradar run -c config.yml` command then writes
+`runs/<timestamp>_study_<id>/`, with one run per condition plus symmetric
+pairwise tables and publication-oriented SVG/PDF/PNG figures. Conditions retain
+their config order and no reference condition is selected.
+
+For a conservative trait-1 positive-evidence filter, keep the supervised method
+fixed and vary the direction if you want to compare it with the original
+two-sided ranking:
+
+```yaml
+preprocess:
+  sparse_feature_filter:
+    scope: trait_1
+  ranked_feature_filter:
+    method: pair_aware
+    max_features: 100
+    higher_in_trait: [null, 1]
+```
+
 Core outputs include:
 
 - `resolved_config.yml`
-- `split_manifest.tsv`
-- `fold_validation_groups.tsv`
-- `metrics_cv.tsv`
-- `thresholds.tsv`
-- `feature_importance.tsv`
-- `feature_importance_by_fold.tsv`
-- `coefficients.tsv`
-- `coefficients_by_fold.tsv`
-- `prediction_cv.tsv`
-- `classification_summary.tsv`
+- `split/tables/split_manifest.tsv`
+- `split/tables/fold_validation_groups.tsv`
+- `split/tables/fold_diagnostics.tsv`
+- `cv/tables/metrics_cv.tsv`
+- `cv/tables/feature_importance.tsv`
+- `cv/tables/feature_importance_by_fold.tsv`
+- `cv/figures/top_feature_expression_by_confusion.svg`
+- `cv/tables/coefficients.tsv`
+- `cv/tables/coefficients_by_fold.tsv`
+- `cv/tables/feature_stability_by_feature.tsv`
+- `cv/tables/feature_stability_by_fold_pair.tsv`
+- `cv/tables/feature_stability_summary.tsv`
+- `cv/tables/prediction_cv.tsv`
+- `model/tables/thresholds.tsv`
+- `model/tables/evaluation_contract.tsv`
+- `summary/tables/classification_summary.tsv`
+- `runtime/tables/timing.tsv`
 - `run_metadata.json`
-- `figures/`
+- `cv/figures/`
 
 If warnings are recorded, they are printed at command end and stored in
 `run_metadata.json` (`warnings` field).
+
+To add group-level 95% confidence intervals for the pooled OOF metrics, enable:
+
+```yaml
+evaluation:
+  group_bootstrap:
+    enabled: true
+    n_resamples: 2000
+    confidence_level: 0.95
+```
+
+This writes `cv/tables/group_bootstrap_metrics.tsv`, the per-replicate audit
+table, and `cv/figures/group_bootstrap_metrics.svg`. The resampling unit is the
+configured `split.group_col`.
+
+`runtime/tables/timing.tsv` is always written. Start with `scope=run` and
+`stage=total`, then inspect `outer_fold`, `sample_set_id`, and
+`candidate_index` rows to locate bottlenecks. Parallel intervals can overlap,
+so their durations are not additive.
 
 ## 5) Run full refit and export a reusable bundle
 
@@ -141,8 +205,10 @@ phenoradar run -c config.yml --execution-stage full_run
 
 `full_run` adds:
 
-- `prediction_external_test.tsv`
-- `prediction_inference.tsv`
+- `external_test/tables/prediction_external_test.tsv`
+- `inference/tables/prediction_inference.tsv`
+- `external_test/figures/`
+- `inference/figures/`
 - `model_bundle/`
 
 ## 6) Predict with a model bundle
@@ -171,15 +237,18 @@ runs/<timestamp>_predict_<id>/
 
 With:
 
-- `prediction_inference.tsv`
+- `inference/tables/prediction_inference.tsv`
 - `run_metadata.json`
-- `figures/`
+- `inference/figures/`
 
 ## 7) Aggregate multiple runs
 
 ```bash
 phenoradar report --runs-root runs
 ```
+
+The default comparison guard rejects rankings that mix datasets or realized splits. Use
+`--allow-mixed-experiments` only when that cross-experiment comparison is intentional.
 
 This writes:
 

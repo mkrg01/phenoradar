@@ -1,5 +1,70 @@
 # Changelog
 
+## Unreleased
+
+### Breaking Changes
+
+* replace scikit-learn logistic elastic net with glum's weighted binomial GLM;
+  replace logistic `C` with native `alpha`, add `gradient_tol`, and remove
+  `model.logistic_solver`; use defaults `alpha=0.01`, `l1_ratio=0.5`,
+  `max_iter=100`, and `gradient_tol=1e-6`
+* fit optional logistic warm-start paths in descending `alpha` order and prefer
+  larger `alpha` under one-SE selection; regenerate previous logistic configs
+  and model bundles for the new backend
+
+### Features
+
+* add optional `split.require_both_labels_per_group` filtering before CV,
+  routing single-label groups to external test and keeping them out of CV
+  and final-refit training; support family-level eligibility from existing
+  metadata annotations without rewriting holdout columns
+* generate all-species and `_accepted_only` prediction/evaluation SVGs when
+  abstention is enabled, with recomputed selective metrics and explicit messages
+  for empty or single-label accepted populations; preserve publication layouts
+  without added population subtitles
+* add `sparse_feature_filter.scope` with `all_samples`, `any_trait`, `trait_0`,
+  and `trait_1` populations; support label-independent pooled nonzero fractions
+  and read legacy `within_trait` settings as the corresponding explicit scope
+* add observed-only standardization and neutral missing-expression inputs for
+  logistic regression, with optional zero-as-missing handling and fixed 0.8
+  coefficient-weight coverage abstention; persist policies in version 3 model
+  bundles and report selective decisions, missing evidence, and accepted-only
+  evaluation alongside raw predictions
+* add one candidate-evidence-style PDF per misclassified OOF species, with
+  held-out-fold ensemble probabilities, signed local linear contributions, and
+  expression references restricted to species sampled for that fold's training
+* allow random-forest runs to preserve absent orthogroup coordinates as `NA`
+  with `preprocess.absent_feature_fill=nan`, including model-bundle prediction
+* add trait-targeted sparse filtering and direction-aware ranked filtering so
+  models can retain only features with higher train-fold expression in trait 1
+  (or symmetrically trait 0)
+* add final-refit feature-importance, signed-coefficient, feature-filter, and
+  model-selection artifacts under `model/`, plus external-test top-feature
+  expression grouped by final-model confusion status
+* add a top-feature `log2(TPM + 1)` small-multiple view with species points grouped by
+  OOF TP, FN, TN, and FP status
+* allow single-label outer-CV validation groups while keeping two-label training folds mandatory;
+  emit undefined two-class fold metrics as `NA`, write split diagnostics for every fold, and add
+  reproducible `stratified_group_kfold` for outer and inner CV
+* add optional group-level bootstrap confidence intervals for pooled OOF metrics,
+  with auditable replicate tables and an interval figure
+* add monotonic stage/fold/sample-set/candidate timing traces and top-level run
+  timing metadata for performance profiling
+
+### Bug Fixes
+
+* preserve the complete pre-transform feature schema in model bundles so sample-rank predictions
+  are invariant to unrelated input features
+
+### Performance
+
+* reuse row-local expression transforms across inner-CV folds and vectorize pair-aware feature
+  ordering; expose inner-CV preprocessing as a dedicated timing stage
+* scan and normalize outer-CV expression rows once through a temporary Parquet cache, then build
+  dense matrices by integer-coordinate accumulation instead of a wide dataframe pivot
+* parse orthogroup annotations only for features used in figures, reuse validated top-feature
+  expression values for tree heatmaps, and share one nonzero mask across trait-level sparse counts
+
 ## [0.4.0](https://github.com/mkrg01/phenoradar/compare/v0.3.0...v0.4.0) (2026-05-19)
 
 

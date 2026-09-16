@@ -3,41 +3,63 @@
 from __future__ import annotations
 
 import json
+import warnings as warning_control
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from hashlib import sha256
 from math import comb
+from numbers import Real
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Lock
 from typing import Any
 
 import numpy as np
 import optuna
 import polars as pl
+from glum import GeneralizedLinearRegressor
 from optuna.samplers import TPESampler
 from scipy.stats import rankdata
+from sklearn import get_config
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import (
-    average_precision_score,
     balanced_accuracy_score,
-    brier_score_loss,
-    log_loss,
     matthews_corrcoef,
-    roc_auc_score,
 )
-from sklearn.model_selection import GroupKFold, LeaveOneGroupOut
+from sklearn.model_selection import GroupKFold, LeaveOneGroupOut, StratifiedGroupKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
+from sklearn.utils.validation import has_fit_parameter
 
+from phenoradar.abstention import annotate_abstention
 from phenoradar.config import AppConfig
+from phenoradar.feature_stability import (
+    FeatureStabilityError,
+    build_feature_stability_tables,
+)
 from phenoradar.interpret import (
     InterpretationError,
     ModelFeatureEntry,
+    _linear_coefficients,
     build_interpretation_tables,
+)
+from phenoradar.metrics import (
+    FIXED_PROBABILITY_THRESHOLD_DERIVED_FROM_CV,
+    FIXED_PROBABILITY_THRESHOLD_NAME,
+    FIXED_PROBABILITY_THRESHOLD_POLICY,
+    FIXED_PROBABILITY_THRESHOLD_VALUE,
+    binary_log_loss,
+    binary_probability_metrics,
+    metric_higher_is_better,
+)
+from phenoradar.missing_expression import (
+    NeutralStandardScaler,
+    mark_expression_observations,
+    mask_expression,
 )
 from phenoradar.model_selection import (
     Candidate,
@@ -47,8 +69,10 @@ from phenoradar.model_selection import (
     expanded_search_space,
     generate_candidates,
 )
+from phenoradar.timing import TimingRecorder
 
 type FeatureScaler = StandardScaler | None
+type FittedEstimator = GeneralizedLinearRegressor | CalibratedClassifierCV | RandomForestClassifier
 
 try:
     from threadpoolctl import (  # type: ignore[import-untyped]
@@ -61,6 +85,7 @@ except ImportError:  # pragma: no cover - available via scikit-learn dependency.
 
 _THREADPOOL_CONTROLLER: ThreadpoolController | None = None
 _THREADPOOL_CONTROLLER_LOCK = Lock()
+_CONTEXTUAL_EXPRESSION_TRANSFORMS = frozenset({"sample_rank", "sample_percentile_rank"})
 
 
 class CVError(ValueError):
@@ -75,6 +100,7 @@ class CVArtifacts:
     loss_by_split_cv: pl.DataFrame
     thresholds: pl.DataFrame
     oof_predictions: pl.DataFrame
+    inference_predictions_by_fold: pl.DataFrame | None
     feature_importance: pl.DataFrame
     coefficients: pl.DataFrame
     feature_importance_by_fold: pl.DataFrame
@@ -85,11 +111,22 @@ class CVArtifacts:
     model_selection_trials_summary: pl.DataFrame | None
     feature_filter_counts: pl.DataFrame
     feature_filter_counts_summary: pl.DataFrame
+    ranked_feature_scores: pl.DataFrame
     retained_features: pl.DataFrame
     retained_features_summary: pl.DataFrame
     model_sparsity: pl.DataFrame
     model_sparsity_summary: pl.DataFrame
+    feature_stability_by_feature: pl.DataFrame
+    feature_stability_by_fold_pair: pl.DataFrame
+    feature_stability_summary: pl.DataFrame
+    top_feature_expression: pl.DataFrame
+    training_group_subsets: pl.DataFrame
+    timing: pl.DataFrame
     warnings: list[str]
+    convergence_diagnostics: pl.DataFrame
+    cv_species_evidence: pl.DataFrame
+    cv_species_feature_evidence: pl.DataFrame
+    cv_species_reference_expression: pl.DataFrame
 
 
 @dataclass(frozen=True)
@@ -99,18 +136,30 @@ class FinalRefitArtifacts:
     pred_external_test: pl.DataFrame
     pred_inference: pl.DataFrame
     loss_by_split_final_refit: pl.DataFrame
+    feature_importance: pl.DataFrame
+    coefficients: pl.DataFrame
+    feature_importance_by_model: pl.DataFrame
+    coefficients_by_model: pl.DataFrame
     model_selection_selected: pl.DataFrame | None
+    model_selection_trials: pl.DataFrame | None
+    model_selection_trials_summary: pl.DataFrame | None
     feature_filter_counts: pl.DataFrame
     feature_filter_counts_summary: pl.DataFrame
+    ranked_feature_scores: pl.DataFrame
     retained_features: pl.DataFrame
     retained_features_summary: pl.DataFrame
     model_sparsity: pl.DataFrame
     model_sparsity_summary: pl.DataFrame
+    training_group_subsets: pl.DataFrame
+    timing: pl.DataFrame
     warnings: list[str]
     ensemble_size: int
+    transform_feature_names: list[str]
     feature_names: list[str]
     scaler: FeatureScaler
-    models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
+    models: list[FittedEstimator]
+    convergence_diagnostics: pl.DataFrame
+    top_feature_expression_external: pl.DataFrame
     model_entries: list[FinalModelEntry] = field(default_factory=list)
 
 
@@ -120,6 +169,8 @@ class SelectedCandidate:
 
     candidate: Candidate
     score: float | None
+    score_std_error: float | None = None
+    selection_rule: str = "best"
 
 
 @dataclass(frozen=True)
@@ -154,30 +205,53 @@ class OuterFoldResult:
     metric_rows: list[dict[str, float | int | str | None]]
     loss_rows: list[dict[str, float | str]]
     oof_rows: list[dict[str, float | int | str]]
+    inference_prediction_rows: list[dict[str, float | str]]
     interpretation_entries: list[ModelFeatureEntry]
     ensemble_model_prob_rows: list[dict[str, float | int | str]]
     model_selection_selected_rows: list[dict[str, Any]]
     model_selection_trial_rows: list[dict[str, Any]]
     feature_filter_count_rows: list[dict[str, Any]]
+    ranked_feature_score_rows: list[dict[str, Any]]
     retained_feature_rows: list[dict[str, Any]]
     model_sparsity_rows: list[dict[str, Any]]
+    training_group_subset_rows: list[dict[str, Any]]
     fold_model_count: int
     n_features_before_preprocess: int
-    n_features_after_low_prevalence: int
+    n_features_after_sparse_feature_filter: int
     n_features_after_low_variance: int
-    n_features_after_pair_aware: int
+    n_features_after_ranked_feature_filter: int
     n_features_after_correlation: int
     n_features_after_preprocess: int
     warnings: list[str]
+    convergence_rows: list[dict[str, Any]]
+    cv_species_evidence: pl.DataFrame
+    cv_species_feature_evidence: pl.DataFrame
+    cv_species_reference_expression: pl.DataFrame
 
 
 @dataclass(frozen=True)
 class OuterCvMatrixCache:
-    """Shared raw expression matrix for all outer-CV folds."""
+    """Shared expression matrices for all outer-CV folds.
+
+    ``matrix`` always contains raw TPM values. ``inference_matrix`` is a raw
+    view for column-local transforms and a once-transformed read-only array for
+    transforms whose result depends on the complete feature row.
+    """
 
     matrix: np.ndarray
+    inference_matrix: np.ndarray
+    inference_transform_applied: bool
     feature_names: list[str]
     species_to_index: dict[str, int]
+    inference_species_to_index: dict[str, int]
+
+
+@dataclass(frozen=True)
+class TrainingGroupSelection:
+    """One deterministic fold-local selection of training groups."""
+
+    group_ids: tuple[str, ...]
+    audit_rows: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -185,9 +259,9 @@ class FeatureFilterCounts:
     """Feature counts after each preprocessing filter stage."""
 
     n_features_before: int
-    n_features_after_low_prevalence: int
+    n_features_after_sparse_feature_filter: int
     n_features_after_low_variance: int
-    n_features_after_pair_aware: int
+    n_features_after_ranked_feature_filter: int
     n_features_after_correlation: int
     n_features_after_all: int
 
@@ -198,14 +272,18 @@ class OuterSampleSetFitResult:
 
     model_probs: list[np.ndarray]
     train_model_probs: list[np.ndarray]
-    fold_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
+    inference_model_probs: list[np.ndarray]
+    fold_models: list[FittedEstimator]
     interpretation_entries: list[ModelFeatureEntry]
     ensemble_model_prob_rows: list[dict[str, float | int | str]]
     model_sparsity_rows: list[dict[str, Any]]
     selected_features: list[str]
+    scaler: FeatureScaler
     filter_counts: FeatureFilterCounts
+    ranked_feature_score_rows: list[dict[str, Any]]
     model_count: int
     warnings: list[str]
+    convergence_rows: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -214,13 +292,28 @@ class FinalSampleSetFitResult:
 
     model_probs: list[np.ndarray]
     train_model_probs: list[np.ndarray]
-    fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
+    fitted_models: list[FittedEstimator]
     model_sparsity_rows: list[dict[str, Any]]
     selected_features: list[str]
     scaler: FeatureScaler
     filter_counts: FeatureFilterCounts
+    ranked_feature_score_rows: list[dict[str, Any]]
     model_count: int
     warnings: list[str]
+    convergence_rows: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class EstimatorFitDiagnostic:
+    """Convergence state observed during one estimator fit call."""
+
+    estimator_class: str
+    convergence_applicable: bool
+    converged: bool | None
+    n_iter_values: tuple[int, ...]
+    max_iter: int | None
+    convergence_warning_count: int
+    convergence_warning_messages: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -229,28 +322,101 @@ class FinalModelEntry:
 
     feature_names: list[str]
     scaler: FeatureScaler
-    model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier
+    model: FittedEstimator
+
+
+@dataclass(frozen=True)
+class RankedFeatureFilterResult:
+    """Selected indices, correlation priorities, and feature-level diagnostics."""
+
+    selected: np.ndarray
+    priority_scores: np.ndarray | None
+    score_rows: list[dict[str, Any]]
 
 
 _FEATURE_FILTER_STAGE_COLUMNS = [
     "n_features_before",
-    "n_features_after_low_prevalence",
+    "n_features_after_sparse_feature_filter",
     "n_features_after_low_variance",
-    "n_features_after_pair_aware",
+    "n_features_after_ranked_feature_filter",
     "n_features_after_correlation",
     "n_features_after_all",
 ]
 _FEATURE_FILTER_STAGE_ORDER = {
     "n_features_before": 0,
-    "n_features_after_low_prevalence": 1,
+    "n_features_after_sparse_feature_filter": 1,
     "n_features_after_low_variance": 2,
-    "n_features_after_pair_aware": 3,
+    "n_features_after_ranked_feature_filter": 3,
     "n_features_after_correlation": 4,
     "n_features_after_all": 5,
 }
 _NONZERO_TOLERANCE = 1e-12
-_PAIR_AWARE_SE_QUANTILE = 0.1
-_PAIR_AWARE_SCORE_FLOOR = 1e-12
+_RANKED_FEATURE_SE_QUANTILE = 0.1
+_RANKED_FEATURE_SCORE_FLOOR = 1e-12
+
+_CONVERGENCE_DIAGNOSTIC_SCHEMA = {
+    "training_scope": pl.String,
+    "fit_scope": pl.String,
+    "fold_id": pl.String,
+    "sample_set_id": pl.Int64,
+    "selection_source_sample_set_id": pl.Int64,
+    "candidate_index": pl.Int64,
+    "inner_fold_id": pl.String,
+    "model_index": pl.Int64,
+    "model_name": pl.String,
+    "estimator_class": pl.String,
+    "convergence_applicable": pl.Boolean,
+    "converged": pl.Boolean,
+    "n_iter_max": pl.Int64,
+    "n_iter_values_json": pl.String,
+    "max_iter": pl.Int64,
+    "convergence_warning_count": pl.Int64,
+    "convergence_warning_message": pl.String,
+    "params_json": pl.String,
+}
+
+
+def _build_convergence_diagnostics(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    if not rows:
+        return pl.DataFrame(schema=_CONVERGENCE_DIAGNOSTIC_SCHEMA)
+    return pl.DataFrame(rows, schema=_CONVERGENCE_DIAGNOSTIC_SCHEMA).sort(
+        [
+            "training_scope",
+            "fold_id",
+            "fit_scope",
+            "sample_set_id",
+            "candidate_index",
+            "inner_fold_id",
+            "model_index",
+        ],
+        nulls_last=True,
+    )
+
+
+def _convergence_summary_warning(diagnostics: pl.DataFrame) -> str | None:
+    if diagnostics.is_empty():
+        return None
+    applicable = diagnostics.filter(pl.col("convergence_applicable"))
+    if applicable.is_empty():
+        return None
+    non_converged = applicable.filter(~pl.col("converged"))
+    if non_converged.is_empty():
+        return None
+    scope_counts = (
+        non_converged.group_by(["training_scope", "fit_scope"])
+        .len(name="fit_count")
+        .sort(["training_scope", "fit_scope"])
+    )
+    scope_summary = ", ".join(
+        f"{row['training_scope']}/{row['fit_scope']}={row['fit_count']}"
+        for row in scope_counts.iter_rows(named=True)
+    )
+    return (
+        "Estimator convergence diagnostics detected "
+        f"{non_converged.height} non-converged fit(s) among {applicable.height} "
+        f"iterative fit(s) ({scope_summary}); see "
+        "model/tables/convergence_diagnostics.tsv."
+    )
 
 
 def _empty_feature_filter_counts() -> pl.DataFrame:
@@ -260,9 +426,9 @@ def _empty_feature_filter_counts() -> pl.DataFrame:
             "fold_id": pl.String,
             "sample_set_id": pl.Int64,
             "n_features_before": pl.Int64,
-            "n_features_after_low_prevalence": pl.Int64,
+            "n_features_after_sparse_feature_filter": pl.Int64,
             "n_features_after_low_variance": pl.Int64,
-            "n_features_after_pair_aware": pl.Int64,
+            "n_features_after_ranked_feature_filter": pl.Int64,
             "n_features_after_correlation": pl.Int64,
             "n_features_after_all": pl.Int64,
         }
@@ -276,12 +442,16 @@ def _empty_feature_filter_counts_summary() -> pl.DataFrame:
             "stage": pl.String,
             "n_records": pl.Int64,
             "n_features_min": pl.Int64,
+            "n_features_q1": pl.Float64,
             "n_features_median": pl.Float64,
             "n_features_mean": pl.Float64,
+            "n_features_q3": pl.Float64,
             "n_features_max": pl.Int64,
             "retained_ratio_min": pl.Float64,
+            "retained_ratio_q1": pl.Float64,
             "retained_ratio_median": pl.Float64,
             "retained_ratio_mean": pl.Float64,
+            "retained_ratio_q3": pl.Float64,
             "retained_ratio_max": pl.Float64,
         }
     )
@@ -323,9 +493,13 @@ def _feature_filter_count_row(
         "fold_id": fold_id,
         "sample_set_id": int(sample_set_id),
         "n_features_before": int(counts.n_features_before),
-        "n_features_after_low_prevalence": int(counts.n_features_after_low_prevalence),
+        "n_features_after_sparse_feature_filter": int(
+            counts.n_features_after_sparse_feature_filter
+        ),
         "n_features_after_low_variance": int(counts.n_features_after_low_variance),
-        "n_features_after_pair_aware": int(counts.n_features_after_pair_aware),
+        "n_features_after_ranked_feature_filter": int(
+            counts.n_features_after_ranked_feature_filter
+        ),
         "n_features_after_correlation": int(counts.n_features_after_correlation),
         "n_features_after_all": int(counts.n_features_after_all),
     }
@@ -335,6 +509,56 @@ def _build_feature_filter_counts(rows: list[dict[str, Any]]) -> pl.DataFrame:
     if not rows:
         return _empty_feature_filter_counts()
     return pl.DataFrame(rows).sort(["scope", "fold_id", "sample_set_id"])
+
+
+_RANKED_FEATURE_SCORE_SCHEMA = {
+    "scope": pl.String,
+    "fold_id": pl.String,
+    "sample_set_id": pl.Int64,
+    "method": pl.String,
+    "higher_in_trait": pl.Int64,
+    "feature": pl.String,
+    "effect": pl.Float64,
+    "direction_match": pl.Boolean,
+    "standard_error": pl.Float64,
+    "score": pl.Float64,
+    "rank": pl.Int64,
+    "retained": pl.Boolean,
+    "n_valid_contrast_pairs": pl.Int64,
+    "n_label0": pl.Int64,
+    "n_label1": pl.Int64,
+    "max_features_requested": pl.Int64,
+    "max_features_effective": pl.Int64,
+    "applied": pl.Boolean,
+    "skip_reason": pl.String,
+}
+
+
+def _build_ranked_feature_scores(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    if not rows:
+        return pl.DataFrame(schema=_RANKED_FEATURE_SCORE_SCHEMA)
+    return pl.DataFrame(rows, schema=_RANKED_FEATURE_SCORE_SCHEMA).sort(
+        ["scope", "fold_id", "sample_set_id", "rank", "feature"],
+        nulls_last=True,
+    )
+
+
+def _with_ranked_feature_score_context(
+    rows: list[dict[str, Any]],
+    *,
+    scope: str,
+    fold_id: str,
+    sample_set_id: int,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "scope": scope,
+            "fold_id": fold_id,
+            "sample_set_id": int(sample_set_id),
+            **row,
+        }
+        for row in rows
+    ]
 
 
 def _summarize_feature_filter_counts(feature_filter_counts: pl.DataFrame) -> pl.DataFrame:
@@ -352,18 +576,30 @@ def _summarize_feature_filter_counts(feature_filter_counts: pl.DataFrame) -> pl.
         [
             pl.len().alias("n_records"),
             pl.col("n_features").min().alias("n_features_min"),
+            pl.col("n_features").quantile(0.25, interpolation="linear").alias("n_features_q1"),
             pl.col("n_features").median().alias("n_features_median"),
             pl.col("n_features").mean().alias("n_features_mean"),
+            pl.col("n_features").quantile(0.75, interpolation="linear").alias("n_features_q3"),
             pl.col("n_features").max().alias("n_features_max"),
             pl.col("retained_ratio").min().alias("retained_ratio_min"),
+            pl.col("retained_ratio")
+            .quantile(0.25, interpolation="linear")
+            .alias("retained_ratio_q1"),
             pl.col("retained_ratio").median().alias("retained_ratio_median"),
             pl.col("retained_ratio").mean().alias("retained_ratio_mean"),
+            pl.col("retained_ratio")
+            .quantile(0.75, interpolation="linear")
+            .alias("retained_ratio_q3"),
             pl.col("retained_ratio").max().alias("retained_ratio_max"),
         ]
     )
-    return summary.with_columns(
-        pl.col("stage").replace(_FEATURE_FILTER_STAGE_ORDER).alias("_stage_order"),
-    ).sort(["scope", "_stage_order"]).drop("_stage_order")
+    return (
+        summary.with_columns(
+            pl.col("stage").replace(_FEATURE_FILTER_STAGE_ORDER).alias("_stage_order"),
+        )
+        .sort(["scope", "_stage_order"])
+        .drop("_stage_order")
+    )
 
 
 def _retained_feature_rows(
@@ -458,9 +694,9 @@ def _coef_nonzero_count(coefficients: np.ndarray, *, tolerance: float) -> int:
 
 
 def _model_nonzero_count(
-    model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+    model: FittedEstimator,
 ) -> tuple[int | None, str, str]:
-    if isinstance(model, LogisticRegression):
+    if isinstance(model, GeneralizedLinearRegressor):
         count = _coef_nonzero_count(model.coef_, tolerance=_NONZERO_TOLERANCE)
         return count, "coef_abs_gt_tol", "ok"
 
@@ -506,7 +742,7 @@ def _model_sparsity_row(
     model_index: int,
     model_name: str,
     n_features_after_all: int,
-    model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+    model: FittedEstimator,
 ) -> dict[str, Any]:
     n_nonzero, count_method, reason = _model_nonzero_count(model)
     if n_nonzero is None:
@@ -537,20 +773,24 @@ def _build_model_sparsity(rows: list[dict[str, Any]]) -> pl.DataFrame:
 def _summarize_model_sparsity(model_sparsity: pl.DataFrame) -> pl.DataFrame:
     if model_sparsity.height == 0:
         return _empty_model_sparsity_summary()
-    return model_sparsity.group_by(["scope", "model_name"]).agg(
-        [
-            pl.len().alias("n_models"),
-            pl.col("n_nonzero_features").count().alias("n_models_with_nonzero_count"),
-            pl.col("n_nonzero_features").min().alias("n_nonzero_min"),
-            pl.col("n_nonzero_features").median().alias("n_nonzero_median"),
-            pl.col("n_nonzero_features").mean().alias("n_nonzero_mean"),
-            pl.col("n_nonzero_features").max().alias("n_nonzero_max"),
-            pl.col("nonzero_ratio").min().alias("nonzero_ratio_min"),
-            pl.col("nonzero_ratio").median().alias("nonzero_ratio_median"),
-            pl.col("nonzero_ratio").mean().alias("nonzero_ratio_mean"),
-            pl.col("nonzero_ratio").max().alias("nonzero_ratio_max"),
-        ]
-    ).sort(["scope", "model_name"])
+    return (
+        model_sparsity.group_by(["scope", "model_name"])
+        .agg(
+            [
+                pl.len().alias("n_models"),
+                pl.col("n_nonzero_features").count().alias("n_models_with_nonzero_count"),
+                pl.col("n_nonzero_features").min().alias("n_nonzero_min"),
+                pl.col("n_nonzero_features").median().alias("n_nonzero_median"),
+                pl.col("n_nonzero_features").mean().alias("n_nonzero_mean"),
+                pl.col("n_nonzero_features").max().alias("n_nonzero_max"),
+                pl.col("nonzero_ratio").min().alias("nonzero_ratio_min"),
+                pl.col("nonzero_ratio").median().alias("nonzero_ratio_median"),
+                pl.col("nonzero_ratio").mean().alias("nonzero_ratio_mean"),
+                pl.col("nonzero_ratio").max().alias("nonzero_ratio_max"),
+            ]
+        )
+        .sort(["scope", "model_name"])
+    )
 
 
 def _deterministic_int_seed(seed_text: str) -> int:
@@ -672,9 +912,9 @@ def _sample_rank_transform(values: np.ndarray, *, percentile: bool) -> np.ndarra
     if np.any(values < 0):
         raise CVError("Expression values must be non-negative before sample rank transform")
 
-    ranked = np.zeros_like(values, dtype=float)
+    ranked = np.where(np.isnan(values), np.nan, 0.0)
     for row_idx in range(values.shape[0]):
-        positive_mask = values[row_idx] > 0.0
+        positive_mask = np.isfinite(values[row_idx]) & (values[row_idx] > 0.0)
         positive_count = int(np.count_nonzero(positive_mask))
         if positive_count == 0:
             continue
@@ -685,11 +925,13 @@ def _sample_rank_transform(values: np.ndarray, *, percentile: bool) -> np.ndarra
     return ranked
 
 
-def apply_expression_transform(matrix: np.ndarray, method: str) -> np.ndarray:
+def apply_expression_transform(
+    matrix: np.ndarray, method: str, *, zero_as_missing: bool = False
+) -> np.ndarray:
     """Apply a sample x feature expression transform before feature filters."""
 
     resolved_method = _validate_expression_transform_method(str(method))
-    values = np.asarray(matrix, dtype=float)
+    values = mask_expression(matrix, zero_as_missing=zero_as_missing)
     if resolved_method == "none":
         return values
     if resolved_method == "log1p":
@@ -702,7 +944,11 @@ def apply_expression_transform(matrix: np.ndarray, method: str) -> np.ndarray:
 
 
 def _apply_expression_transform_for_config(config: AppConfig, matrix: np.ndarray) -> np.ndarray:
-    return apply_expression_transform(matrix, config.preprocess.expression_transform.method)
+    return apply_expression_transform(
+        matrix,
+        config.preprocess.expression_transform.method,
+        zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
+    )
 
 
 def apply_feature_scaling(matrix: np.ndarray, scaler: FeatureScaler, method: str) -> np.ndarray:
@@ -730,7 +976,11 @@ def fit_feature_scaling(
     if method == "none":
         return x_train_values, x_target_values, None
 
-    scaler = StandardScaler()
+    scaler = (
+        NeutralStandardScaler()
+        if config.preprocess.missing_expression.method == "neutral"
+        else StandardScaler()
+    )
     x_train_scaled = np.asarray(scaler.fit_transform(x_train_values), dtype=float)
     if x_target_values.shape[0] == 0:
         x_target_scaled = np.empty((0, x_train_values.shape[1]), dtype=float)
@@ -739,8 +989,293 @@ def fit_feature_scaling(
     return x_train_scaled, x_target_scaled, scaler
 
 
+_CV_SPECIES_EVIDENCE_SCHEMA = {
+    "fold_id": pl.String,
+    "species": pl.String,
+    "group_id": pl.String,
+    "label": pl.Int8,
+    "pred_label": pl.Int8,
+    "confusion_group": pl.String,
+    "prob": pl.Float64,
+    "log_loss": pl.Float64,
+    "uncertainty_std": pl.Float64,
+    "n_models": pl.Int64,
+}
+_CV_SPECIES_FEATURE_EVIDENCE_SCHEMA = {
+    "fold_id": pl.String,
+    "species": pl.String,
+    "label": pl.Int8,
+    "feature": pl.String,
+    "local_rank": pl.Int64,
+    "contribution_mean": pl.Float64,
+    "contribution_mean_abs": pl.Float64,
+    "contribution_min": pl.Float64,
+    "contribution_max": pl.Float64,
+    "target_tpm": pl.Float64,
+    "target_log2_tpm_plus1": pl.Float64,
+    "n_models": pl.Int64,
+}
+_CV_SPECIES_REFERENCE_EXPRESSION_SCHEMA = {
+    "fold_id": pl.String,
+    "target_species": pl.String,
+    "species": pl.String,
+    "label": pl.Int8,
+    "feature": pl.String,
+    "tpm": pl.Float64,
+    "log2_tpm_plus1": pl.Float64,
+}
+_LOCAL_EVIDENCE_NONZERO_TOLERANCE = 1e-12
+
+
+def _empty_cv_species_evidence() -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    return (
+        pl.DataFrame(schema=_CV_SPECIES_EVIDENCE_SCHEMA),
+        pl.DataFrame(schema=_CV_SPECIES_FEATURE_EVIDENCE_SCHEMA),
+        pl.DataFrame(schema=_CV_SPECIES_REFERENCE_EXPRESSION_SCHEMA),
+    )
+
+
+def _build_cv_species_evidence(
+    *,
+    config: AppConfig,
+    fold_id: str,
+    model_entries: list[FinalModelEntry],
+    feature_names: list[str],
+    train_species: list[str],
+    valid_species: list[str],
+    valid_group_ids: list[str],
+    y_train: np.ndarray,
+    y_valid: np.ndarray,
+    x_train_raw: np.ndarray,
+    x_valid_raw: np.ndarray,
+    reference_indices: np.ndarray,
+    mean_prob: np.ndarray,
+    uncertainty_std: np.ndarray | None,
+    fixed_threshold: float,
+    top_features: int,
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, list[str]]:
+    """Build local linear evidence for species misclassified in one outer fold."""
+    empty_species, empty_features, empty_reference = _empty_cv_species_evidence()
+    warnings: list[str] = []
+    n_valid = len(valid_species)
+    if not (
+        len(valid_group_ids) == n_valid
+        and y_valid.shape == (n_valid,)
+        and mean_prob.shape == (n_valid,)
+        and x_valid_raw.shape == (n_valid, len(feature_names))
+    ):
+        raise CVError(f"Fold {fold_id} CV species-evidence validation schema is inconsistent")
+    if not (
+        y_train.shape == (len(train_species),)
+        and x_train_raw.shape == (len(train_species), len(feature_names))
+    ):
+        raise CVError(f"Fold {fold_id} CV species-evidence training schema is inconsistent")
+    if uncertainty_std is not None and uncertainty_std.shape != (n_valid,):
+        raise CVError(f"Fold {fold_id} CV species-evidence uncertainty schema is inconsistent")
+    if top_features < 1:
+        raise CVError("figures.top_features must be >= 1")
+
+    pred_label = (mean_prob >= fixed_threshold).astype(int)
+    error_indices = np.flatnonzero(pred_label != y_valid)
+    if error_indices.size == 0:
+        return empty_species, empty_features, empty_reference, warnings
+    if not model_entries:
+        warnings.append(
+            f"Skipped CV species evidence for fold {fold_id}: no fitted outer-fold models"
+        )
+        return empty_species, empty_features, empty_reference, warnings
+
+    coefficients: list[np.ndarray] = []
+    for entry in model_entries:
+        coefficient = _linear_coefficients(entry.model)
+        if coefficient is None:
+            warnings.append(
+                f"Skipped CV species evidence for fold {fold_id}: local contribution is "
+                "unavailable for the outer-fold model family"
+            )
+            return empty_species, empty_features, empty_reference, warnings
+        if coefficient.shape[0] != len(entry.feature_names):
+            raise CVError(
+                f"Fold {fold_id} model coefficient width does not match its feature schema"
+            )
+        coefficients.append(np.asarray(coefficient, dtype=float))
+
+    feature_index = {feature: idx for idx, feature in enumerate(feature_names)}
+    if len(feature_index) != len(feature_names):
+        raise CVError("Outer-CV transform feature schema contains duplicates")
+    model_features = sorted(
+        {feature for entry in model_entries for feature in entry.feature_names}
+    )
+    missing_features = sorted(set(model_features) - set(feature_names))
+    if missing_features:
+        raise CVError(
+            f"Fold {fold_id} model features are absent from the transform schema: "
+            + ", ".join(missing_features[:10])
+        )
+
+    x_valid_transformed = _apply_expression_transform_for_config(config, x_valid_raw)
+    x_error_transformed = x_valid_transformed[error_indices, :]
+    model_feature_index = {feature: idx for idx, feature in enumerate(model_features)}
+    contribution_cube = np.zeros(
+        (len(model_entries), error_indices.size, len(model_features)), dtype=float
+    )
+    for model_idx, (entry, coefficient) in enumerate(
+        zip(model_entries, coefficients, strict=True)
+    ):
+        selected_indices = np.array(
+            [feature_index[feature] for feature in entry.feature_names], dtype=int
+        )
+        selected = x_error_transformed[:, selected_indices]
+        scaled = apply_feature_scaling(
+            selected,
+            entry.scaler,
+            config.preprocess.feature_scaling.method,
+        )
+        model_contributions = scaled * coefficient[np.newaxis, :]
+        union_indices = np.array(
+            [model_feature_index[feature] for feature in entry.feature_names], dtype=int
+        )
+        contribution_cube[model_idx][:, union_indices] = model_contributions
+
+    contribution_mean = np.mean(contribution_cube, axis=0)
+    contribution_mean_abs = np.mean(np.abs(contribution_cube), axis=0)
+    contribution_min = np.min(contribution_cube, axis=0)
+    contribution_max = np.max(contribution_cube, axis=0)
+    uncertainty_values: list[float | None] = (
+        [None] * n_valid
+        if uncertainty_std is None
+        else uncertainty_std.astype(float, copy=False).tolist()
+    )
+
+    species_rows: list[dict[str, Any]] = []
+    feature_rows: list[dict[str, Any]] = []
+    selected_by_species: dict[int, list[int]] = {}
+    for error_idx, valid_idx in enumerate(error_indices.tolist()):
+        order = sorted(
+            range(len(model_features)),
+            key=lambda feature_idx: (
+                -float(contribution_mean_abs[error_idx, feature_idx]),
+                model_features[feature_idx],
+            ),
+        )
+        nonzero_order = [
+            feature_idx
+            for feature_idx in order
+            if float(contribution_mean_abs[error_idx, feature_idx])
+            > _LOCAL_EVIDENCE_NONZERO_TOLERANCE
+        ][:top_features]
+        species = valid_species[valid_idx]
+        if not nonzero_order:
+            warnings.append(
+                f"Skipped CV species evidence for {species} in fold {fold_id}: "
+                "all local contributions are zero"
+            )
+            continue
+        selected_by_species[valid_idx] = nonzero_order
+        label = int(y_valid[valid_idx])
+        predicted = int(pred_label[valid_idx])
+        probability = float(mean_prob[valid_idx])
+        true_class_probability = probability if label == 1 else 1.0 - probability
+        true_class_probability = float(
+            np.clip(true_class_probability, np.finfo(float).eps, 1.0)
+        )
+        species_rows.append(
+            {
+                "fold_id": fold_id,
+                "species": species,
+                "group_id": valid_group_ids[valid_idx],
+                "label": label,
+                "pred_label": predicted,
+                "confusion_group": "FN" if label == 1 else "FP",
+                "prob": probability,
+                "log_loss": float(-np.log(true_class_probability)),
+                "uncertainty_std": uncertainty_values[valid_idx],
+                "n_models": len(model_entries),
+            }
+        )
+        for local_rank, feature_idx in enumerate(nonzero_order, start=1):
+            feature = model_features[feature_idx]
+            raw_value = float(x_valid_raw[valid_idx, feature_index[feature]])
+            feature_rows.append(
+                {
+                    "fold_id": fold_id,
+                    "species": species,
+                    "label": label,
+                    "feature": feature,
+                    "local_rank": local_rank,
+                    "contribution_mean": float(contribution_mean[error_idx, feature_idx]),
+                    "contribution_mean_abs": float(
+                        contribution_mean_abs[error_idx, feature_idx]
+                    ),
+                    "contribution_min": float(contribution_min[error_idx, feature_idx]),
+                    "contribution_max": float(contribution_max[error_idx, feature_idx]),
+                    "target_tpm": raw_value,
+                    "target_log2_tpm_plus1": float(np.log2(raw_value + 1.0)),
+                    "n_models": len(model_entries),
+                }
+            )
+
+    if not species_rows:
+        return empty_species, empty_features, empty_reference, warnings
+
+    resolved_reference_indices = np.unique(np.asarray(reference_indices, dtype=int))
+    if resolved_reference_indices.size == 0:
+        raise CVError(f"Fold {fold_id} CV species evidence has no training reference species")
+    if (
+        np.min(resolved_reference_indices) < 0
+        or np.max(resolved_reference_indices) >= len(train_species)
+    ):
+        raise CVError(f"Fold {fold_id} CV species-evidence reference index is out of range")
+    reference_rows: list[dict[str, Any]] = []
+    for valid_idx, selected_features in selected_by_species.items():
+        target_species = valid_species[valid_idx]
+        for reference_idx in resolved_reference_indices.tolist():
+            for selected_feature_idx in selected_features:
+                feature = model_features[selected_feature_idx]
+                raw_value = float(x_train_raw[reference_idx, feature_index[feature]])
+                reference_rows.append(
+                    {
+                        "fold_id": fold_id,
+                        "target_species": target_species,
+                        "species": train_species[reference_idx],
+                        "label": int(y_train[reference_idx]),
+                        "feature": feature,
+                        "tpm": raw_value,
+                        "log2_tpm_plus1": float(np.log2(raw_value + 1.0)),
+                    }
+                )
+
+    reference_frame = pl.DataFrame(reference_rows, schema=_CV_SPECIES_REFERENCE_EXPRESSION_SCHEMA)
+    if config.preprocess.missing_expression.method == "neutral":
+        reference_frame = mark_expression_observations(
+            reference_frame, zero_as_missing=config.preprocess.missing_expression.zero_as_missing
+        )
+    return (
+        pl.DataFrame(species_rows, schema=_CV_SPECIES_EVIDENCE_SCHEMA).sort(
+            ["log_loss", "species"], descending=[True, False]
+        ),
+        pl.DataFrame(feature_rows, schema=_CV_SPECIES_FEATURE_EVIDENCE_SCHEMA).sort(
+            ["species", "local_rank"]
+        ),
+        reference_frame.sort(["target_species", "feature", "label", "species"]),
+        warnings,
+    )
+
+
 class ExpressionMatrixBuilder:
     """Build species x orthogroup matrix from long-format expression data."""
+
+    _SOURCE_LINE_COL = "__phenoradar_source_line"
+    _INVALID_TPM_PREVIEW_LIMIT = 10
+    _INVALID_TPM_REASON_LABELS = (
+        (1, "missing"),
+        (2, "non-numeric"),
+        (4, "non-finite"),
+        (8, "negative"),
+        (16, "non-finite-after-sum"),
+        (32, "missing-feature"),
+    )
+    _MISSING_FEATURE_SENTINEL = "__phenoradar_missing_feature__"
 
     def __init__(self, config: AppConfig) -> None:
         self._tpm_path = Path(config.data.tpm_path)
@@ -748,56 +1283,292 @@ class ExpressionMatrixBuilder:
         self._feature_col = config.data.feature_col
         self._value_col = config.data.value_col
         self._max_pivot_cells = int(config.preprocess.max_pivot_cells)
+        absent_feature_fill = config.preprocess.absent_feature_fill
+        if absent_feature_fill != 0 and absent_feature_fill != "nan":
+            raise CVError(
+                "Unsupported preprocess.absent_feature_fill: "
+                f"{absent_feature_fill}"
+            )
+        self._absent_feature_fill_value = (
+            0.0 if absent_feature_fill == 0 else float("nan")
+        )
+        self._cache_tempdir: TemporaryDirectory[str] | None = None
+        self._cached_long_path: Path | None = None
+        self._cached_species: set[str] | None = None
 
         try:
-            self._scan = pl.scan_csv(self._tpm_path, separator="\t")
+            schema_scan = pl.scan_csv(self._tpm_path, separator="\t")
+            schema_columns = set(schema_scan.collect_schema().names())
         except FileNotFoundError as exc:
             raise CVError(f"Input file not found: {self._tpm_path}") from exc
+        except (OSError, pl.exceptions.PolarsError) as exc:
+            raise CVError(f"Failed to read expression data schema: {self._tpm_path}") from exc
 
-        schema_columns = set(self._scan.collect_schema().names())
         required = {self._species_col, self._feature_col, self._value_col}
         missing = sorted(required - schema_columns)
         if missing:
             missing_str = ", ".join(missing)
             raise CVError(f"Missing required columns in expression data: {missing_str}")
+        if self._SOURCE_LINE_COL in schema_columns:
+            raise CVError(
+                f"Expression data uses a reserved internal column name: {self._SOURCE_LINE_COL}"
+            )
 
-    def build_matrix(self, species_order: list[str]) -> tuple[np.ndarray, list[str]]:
-        if not species_order:
-            raise CVError("No species were provided for matrix construction")
+        # Read the value column as text so validation does not depend on the CSV
+        # schema-inference window.  Row indices start at the first physical data
+        # line (the header is line 1) and are retained for actionable errors.
+        try:
+            self._scan = pl.scan_csv(
+                self._tpm_path,
+                separator="\t",
+                schema_overrides={self._value_col: pl.String},
+                row_index_name=self._SOURCE_LINE_COL,
+                row_index_offset=2,
+            )
+        except (OSError, pl.exceptions.PolarsError) as exc:
+            raise CVError(f"Failed to read expression data: {self._tpm_path}") from exc
 
-        unique_species = list(dict.fromkeys(species_order))
-        long_scan = (
+    def _collect_expression(self, scan: pl.LazyFrame) -> pl.DataFrame:
+        try:
+            return scan.collect()
+        except (OSError, pl.exceptions.PolarsError) as exc:
+            raise CVError(f"Failed to read expression data: {self._tpm_path}: {exc}") from exc
+
+    def _raw_long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
+        raw_value = pl.col(self._value_col).cast(pl.String, strict=False).str.strip_chars()
+        feature_value = pl.col(self._feature_col).cast(pl.String, strict=False).str.strip_chars()
+        parsed_value = raw_value.cast(pl.Float64, strict=False)
+        invalid_value_reason_mask = (
+            pl.when(raw_value.is_null() | (raw_value == ""))
+            .then(pl.lit(1, dtype=pl.UInt8))
+            .when(parsed_value.is_null())
+            .then(pl.lit(2, dtype=pl.UInt8))
+            .when(~parsed_value.is_finite())
+            .then(pl.lit(4, dtype=pl.UInt8))
+            .when(parsed_value < 0.0)
+            .then(pl.lit(8, dtype=pl.UInt8))
+            .otherwise(pl.lit(0, dtype=pl.UInt8))
+        )
+        missing_feature_reason_mask = (
+            pl.when(feature_value.is_null() | (feature_value == ""))
+            .then(pl.lit(32, dtype=pl.UInt8))
+            .otherwise(pl.lit(0, dtype=pl.UInt8))
+        )
+        invalid_reason_mask = invalid_value_reason_mask + missing_feature_reason_mask
+
+        normalized = (
             self._scan.filter(
-                pl.col(self._species_col).cast(pl.String, strict=False).str.strip_chars().is_in(
-                    unique_species
-                )
+                pl.col(self._species_col)
+                .cast(pl.String, strict=False)
+                .str.strip_chars()
+                .is_in(unique_species)
             )
             .select(
                 pl.col(self._species_col)
                 .cast(pl.String, strict=False)
                 .str.strip_chars()
                 .alias("__species"),
-                pl.col(self._feature_col)
-                .cast(pl.String, strict=False)
-                .str.strip_chars()
+                feature_value.fill_null(self._MISSING_FEATURE_SENTINEL)
+                .replace("", self._MISSING_FEATURE_SENTINEL)
                 .alias("__feature"),
-                pl.col(self._value_col).cast(pl.Float64, strict=False).fill_null(0.0).alias(
-                    "__value"
-                ),
+                parsed_value.alias("__parsed_value"),
+                invalid_reason_mask.alias("__invalid_reason_mask"),
+                pl.col(self._SOURCE_LINE_COL).alias("__source_line"),
             )
-            .filter(
-                pl.col("__species").is_not_null()
-                & (pl.col("__species") != "")
-                & pl.col("__feature").is_not_null()
-                & (pl.col("__feature") != "")
+            .filter(pl.col("__species").is_not_null() & (pl.col("__species") != ""))
+            .with_columns(
+                pl.when(pl.col("__invalid_reason_mask") == 0)
+                .then(pl.col("__parsed_value"))
+                .otherwise(pl.lit(float("nan")))
+                .alias("__value"),
             )
-            .group_by(["__species", "__feature"])
-            .agg(pl.col("__value").sum())
+        )
+        invalid = pl.col("__invalid_reason_mask") != 0
+        aggregated = normalized.group_by(["__species", "__feature"]).agg(
+            pl.col("__value").sum(),
+            invalid.sum().alias("__invalid_count"),
+            pl.col("__source_line").min().alias("__group_first_line"),
+            pl.col("__source_line").filter(invalid).min().alias("__invalid_line"),
+            pl.col("__invalid_reason_mask").max().alias("__invalid_reason_mask"),
+        )
+        aggregate_overflow = (pl.col("__invalid_count") == 0) & ~pl.col("__value").is_finite()
+        return aggregated.with_columns(
+            pl.when(aggregate_overflow)
+            .then(pl.lit(1, dtype=pl.UInt32))
+            .otherwise(pl.col("__invalid_count"))
+            .alias("__invalid_count"),
+            pl.when(aggregate_overflow)
+            .then(pl.col("__group_first_line"))
+            .otherwise(pl.col("__invalid_line"))
+            .alias("__invalid_line"),
+            pl.when(aggregate_overflow)
+            .then(pl.lit(16, dtype=pl.UInt8))
+            .otherwise(pl.col("__invalid_reason_mask"))
+            .alias("__invalid_reason_mask"),
+        ).drop("__group_first_line")
+
+    @classmethod
+    def _raise_invalid_tpm_values(cls, invalid_rows: pl.DataFrame, total: int) -> None:
+        examples: list[str] = []
+        for row in invalid_rows.iter_rows(named=True):
+            reason_mask = int(row["__invalid_reason_mask"])
+            reasons = ",".join(
+                label for flag, label in cls._INVALID_TPM_REASON_LABELS if reason_mask & flag
+            )
+            feature = row["__feature"]
+            feature_repr = (
+                "<missing>"
+                if feature == cls._MISSING_FEATURE_SENTINEL and reason_mask & 32
+                else repr(feature)
+            )
+            examples.append(
+                f"first_invalid_line={row['__invalid_line']}: species={row['__species']!r}, "
+                f"feature={feature_repr}, example_reasons_in_coordinate=({reasons})"
+            )
+        raise CVError(
+            "Invalid expression data: selected rows require a feature identifier and TPM values "
+            "must be non-negative finite numbers; "
+            f"invalid_rows={total}; examples: {'; '.join(examples)}"
         )
 
+    @classmethod
+    def _validate_tpm_frame(cls, long_df: pl.DataFrame) -> None:
+        invalid_rows = (
+            long_df.filter(pl.col("__invalid_count") > 0)
+            .sort("__invalid_line")
+            .head(cls._INVALID_TPM_PREVIEW_LIMIT)
+        )
+        if invalid_rows.height == 0:
+            return
+        total = int(long_df.select(pl.col("__invalid_count").sum()).item())
+        cls._raise_invalid_tpm_values(invalid_rows, total)
+
+    def _validate_tpm_scan(self, long_scan: pl.LazyFrame) -> None:
+        invalid_scan = long_scan.filter(pl.col("__invalid_count") > 0)
+        invalid_rows = self._collect_expression(
+            invalid_scan.sort("__invalid_line").head(self._INVALID_TPM_PREVIEW_LIMIT)
+        )
+        if invalid_rows.height == 0:
+            return
+        total = int(
+            self._collect_expression(invalid_scan.select(pl.col("__invalid_count").sum())).item()
+        )
+        self._raise_invalid_tpm_values(invalid_rows, total)
+
+    def _long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
+        requested_species = set(unique_species)
+        if (
+            self._cached_long_path is not None
+            and self._cached_species is not None
+            and requested_species.issubset(self._cached_species)
+        ):
+            return pl.scan_parquet(self._cached_long_path).filter(
+                pl.col("__species").is_in(unique_species)
+            )
+        return self._raw_long_scan_for_species(unique_species)
+
+    def cache_species(self, species_order: list[str]) -> None:
+        """Materialize normalized expression rows for a reusable species set."""
+
+        if not species_order:
+            raise CVError("No species were provided for matrix construction")
+        unique_species = list(dict.fromkeys(species_order))
+        requested_species = set(unique_species)
+        if (
+            self._cached_long_path is not None
+            and self._cached_species is not None
+            and requested_species.issubset(self._cached_species)
+        ):
+            return
+
+        cache_tempdir = TemporaryDirectory(prefix="phenoradar-expression-")
+        cache_path = Path(cache_tempdir.name) / "expression_long.parquet"
+        try:
+            self._raw_long_scan_for_species(unique_species).sink_parquet(
+                cache_path,
+                compression="zstd",
+            )
+        except (OSError, pl.exceptions.PolarsError) as exc:
+            cache_tempdir.cleanup()
+            raise CVError(f"Failed to read expression data: {self._tpm_path}: {exc}") from exc
+        cached_scan = pl.scan_parquet(cache_path)
+        try:
+            self._validate_tpm_scan(cached_scan)
+        except CVError:
+            cache_tempdir.cleanup()
+            raise
+        self._cache_tempdir = cache_tempdir
+        self._cached_long_path = cache_path
+        self._cached_species = requested_species
+
+    @staticmethod
+    def _normalize_feature_order(feature_order: list[str]) -> list[str]:
+        feature_names = [str(value).strip() for value in feature_order]
+        if not feature_names:
+            raise CVError("No features were provided for matrix construction")
+        if any(value == "" for value in feature_names):
+            raise CVError("Feature order contains an empty feature identifier")
+        if len(set(feature_names)) != len(feature_names):
+            raise CVError("Feature order contains duplicate feature identifiers")
+        return feature_names
+
+    @staticmethod
+    def _matrix_from_long_df(
+        long_df: pl.DataFrame,
+        ordering_df: pl.DataFrame,
+        feature_names: list[str],
+        absent_feature_fill_value: float = 0.0,
+    ) -> np.ndarray:
+        if long_df.height == 0:
+            return np.full(
+                (ordering_df.height, len(feature_names)),
+                absent_feature_fill_value,
+                dtype=float,
+            )
+        species_index = (
+            ordering_df.select("__species")
+            .unique(maintain_order=True)
+            .with_row_index("__matrix_row")
+        )
+        feature_index = pl.DataFrame({"__feature": feature_names}).with_row_index("__matrix_col")
+        coordinates = (
+            long_df.select("__species", "__feature", "__value")
+            .join(species_index, on="__species", how="inner")
+            .join(feature_index, on="__feature", how="inner")
+        )
+        matrix_rows = coordinates.get_column("__matrix_row").to_numpy()
+        matrix_cols = coordinates.get_column("__matrix_col").to_numpy()
+        matrix = np.zeros((species_index.height, len(feature_names)), dtype=float)
+        np.add.at(
+            matrix,
+            (matrix_rows, matrix_cols),
+            coordinates.get_column("__value").to_numpy(),
+        )
+        if np.isnan(absent_feature_fill_value):
+            present = np.zeros_like(matrix, dtype=bool)
+            present[matrix_rows, matrix_cols] = True
+            matrix[~present] = np.nan
+        ordered_rows = (
+            ordering_df.join(species_index, on="__species", how="left", validate="m:1")
+            .sort("__row_idx")
+            .get_column("__matrix_row")
+            .to_numpy()
+        )
+        return matrix[ordered_rows, :]
+
+    def feature_names_for_species(self, species_order: list[str]) -> list[str]:
+        """Return sorted feature names available for the selected species."""
+
+        if not species_order:
+            raise CVError("No species were provided for matrix construction")
+
+        unique_species = list(dict.fromkeys(species_order))
+        long_scan = self._long_scan_for_species(unique_species)
         present_species = {
             str(value)
-            for value in long_scan.select("__species").unique().collect().to_series().to_list()
+            for value in self._collect_expression(long_scan.select("__species").unique())
+            .to_series()
+            .to_list()
         }
         if not present_species:
             raise CVError("Expression matrix is empty for the selected species")
@@ -809,14 +1580,60 @@ class ExpressionMatrixBuilder:
         feature_names = [
             str(value)
             for value in (
-                long_scan.select("__feature")
-                .unique()
-                .sort("__feature")
-                .collect()
+                self._collect_expression(long_scan.select("__feature").unique().sort("__feature"))
                 .to_series()
                 .to_list()
             )
         ]
+        if not feature_names:
+            raise CVError("No features were available after pivoting expression data")
+        return feature_names
+
+    def build_matrix(
+        self, species_order: list[str], feature_order: list[str] | None = None
+    ) -> tuple[np.ndarray, list[str]]:
+        if not species_order:
+            raise CVError("No species were provided for matrix construction")
+
+        unique_species = list(dict.fromkeys(species_order))
+        uses_validated_cache = (
+            self._cached_long_path is not None
+            and self._cached_species is not None
+            and set(unique_species).issubset(self._cached_species)
+        )
+        long_scan = self._long_scan_for_species(unique_species)
+
+        present_species = {
+            str(value)
+            for value in self._collect_expression(long_scan.select("__species").unique())
+            .to_series()
+            .to_list()
+        }
+        if not present_species:
+            raise CVError("Expression matrix is empty for the selected species")
+        missing_species = sorted(set(unique_species) - set(str(v) for v in present_species))
+        if missing_species:
+            preview = ", ".join(missing_species[:10])
+            raise CVError(f"Expression data is missing selected species: {preview}")
+
+        if feature_order is None:
+            feature_names = [
+                str(value)
+                for value in (
+                    self._collect_expression(
+                        long_scan.select("__feature").unique().sort("__feature")
+                    )
+                    .to_series()
+                    .to_list()
+                )
+            ]
+        else:
+            feature_names = self._normalize_feature_order(feature_order)
+            # Validate every consumed row for the requested species, including
+            # features that will subsequently be ignored by schema alignment.
+            if not uses_validated_cache:
+                self._validate_tpm_scan(long_scan)
+            long_scan = long_scan.filter(pl.col("__feature").is_in(feature_names))
         if not feature_names:
             raise CVError("No features were available after pivoting expression data")
 
@@ -825,40 +1642,39 @@ class ExpressionMatrixBuilder:
         )
         estimated_cells = len(unique_species) * len(feature_names)
         if estimated_cells <= self._max_pivot_cells:
-            long_df = long_scan.collect()
-            pivot = long_df.pivot(
-                index="__species",
-                on="__feature",
-                values="__value",
-                aggregate_function="sum",
+            long_df = self._collect_expression(long_scan)
+            self._validate_tpm_frame(long_df)
+            long_df = long_df.select(["__species", "__feature", "__value"])
+            return (
+                self._matrix_from_long_df(
+                    long_df,
+                    ordering_df,
+                    feature_names,
+                    self._absent_feature_fill_value,
+                ),
+                feature_names,
             )
-            ordered = (
-                ordering_df.join(pivot, on="__species", how="left")
-                .fill_null(0.0)
-                .sort("__row_idx")
-                .select(feature_names)
-            )
-            return ordered.to_numpy().astype(float, copy=False), feature_names
 
         feature_chunk_size = max(1, self._max_pivot_cells // max(1, len(unique_species)))
-        matrix = np.zeros((len(species_order), len(feature_names)), dtype=float)
+        matrix = np.full(
+            (len(species_order), len(feature_names)),
+            self._absent_feature_fill_value,
+            dtype=float,
+        )
         for start in range(0, len(feature_names), feature_chunk_size):
             stop = min(start + feature_chunk_size, len(feature_names))
             chunk_features = feature_names[start:stop]
-            chunk_df = long_scan.filter(pl.col("__feature").is_in(chunk_features)).collect()
-            chunk_pivot = chunk_df.pivot(
-                index="__species",
-                on="__feature",
-                values="__value",
-                aggregate_function="sum",
+            chunk_df = self._collect_expression(
+                long_scan.filter(pl.col("__feature").is_in(chunk_features))
             )
-            ordered_chunk = (
-                ordering_df.join(chunk_pivot, on="__species", how="left")
-                .fill_null(0.0)
-                .sort("__row_idx")
-                .select(chunk_features)
+            self._validate_tpm_frame(chunk_df)
+            chunk_df = chunk_df.select(["__species", "__feature", "__value"])
+            chunk_matrix = self._matrix_from_long_df(
+                chunk_df,
+                ordering_df,
+                chunk_features,
+                self._absent_feature_fill_value,
             )
-            chunk_matrix = ordered_chunk.to_numpy().astype(float, copy=False)
             expected_shape = (len(species_order), len(chunk_features))
             if chunk_matrix.shape != expected_shape:
                 raise CVError("Expression matrix chunking produced inconsistent chunk shape")
@@ -867,27 +1683,67 @@ class ExpressionMatrixBuilder:
         return matrix, feature_names
 
 
+def _column_nan_mean(values: np.ndarray) -> np.ndarray:
+    observed = np.isfinite(values)
+    counts = np.count_nonzero(observed, axis=0)
+    totals = np.sum(np.where(observed, values, 0.0), axis=0)
+    return np.asarray(
+        np.divide(
+            totals,
+            counts,
+            out=np.full(values.shape[1], np.nan, dtype=float),
+            where=counts > 0,
+        ),
+        dtype=float,
+    )
+
+
+def _column_nan_variance(values: np.ndarray, *, ddof: int) -> np.ndarray:
+    observed = np.isfinite(values)
+    counts = np.count_nonzero(observed, axis=0)
+    means = _column_nan_mean(values)
+    squared_deviations = np.where(observed, (values - means) ** 2, 0.0)
+    denominator = counts - int(ddof)
+    return np.asarray(
+        np.divide(
+            np.sum(squared_deviations, axis=0),
+            denominator,
+            out=np.full(values.shape[1], np.nan, dtype=float),
+            where=denominator > 0,
+        ),
+        dtype=float,
+    )
+
+
 def _pair_group_contrasts(
     x_train_expr: np.ndarray,
     y_train: np.ndarray,
     groups_train: np.ndarray,
     selected: np.ndarray,
 ) -> np.ndarray:
-    groups_str = groups_train.astype(str)
-    unique_groups = sorted(set(groups_str.tolist()))
+    groups_by_key: dict[str, list[int]] = {}
+    for idx, raw_group in enumerate(groups_train.tolist()):
+        if raw_group is None:
+            continue
+        try:
+            if bool(np.isnan(raw_group)):
+                continue
+        except (TypeError, ValueError):
+            pass
+        group = str(raw_group).strip()
+        if not group:
+            continue
+        groups_by_key.setdefault(group, []).append(idx)
     contrast_rows: list[np.ndarray] = []
 
-    for group in unique_groups:
-        group_indices = np.where(groups_str == group)[0]
+    for group in sorted(groups_by_key):
+        group_indices = np.array(groups_by_key[group], dtype=int)
         label0_idx = group_indices[y_train[group_indices] == 0]
         label1_idx = group_indices[y_train[group_indices] == 1]
         if label0_idx.size == 0 or label1_idx.size == 0:
-            raise CVError(
-                "pair_aware_filter requires both labels within each training group; "
-                f"offending group={group}"
-            )
-        label1_mean = np.mean(x_train_expr[label1_idx][:, selected], axis=0)
-        label0_mean = np.mean(x_train_expr[label0_idx][:, selected], axis=0)
+            continue
+        label1_mean = _column_nan_mean(x_train_expr[label1_idx][:, selected])
+        label0_mean = _column_nan_mean(x_train_expr[label0_idx][:, selected])
         contrast_rows.append(np.asarray(label1_mean - label0_mean, dtype=float))
 
     if not contrast_rows:
@@ -895,66 +1751,330 @@ def _pair_group_contrasts(
     return np.vstack(contrast_rows)
 
 
-def _apply_pair_aware_filter(
-    config: AppConfig,
-    x_train_expr: np.ndarray,
-    y_train: np.ndarray,
-    groups_train: np.ndarray,
+def _ranked_score_rows(
+    *,
+    method: str,
+    higher_in_trait: int | None,
     selected: np.ndarray,
     feature_names: list[str],
+    effect: np.ndarray,
+    standard_error: np.ndarray,
+    score: np.ndarray,
+    rank_by_local: np.ndarray,
+    retained_local: set[int],
+    n_valid_contrast_pairs: int | None,
+    n_label0: int | None,
+    n_label1: int | None,
+    max_features_requested: int | None,
+    max_features_effective: int,
+    applied: bool,
+    skip_reason: str | None,
+) -> list[dict[str, Any]]:
+    def _finite_or_none(value: float) -> float | None:
+        return float(value) if np.isfinite(value) else None
+
+    rows: list[dict[str, Any]] = []
+    for local_idx, feature_index in enumerate(selected.tolist()):
+        rank_value = int(rank_by_local[local_idx])
+        effect_value = float(effect[local_idx])
+        direction_match = (
+            higher_in_trait is None
+            or (
+                higher_in_trait == 1
+                and effect_value > _NONZERO_TOLERANCE
+            )
+            or (
+                higher_in_trait == 0
+                and effect_value < -_NONZERO_TOLERANCE
+            )
+        )
+        rows.append(
+            {
+                "method": method,
+                "higher_in_trait": higher_in_trait,
+                "feature": feature_names[feature_index],
+                "effect": _finite_or_none(effect_value),
+                "direction_match": direction_match,
+                "standard_error": _finite_or_none(float(standard_error[local_idx])),
+                "score": _finite_or_none(float(score[local_idx])),
+                "rank": None if rank_value <= 0 or not direction_match else rank_value,
+                "retained": local_idx in retained_local,
+                "n_valid_contrast_pairs": n_valid_contrast_pairs,
+                "n_label0": n_label0,
+                "n_label1": n_label1,
+                "max_features_requested": max_features_requested,
+                "max_features_effective": max_features_effective,
+                "applied": applied,
+                "skip_reason": skip_reason,
+            }
+        )
+    return rows
+
+
+def _apply_ranked_feature_filter(
+    config: AppConfig,
+    x_train_expr: np.ndarray,
+    selected: np.ndarray,
+    feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
-) -> tuple[np.ndarray, np.ndarray | None]:
-    max_features = config.preprocess.pair_aware_filter.max_features
+) -> RankedFeatureFilterResult:
+    filter_config = config.preprocess.ranked_feature_filter
+    method = filter_config.method
+    higher_in_trait = filter_config.higher_in_trait
+    candidate_count = int(selected.size)
+    if candidate_count == 0:
+        return RankedFeatureFilterResult(
+            selected=selected,
+            priority_scores=np.empty(0, dtype=float),
+            score_rows=[],
+        )
+
+    max_features = filter_config.max_features
+    max_features_requested = None if max_features is None else int(max_features)
+    n_label0: int | None = None
+    n_label1: int | None = None
+    if y_train is not None:
+        y_train = np.asarray(y_train)
+        if y_train.shape[0] != x_train_expr.shape[0]:
+            raise CVError("ranked_feature_filter y_train length does not match training rows")
+        n_label0 = int(np.count_nonzero(y_train == 0))
+        n_label1 = int(np.count_nonzero(y_train == 1))
+
+    empty_values = np.full(candidate_count, np.nan, dtype=float)
+    if method == "none":
+        rows = _ranked_score_rows(
+            method=method,
+            higher_in_trait=higher_in_trait,
+            selected=selected,
+            feature_names=feature_names,
+            effect=empty_values,
+            standard_error=empty_values,
+            score=empty_values,
+            rank_by_local=np.zeros(candidate_count, dtype=int),
+            retained_local=set(range(candidate_count)),
+            n_valid_contrast_pairs=None,
+            n_label0=n_label0,
+            n_label1=n_label1,
+            max_features_requested=max_features_requested,
+            max_features_effective=candidate_count,
+            applied=False,
+            skip_reason="method_none",
+        )
+        return RankedFeatureFilterResult(selected=selected, priority_scores=None, score_rows=rows)
+
     if max_features is None:
-        raise CVError("pair_aware_filter is enabled but max_features is missing")
-    if selected.size == 0:
-        return selected, np.empty(0, dtype=float)
+        raise CVError(f"ranked_feature_filter max_features is missing for method {method}")
 
-    contrasts = _pair_group_contrasts(x_train_expr, y_train, groups_train, selected)
-    n_groups = int(contrasts.shape[0])
-    if n_groups < 2:
-        if warnings is not None:
-            warnings.append(
-                "pair_aware_filter skipped because fewer than 2 training groups were available "
-                "in a split"
-            )
-        return selected, None
+    effect = empty_values.copy()
+    standard_error = empty_values.copy()
+    score = empty_values.copy()
+    n_valid_contrast_pairs: int | None = None
+    fallback_to_unstandardized_effect = False
 
-    effect = np.asarray(np.mean(contrasts, axis=0), dtype=float)
-    se = np.asarray(np.std(contrasts, axis=0, ddof=1), dtype=float) / np.sqrt(float(n_groups))
-    positive_se = se[np.isfinite(se) & (se > 0.0)]
-    if positive_se.size == 0:
-        if warnings is not None:
-            warnings.append(
-                "pair_aware_filter used absolute mean group contrast because all per-feature "
-                "standard errors were zero"
+    if method == "pair_aware":
+        if y_train is None or groups_train is None:
+            raise CVError(
+                "ranked_feature_filter method pair_aware requires y_train and groups_train"
             )
-        score = np.abs(effect)
-    else:
-        s0 = max(float(np.quantile(positive_se, _PAIR_AWARE_SE_QUANTILE)), _PAIR_AWARE_SCORE_FLOOR)
-        score = np.abs(effect) / np.maximum(se, s0)
+        contrasts = _pair_group_contrasts(x_train_expr, y_train, groups_train, selected)
+        n_valid_contrast_pairs = int(contrasts.shape[0])
+        min_contrast_pairs = int(filter_config.min_contrast_pairs)
+        if n_valid_contrast_pairs < min_contrast_pairs:
+            if higher_in_trait is not None:
+                raise CVError(
+                    "ranked_feature_filter cannot enforce "
+                    f"higher_in_trait={higher_in_trait} because too few valid contrast "
+                    "pairs were available in a split; "
+                    f"valid_contrast_pairs={n_valid_contrast_pairs}, "
+                    f"min_contrast_pairs={min_contrast_pairs}"
+                )
+            if warnings is not None:
+                warnings.append(
+                    "ranked_feature_filter method pair_aware skipped because too few valid "
+                    "contrast pairs were available in a split; "
+                    f"valid_contrast_pairs={n_valid_contrast_pairs}, "
+                    f"min_contrast_pairs={min_contrast_pairs}"
+                )
+            rows = _ranked_score_rows(
+                method=method,
+                higher_in_trait=higher_in_trait,
+                selected=selected,
+                feature_names=feature_names,
+                effect=effect,
+                standard_error=standard_error,
+                score=score,
+                rank_by_local=np.zeros(candidate_count, dtype=int),
+                retained_local=set(range(candidate_count)),
+                n_valid_contrast_pairs=n_valid_contrast_pairs,
+                n_label0=n_label0,
+                n_label1=n_label1,
+                max_features_requested=max_features_requested,
+                max_features_effective=candidate_count,
+                applied=False,
+                skip_reason="too_few_valid_contrast_pairs",
+            )
+            return RankedFeatureFilterResult(
+                selected=selected, priority_scores=None, score_rows=rows
+            )
+        effect = _column_nan_mean(contrasts)
+        if n_valid_contrast_pairs > 1:
+            valid_contrast_counts = np.count_nonzero(np.isfinite(contrasts), axis=0)
+            contrast_variance = _column_nan_variance(contrasts, ddof=1)
+            standard_error = np.sqrt(
+                np.divide(
+                    contrast_variance,
+                    valid_contrast_counts,
+                    out=np.full(candidate_count, np.nan, dtype=float),
+                    where=valid_contrast_counts > 0,
+                )
+            )
+        else:
+            fallback_to_unstandardized_effect = True
+    elif method == "unpaired":
+        if y_train is None:
+            raise CVError("ranked_feature_filter method unpaired requires y_train")
+        label0_idx = np.flatnonzero(y_train == 0)
+        label1_idx = np.flatnonzero(y_train == 1)
+        if label0_idx.size == 0 or label1_idx.size == 0:
+            raise CVError("ranked_feature_filter method unpaired requires both labels")
+        label0_values = x_train_expr[label0_idx][:, selected]
+        label1_values = x_train_expr[label1_idx][:, selected]
+        effect = _column_nan_mean(label1_values) - _column_nan_mean(label0_values)
+        if label0_idx.size > 1 and label1_idx.size > 1:
+            label0_counts = np.count_nonzero(np.isfinite(label0_values), axis=0)
+            label1_counts = np.count_nonzero(np.isfinite(label1_values), axis=0)
+            standard_error = np.sqrt(
+                np.divide(
+                    _column_nan_variance(label1_values, ddof=1),
+                    label1_counts,
+                    out=np.full(candidate_count, np.nan, dtype=float),
+                    where=label1_counts > 0,
+                )
+                + np.divide(
+                    _column_nan_variance(label0_values, ddof=1),
+                    label0_counts,
+                    out=np.full(candidate_count, np.nan, dtype=float),
+                    where=label0_counts > 0,
+                )
+            )
+        else:
+            fallback_to_unstandardized_effect = True
+    elif method == "variance":
+        if x_train_expr.shape[0] > 1:
+            score = _column_nan_variance(x_train_expr[:, selected], ddof=1)
+        else:
+            score = np.zeros(candidate_count, dtype=float)
+    else:  # pragma: no cover - guarded by config validation.
+        raise CVError(f"Unsupported ranked_feature_filter method: {method}")
+
+    if method in {"pair_aware", "unpaired"}:
+        positive_se = standard_error[np.isfinite(standard_error) & (standard_error > 0.0)]
+        if positive_se.size == 0:
+            fallback_to_unstandardized_effect = True
+            score = np.abs(effect)
+        else:
+            s0 = max(
+                float(np.quantile(positive_se, _RANKED_FEATURE_SE_QUANTILE)),
+                _RANKED_FEATURE_SCORE_FLOOR,
+            )
+            denominator = np.where(
+                np.isfinite(standard_error),
+                np.maximum(standard_error, s0),
+                s0,
+            )
+            score = np.abs(effect) / denominator
+        if fallback_to_unstandardized_effect and warnings is not None:
+            warnings.append(
+                f"ranked_feature_filter method {method} used unstandardized effect because "
+                "usable per-feature standard errors were unavailable"
+            )
+
     score = np.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0)
-    if np.all(np.isclose(score, 0.0)):
+    direction_match = np.ones(candidate_count, dtype=bool)
+    if higher_in_trait == 1:
+        direction_match = effect > _NONZERO_TOLERANCE
+        score = np.where(direction_match, score, 0.0)
+    elif higher_in_trait == 0:
+        direction_match = effect < -_NONZERO_TOLERANCE
+        score = np.where(direction_match, score, 0.0)
+    feature_keys = np.asarray(
+        [feature_names[feature_index] for feature_index in selected], dtype=str
+    )
+    secondary = (
+        np.abs(np.nan_to_num(effect, nan=0.0))
+        if method in {"pair_aware", "unpaired"}
+        else np.zeros(candidate_count, dtype=float)
+    )
+    if higher_in_trait is not None:
+        secondary = np.where(direction_match, secondary, 0.0)
+    order = np.lexsort((feature_keys, -secondary, -score))
+    rank_by_local = np.empty(candidate_count, dtype=int)
+    rank_by_local[order] = np.arange(1, candidate_count + 1, dtype=int)
+
+    if higher_in_trait is not None and not np.any(direction_match):
+        expected_effect = "> 0" if higher_in_trait == 1 else "< 0"
+        raise CVError(
+            "ranked_feature_filter removed all candidates because "
+            f"higher_in_trait={higher_in_trait} requires effect {expected_effect}"
+        )
+
+    if higher_in_trait is None and np.all(np.isclose(score, 0.0)):
         if warnings is not None:
             warnings.append(
-                "pair_aware_filter skipped because all pair-aware scores were zero or non-finite "
-                "in a split"
+                f"ranked_feature_filter method {method} skipped because all scores were zero "
+                "or non-finite in a split"
             )
-        return selected, None
+        rows = _ranked_score_rows(
+            method=method,
+            higher_in_trait=higher_in_trait,
+            selected=selected,
+            feature_names=feature_names,
+            effect=effect,
+            standard_error=standard_error,
+            score=score,
+            rank_by_local=rank_by_local,
+            retained_local=set(range(candidate_count)),
+            n_valid_contrast_pairs=n_valid_contrast_pairs,
+            n_label0=n_label0,
+            n_label1=n_label1,
+            max_features_requested=max_features_requested,
+            max_features_effective=candidate_count,
+            applied=False,
+            skip_reason="all_scores_zero_or_non_finite",
+        )
+        return RankedFeatureFilterResult(selected=selected, priority_scores=None, score_rows=rows)
 
-    keep_count = min(int(max_features), int(selected.size))
-    order = sorted(
-        range(selected.size),
-        key=lambda idx: (-score[idx], -abs(effect[idx]), feature_names[selected[idx]]),
+    eligible_order = order[direction_match[order]]
+    keep_count = min(int(max_features), int(eligible_order.size))
+    kept_local = np.asarray(eligible_order[:keep_count], dtype=int)
+    rows = _ranked_score_rows(
+        method=method,
+        higher_in_trait=higher_in_trait,
+        selected=selected,
+        feature_names=feature_names,
+        effect=effect,
+        standard_error=standard_error,
+        score=score,
+        rank_by_local=rank_by_local,
+        retained_local=set(kept_local.tolist()),
+        n_valid_contrast_pairs=n_valid_contrast_pairs,
+        n_label0=n_label0,
+        n_label1=n_label1,
+        max_features_requested=max_features_requested,
+        max_features_effective=keep_count,
+        applied=True,
+        skip_reason=None,
     )
-    kept_local = np.array(order[:keep_count], dtype=int)
     kept_global = selected[kept_local]
     kept_priority = score[kept_local]
-
     order_by_feature = np.argsort(kept_global)
-    kept_global = np.asarray(kept_global[order_by_feature], dtype=int)
-    kept_priority = np.asarray(kept_priority[order_by_feature], dtype=float)
-    return kept_global, kept_priority
+    return RankedFeatureFilterResult(
+        selected=np.asarray(kept_global[order_by_feature], dtype=int),
+        priority_scores=np.asarray(kept_priority[order_by_feature], dtype=float),
+        score_rows=rows,
+    )
 
 
 def _select_feature_indices_with_counts(
@@ -964,40 +2084,100 @@ def _select_feature_indices_with_counts(
     y_train: np.ndarray | None = None,
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
+    ranked_feature_score_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[np.ndarray, FeatureFilterCounts]:
     selected = np.arange(x_train_expr.shape[1], dtype=int)
     n_features_before = int(selected.size)
+    if config.preprocess.missing_expression.method == "neutral":
+        observations = np.count_nonzero(np.isfinite(x_train_expr), axis=0)
+        variance = _column_nan_variance(x_train_expr, ddof=0)
+        selected = selected[(observations >= 2) & np.isfinite(variance) & (variance > 0)]
+        if y_train is not None and config.preprocess.ranked_feature_filter.method in {
+            "pair_aware",
+            "unpaired",
+        }:
+            observed_in_both = np.all(
+                [
+                    np.any(np.isfinite(x_train_expr[np.asarray(y_train) == label]), axis=0)
+                    for label in (0, 1)
+                ],
+                axis=0,
+            )
+            selected = selected[observed_in_both[selected]]
+            if config.preprocess.ranked_feature_filter.method == "pair_aware":
+                if groups_train is None:
+                    raise CVError("Pair-aware neutral preprocessing requires contrast groups")
+                contrasts = _pair_group_contrasts(x_train_expr, y_train, groups_train, selected)
+                counts_per_feature = np.count_nonzero(np.isfinite(contrasts), axis=0)
+                selected = selected[
+                    counts_per_feature >= config.preprocess.ranked_feature_filter.min_contrast_pairs
+                ]
 
-    if config.preprocess.low_prevalence_filter.enabled:
-        min_species = config.preprocess.low_prevalence_filter.min_species_per_feature
-        if min_species is None:
-            raise CVError("low_prevalence_filter is enabled but min_species_per_feature is missing")
-        prevalence = np.count_nonzero(x_train_expr[:, selected] > 0.0, axis=0)
-        selected = selected[prevalence >= int(min_species)]
-    n_features_after_low_prevalence = int(selected.size)
+    if config.preprocess.sparse_feature_filter.enabled:
+        min_fraction = (
+            config.preprocess.sparse_feature_filter.min_nonzero_fraction
+        )
+        if min_fraction is None:
+            raise CVError(
+                "sparse_feature_filter is enabled but "
+                "min_nonzero_fraction is missing"
+            )
+        if x_train_expr.shape[0] == 0:
+            raise CVError("sparse_feature_filter requires at least one training row")
+        scope = config.preprocess.sparse_feature_filter.scope
+        nonzero_mask = x_train_expr[:, selected] > _NONZERO_TOLERANCE
+        if scope == "all_samples":
+            nonzero_fraction = np.count_nonzero(nonzero_mask, axis=0) / x_train_expr.shape[0]
+        else:
+            if y_train is None:
+                raise CVError("sparse_feature_filter requires y_train in preprocessing")
+            if len(y_train) != x_train_expr.shape[0]:
+                raise CVError("sparse_feature_filter y_train length does not match training rows")
+            y_train_arr = np.asarray(y_train)
+            if scope == "any_trait":
+                trait_values = np.unique(y_train_arr)
+            else:
+                target_trait = 0 if scope == "trait_0" else 1
+                if not np.any(y_train_arr == target_trait):
+                    raise CVError(
+                        f"sparse_feature_filter scope={scope} requires trait {target_trait} "
+                        "in training rows"
+                    )
+                trait_values = np.asarray([target_trait], dtype=int)
+            nonzero_fraction = np.zeros(selected.size, dtype=float)
+            for trait_value in trait_values:
+                trait_mask = y_train_arr == trait_value
+                trait_count = int(np.count_nonzero(trait_mask))
+                if trait_count == 0:
+                    continue
+                trait_nonzero_fraction = (
+                    np.count_nonzero(nonzero_mask[trait_mask, :], axis=0) / trait_count
+                )
+                nonzero_fraction = np.maximum(nonzero_fraction, trait_nonzero_fraction)
+        selected = selected[nonzero_fraction >= float(min_fraction)]
+    n_features_after_sparse_feature_filter = int(selected.size)
 
     if config.preprocess.low_variance_filter.enabled:
         min_variance = config.preprocess.low_variance_filter.min_variance
         if min_variance is None:
             raise CVError("low_variance_filter is enabled but min_variance is missing")
-        variances = np.var(x_train_expr[:, selected], axis=0)
+        variances = _column_nan_variance(x_train_expr[:, selected], ddof=0)
         selected = selected[variances >= float(min_variance)]
     n_features_after_low_variance = int(selected.size)
 
-    pair_aware_priority_scores: np.ndarray | None = None
-    if config.preprocess.pair_aware_filter.enabled and selected.size > 0:
-        if y_train is None or groups_train is None:
-            raise CVError("pair_aware_filter requires y_train and groups_train in preprocessing")
-        selected, pair_aware_priority_scores = _apply_pair_aware_filter(
-            config,
-            x_train_expr,
-            y_train,
-            groups_train,
-            selected,
-            feature_names,
-            warnings=warnings,
-        )
-    n_features_after_pair_aware = int(selected.size)
+    ranked_result = _apply_ranked_feature_filter(
+        config,
+        x_train_expr,
+        selected,
+        feature_names,
+        y_train=y_train,
+        groups_train=groups_train,
+        warnings=warnings,
+    )
+    selected = ranked_result.selected
+    if ranked_feature_score_rows is not None:
+        ranked_feature_score_rows.extend(ranked_result.score_rows)
+    n_features_after_ranked_feature_filter = int(selected.size)
 
     if config.preprocess.correlation_filter.enabled and selected.size > 1:
         selected = _apply_correlation_filter(
@@ -1005,7 +2185,7 @@ def _select_feature_indices_with_counts(
             x_train_expr,
             selected,
             feature_names,
-            priority_scores=pair_aware_priority_scores,
+            priority_scores=ranked_result.priority_scores,
         )
     n_features_after_correlation = int(selected.size)
 
@@ -1013,9 +2193,9 @@ def _select_feature_indices_with_counts(
         raise CVError("Preprocessing removed all features in a fold")
     return selected, FeatureFilterCounts(
         n_features_before=n_features_before,
-        n_features_after_low_prevalence=n_features_after_low_prevalence,
+        n_features_after_sparse_feature_filter=n_features_after_sparse_feature_filter,
         n_features_after_low_variance=n_features_after_low_variance,
-        n_features_after_pair_aware=n_features_after_pair_aware,
+        n_features_after_ranked_feature_filter=n_features_after_ranked_feature_filter,
         n_features_after_correlation=n_features_after_correlation,
         n_features_after_all=int(selected.size),
     )
@@ -1051,25 +2231,47 @@ def _apply_correlation_filter(
     if max_abs_corr is None:
         raise CVError("correlation_filter is enabled but max_abs_correlation is missing")
     if priority_scores is not None and priority_scores.shape[0] != selected.size:
-        raise CVError("pair-aware priority scores must align with the selected feature set")
+        raise CVError("ranked feature priority scores must align with the selected feature set")
 
     train_selected = x_train_log[:, selected]
-    if config.preprocess.correlation_filter.method == "spearman":
-        ranked = np.apply_along_axis(rankdata, 0, train_selected)
-        corr = np.corrcoef(ranked, rowvar=False)
+    method = config.preprocess.correlation_filter.method
+    feature_count = train_selected.shape[1]
+    if np.isfinite(train_selected).all():
+        if method == "spearman":
+            ranked = np.apply_along_axis(rankdata, 0, train_selected)
+            corr = np.corrcoef(ranked, rowvar=False)
+        else:
+            corr = np.corrcoef(train_selected, rowvar=False)
+        corr = np.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
+        local_variances = np.var(train_selected, axis=0)
     else:
-        corr = np.corrcoef(train_selected, rowvar=False)
-    corr = np.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
-
-    local_variances = np.var(train_selected, axis=0)
+        corr = np.eye(feature_count, dtype=float)
+        for left_idx in range(feature_count):
+            for right_idx in range(left_idx):
+                observed = np.isfinite(train_selected[:, left_idx]) & np.isfinite(
+                    train_selected[:, right_idx]
+                )
+                left = train_selected[observed, left_idx]
+                right = train_selected[observed, right_idx]
+                if left.size < 2 or np.ptp(left) == 0.0 or np.ptp(right) == 0.0:
+                    value = 0.0
+                else:
+                    if method == "spearman":
+                        left = rankdata(left, method="average")
+                        right = rankdata(right, method="average")
+                    value = float(np.corrcoef(left, right)[0, 1])
+                    if not np.isfinite(value):
+                        value = 0.0
+                corr[left_idx, right_idx] = value
+                corr[right_idx, left_idx] = value
+        local_variances = np.nan_to_num(
+            _column_nan_variance(train_selected, ddof=0),
+            nan=-np.inf,
+        )
     order = sorted(
         range(selected.size),
         key=lambda idx: (
-            -(
-                0.0
-                if priority_scores is None
-                else float(priority_scores[idx])
-            ),
+            -(0.0 if priority_scores is None else float(priority_scores[idx])),
             -local_variances[idx],
             feature_names[selected[idx]],
         ),
@@ -1097,9 +2299,34 @@ def _preprocess_fold_with_counts(
     y_train: np.ndarray | None = None,
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
-) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts]:
+    ranked_feature_score_rows: list[dict[str, Any]] | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts, FeatureScaler]:
     x_train_expr = _apply_expression_transform_for_config(config, x_train_raw)
     x_valid_expr = _apply_expression_transform_for_config(config, x_valid_raw)
+
+    return _preprocess_transformed_fold_with_counts(
+        config,
+        x_train_expr,
+        x_valid_expr,
+        feature_names,
+        y_train=y_train,
+        groups_train=groups_train,
+        warnings=warnings,
+        ranked_feature_score_rows=ranked_feature_score_rows,
+    )
+
+
+def _preprocess_transformed_fold_with_counts(
+    config: AppConfig,
+    x_train_expr: np.ndarray,
+    x_valid_expr: np.ndarray,
+    feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
+    ranked_feature_score_rows: list[dict[str, Any]] | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts, FeatureScaler]:
+    """Preprocess a fold whose row-local expression transform is already applied."""
 
     selected, counts = _select_feature_indices_with_counts(
         config,
@@ -1108,16 +2335,17 @@ def _preprocess_fold_with_counts(
         y_train=y_train,
         groups_train=groups_train,
         warnings=warnings,
+        ranked_feature_score_rows=ranked_feature_score_rows,
     )
     selected_features = [feature_names[idx] for idx in selected]
 
     x_train_selected = x_train_expr[:, selected]
     x_valid_selected = x_valid_expr[:, selected]
 
-    x_train_scaled, x_valid_scaled, _scaler = fit_feature_scaling(
+    x_train_scaled, x_valid_scaled, scaler = fit_feature_scaling(
         config, x_train_selected, x_valid_selected
     )
-    return x_train_scaled, x_valid_scaled, selected_features, counts
+    return x_train_scaled, x_valid_scaled, selected_features, counts, scaler
 
 
 def _preprocess_fold(
@@ -1129,16 +2357,112 @@ def _preprocess_fold(
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    x_train_scaled, x_valid_scaled, selected_features, _counts = _preprocess_fold_with_counts(
-        config,
-        x_train_raw,
-        x_valid_raw,
-        feature_names,
-        y_train=y_train,
-        groups_train=groups_train,
-        warnings=warnings,
+    x_train_scaled, x_valid_scaled, selected_features, _counts, _scaler = (
+        _preprocess_fold_with_counts(
+            config,
+            x_train_raw,
+            x_valid_raw,
+            feature_names,
+            y_train=y_train,
+            groups_train=groups_train,
+            warnings=warnings,
+        )
     )
     return x_train_scaled, x_valid_scaled, selected_features
+
+
+_TRAINING_GROUP_SUBSET_SCHEMA = {
+    "scope": pl.String,
+    "fold_id": pl.String,
+    "group_col": pl.String,
+    "group_subsample_repeat_index": pl.Int64,
+    "training_group_count_requested": pl.Int64,
+    "n_training_groups_available": pl.Int64,
+    "n_training_groups_selected": pl.Int64,
+    "group_rank": pl.Int64,
+    "group_id": pl.String,
+    "selected": pl.Boolean,
+    "n_species": pl.Int64,
+    "n_label0": pl.Int64,
+    "n_label1": pl.Int64,
+}
+
+
+def _build_training_group_subsets(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    if not rows:
+        return pl.DataFrame(schema=_TRAINING_GROUP_SUBSET_SCHEMA)
+    return pl.DataFrame(rows, schema=_TRAINING_GROUP_SUBSET_SCHEMA).sort(
+        ["scope", "fold_id", "group_rank", "group_id"]
+    )
+
+
+def _select_training_groups(
+    config: AppConfig,
+    y_train: np.ndarray,
+    groups_train: np.ndarray,
+    *,
+    scope: str,
+    fold_id: str,
+) -> TrainingGroupSelection:
+    """Select a reproducible nested subset of ``split.group_col`` training groups."""
+    if y_train.shape[0] != groups_train.shape[0]:
+        raise CVError("Training labels and groups have different row counts")
+
+    normalized_groups = groups_train.astype(str)
+    unique_groups = sorted(set(normalized_groups.tolist()))
+    if not unique_groups:
+        raise CVError(f"No training groups are available for scope={scope}, fold={fold_id}")
+
+    repeat_index = int(config.sampling.group_subsample_repeat_index)
+    ordered_groups = sorted(
+        unique_groups,
+        key=lambda group: (
+            _deterministic_int_seed(
+                f"{config.runtime.seed}|training_group_subset|{repeat_index}|{group}"
+            ),
+            group,
+        ),
+    )
+    requested = config.sampling.training_group_count
+    if requested is not None and int(requested) > len(ordered_groups):
+        raise CVError(
+            "sampling.training_group_count requires exactly "
+            f"{requested} training groups, but only {len(ordered_groups)} are available "
+            f"for scope={scope}, fold={fold_id}"
+        )
+    effective_count = len(ordered_groups) if requested is None else int(requested)
+    selected_groups = tuple(ordered_groups[:effective_count])
+    selected_mask = np.isin(normalized_groups, np.asarray(selected_groups, dtype=str))
+    if np.unique(y_train[selected_mask]).size < 2:
+        raise CVError(
+            "Training-group subsampling produced fewer than two labels; "
+            f"scope={scope}, fold={fold_id}, training_group_count={requested}, "
+            f"group_subsample_repeat_index={repeat_index}"
+        )
+
+    selected_set = set(selected_groups)
+    audit_rows: list[dict[str, Any]] = []
+    for rank, group in enumerate(ordered_groups, start=1):
+        group_mask = normalized_groups == group
+        group_labels = y_train[group_mask]
+        audit_rows.append(
+            {
+                "scope": scope,
+                "fold_id": fold_id,
+                "group_col": config.split.group_col,
+                "group_subsample_repeat_index": repeat_index,
+                "training_group_count_requested": (None if requested is None else int(requested)),
+                "n_training_groups_available": len(ordered_groups),
+                "n_training_groups_selected": effective_count,
+                "group_rank": rank,
+                "group_id": group,
+                "selected": group in selected_set,
+                "n_species": int(group_labels.size),
+                "n_label0": int(np.sum(group_labels == 0)),
+                "n_label1": int(np.sum(group_labels == 1)),
+            }
+        )
+    return TrainingGroupSelection(group_ids=selected_groups, audit_rows=audit_rows)
 
 
 def _sample_training_sets(
@@ -1147,21 +2471,33 @@ def _sample_training_sets(
     groups_train: np.ndarray,
     training_scope_id: str,
     warnings: list[str],
+    selected_group_ids: tuple[str, ...] | None = None,
 ) -> list[np.ndarray]:
+    normalized_groups = groups_train.astype(str)
+    unique_groups = (
+        sorted(set(normalized_groups.tolist()))
+        if selected_group_ids is None
+        else list(selected_group_ids)
+    )
+    unknown_groups = sorted(set(unique_groups) - set(normalized_groups.tolist()))
+    if unknown_groups:
+        raise CVError(
+            "Selected training groups are absent from the training rows: "
+            + ", ".join(unknown_groups)
+        )
     if config.sampling.strategy == "all_samples":
-        return [np.arange(y_train.shape[0], dtype=int)]
+        selected = np.flatnonzero(np.isin(normalized_groups, np.asarray(unique_groups, dtype=str)))
+        return [selected.astype(int, copy=False)]
 
-    unique_groups = sorted(set(str(group) for group in groups_train.tolist()))
     group_specs: list[tuple[str, np.ndarray, np.ndarray, int]] = []
     max_sets = 1
     for group in unique_groups:
-        group_indices = np.where(groups_train.astype(str) == group)[0]
+        group_indices = np.where(normalized_groups == group)[0]
         label0_idx = group_indices[y_train[group_indices] == 0]
         label1_idx = group_indices[y_train[group_indices] == 1]
         if label0_idx.size == 0 or label1_idx.size == 0:
             raise CVError(
-                "group_balanced sampling requires both labels per group; "
-                f"offending group={group}"
+                f"group_balanced sampling requires both labels per group; offending group={group}"
             )
 
         if config.sampling.max_samples_per_label_per_group is None:
@@ -1243,7 +2579,7 @@ def _fit_sample_weights(config: AppConfig, y: np.ndarray, groups: np.ndarray) ->
 
 def _validate_model_params(model_name: str, model_params: dict[str, Any]) -> None:
     allowed: dict[str, set[str]] = {
-        "logistic_elasticnet": {"C", "l1_ratio", "max_iter"},
+        "logistic_elasticnet": {"alpha", "l1_ratio", "max_iter", "gradient_tol"},
         "linear_svm": {"C", "max_iter"},
         "random_forest": {"n_estimators", "max_depth", "min_samples_split", "min_samples_leaf"},
     }
@@ -1254,6 +2590,36 @@ def _validate_model_params(model_name: str, model_params: dict[str, Any]) -> Non
             f"Unsupported model_selection.search_space parameter(s) for {model_name}: "
             f"{disallowed_text}"
         )
+    if model_name != "logistic_elasticnet":
+        return
+
+    requirements = {
+        "alpha": "a finite number >= 0",
+        "l1_ratio": "a finite number in [0, 1]",
+        "gradient_tol": "a finite number > 0",
+        "max_iter": "a finite positive integer (booleans are not accepted)",
+    }
+    for name, value in model_params.items():
+        numeric = isinstance(value, Real) and not isinstance(value, (bool, np.bool_))
+        try:
+            number = float(value) if numeric else float("nan")
+        except (OverflowError, ValueError):
+            number = float("nan")
+        valid = bool(np.isfinite(number))
+        if name == "alpha":
+            valid = valid and number >= 0
+        elif name == "l1_ratio":
+            valid = valid and 0 <= number <= 1
+        elif name == "gradient_tol":
+            valid = valid and number > 0
+        else:
+            # Discrete float ranges can legitimately produce values such as 100.0.
+            valid = valid and number >= 1 and number.is_integer()
+        if not valid:
+            raise CVError(
+                f"model_selection.search_space.{name} for logistic_elasticnet "
+                f"must be {requirements[name]}; got {value!r}"
+            )
 
 
 def _build_estimator(
@@ -1262,19 +2628,24 @@ def _build_estimator(
     y_train: np.ndarray,
     model_params: dict[str, Any] | None = None,
     rf_n_jobs: int | None = None,
-) -> LogisticRegression | CalibratedClassifierCV | RandomForestClassifier:
+) -> FittedEstimator:
     params = {} if model_params is None else dict(model_params)
     _validate_model_params(config.model.name, params)
 
     if config.model.name == "logistic_elasticnet":
-        c_value = float(params.get("C", 1.0))
+        alpha = float(params.get("alpha", 0.01))
         l1_ratio = float(params.get("l1_ratio", 0.5))
-        max_iter = int(params.get("max_iter", 5000))
-        return LogisticRegression(
-            solver="saga",
+        max_iter = int(params.get("max_iter", 100))
+        gradient_tol = float(params.get("gradient_tol", 1e-6))
+        return GeneralizedLinearRegressor(
+            family="binomial",
+            solver="irls-cd",
+            alpha=alpha,
             l1_ratio=l1_ratio,
-            C=c_value,
             max_iter=max_iter,
+            gradient_tol=gradient_tol,
+            fit_intercept=True,
+            scale_predictors=False,
             random_state=model_seed,
         )
 
@@ -1285,12 +2656,12 @@ def _build_estimator(
         min_class_count = int(class_counts.min())
         if min_class_count < 2:
             raise CVError(
-                "linear_svm calibration requires at least 2 "
-                "samples per class in train fold"
+                "linear_svm calibration requires at least 2 samples per class in train fold"
             )
         calibrate_cv = 3 if min_class_count >= 3 else 2
+        base_estimator = LinearSVC(C=c_value, max_iter=max_iter, random_state=model_seed)
         return CalibratedClassifierCV(
-            estimator=LinearSVC(C=c_value, max_iter=max_iter, random_state=model_seed),
+            estimator=base_estimator,
             method="sigmoid",
             cv=calibrate_cv,
         )
@@ -1314,24 +2685,150 @@ def _build_estimator(
 
 
 def _fit_estimator(
-    estimator: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+    estimator: FittedEstimator,
     x_train: np.ndarray,
     y_train: np.ndarray,
     sample_weight: np.ndarray | None,
-) -> None:
+) -> EstimatorFitDiagnostic:
     if sample_weight is None:
         estimator.fit(x_train, y_train)
-        return
-    try:
-        estimator.fit(x_train, y_train, sample_weight=sample_weight)
-    except TypeError:
-        estimator.fit(x_train, y_train)
+    else:
+        if not has_fit_parameter(estimator, "sample_weight"):
+            raise CVError(
+                f"{type(estimator).__name__}.fit does not support sample_weight; "
+                "refusing to ignore configured sample weighting"
+            )
+        if (
+            isinstance(estimator, CalibratedClassifierCV)
+            and isinstance(estimator.estimator, LinearSVC)
+            and bool(get_config().get("enable_metadata_routing", False))
+        ):
+            estimator.estimator.set_fit_request(sample_weight=True)
+        try:
+            estimator.fit(x_train, y_train, sample_weight=sample_weight)
+        except TypeError as exc:
+            raise CVError(
+                f"{type(estimator).__name__}.fit failed while applying sample_weight: {exc}"
+            ) from exc
+
+    if isinstance(estimator, GeneralizedLinearRegressor):
+        # IRLS may converge on its last allowed iteration, so n_iter_ alone
+        # cannot determine convergence. Read its final optimality residual.
+        diagnostics = estimator.diagnostics_
+        residual = float(diagnostics[-1]["convergence"])
+        tolerance = float(estimator.gradient_tol or 1e-4)
+        converged = bool(np.isfinite(residual) and residual < tolerance)
+        messages = () if converged else (
+            f"Binomial GLM did not reach gradient_tol={tolerance:g}; "
+            f"final convergence residual={residual:g}",
+        )
+        return EstimatorFitDiagnostic(
+            estimator_class=type(estimator).__name__,
+            convergence_applicable=True,
+            converged=converged,
+            n_iter_values=(int(estimator.n_iter_),),
+            max_iter=int(estimator.max_iter),
+            convergence_warning_count=0 if converged else 1,
+            convergence_warning_messages=messages,
+        )
+
+    iterative_estimators: list[LinearSVC] = []
+    if isinstance(estimator, CalibratedClassifierCV) and isinstance(
+        estimator.estimator, LinearSVC
+    ):
+        calibrated_estimators = [
+            calibrated.estimator
+            for calibrated in estimator.calibrated_classifiers_
+            if isinstance(calibrated.estimator, LinearSVC)
+        ]
+        iterative_estimators.extend(calibrated_estimators)
+
+    n_iter_values: list[int] = []
+    max_iter_values: list[int] = []
+    iteration_limit_reached_count = 0
+    for iterative_estimator in iterative_estimators:
+        raw_n_iter = getattr(iterative_estimator, "n_iter_", None)
+        estimator_n_iter_values: list[int] = []
+        if raw_n_iter is not None:
+            estimator_n_iter_values = [
+                int(value) for value in np.asarray(raw_n_iter, dtype=int).reshape(-1).tolist()
+            ]
+            n_iter_values.extend(estimator_n_iter_values)
+        raw_max_iter = getattr(iterative_estimator, "max_iter", None)
+        if raw_max_iter is not None:
+            estimator_max_iter = int(raw_max_iter)
+            max_iter_values.append(estimator_max_iter)
+            iteration_limit_reached_count += sum(
+                n_iter >= estimator_max_iter for n_iter in estimator_n_iter_values
+            )
+
+    convergence_applicable = bool(iterative_estimators)
+    convergence_messages = (
+        (
+            (
+                "Iteration limit reached (observed n_iter_ >= configured max_iter); "
+                "coefficients may not have converged"
+            ),
+        )
+        if iteration_limit_reached_count > 0
+        else ()
+    )
+    return EstimatorFitDiagnostic(
+        estimator_class=type(estimator).__name__,
+        convergence_applicable=convergence_applicable,
+        converged=(iteration_limit_reached_count == 0 if convergence_applicable else None),
+        n_iter_values=tuple(n_iter_values),
+        max_iter=max(max_iter_values) if max_iter_values else None,
+        convergence_warning_count=iteration_limit_reached_count,
+        convergence_warning_messages=convergence_messages,
+    )
+
+
+def _convergence_diagnostic_row(
+    diagnostic: EstimatorFitDiagnostic,
+    *,
+    training_scope: str,
+    fit_scope: str,
+    fold_id: str,
+    sample_set_id: int,
+    selection_source_sample_set_id: int,
+    candidate_index: int,
+    inner_fold_id: str,
+    model_index: int | None,
+    model_name: str,
+    params_json: str,
+) -> dict[str, Any]:
+    return {
+        "training_scope": training_scope,
+        "fit_scope": fit_scope,
+        "fold_id": fold_id,
+        "sample_set_id": sample_set_id,
+        "selection_source_sample_set_id": selection_source_sample_set_id,
+        "candidate_index": candidate_index,
+        "inner_fold_id": inner_fold_id,
+        "model_index": model_index,
+        "model_name": model_name,
+        "estimator_class": diagnostic.estimator_class,
+        "convergence_applicable": diagnostic.convergence_applicable,
+        "converged": diagnostic.converged,
+        "n_iter_max": max(diagnostic.n_iter_values) if diagnostic.n_iter_values else None,
+        "n_iter_values_json": json.dumps(diagnostic.n_iter_values),
+        "max_iter": diagnostic.max_iter,
+        "convergence_warning_count": diagnostic.convergence_warning_count,
+        "convergence_warning_message": " | ".join(diagnostic.convergence_warning_messages),
+        "params_json": params_json,
+    }
 
 
 def _predict_positive_probability(
-    estimator: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+    estimator: FittedEstimator,
     x_valid: np.ndarray,
 ) -> np.ndarray:
+    if isinstance(estimator, GeneralizedLinearRegressor):
+        probability = np.asarray(estimator.predict(x_valid), dtype=float)
+        if probability.shape != (x_valid.shape[0],):
+            raise CVError("Binomial GLM predict returned unexpected shape")
+        return probability
     probabilities = np.asarray(estimator.predict_proba(x_valid), dtype=float)
     if probabilities.ndim != 2 or probabilities.shape[1] < 2:
         raise CVError("predict_proba returned unexpected shape")
@@ -1390,7 +2887,10 @@ def _selection_metric_from_probability(
     if metric_name == "log_loss":
         return _binary_log_loss(y_true, prob)
 
-    threshold = float(config.report.fixed_probability_threshold)
+    if np.unique(y_true).size < 2:
+        return np.nan
+
+    threshold = FIXED_PROBABILITY_THRESHOLD_VALUE
     pred = (prob >= threshold).astype(int)
     if metric_name == "mcc":
         return float(matthews_corrcoef(y_true, pred))
@@ -1400,7 +2900,7 @@ def _selection_metric_from_probability(
 
 
 def _selection_metric_higher_is_better(metric_name: str) -> bool:
-    return metric_name != "log_loss"
+    return metric_higher_is_better(metric_name)
 
 
 def _selection_metric_optuna_direction(metric_name: str) -> str:
@@ -1411,13 +2911,23 @@ def _selection_metric_nan_sentinel(metric_name: str) -> float:
     return -1e12 if _selection_metric_higher_is_better(metric_name) else 1e12
 
 
-def _rank_selected_candidates(
+def _finite_score(value: float | None) -> float | None:
+    if value is None:
+        return None
+    score = float(value)
+    if not np.isfinite(score):
+        return None
+    return score
+
+
+def _rank_candidates_by_metric(
     scored: list[SelectedCandidate], metric_name: str
 ) -> list[SelectedCandidate]:
     def _score_for_sort(value: float | None) -> float:
-        if value is None:
+        score = _finite_score(value)
+        if score is None:
             return -np.inf if _selection_metric_higher_is_better(metric_name) else np.inf
-        return float(value)
+        return score
 
     if _selection_metric_higher_is_better(metric_name):
         return sorted(
@@ -1428,6 +2938,104 @@ def _rank_selected_candidates(
         scored,
         key=lambda item: (_score_for_sort(item.score), item.candidate.candidate_index),
     )
+
+
+def _numeric_candidate_param(candidate: Candidate, name: str, default: float) -> float:
+    value = candidate.params.get(name)
+    if value is None:
+        return default
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not np.isfinite(numeric):
+        return default
+    return numeric
+
+
+def _candidate_simplicity_sort_key(candidate: Candidate, model_name: str) -> tuple[float, ...]:
+    if model_name == "logistic_elasticnet":
+        alpha = _numeric_candidate_param(candidate, "alpha", 0.01)
+        l1_ratio = _numeric_candidate_param(candidate, "l1_ratio", 0.5)
+        return (-alpha, -l1_ratio, float(candidate.candidate_index))
+    if model_name == "linear_svm":
+        c_value = _numeric_candidate_param(candidate, "C", np.inf)
+        return (c_value, float(candidate.candidate_index))
+
+    if model_name == "random_forest":
+        max_depth_raw = candidate.params.get("max_depth")
+        max_depth = (
+            np.inf
+            if max_depth_raw is None
+            else _numeric_candidate_param(candidate, "max_depth", np.inf)
+        )
+        min_samples_leaf = _numeric_candidate_param(candidate, "min_samples_leaf", 1.0)
+        min_samples_split = _numeric_candidate_param(candidate, "min_samples_split", 2.0)
+        n_estimators = _numeric_candidate_param(candidate, "n_estimators", 100.0)
+        return (
+            max_depth,
+            -min_samples_leaf,
+            -min_samples_split,
+            n_estimators,
+            float(candidate.candidate_index),
+        )
+
+    return (float(candidate.candidate_index),)
+
+
+def _rank_candidates_one_se(
+    scored: list[SelectedCandidate], config: AppConfig
+) -> list[SelectedCandidate]:
+    metric_name = config.model_selection.selection_metric
+    ranked_by_metric = _rank_candidates_by_metric(scored, metric_name)
+    if not ranked_by_metric:
+        return []
+
+    best = next((item for item in ranked_by_metric if _finite_score(item.score) is not None), None)
+    if best is None:
+        return ranked_by_metric
+
+    best_score = _finite_score(best.score)
+    if best_score is None:
+        return ranked_by_metric
+    best_se = _finite_score(best.score_std_error)
+    if best_se is None:
+        best_se = 0.0
+
+    higher_is_better = _selection_metric_higher_is_better(metric_name)
+    if higher_is_better:
+        cutoff = best_score - best_se
+
+        def _within_one_se(item: SelectedCandidate) -> bool:
+            score = _finite_score(item.score)
+            return score is not None and score >= cutoff
+
+    else:
+        cutoff = best_score + best_se
+
+        def _within_one_se(item: SelectedCandidate) -> bool:
+            score = _finite_score(item.score)
+            return score is not None and score <= cutoff
+
+    metric_rank = {id(item): rank for rank, item in enumerate(ranked_by_metric)}
+    eligible = [item for item in ranked_by_metric if _within_one_se(item)]
+    ineligible = [item for item in ranked_by_metric if not _within_one_se(item)]
+    eligible_sorted = sorted(
+        eligible,
+        key=lambda item: (
+            _candidate_simplicity_sort_key(item.candidate, config.model.name),
+            metric_rank[id(item)],
+        ),
+    )
+    return eligible_sorted + ineligible
+
+
+def _rank_selected_candidates(
+    scored: list[SelectedCandidate], config: AppConfig
+) -> list[SelectedCandidate]:
+    if config.model_selection.selection_rule == "one_se":
+        return _rank_candidates_one_se(scored, config)
+    return _rank_candidates_by_metric(scored, config.model_selection.selection_metric)
 
 
 def _candidate_params_key(candidate: Candidate) -> str:
@@ -1470,6 +3078,14 @@ def _selection_source_sample_set_ids(config: AppConfig, sampled_set_count: int) 
     )
 
 
+def _selection_timing_location(training_scope_id: str) -> tuple[str, str | None]:
+    if training_scope_id.startswith("outer_fold_"):
+        return "outer_fold", training_scope_id.removeprefix("outer_fold_")
+    if training_scope_id == "final_refit":
+        return "final_refit", None
+    return "model_selection", None
+
+
 def _requested_selected_candidate_count(
     *,
     config: AppConfig,
@@ -1494,23 +3110,41 @@ def _inner_cv_splits(
 
     indices = np.arange(y.shape[0], dtype=int)
     split_iter: Any
-    if config.model_selection.inner_cv_strategy == "logo":
+    strategy = config.model_selection.inner_cv_strategy
+    if strategy == "logo":
         split_iter = LeaveOneGroupOut().split(indices, y, groups)
-    else:
+    elif strategy == "group_kfold":
         n_splits = config.model_selection.inner_cv_n_splits
         if n_splits is None:
             raise CVError(
                 "model_selection.inner_cv_n_splits is required for inner_cv_strategy=group_kfold"
             )
         split_iter = GroupKFold(n_splits=n_splits).split(indices, y, groups)
+    else:
+        n_splits = config.model_selection.inner_cv_n_splits
+        if n_splits is None:
+            raise CVError(
+                "model_selection.inner_cv_n_splits is required for "
+                "inner_cv_strategy=stratified_group_kfold"
+            )
+        split_iter = StratifiedGroupKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=config.runtime.seed,
+        ).split(indices, y, groups)
 
     rows: list[tuple[np.ndarray, np.ndarray, str]] = []
     try:
-        for inner_fold_index, (train_idx, valid_idx) in enumerate(split_iter):
+        for inner_fold_index, (train_idx, valid_idx) in enumerate(split_iter, start=1):
             train_idx_array = np.asarray(train_idx, dtype=int)
             valid_idx_array = np.asarray(valid_idx, dtype=int)
             if train_idx_array.size == 0 or valid_idx_array.size == 0:
                 raise CVError("Inner CV produced an empty train/validation split")
+            if np.unique(y[train_idx_array]).size < 2:
+                raise CVError(
+                    f"Inner CV fold {inner_fold_index} training split contains "
+                    "fewer than two labels"
+                )
             rows.append((train_idx_array, valid_idx_array, str(inner_fold_index)))
     except ValueError as exc:
         raise CVError(f"Inner CV split error: {exc}") from exc
@@ -1532,11 +3166,12 @@ def _build_inner_cv_preprocessed_folds(
 ) -> list[InnerCvPreprocessedFold]:
     def _build() -> list[InnerCvPreprocessedFold]:
         preprocessed_folds: list[InnerCvPreprocessedFold] = []
+        x_source_expr = _apply_expression_transform_for_config(config, x_source_raw)
         for train_idx, valid_idx, inner_fold_id in _inner_cv_splits(
             config, y_source, groups_source
         ):
-            x_train_raw = x_source_raw[train_idx, :]
-            x_valid_raw = x_source_raw[valid_idx, :]
+            x_train_expr = x_source_expr[train_idx, :]
+            x_valid_expr = x_source_expr[valid_idx, :]
             y_train = y_source[train_idx]
             y_valid = y_source[valid_idx]
             groups_train = groups_source[train_idx]
@@ -1544,14 +3179,16 @@ def _build_inner_cv_preprocessed_folds(
                 None if contrast_groups_source is None else contrast_groups_source[train_idx]
             )
 
-            x_train, x_valid, _selected = _preprocess_fold(
-                config,
-                x_train_raw,
-                x_valid_raw,
-                feature_names,
-                y_train=y_train,
-                groups_train=contrast_groups_train,
-                warnings=warnings,
+            x_train, x_valid, _selected, _counts, _scaler = (
+                _preprocess_transformed_fold_with_counts(
+                    config,
+                    x_train_expr,
+                    x_valid_expr,
+                    feature_names,
+                    y_train=y_train,
+                    groups_train=contrast_groups_train,
+                    warnings=warnings,
+                )
             )
             sample_weight = _fit_sample_weights(config, y_train, groups_train)
             preprocessed_folds.append(
@@ -1577,6 +3214,8 @@ def _score_candidate_inner_cv(
     candidate: Candidate,
     preprocessed_folds: list[InnerCvPreprocessedFold],
     estimator_n_jobs: int | None = None,
+    timing_recorder: TimingRecorder | None = None,
+    warm_start_estimators: dict[str, GeneralizedLinearRegressor] | None = None,
 ) -> tuple[float, list[dict[str, Any]]]:
     resolved_estimator_n_jobs = (
         _runtime_n_jobs(config) if estimator_n_jobs is None else int(estimator_n_jobs)
@@ -1594,14 +3233,37 @@ def _score_candidate_inner_cv(
                 f"{config.runtime.seed}|{training_scope_id}|source_{source_sample_set_id}|"
                 f"candidate_{candidate.candidate_index}|inner_{fold.inner_fold_id}"
             )
-            estimator = _build_estimator(
+            fresh_estimator = _build_estimator(
                 config,
                 seed,
                 fold.y_train,
                 model_params=candidate.params,
                 rf_n_jobs=resolved_estimator_n_jobs,
             )
-            _fit_estimator(estimator, fold.x_train, fold.y_train, fold.sample_weight)
+            estimator: FittedEstimator
+            if warm_start_estimators is None:
+                estimator = fresh_estimator
+            else:
+                if not isinstance(fresh_estimator, GeneralizedLinearRegressor):
+                    raise CVError("Warm-start candidate path requires logistic regression")
+                cached_estimator = warm_start_estimators.get(fold.inner_fold_id)
+                if cached_estimator is None:
+                    fresh_estimator.set_params(warm_start=True)
+                    estimator = fresh_estimator
+                    warm_start_estimators[fold.inner_fold_id] = fresh_estimator
+                else:
+                    cached_estimator.set_params(
+                        alpha=fresh_estimator.alpha,
+                        l1_ratio=fresh_estimator.l1_ratio,
+                        max_iter=fresh_estimator.max_iter,
+                        gradient_tol=fresh_estimator.gradient_tol,
+                        random_state=fresh_estimator.random_state,
+                        warm_start=True,
+                    )
+                    estimator = cached_estimator
+            fit_diagnostic = _fit_estimator(
+                estimator, fold.x_train, fold.y_train, fold.sample_weight
+            )
             prob = _predict_positive_probability(estimator, fold.x_valid)
             score = _selection_metric_from_probability(config, fold.y_valid, prob)
             fold_scores.append(score)
@@ -1612,14 +3274,56 @@ def _score_candidate_inner_cv(
                     "metric_name": config.model_selection.selection_metric,
                     "metric_value": score,
                     "params_json": params_json,
+                    "fit_diagnostic": fit_diagnostic,
                 }
             )
 
         if not fold_scores:
             return np.nan, trial_rows
-        return float(np.nanmean(np.asarray(fold_scores, dtype=float))), trial_rows
+        fold_score_array = np.asarray(fold_scores, dtype=float)
+        if np.all(np.isnan(fold_score_array)):
+            return np.nan, trial_rows
+        return float(np.nanmean(fold_score_array)), trial_rows
 
-    return _with_native_thread_limit(resolved_estimator_n_jobs, _score)
+    timing_started = None if timing_recorder is None else timing_recorder.start()
+    result = _with_native_thread_limit(resolved_estimator_n_jobs, _score)
+    if timing_recorder is not None and timing_started is not None:
+        timing_scope, timing_fold_id = _selection_timing_location(training_scope_id)
+        timing_recorder.record_since(
+            timing_started,
+            scope=timing_scope,
+            stage="candidate_score",
+            fold_id=timing_fold_id,
+            sample_set_id=source_sample_set_id,
+            candidate_index=candidate.candidate_index,
+        )
+    return result
+
+
+def _score_std_error_from_trial_rows(trial_rows: list[dict[str, Any]]) -> float | None:
+    values = [
+        score for row in trial_rows if (score := _finite_score(row.get("metric_value"))) is not None
+    ]
+    if not values:
+        return None
+    value_array = np.asarray(values, dtype=float)
+    return float(np.std(value_array, ddof=0) / np.sqrt(value_array.size))
+
+
+def _candidate_score_std_errors_from_trial_rows(
+    trial_rows: list[dict[str, Any]],
+) -> dict[int, float | None]:
+    rows_by_candidate: dict[int, list[dict[str, Any]]] = {}
+    for row in trial_rows:
+        candidate_index_raw = row.get("candidate_index")
+        if candidate_index_raw is None:
+            continue
+        candidate_index = int(candidate_index_raw)
+        rows_by_candidate.setdefault(candidate_index, []).append(row)
+    return {
+        candidate_index: _score_std_error_from_trial_rows(rows)
+        for candidate_index, rows in rows_by_candidate.items()
+    }
 
 
 def _tpe_trial_params(
@@ -1655,11 +3359,11 @@ def _prepare_source_selection_tpe(
     warnings: list[str],
     progress_callback: Callable[[str, str | None], None] | None = None,
     contrast_groups_train: np.ndarray | None = None,
+    timing_recorder: TimingRecorder | None = None,
 ) -> SourceSelectionResult:
     if not _selection_is_active(config):
         raise CVError(
-            "selected_candidate_count/selected_candidate_percent is required "
-            "for TPE selection flow"
+            "selected_candidate_count/selected_candidate_percent is required for TPE selection flow"
         )
     if config.model_selection.trial_count is None:
         raise CVError("trial_count is required for TPE strategy")
@@ -1678,6 +3382,7 @@ def _prepare_source_selection_tpe(
             f"source_sample_set_id={source_sample_set_id}"
         )
 
+    inner_preprocess_started = None if timing_recorder is None else timing_recorder.start()
     preprocessed_folds = _build_inner_cv_preprocessed_folds(
         config=config,
         x_source_raw=x_source_raw,
@@ -1687,6 +3392,15 @@ def _prepare_source_selection_tpe(
         feature_names=feature_names,
         warnings=warnings,
     )
+    if timing_recorder is not None and inner_preprocess_started is not None:
+        timing_scope, timing_fold_id = _selection_timing_location(training_scope_id)
+        timing_recorder.record_since(
+            inner_preprocess_started,
+            scope=timing_scope,
+            stage="inner_cv_preprocessing",
+            fold_id=timing_fold_id,
+            sample_set_id=source_sample_set_id,
+        )
 
     trial_count = int(config.model_selection.trial_count)
     discrete_values, continuous_values = expanded_search_space(config.model_selection.search_space)
@@ -1726,6 +3440,7 @@ def _prepare_source_selection_tpe(
             candidate=candidate,
             preprocessed_folds=preprocessed_folds,
             estimator_n_jobs=estimator_n_jobs,
+            timing_recorder=timing_recorder,
         )
         trial_rows.extend(rows)
         if progress_callback is not None:
@@ -1749,6 +3464,7 @@ def _prepare_source_selection_tpe(
     study.optimize(_objective, n_trials=effective_trials)
     ordered_trials = sorted(study.trials, key=lambda item: item.number)
     scored: list[SelectedCandidate] = []
+    score_std_errors = _candidate_score_std_errors_from_trial_rows(trial_rows)
     for trial in ordered_trials:
         params_raw = trial.user_attrs.get("candidate_params")
         if not isinstance(params_raw, dict):
@@ -1760,11 +3476,13 @@ def _prepare_source_selection_tpe(
             SelectedCandidate(
                 candidate=Candidate(candidate_index=trial.number, params=dict(params_raw)),
                 score=score_value,
+                score_std_error=score_std_errors.get(trial.number),
+                selection_rule=config.model_selection.selection_rule,
             )
         )
 
     scored_count = len(scored)
-    ranked = _rank_selected_candidates(scored, metric_name)
+    ranked = _rank_selected_candidates(scored, config)
     ranked_unique = _dedupe_ranked_candidates_by_params(ranked)
     available = len(ranked_unique)
     if available < scored_count:
@@ -1810,6 +3528,7 @@ def _prepare_source_selection(
     warnings: list[str],
     progress_callback: Callable[[str, str | None], None] | None = None,
     contrast_groups_train: np.ndarray | None = None,
+    timing_recorder: TimingRecorder | None = None,
 ) -> SourceSelectionResult:
     selection_active = _selection_is_active(config)
     if selection_active and config.model_selection.search_strategy == "tpe":
@@ -1825,6 +3544,7 @@ def _prepare_source_selection(
             warnings=warnings,
             progress_callback=progress_callback,
             contrast_groups_train=contrast_groups_train,
+            timing_recorder=timing_recorder,
         )
 
     try:
@@ -1872,6 +3592,7 @@ def _prepare_source_selection(
             f"source_sample_set_id={source_sample_set_id}"
         )
 
+    inner_preprocess_started = None if timing_recorder is None else timing_recorder.start()
     preprocessed_folds = _build_inner_cv_preprocessed_folds(
         config=config,
         x_source_raw=x_source_raw,
@@ -1881,13 +3602,35 @@ def _prepare_source_selection(
         feature_names=feature_names,
         warnings=warnings,
     )
+    if timing_recorder is not None and inner_preprocess_started is not None:
+        timing_scope, timing_fold_id = _selection_timing_location(training_scope_id)
+        timing_recorder.record_since(
+            inner_preprocess_started,
+            scope=timing_scope,
+            stage="inner_cv_preprocessing",
+            fold_id=timing_fold_id,
+            sample_set_id=source_sample_set_id,
+        )
 
     worker_count, estimator_n_jobs = _selection_parallel_plan(config, available)
     scored: list[SelectedCandidate] = []
     trial_rows: list[dict[str, Any]] = []
     if worker_count == 1:
         scored_rows: list[tuple[float, list[dict[str, Any]]]] = []
+        warm_start_caches: dict[str, dict[str, GeneralizedLinearRegressor]] = {}
+        if config.model.logistic_warm_start_path:
+            candidates = sorted(
+                candidates,
+                key=lambda item: -_numeric_candidate_param(item, "alpha", 0.01),
+            )
         for candidate_progress, candidate in enumerate(candidates, start=1):
+            warm_start_estimators: dict[str, GeneralizedLinearRegressor] | None = None
+            if config.model.logistic_warm_start_path:
+                path_params = {
+                    name: value for name, value in candidate.params.items() if name != "alpha"
+                }
+                path_key = json.dumps(path_params, ensure_ascii=True, sort_keys=True)
+                warm_start_estimators = warm_start_caches.setdefault(path_key, {})
             mean_score, rows = _score_candidate_inner_cv(
                 config=config,
                 training_scope_id=training_scope_id,
@@ -1895,6 +3638,8 @@ def _prepare_source_selection(
                 candidate=candidate,
                 preprocessed_folds=preprocessed_folds,
                 estimator_n_jobs=estimator_n_jobs,
+                timing_recorder=timing_recorder,
+                warm_start_estimators=warm_start_estimators,
             )
             scored_rows.append((mean_score, rows))
             if progress_callback is not None:
@@ -1909,6 +3654,11 @@ def _prepare_source_selection(
                     ),
                 )
     else:
+        if config.model.logistic_warm_start_path:
+            warnings.append(
+                "model.logistic_warm_start_path was not applied because candidate "
+                f"scoring used {worker_count} parallel workers"
+            )
         scored_rows_by_index: dict[int, tuple[float, list[dict[str, Any]]]] = {}
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = {
@@ -1920,6 +3670,7 @@ def _prepare_source_selection(
                     candidate=candidate,
                     preprocessed_folds=preprocessed_folds,
                     estimator_n_jobs=estimator_n_jobs,
+                    timing_recorder=timing_recorder,
                 ): candidate
                 for candidate in candidates
             }
@@ -1942,11 +3693,18 @@ def _prepare_source_selection(
 
     for candidate, (mean_score, rows) in zip(candidates, scored_rows, strict=True):
         score_value = None if np.isnan(mean_score) else float(mean_score)
-        scored.append(SelectedCandidate(candidate=candidate, score=score_value))
+        scored.append(
+            SelectedCandidate(
+                candidate=candidate,
+                score=score_value,
+                score_std_error=_score_std_error_from_trial_rows(rows),
+                selection_rule=config.model_selection.selection_rule,
+            )
+        )
         trial_rows.extend(rows)
 
     scored_count = len(scored)
-    ranked = _rank_selected_candidates(scored, config.model_selection.selection_metric)
+    ranked = _rank_selected_candidates(scored, config)
     ranked_unique = _dedupe_ranked_candidates_by_params(ranked)
     available_unique = len(ranked_unique)
     if available_unique < scored_count:
@@ -1983,42 +3741,11 @@ def _prepare_source_selection(
 def _compute_fold_metrics(
     y_true: np.ndarray, prob: np.ndarray, threshold: float
 ) -> dict[str, float]:
-    y_pred = (prob >= threshold).astype(int)
-    metrics: dict[str, float] = {}
-
-    try:
-        metrics["roc_auc"] = float(roc_auc_score(y_true, prob))
-    except (IndexError, ValueError):
-        metrics["roc_auc"] = np.nan
-
-    try:
-        metrics["pr_auc"] = float(average_precision_score(y_true, prob))
-    except (IndexError, ValueError):
-        metrics["pr_auc"] = np.nan
-
-    try:
-        metrics["balanced_accuracy"] = float(balanced_accuracy_score(y_true, y_pred))
-    except (IndexError, ValueError):
-        metrics["balanced_accuracy"] = np.nan
-
-    try:
-        metrics["mcc"] = float(matthews_corrcoef(y_true, y_pred))
-    except (IndexError, ValueError):
-        metrics["mcc"] = np.nan
-
-    try:
-        metrics["brier"] = float(brier_score_loss(y_true, prob))
-    except (IndexError, ValueError):
-        metrics["brier"] = np.nan
-
-    return metrics
+    return binary_probability_metrics(y_true, prob, threshold=threshold)
 
 
 def _binary_log_loss(y_true: np.ndarray, prob: np.ndarray) -> float:
-    try:
-        return float(log_loss(y_true, prob, labels=[0, 1]))
-    except (IndexError, ValueError):
-        return np.nan
+    return binary_log_loss(y_true, prob)
 
 
 def _summarize_model_selection_trials(model_selection_trials: pl.DataFrame) -> pl.DataFrame:
@@ -2028,7 +3755,7 @@ def _summarize_model_selection_trials(model_selection_trials: pl.DataFrame) -> p
         .otherwise(pl.col("metric_value"))
         .alias("_metric_value_valid")
     )
-    return scored.group_by(
+    summary = scored.group_by(
         ["fold_id", "sample_set_id", "candidate_index", "metric_name", "params_json"]
     ).agg(
         [
@@ -2037,37 +3764,13 @@ def _summarize_model_selection_trials(model_selection_trials: pl.DataFrame) -> p
             pl.col("_metric_value_valid").mean().alias("metric_value_mean"),
             pl.col("_metric_value_valid").std(ddof=0).alias("metric_value_std"),
         ]
+    )
+    return summary.with_columns(
+        pl.when(pl.col("n_valid_inner_folds") > 0)
+        .then(pl.col("metric_value_std") / pl.col("n_valid_inner_folds").cast(pl.Float64).sqrt())
+        .otherwise(pl.lit(None, dtype=pl.Float64))
+        .alias("metric_value_se")
     ).sort(["fold_id", "sample_set_id", "candidate_index"])
-
-
-def _derive_cv_threshold(
-    config: AppConfig, y_true: np.ndarray, prob: np.ndarray
-) -> tuple[float, str | None]:
-    if prob.size == 0:
-        raise CVError("Cannot derive CV threshold from empty prediction set")
-
-    metric_name = config.report.auto_threshold_selection_metric
-    candidates = np.unique(np.concatenate([np.array([0.0, 1.0]), prob]))
-    best_threshold = 0.5
-    best_score = -np.inf
-
-    for threshold in candidates:
-        pred = (prob >= float(threshold)).astype(int)
-        if metric_name == "mcc":
-            score = float(matthews_corrcoef(y_true, pred))
-        else:
-            score = float(balanced_accuracy_score(y_true, pred))
-        if np.isnan(score):
-            continue
-        if score > best_score or (
-            np.isclose(score, best_score) and float(threshold) < best_threshold
-        ):
-            best_score = score
-            best_threshold = float(threshold)
-
-    if np.isinf(best_score):
-        return 0.5, "cv_derived_threshold fallback to 0.5 because all candidate scores were NaN"
-    return best_threshold, None
 
 
 def _fold_ids(split_manifest: pl.DataFrame) -> list[str]:
@@ -2084,8 +3787,11 @@ def _fold_ids(split_manifest: pl.DataFrame) -> list[str]:
 def _with_contrast_group_column(config: AppConfig, split_manifest: pl.DataFrame) -> pl.DataFrame:
     if "contrast_group_id" in split_manifest.columns:
         return split_manifest
-    if config.preprocess.pair_aware_filter.enabled:
-        raise CVError("split_manifest is missing contrast_group_id required by pair_aware_filter")
+    if config.preprocess.ranked_feature_filter.method == "pair_aware":
+        raise CVError(
+            "split_manifest is missing contrast_group_id required by "
+            "ranked_feature_filter method pair_aware"
+        )
     return split_manifest.with_columns(pl.lit(None, dtype=pl.String).alias("contrast_group_id"))
 
 
@@ -2101,28 +3807,111 @@ def _outer_cv_species(split_manifest: pl.DataFrame) -> list[str]:
     return [str(value) for value in species_values]
 
 
+def _outer_cv_inference_species(config: AppConfig, split_manifest: pl.DataFrame) -> list[str]:
+    if config.runtime.execution_stage != "full_run":
+        return []
+    species_values = (
+        split_manifest.filter(pl.col("pool") == "discovery_inference")
+        .select("species")
+        .unique()
+        .sort("species")
+        .to_series()
+        .to_list()
+    )
+    return [str(value) for value in species_values]
+
+
 def _build_outer_cv_matrix_cache(
     config: AppConfig, split_manifest: pl.DataFrame
 ) -> OuterCvMatrixCache:
-    species_order = _outer_cv_species(split_manifest)
-    if not species_order:
+    cv_species = _outer_cv_species(split_manifest)
+    if not cv_species:
         raise CVError("No species available for outer CV train/validation pool")
+    inference_species = _outer_cv_inference_species(config, split_manifest)
+    species_order = [*cv_species, *inference_species]
 
     matrix_builder = ExpressionMatrixBuilder(config)
-    matrix, feature_names = _with_native_thread_limit_for_config(
+    _with_native_thread_limit_for_config(
         config,
-        matrix_builder.build_matrix,
+        matrix_builder.cache_species,
         species_order,
     )
+    cv_matrix, feature_names = _with_native_thread_limit_for_config(
+        config,
+        matrix_builder.build_matrix,
+        cv_species,
+    )
+    if inference_species:
+        raw_inference_matrix, _ = _with_native_thread_limit_for_config(
+            config,
+            matrix_builder.build_matrix,
+            inference_species,
+            feature_names,
+        )
+        matrix = np.vstack([cv_matrix, raw_inference_matrix])
+        del cv_matrix, raw_inference_matrix
+    else:
+        matrix = cv_matrix
     matrix.setflags(write=False)
+
+    inference_row_start = len(cv_species)
+    raw_inference_view = matrix[inference_row_start:, :]
+    transform_method = _validate_expression_transform_method(
+        config.preprocess.expression_transform.method
+    )
+    inference_transform_applied = bool(
+        inference_species and transform_method in _CONTEXTUAL_EXPRESSION_TRANSFORMS
+    )
+    if inference_transform_applied:
+        # Rank-based transforms depend on every feature in a sample. Compute
+        # them once before fold concurrency rather than once per outer fold.
+        inference_matrix = _with_native_thread_limit_for_config(
+            config,
+            _apply_expression_transform_for_config,
+            config,
+            raw_inference_view,
+        )
+    else:
+        inference_matrix = raw_inference_view
+    inference_matrix.setflags(write=False)
+
     species_to_index = {species: idx for idx, species in enumerate(species_order)}
     if len(species_to_index) != len(species_order):
         raise CVError("Outer CV species list contains duplicate identifiers")
+    inference_species_to_index = {species: idx for idx, species in enumerate(inference_species)}
     return OuterCvMatrixCache(
         matrix=matrix,
+        inference_matrix=inference_matrix,
+        inference_transform_applied=inference_transform_applied,
         feature_names=feature_names,
         species_to_index=species_to_index,
+        inference_species_to_index=inference_species_to_index,
     )
+
+
+def _slice_outer_cv_inference_matrix(
+    cache: OuterCvMatrixCache,
+    *,
+    species: list[str],
+) -> np.ndarray:
+    """Return a read-only basic-slice view of the shared inference matrix."""
+
+    if not species:
+        return cache.inference_matrix[:0, :]
+    try:
+        row_idx = np.array(
+            [cache.inference_species_to_index[value] for value in species], dtype=int
+        )
+    except KeyError as exc:
+        raise CVError(
+            "Inference target references species absent from shared outer-CV matrix; "
+            f"species={exc.args[0]}"
+        ) from exc
+    start = int(row_idx[0])
+    stop = start + int(row_idx.size)
+    if not np.array_equal(row_idx, np.arange(start, stop, dtype=int)):
+        raise CVError("Inference species must preserve the cached contiguous row order")
+    return cache.inference_matrix[start:stop, :]
 
 
 def _slice_outer_cv_matrix(
@@ -2148,6 +3937,106 @@ def _slice_outer_cv_matrix(
         ) from exc
 
     return cache.matrix[train_row_idx, :], cache.matrix[valid_row_idx, :]
+
+
+def _build_top_feature_expression_from_matrix(
+    *,
+    species_order: list[str],
+    matrix: np.ndarray,
+    feature_names: list[str],
+    feature_importance: pl.DataFrame,
+    feature_limit: int,
+) -> pl.DataFrame:
+    """Build a small validated raw-expression cache for downstream figures."""
+    schema = {"species": pl.String, "feature": pl.String, "tpm": pl.Float64}
+    if feature_limit < 1 or feature_importance.height == 0:
+        return pl.DataFrame(schema=schema)
+    if matrix.ndim != 2 or matrix.shape != (len(species_order), len(feature_names)):
+        raise CVError("Top-feature expression matrix does not match its species/feature schema")
+    top_features = (
+        feature_importance.drop_nulls(["feature", "importance_mean"])
+        .with_columns(
+            pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("feature"),
+            pl.col("importance_mean").cast(pl.Float64, strict=False).alias("importance_mean"),
+        )
+        .filter(pl.col("feature").is_not_null() & (pl.col("feature") != ""))
+        .sort(["importance_mean", "feature"], descending=[True, False])
+        .head(feature_limit)
+        .get_column("feature")
+        .to_list()
+    )
+    if not top_features:
+        return pl.DataFrame(schema=schema)
+    feature_to_index = {feature: index for index, feature in enumerate(feature_names)}
+    selected_features = [feature for feature in top_features if feature in feature_to_index]
+    if not selected_features:
+        return pl.DataFrame(schema=schema)
+    feature_indices = [feature_to_index[feature] for feature in selected_features]
+    values = matrix[:, feature_indices]
+    return pl.DataFrame(
+        {
+            "species": np.repeat(np.asarray(species_order, dtype=str), len(selected_features)),
+            "feature": np.tile(np.asarray(selected_features, dtype=str), len(species_order)),
+            "tpm": values.reshape(-1),
+        },
+        schema=schema,
+    )
+
+
+def _build_top_feature_expression(
+    cache: OuterCvMatrixCache,
+    feature_importance: pl.DataFrame,
+    *,
+    feature_limit: int,
+) -> pl.DataFrame:
+    species_order = [
+        species
+        for species, _index in sorted(cache.species_to_index.items(), key=lambda row: row[1])
+    ]
+    return _build_top_feature_expression_from_matrix(
+        species_order=species_order,
+        matrix=cache.matrix,
+        feature_names=cache.feature_names,
+        feature_importance=feature_importance,
+        feature_limit=feature_limit,
+    )
+
+
+def _build_final_refit_interpretation(
+    model_entries: list[FinalModelEntry],
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame, list[str]]:
+    """Summarize final-ensemble feature effects across individual model members."""
+    entries = [
+        ModelFeatureEntry(
+            feature_names=entry.feature_names,
+            model=entry.model,
+            fold_id=str(model_index),
+        )
+        for model_index, entry in enumerate(model_entries)
+    ]
+    artifacts = build_interpretation_tables(entries)
+    feature_importance = artifacts.feature_importance.drop("n_folds")
+    coefficients = artifacts.coefficients.drop("n_folds")
+    feature_importance_by_model = artifacts.feature_importance_by_fold.select(
+        pl.col("fold_id").cast(pl.Int64, strict=True).alias("model_index"),
+        "feature",
+        pl.col("importance_mean").alias("importance"),
+        "method",
+    )
+    coefficients_by_model = artifacts.coefficients_by_fold.select(
+        pl.col("fold_id").cast(pl.Int64, strict=True).alias("model_index"),
+        "feature",
+        pl.col("coef_mean").alias("coefficient"),
+        "method",
+        "reason",
+    )
+    return (
+        feature_importance,
+        coefficients,
+        feature_importance_by_model,
+        coefficients_by_model,
+        artifacts.warnings,
+    )
 
 
 def _metric_rows(
@@ -2177,6 +4066,15 @@ def _metric_rows(
             }
         )
     return rows
+
+
+def _metrics_dataframe(
+    metric_rows: list[dict[str, float | int | str | None]],
+) -> pl.DataFrame:
+    return pl.DataFrame(
+        metric_rows,
+        schema_overrides={"n_valid_folds": pl.Int64},
+    ).sort(["aggregate_scope", "fold_id", "metric"])
 
 
 def _preprocess_train_and_target(
@@ -2210,6 +4108,7 @@ def _preprocess_train_and_target_with_counts(
     y_train: np.ndarray | None = None,
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
+    ranked_feature_score_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str], FeatureScaler, FeatureFilterCounts]:
     x_train_expr = _apply_expression_transform_for_config(config, x_train_raw)
     x_target_expr = _apply_expression_transform_for_config(config, x_target_raw)
@@ -2221,6 +4120,7 @@ def _preprocess_train_and_target_with_counts(
         y_train=y_train,
         groups_train=groups_train,
         warnings=warnings,
+        ranked_feature_score_rows=ranked_feature_score_rows,
     )
     selected_features = [feature_names[idx] for idx in selected]
 
@@ -2233,11 +4133,111 @@ def _preprocess_train_and_target_with_counts(
     return x_train_scaled, x_target_scaled, selected_features, scaler, counts
 
 
+def _counts_with_n_features_before(
+    counts: FeatureFilterCounts, n_features_before: int | None
+) -> FeatureFilterCounts:
+    if n_features_before is None:
+        return counts
+    resolved = int(n_features_before)
+    if resolved < counts.n_features_after_sparse_feature_filter:
+        raise CVError("n_features_before override is smaller than retained feature count")
+    return FeatureFilterCounts(
+        n_features_before=resolved,
+        n_features_after_sparse_feature_filter=counts.n_features_after_sparse_feature_filter,
+        n_features_after_low_variance=counts.n_features_after_low_variance,
+        n_features_after_ranked_feature_filter=(counts.n_features_after_ranked_feature_filter),
+        n_features_after_correlation=counts.n_features_after_correlation,
+        n_features_after_all=counts.n_features_after_all,
+    )
+
+
+def _preprocess_train_only_with_counts(
+    config: AppConfig,
+    x_train_raw: np.ndarray,
+    feature_names: list[str],
+    y_train: np.ndarray | None = None,
+    groups_train: np.ndarray | None = None,
+    warnings: list[str] | None = None,
+    n_features_before_override: int | None = None,
+    ranked_feature_score_rows: list[dict[str, Any]] | None = None,
+) -> tuple[np.ndarray, list[str], FeatureScaler, FeatureFilterCounts]:
+    x_train_expr = _apply_expression_transform_for_config(config, x_train_raw)
+    selected, counts = _select_feature_indices_with_counts(
+        config,
+        x_train_expr,
+        feature_names,
+        y_train=y_train,
+        groups_train=groups_train,
+        warnings=warnings,
+        ranked_feature_score_rows=ranked_feature_score_rows,
+    )
+    counts = _counts_with_n_features_before(counts, n_features_before_override)
+    selected_features = [feature_names[idx] for idx in selected]
+    x_train_selected = x_train_expr[:, selected]
+    empty_target = np.empty((0, len(selected_features)), dtype=float)
+    x_train_scaled, _empty_scaled, scaler = fit_feature_scaling(
+        config, x_train_selected, empty_target
+    )
+    return x_train_scaled, selected_features, scaler, counts
+
+
+def _transform_target_for_selected_features(
+    config: AppConfig,
+    x_target_raw: np.ndarray,
+    target_feature_names: list[str],
+    selected_features: list[str],
+    scaler: FeatureScaler,
+) -> np.ndarray:
+    if len(target_feature_names) != int(x_target_raw.shape[1]):
+        raise CVError("Target matrix feature names do not match target matrix columns")
+    target_index = {feature: idx for idx, feature in enumerate(target_feature_names)}
+    if len(target_index) != len(target_feature_names):
+        raise CVError("Target matrix feature names contain duplicates")
+    missing_features = [feature for feature in selected_features if feature not in target_index]
+    if missing_features:
+        preview = ", ".join(missing_features[:10])
+        raise CVError(f"Target matrix is missing selected feature(s): {preview}")
+    selected_indices = np.array([target_index[feature] for feature in selected_features], dtype=int)
+    x_target_expr = _apply_expression_transform_for_config(config, x_target_raw)
+    x_target_selected = x_target_expr[:, selected_indices]
+    return apply_feature_scaling(
+        x_target_selected,
+        scaler,
+        config.preprocess.feature_scaling.method,
+    )
+
+
+def _predict_final_refit_targets(
+    config: AppConfig,
+    fit_result: FinalSampleSetFitResult,
+    x_target_raw: np.ndarray,
+    target_feature_names: list[str],
+) -> list[np.ndarray]:
+    x_target = _transform_target_for_selected_features(
+        config,
+        x_target_raw,
+        target_feature_names,
+        fit_result.selected_features,
+        fit_result.scaler,
+    )
+    return [_predict_positive_probability(model, x_target) for model in fit_result.fitted_models]
+
+
+def _final_refit_can_prune_target_matrix(config: AppConfig) -> bool:
+    transform_method = _validate_expression_transform_method(
+        config.preprocess.expression_transform.method
+    )
+    if transform_method not in {"none", "log1p"}:
+        return False
+    sparse_filter = config.preprocess.sparse_feature_filter
+    min_fraction = sparse_filter.min_nonzero_fraction
+    return bool(sparse_filter.enabled and min_fraction is not None and float(min_fraction) > 0.0)
+
+
 def _build_prediction_table(
     species: list[str],
     prob: np.ndarray,
     fixed_threshold: float,
-    cv_threshold: float,
     uncertainty_std: np.ndarray | None,
     true_label: np.ndarray | None = None,
     include_true_label_column: bool = False,
@@ -2253,7 +4253,6 @@ def _build_prediction_table(
         "species": species,
         "prob": prob.astype(float, copy=False).tolist(),
         "pred_label_fixed_threshold": (prob >= fixed_threshold).astype(int).tolist(),
-        "pred_label_cv_derived_threshold": (prob >= cv_threshold).astype(int).tolist(),
     }
     if include_true_label_column:
         payload["true_label"] = [None] * len(species)
@@ -2265,6 +4264,28 @@ def _build_prediction_table(
     return pl.DataFrame(payload).sort("species")
 
 
+def _annotate_prediction_abstention(
+    config: AppConfig,
+    predictions: pl.DataFrame,
+    species: list[str],
+    matrix: np.ndarray,
+    feature_names: list[str],
+    entries: list[FinalModelEntry],
+) -> pl.DataFrame:
+    if not config.abstention.enabled:
+        return predictions
+    return annotate_abstention(
+        predictions,
+        species=species,
+        matrix=matrix,
+        feature_names=feature_names,
+        model_coefficients=[(entry.feature_names, entry.model.coef_) for entry in entries],
+        zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
+        threshold=config.abstention.threshold,
+        top_features=config.figures.top_features,
+    )
+
+
 def _fit_outer_sample_set(
     *,
     config: AppConfig,
@@ -2272,6 +4293,7 @@ def _fit_outer_sample_set(
     sample_set_id: int,
     sampled_idx: np.ndarray,
     source_result: SourceSelectionResult,
+    selection_source_sample_set_id: int,
     base_model_index: int,
     x_train_raw: np.ndarray,
     y_train: np.ndarray,
@@ -2279,7 +4301,10 @@ def _fit_outer_sample_set(
     contrast_groups_train: np.ndarray | None,
     x_valid_raw: np.ndarray,
     valid_species: list[str],
+    x_inference_matrix: np.ndarray,
+    inference_transform_applied: bool,
     feature_names: list[str],
+    timing_recorder: TimingRecorder | None = None,
 ) -> OuterSampleSetFitResult:
     x_sampled_raw = x_train_raw[sampled_idx, :]
     y_sampled = y_train[sampled_idx]
@@ -2290,8 +4315,10 @@ def _fit_outer_sample_set(
     warnings: list[str] = []
     if np.unique(y_sampled).size < 2:
         raise CVError(f"Fold {fold_id} sampled training set became single-class")
+    preprocess_started = None if timing_recorder is None else timing_recorder.start()
+    ranked_feature_score_rows: list[dict[str, Any]] = []
     try:
-        x_sampled, x_valid, selected_features, filter_counts = _preprocess_fold_with_counts(
+        x_sampled, x_valid, selected_features, filter_counts, scaler = _preprocess_fold_with_counts(
             config,
             x_sampled_raw,
             x_valid_raw,
@@ -2299,19 +4326,51 @@ def _fit_outer_sample_set(
             y_train=y_sampled,
             groups_train=contrast_groups_sampled,
             warnings=warnings,
+            ranked_feature_score_rows=ranked_feature_score_rows,
         )
     except CVError as exc:
         raise CVError(
             f"Fold {fold_id} sample_set_id={sample_set_id} preprocessing failed: {exc}"
         ) from exc
+    if timing_recorder is not None and preprocess_started is not None:
+        timing_recorder.record_since(
+            preprocess_started,
+            scope="outer_fold",
+            stage="preprocessing",
+            fold_id=fold_id,
+            sample_set_id=sample_set_id,
+        )
     sample_weight = _fit_sample_weights(config, y_sampled, groups_sampled)
+
+    selected_feature_index = {feature: idx for idx, feature in enumerate(feature_names)}
+    selected_indices = np.array(
+        [selected_feature_index[feature] for feature in selected_features], dtype=int
+    )
+    if x_inference_matrix.shape[0] == 0:
+        x_inference = np.empty((0, len(selected_features)), dtype=float)
+    else:
+        # none/log1p are column-local, so project to the fold's retained
+        # features before transforming. Contextual rank transforms were
+        # applied once to the complete row when the shared cache was built.
+        x_inference_selected = x_inference_matrix[:, selected_indices]
+        if not inference_transform_applied:
+            x_inference_selected = _apply_expression_transform_for_config(
+                config, x_inference_selected
+            )
+        x_inference = apply_feature_scaling(
+            x_inference_selected,
+            scaler,
+            config.preprocess.feature_scaling.method,
+        )
 
     model_probs: list[np.ndarray] = []
     train_model_probs: list[np.ndarray] = []
-    fold_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
+    inference_model_probs: list[np.ndarray] = []
+    fold_models: list[FittedEstimator] = []
     interpretation_entries: list[ModelFeatureEntry] = []
     ensemble_model_prob_rows: list[dict[str, float | int | str]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
+    convergence_rows: list[dict[str, Any]] = []
     for selected_offset, selected in enumerate(source_result.selected_candidates):
         model_index = base_model_index + selected_offset
         model_seed = _ensemble_seed(
@@ -2325,8 +4384,37 @@ def _fit_outer_sample_set(
             y_sampled,
             model_params=selected.candidate.params,
         )
-        _fit_estimator(estimator, x_sampled, y_sampled, sample_weight)
+        fit_started = None if timing_recorder is None else timing_recorder.start()
+        fit_diagnostic = _fit_estimator(estimator, x_sampled, y_sampled, sample_weight)
+        if timing_recorder is not None and fit_started is not None:
+            timing_recorder.record_since(
+                fit_started,
+                scope="outer_fold",
+                stage="model_fit",
+                fold_id=fold_id,
+                sample_set_id=sample_set_id,
+                candidate_index=selected.candidate.candidate_index,
+            )
         fold_models.append(estimator)
+        convergence_rows.append(
+            _convergence_diagnostic_row(
+                fit_diagnostic,
+                training_scope="outer_fold",
+                fit_scope="selected_model",
+                fold_id=fold_id,
+                sample_set_id=sample_set_id,
+                selection_source_sample_set_id=selection_source_sample_set_id,
+                candidate_index=selected.candidate.candidate_index,
+                inner_fold_id="NA",
+                model_index=model_index,
+                model_name=config.model.name,
+                params_json=json.dumps(
+                    selected.candidate.params,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            )
+        )
         model_sparsity_rows.append(
             _model_sparsity_row(
                 scope="outer_fold",
@@ -2338,7 +4426,12 @@ def _fit_outer_sample_set(
                 model=estimator,
             )
         )
+        prediction_started = None if timing_recorder is None else timing_recorder.start()
         train_model_probs.append(_predict_positive_probability(estimator, x_sampled))
+        if x_inference.shape[0] == 0:
+            inference_model_probs.append(np.empty(0, dtype=float))
+        else:
+            inference_model_probs.append(_predict_positive_probability(estimator, x_inference))
         interpretation_entries.append(
             ModelFeatureEntry(
                 feature_names=selected_features,
@@ -2347,6 +4440,15 @@ def _fit_outer_sample_set(
             )
         )
         model_prob = _predict_positive_probability(estimator, x_valid)
+        if timing_recorder is not None and prediction_started is not None:
+            timing_recorder.record_since(
+                prediction_started,
+                scope="outer_fold",
+                stage="prediction",
+                fold_id=fold_id,
+                sample_set_id=sample_set_id,
+                candidate_index=selected.candidate.candidate_index,
+            )
         model_probs.append(model_prob)
         for species_name, prob_value in zip(
             valid_species,
@@ -2365,14 +4467,23 @@ def _fit_outer_sample_set(
     return OuterSampleSetFitResult(
         model_probs=model_probs,
         train_model_probs=train_model_probs,
+        inference_model_probs=inference_model_probs,
         fold_models=fold_models,
         interpretation_entries=interpretation_entries,
         ensemble_model_prob_rows=ensemble_model_prob_rows,
         model_sparsity_rows=model_sparsity_rows,
         selected_features=selected_features,
+        scaler=scaler,
         filter_counts=filter_counts,
+        ranked_feature_score_rows=_with_ranked_feature_score_context(
+            ranked_feature_score_rows,
+            scope="outer_fold",
+            fold_id=fold_id,
+            sample_set_id=sample_set_id,
+        ),
         model_count=len(source_result.selected_candidates),
         warnings=warnings,
+        convergence_rows=convergence_rows,
     )
 
 
@@ -2389,16 +4500,22 @@ def _fit_final_refit_sample_set(
     contrast_groups_train: np.ndarray | None = None,
     x_target_raw: np.ndarray | None = None,
     feature_names: list[str] | None = None,
+    target_feature_names: list[str] | None = None,
     target_count: int,
+    n_features_before_override: int | None = None,
     x_train: np.ndarray | None = None,
     x_target: np.ndarray | None = None,
+    timing_recorder: TimingRecorder | None = None,
+    selection_source_sample_set_id: int | None = None,
 ) -> FinalSampleSetFitResult:
     resolved_x_train_raw = x_train_raw if x_train_raw is not None else x_train
     resolved_x_target_raw = x_target_raw if x_target_raw is not None else x_target
-    if resolved_x_train_raw is None or resolved_x_target_raw is None:
-        raise CVError("Final refit sample-set fit requires train/target arrays")
+    if resolved_x_train_raw is None:
+        raise CVError("Final refit sample-set fit requires train array")
     if feature_names is None:
         feature_names = [f"feature_{idx}" for idx in range(int(resolved_x_train_raw.shape[1]))]
+    if target_feature_names is None:
+        target_feature_names = feature_names
 
     x_sampled_raw = resolved_x_train_raw[sampled_idx, :]
     y_sampled = y_train[sampled_idx]
@@ -2409,41 +4526,59 @@ def _fit_final_refit_sample_set(
     warnings: list[str] = []
     if np.unique(y_sampled).size < 2:
         raise CVError("Final refit sampled training set became single-class")
-    (
-        x_sampled,
-        x_target,
-        selected_features,
-        scaler,
-        filter_counts,
-    ) = _preprocess_train_and_target_with_counts(
+    preprocess_started = None if timing_recorder is None else timing_recorder.start()
+    ranked_feature_score_rows: list[dict[str, Any]] = []
+    x_sampled, selected_features, scaler, filter_counts = _preprocess_train_only_with_counts(
         config,
         x_sampled_raw,
-        resolved_x_target_raw,
         feature_names,
         y_train=y_sampled,
         groups_train=contrast_groups_sampled,
         warnings=warnings,
+        n_features_before_override=n_features_before_override,
+        ranked_feature_score_rows=ranked_feature_score_rows,
     )
+    x_target_scaled: np.ndarray | None = None
+    if target_count > 0 and resolved_x_target_raw is not None:
+        x_target_scaled = _transform_target_for_selected_features(
+            config,
+            resolved_x_target_raw,
+            target_feature_names,
+            selected_features,
+            scaler,
+        )
+    if timing_recorder is not None and preprocess_started is not None:
+        timing_recorder.record_since(
+            preprocess_started,
+            scope="final_refit",
+            stage="preprocessing",
+            sample_set_id=sample_set_id,
+        )
     sample_weight = _fit_sample_weights(config, y_sampled, groups_sampled)
 
     selected_count = len(source_result.selected_candidates)
     model_workers, per_model_n_jobs = _sample_set_parallel_plan(config, selected_count)
     model_config = _config_with_runtime_n_jobs(config, per_model_n_jobs)
+    resolved_selection_source_sample_set_id = (
+        sample_set_id if selection_source_sample_set_id is None else selection_source_sample_set_id
+    )
 
     def _fit_one(
         selected_offset: int,
         selected: SelectedCandidate,
     ) -> tuple[
         int,
-        LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+        FittedEstimator,
         np.ndarray,
         np.ndarray,
+        EstimatorFitDiagnostic,
     ]:
         def _fit_one_limited() -> tuple[
             int,
-            LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+            FittedEstimator,
             np.ndarray,
             np.ndarray,
+            EstimatorFitDiagnostic,
         ]:
             model_index = base_model_index + selected_offset
             model_seed = _ensemble_seed(config.runtime.seed, "final_refit", model_index)
@@ -2453,22 +4588,47 @@ def _fit_final_refit_sample_set(
                 y_sampled,
                 model_params=selected.candidate.params,
             )
-            _fit_estimator(estimator, x_sampled, y_sampled, sample_weight)
-            if target_count == 0:
+            fit_started = None if timing_recorder is None else timing_recorder.start()
+            fit_diagnostic = _fit_estimator(estimator, x_sampled, y_sampled, sample_weight)
+            if timing_recorder is not None and fit_started is not None:
+                timing_recorder.record_since(
+                    fit_started,
+                    scope="final_refit",
+                    stage="model_fit",
+                    sample_set_id=sample_set_id,
+                    candidate_index=selected.candidate.candidate_index,
+                )
+            prediction_started = None if timing_recorder is None else timing_recorder.start()
+            if target_count == 0 or x_target_scaled is None:
                 model_prob = np.array([], dtype=float)
             else:
-                model_prob = _predict_positive_probability(estimator, x_target)
+                model_prob = _predict_positive_probability(estimator, x_target_scaled)
             train_model_prob = _predict_positive_probability(estimator, x_sampled)
-            return selected_offset, estimator, model_prob, train_model_prob
+            if timing_recorder is not None and prediction_started is not None:
+                timing_recorder.record_since(
+                    prediction_started,
+                    scope="final_refit",
+                    stage="prediction",
+                    sample_set_id=sample_set_id,
+                    candidate_index=selected.candidate.candidate_index,
+                )
+            return (
+                selected_offset,
+                estimator,
+                model_prob,
+                train_model_prob,
+                fit_diagnostic,
+            )
 
         return _with_native_thread_limit_for_config(model_config, _fit_one_limited)
 
     results: list[
         tuple[
             int,
-            LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+            FittedEstimator,
             np.ndarray,
             np.ndarray,
+            EstimatorFitDiagnostic,
         ]
     ] = []
     if model_workers == 1:
@@ -2484,13 +4644,34 @@ def _fit_final_refit_sample_set(
                 results.append(futures[selected_offset].result())
 
     ordered_results = sorted(results, key=lambda item: item[0])
-    fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
+    fitted_models: list[FittedEstimator] = []
     model_probs: list[np.ndarray] = []
     train_model_probs: list[np.ndarray] = []
     model_sparsity_rows: list[dict[str, Any]] = []
-    for selected_offset, model, prob, train_prob in ordered_results:
+    convergence_rows: list[dict[str, Any]] = []
+    for selected_offset, model, prob, train_prob, fit_diagnostic in ordered_results:
         model_index = base_model_index + selected_offset
+        selected = source_result.selected_candidates[selected_offset]
         fitted_models.append(model)
+        convergence_rows.append(
+            _convergence_diagnostic_row(
+                fit_diagnostic,
+                training_scope="final_refit",
+                fit_scope="selected_model",
+                fold_id="NA",
+                sample_set_id=sample_set_id,
+                selection_source_sample_set_id=(resolved_selection_source_sample_set_id),
+                candidate_index=selected.candidate.candidate_index,
+                inner_fold_id="NA",
+                model_index=model_index,
+                model_name=config.model.name,
+                params_json=json.dumps(
+                    selected.candidate.params,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            )
+        )
         model_sparsity_rows.append(
             _model_sparsity_row(
                 scope="final_refit",
@@ -2513,17 +4694,27 @@ def _fit_final_refit_sample_set(
         selected_features=selected_features,
         scaler=scaler,
         filter_counts=filter_counts,
+        ranked_feature_score_rows=_with_ranked_feature_score_context(
+            ranked_feature_score_rows,
+            scope="final_refit",
+            fold_id="NA",
+            sample_set_id=sample_set_id,
+        ),
         model_count=selected_count,
         warnings=warnings,
+        convergence_rows=convergence_rows,
     )
 
 
-def run_final_refit(
+def _run_final_refit_impl(
     config: AppConfig,
     split_manifest: pl.DataFrame,
-    cv_threshold: float,
+    timing_recorder: TimingRecorder | None = None,
 ) -> FinalRefitArtifacts:
     """Refit final model(s) on full training pool and predict external/inference pools."""
+    recorder = timing_recorder if timing_recorder is not None else TimingRecorder()
+    timing_start_index = recorder.record_count
+    total_started = recorder.start()
     split_manifest = _with_contrast_group_column(config, split_manifest)
     warnings: list[str] = []
     polars_warning = _polars_thread_pool_warning(config)
@@ -2531,6 +4722,7 @@ def run_final_refit(
         warnings.append(polars_warning)
     matrix_builder = ExpressionMatrixBuilder(config)
 
+    pool_preparation_started = recorder.start()
     train_pool = (
         split_manifest.filter(pl.col("pool").is_in(["train", "validation"]))
         .group_by("species")
@@ -2545,12 +4737,6 @@ def run_final_refit(
         raise CVError("No species available for final refit training pool")
     if train_pool.filter(pl.col("label").is_null() | pl.col("group_id").is_null()).height > 0:
         raise CVError("Final refit training pool contains null label/group values")
-    if (
-        config.preprocess.pair_aware_filter.enabled
-        and train_pool.filter(pl.col("contrast_group_id").is_null()).height > 0
-    ):
-        raise CVError("Final refit training pool contains null contrast group values")
-
     external_pool = (
         split_manifest.filter(pl.col("pool") == "external_test")
         .group_by("species")
@@ -2566,44 +4752,90 @@ def run_final_refit(
 
     train_species = [str(v) for v in train_pool.select("species").to_series().to_list()]
     external_species = [str(v) for v in external_pool.select("species").to_series().to_list()]
-    external_true_label = np.array(
-        external_pool.select("label").to_series().to_list(), dtype=int
-    )
+    external_true_label = np.array(external_pool.select("label").to_series().to_list(), dtype=int)
     inference_species = [str(v) for v in inference_pool.select("species").to_series().to_list()]
     target_species = external_species + inference_species
-
-    x_all_raw, feature_names = _with_native_thread_limit_for_config(
-        config, matrix_builder.build_matrix, train_species + target_species
+    recorder.record_since(
+        pool_preparation_started,
+        scope="final_refit",
+        stage="pool_preparation",
     )
+
     train_count = len(train_species)
     target_count = len(target_species)
     external_count = len(external_species)
+    prune_target_matrix = target_count > 0 and _final_refit_can_prune_target_matrix(config)
+    n_features_before_override: int | None = None
+    target_feature_names: list[str] | None = None
+    x_target_pruned: np.ndarray | None = None
 
-    x_train_raw = x_all_raw[:train_count, :]
-    x_target_raw = (
-        x_all_raw[train_count:, :]
-        if target_count > 0
-        else np.empty((0, x_all_raw.shape[1]), dtype=float)
+    matrix_build_started = recorder.start()
+    if prune_target_matrix:
+        _with_native_thread_limit_for_config(
+            config, matrix_builder.cache_species, train_species + target_species
+        )
+        full_feature_names = _with_native_thread_limit_for_config(
+            config, matrix_builder.feature_names_for_species, train_species + target_species
+        )
+        n_features_before_override = len(full_feature_names)
+        x_train_raw, feature_names = _with_native_thread_limit_for_config(
+            config, matrix_builder.build_matrix, train_species
+        )
+        x_target_raw: np.ndarray | None = None
+    else:
+        x_all_raw, feature_names = _with_native_thread_limit_for_config(
+            config, matrix_builder.build_matrix, train_species + target_species
+        )
+        x_train_raw = x_all_raw[:train_count, :]
+        x_target_raw = (
+            x_all_raw[train_count:, :]
+            if target_count > 0
+            else np.empty((0, x_all_raw.shape[1]), dtype=float)
+        )
+        target_feature_names = feature_names
+    recorder.record_since(
+        matrix_build_started,
+        scope="final_refit",
+        stage="matrix_build",
     )
 
     y_train = np.array(train_pool.select("label").to_series().to_list(), dtype=int)
     groups_train = np.array(train_pool.select("group_id").to_series().to_list(), dtype=str)
     contrast_groups_train: np.ndarray | None = None
-    if config.data.contrast_pair_col is not None or config.preprocess.pair_aware_filter.enabled:
+    if (
+        config.data.contrast_pair_col is not None
+        or config.preprocess.ranked_feature_filter.method == "pair_aware"
+    ):
         contrast_values = train_pool.select("contrast_group_id").to_series().to_list()
-        contrast_groups_train = np.array(contrast_values, dtype=str)
+        contrast_groups_train = np.array(contrast_values, dtype=object)
+    sampling_started = recorder.start()
+    training_group_selection = _select_training_groups(
+        config,
+        y_train,
+        groups_train,
+        scope="final_refit",
+        fold_id="NA",
+    )
     sampled_sets = _sample_training_sets(
         config=config,
         y_train=y_train,
         groups_train=groups_train,
         training_scope_id="final_refit",
         warnings=warnings,
+        selected_group_ids=training_group_selection.group_ids,
+    )
+    recorder.record_since(
+        sampling_started,
+        scope="final_refit",
+        stage="sampling",
     )
 
     model_probs: list[np.ndarray] = []
-    fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
+    fitted_models: list[FittedEstimator] = []
     selection_active = _selection_is_active(config)
     model_selection_selected_rows: list[dict[str, Any]] = []
+    model_selection_trial_rows: list[dict[str, Any]] = []
+    convergence_rows: list[dict[str, Any]] = []
 
     source_sample_set_ids = _selection_source_sample_set_ids(config, len(sampled_sets))
     source_workers, per_source_n_jobs = _sample_set_parallel_plan(
@@ -2613,6 +4845,7 @@ def run_final_refit(
 
     def _prepare_source(source_sample_set_id: int) -> tuple[int, SourceSelectionResult, list[str]]:
         local_warnings: list[str] = []
+        selection_started = recorder.start()
         source_result = _prepare_source_selection(
             config=source_config,
             training_scope_id="final_refit",
@@ -2624,6 +4857,13 @@ def run_final_refit(
             contrast_groups_train=contrast_groups_train,
             feature_names=feature_names,
             warnings=local_warnings,
+            timing_recorder=recorder,
+        )
+        recorder.record_since(
+            selection_started,
+            scope="final_refit",
+            stage="model_selection" if selection_active else "candidate_generation",
+            sample_set_id=source_sample_set_id,
         )
         return source_sample_set_id, source_result, local_warnings
 
@@ -2644,6 +4884,38 @@ def run_final_refit(
                 source_results[source_id] = source_result
                 warnings.extend(local_warnings)
 
+    if selection_active:
+        for source_sample_set_id in source_sample_set_ids:
+            for row in source_results[source_sample_set_id].trial_rows:
+                model_selection_trial_rows.append(
+                    {
+                        "fold_id": "NA",
+                        "sample_set_id": source_sample_set_id,
+                        "candidate_index": row["candidate_index"],
+                        "inner_fold_id": row["inner_fold_id"],
+                        "metric_name": row["metric_name"],
+                        "metric_value": row["metric_value"],
+                        "params_json": row["params_json"],
+                    }
+                )
+                fit_diagnostic = row.get("fit_diagnostic")
+                if isinstance(fit_diagnostic, EstimatorFitDiagnostic):
+                    convergence_rows.append(
+                        _convergence_diagnostic_row(
+                            fit_diagnostic,
+                            training_scope="final_refit",
+                            fit_scope="candidate_evaluation",
+                            fold_id="NA",
+                            sample_set_id=source_sample_set_id,
+                            selection_source_sample_set_id=source_sample_set_id,
+                            candidate_index=int(row["candidate_index"]),
+                            inner_fold_id=str(row["inner_fold_id"]),
+                            model_index=None,
+                            model_name=config.model.name,
+                            params_json=str(row["params_json"]),
+                        )
+                    )
+
     for sample_set_id, _sampled_idx in enumerate(sampled_sets):
         source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
         source_result = source_results[source_sample_set_id]
@@ -2652,6 +4924,9 @@ def run_final_refit(
         if selection_active:
             for rank, selected in enumerate(source_result.selected_candidates, start=1):
                 score_value = np.nan if selected.score is None else float(selected.score)
+                score_std_error = (
+                    np.nan if selected.score_std_error is None else float(selected.score_std_error)
+                )
                 model_selection_selected_rows.append(
                     {
                         "selection_scope": "final_refit",
@@ -2662,6 +4937,8 @@ def run_final_refit(
                         "candidate_index": selected.candidate.candidate_index,
                         "metric_name": config.model_selection.selection_metric,
                         "metric_value": score_value,
+                        "metric_value_se": score_std_error,
+                        "selection_rule": selected.selection_rule,
                         "n_available_candidates": source_result.n_available_candidates,
                         "n_scored_candidates": source_result.n_scored_candidates,
                         "selected_candidate_count_requested": (
@@ -2693,6 +4970,7 @@ def run_final_refit(
         sampled_idx: np.ndarray,
     ) -> tuple[int, FinalSampleSetFitResult]:
         source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
+        sample_fit_started = recorder.start()
         fit_result = _with_native_thread_limit_for_config(
             sample_config,
             _fit_final_refit_sample_set,
@@ -2707,7 +4985,17 @@ def run_final_refit(
             contrast_groups_train=contrast_groups_train,
             x_target_raw=x_target_raw,
             feature_names=feature_names,
+            target_feature_names=target_feature_names,
             target_count=target_count,
+            n_features_before_override=n_features_before_override,
+            timing_recorder=recorder,
+            selection_source_sample_set_id=source_sample_set_id,
+        )
+        recorder.record_since(
+            sample_fit_started,
+            scope="final_refit",
+            stage="sample_set_total",
+            sample_set_id=sample_set_id,
         )
         return sample_set_id, fit_result
 
@@ -2732,8 +5020,49 @@ def run_final_refit(
     selected_features = first_sample_result.selected_features
     scaler = first_sample_result.scaler
 
+    target_model_probs_by_sample: dict[int, list[np.ndarray]] = {}
+    if prune_target_matrix:
+        if target_count > 0:
+            target_feature_union = list(
+                dict.fromkeys(
+                    feature
+                    for sample_set_id in range(len(sampled_sets))
+                    for feature in sample_results[sample_set_id].selected_features
+                )
+            )
+            x_target_pruned, target_feature_names = _with_native_thread_limit_for_config(
+                config,
+                matrix_builder.build_matrix,
+                target_species,
+                feature_order=target_feature_union,
+            )
+            for sample_set_id in range(len(sampled_sets)):
+                target_prediction_started = recorder.start()
+                target_model_probs_by_sample[sample_set_id] = _predict_final_refit_targets(
+                    config,
+                    sample_results[sample_set_id],
+                    x_target_pruned,
+                    target_feature_names,
+                )
+                recorder.record_since(
+                    target_prediction_started,
+                    scope="final_refit",
+                    stage="target_prediction",
+                    sample_set_id=sample_set_id,
+                )
+        else:
+            for sample_set_id in range(len(sampled_sets)):
+                target_model_probs_by_sample[sample_set_id] = sample_results[
+                    sample_set_id
+                ].model_probs
+    else:
+        for sample_set_id in range(len(sampled_sets)):
+            target_model_probs_by_sample[sample_set_id] = sample_results[sample_set_id].model_probs
+
+    postprocess_started = recorder.start()
     model_entries: list[FinalModelEntry] = []
     feature_filter_count_rows: list[dict[str, Any]] = []
+    ranked_feature_score_rows: list[dict[str, Any]] = []
     retained_feature_rows: list[dict[str, Any]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
     sampled_train_loss_values: list[float] = []
@@ -2748,6 +5077,7 @@ def run_final_refit(
                 counts=fit_result.filter_counts,
             )
         )
+        ranked_feature_score_rows.extend(fit_result.ranked_feature_score_rows)
         retained_feature_rows.extend(
             _retained_feature_rows(
                 scope="final_refit",
@@ -2758,8 +5088,10 @@ def run_final_refit(
         )
         warnings.extend(fit_result.warnings)
         model_sparsity_rows.extend(fit_result.model_sparsity_rows)
+        convergence_rows.extend(fit_result.convergence_rows)
         fitted_models.extend(fit_result.fitted_models)
-        model_probs.extend(fit_result.model_probs)
+        sample_model_probs = target_model_probs_by_sample[sample_set_id]
+        model_probs.extend(sample_model_probs)
         sampled_idx = sampled_sets[sample_set_id]
         y_sampled = y_train[sampled_idx]
         sampled_train_prob = _aggregate_probabilities(
@@ -2769,7 +5101,7 @@ def run_final_refit(
         sampled_train_loss_values.append(_binary_log_loss(y_sampled, sampled_train_prob))
         if external_count > 0:
             sampled_target_prob = _aggregate_probabilities(
-                probs=fit_result.model_probs,
+                probs=sample_model_probs,
                 aggregation=config.ensemble.probability_aggregation,
             )
             sampled_external_prob = sampled_target_prob[:external_count]
@@ -2824,19 +5156,14 @@ def run_final_refit(
 
     external_prob = mean_prob[:external_count]
     inference_prob = mean_prob[external_count:]
-    external_uncertainty = (
-        None if uncertainty_std is None else uncertainty_std[:external_count]
-    )
-    inference_uncertainty = (
-        None if uncertainty_std is None else uncertainty_std[external_count:]
-    )
+    external_uncertainty = None if uncertainty_std is None else uncertainty_std[:external_count]
+    inference_uncertainty = None if uncertainty_std is None else uncertainty_std[external_count:]
 
-    fixed_threshold = float(config.report.fixed_probability_threshold)
+    fixed_threshold = FIXED_PROBABILITY_THRESHOLD_VALUE
     pred_external = _build_prediction_table(
         species=external_species,
         prob=external_prob,
         fixed_threshold=fixed_threshold,
-        cv_threshold=cv_threshold,
         uncertainty_std=external_uncertainty,
         true_label=external_true_label,
         include_true_label_column=True,
@@ -2845,10 +5172,80 @@ def run_final_refit(
         species=inference_species,
         prob=inference_prob,
         fixed_threshold=fixed_threshold,
-        cv_threshold=cv_threshold,
         uncertainty_std=inference_uncertainty,
         include_true_label_column=True,
     )
+    if config.abstention.enabled:
+        target_matrix = x_target_pruned if prune_target_matrix else x_target_raw
+        if target_matrix is None or target_feature_names is None:
+            if target_count:
+                raise CVError("Target expression is unavailable for abstention")
+            target_feature_names = list(
+                dict.fromkeys(feature for entry in model_entries for feature in entry.feature_names)
+            )
+            target_matrix = np.empty((0, len(target_feature_names)), dtype=float)
+        pred_external = _annotate_prediction_abstention(
+            config,
+            pred_external,
+            external_species,
+            target_matrix[:external_count],
+            target_feature_names,
+            model_entries,
+        )
+        pred_inference = _annotate_prediction_abstention(
+            config,
+            pred_inference,
+            inference_species,
+            target_matrix[external_count:],
+            target_feature_names,
+            model_entries,
+        )
+    interpretation_started = recorder.start()
+    try:
+        (
+            feature_importance,
+            coefficients,
+            feature_importance_by_model,
+            coefficients_by_model,
+            interpretation_warnings,
+        ) = _build_final_refit_interpretation(model_entries)
+    except InterpretationError as exc:
+        raise CVError(str(exc)) from exc
+    recorder.record_since(
+        interpretation_started,
+        scope="final_refit",
+        stage="interpretation",
+    )
+    warnings.extend(interpretation_warnings)
+
+    if external_count > 0:
+        if prune_target_matrix:
+            if x_target_pruned is None:
+                raise CVError("Pruned external-test expression matrix is unavailable")
+            external_expression_matrix = x_target_pruned[:external_count, :]
+        else:
+            if x_target_raw is None:
+                raise CVError("External-test expression matrix is unavailable after final refit")
+            external_expression_matrix = x_target_raw[:external_count, :]
+        if target_feature_names is None:
+            raise CVError("External-test feature schema is unavailable after final refit")
+        top_feature_expression_external = _build_top_feature_expression_from_matrix(
+            species_order=external_species,
+            matrix=external_expression_matrix,
+            feature_names=target_feature_names,
+            feature_importance=feature_importance,
+            feature_limit=config.figures.top_features,
+        )
+    else:
+        top_feature_expression_external = pl.DataFrame(
+            schema={"species": pl.String, "feature": pl.String, "tpm": pl.Float64}
+        )
+
+    if config.preprocess.missing_expression.method == "neutral":
+        top_feature_expression_external = mark_expression_observations(
+            top_feature_expression_external,
+            zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
+        )
     model_selection_selected: pl.DataFrame | None = None
     if model_selection_selected_rows:
         model_selection_selected = pl.DataFrame(model_selection_selected_rows).sort(
@@ -2860,31 +5257,73 @@ def run_final_refit(
                 "candidate_index",
             ]
         )
+    model_selection_trials: pl.DataFrame | None = None
+    model_selection_trials_summary: pl.DataFrame | None = None
+    if model_selection_trial_rows:
+        model_selection_trials = pl.DataFrame(model_selection_trial_rows).sort(
+            ["fold_id", "sample_set_id", "candidate_index", "inner_fold_id"]
+        )
+        model_selection_trials_summary = _summarize_model_selection_trials(model_selection_trials)
     feature_filter_counts = _build_feature_filter_counts(feature_filter_count_rows)
     feature_filter_counts_summary = _summarize_feature_filter_counts(feature_filter_counts)
+    ranked_feature_scores = _build_ranked_feature_scores(ranked_feature_score_rows)
     retained_features = _build_retained_features(retained_feature_rows)
     retained_features_summary = _summarize_retained_features(retained_features)
     model_sparsity = _build_model_sparsity(model_sparsity_rows)
     model_sparsity_summary = _summarize_model_sparsity(model_sparsity)
+    convergence_diagnostics = _build_convergence_diagnostics(convergence_rows)
+    convergence_warning = _convergence_summary_warning(convergence_diagnostics)
+    if convergence_warning is not None:
+        warnings.append(convergence_warning)
+    recorder.record_since(
+        postprocess_started,
+        scope="final_refit",
+        stage="postprocess",
+    )
+    recorder.record_since(total_started, scope="final_refit", stage="total")
+    timing = recorder.to_frame(start_index=timing_start_index)
 
     return FinalRefitArtifacts(
         pred_external_test=pred_external,
         pred_inference=pred_inference,
         loss_by_split_final_refit=loss_by_split_final_refit,
+        feature_importance=feature_importance,
+        coefficients=coefficients,
+        feature_importance_by_model=feature_importance_by_model,
+        coefficients_by_model=coefficients_by_model,
         model_selection_selected=model_selection_selected,
+        model_selection_trials=model_selection_trials,
+        model_selection_trials_summary=model_selection_trials_summary,
         feature_filter_counts=feature_filter_counts,
         feature_filter_counts_summary=feature_filter_counts_summary,
+        ranked_feature_scores=ranked_feature_scores,
         retained_features=retained_features,
         retained_features_summary=retained_features_summary,
         model_sparsity=model_sparsity,
         model_sparsity_summary=model_sparsity_summary,
+        training_group_subsets=_build_training_group_subsets(training_group_selection.audit_rows),
+        timing=timing,
         warnings=warnings,
         ensemble_size=len(model_probs),
+        transform_feature_names=feature_names,
         feature_names=selected_features,
         scaler=scaler,
         models=fitted_models,
+        convergence_diagnostics=convergence_diagnostics,
+        top_feature_expression_external=top_feature_expression_external,
         model_entries=model_entries,
     )
+
+
+def run_final_refit(
+    config: AppConfig,
+    split_manifest: pl.DataFrame,
+    timing_recorder: TimingRecorder | None = None,
+) -> FinalRefitArtifacts:
+    """Refit final models while recording convergence without stderr warning noise."""
+    with warning_control.catch_warnings():
+        warning_control.simplefilter("ignore", ConvergenceWarning)
+        return _run_final_refit_impl(config, split_manifest, timing_recorder)
 
 
 def _run_outer_fold(
@@ -2896,6 +5335,7 @@ def _run_outer_fold(
     fixed_threshold: float,
     selection_active: bool,
     progress_callback: Callable[[str], None] | None = None,
+    timing_recorder: TimingRecorder | None = None,
 ) -> OuterFoldResult:
     warnings: list[str] = []
 
@@ -2905,9 +5345,7 @@ def _run_outer_fold(
         if details is None:
             progress_callback(f"Outer CV fold stage (fold_id={fold_id}, stage={stage}).")
             return
-        progress_callback(
-            f"Outer CV fold stage (fold_id={fold_id}, stage={stage}, {details})."
-        )
+        progress_callback(f"Outer CV fold stage (fold_id={fold_id}, stage={stage}, {details}).")
 
     train_df = split_manifest.filter(
         (pl.col("pool") == "train") & (pl.col("fold_id") == fold_id)
@@ -2920,41 +5358,70 @@ def _run_outer_fold(
 
     train_species = [str(v) for v in train_df.select("species").to_series().to_list()]
     valid_species = [str(v) for v in valid_df.select("species").to_series().to_list()]
+    valid_group_ids = [
+        "" if value is None else str(value)
+        for value in valid_df.select("group_id").to_series().to_list()
+    ]
+    inference_species = _outer_cv_inference_species(config, split_manifest)
     y_train = np.array(train_df.select("label").to_series().to_list(), dtype=int)
     y_valid = np.array(valid_df.select("label").to_series().to_list(), dtype=int)
     groups_train = np.array(train_df.select("group_id").to_series().to_list(), dtype=str)
     contrast_groups_train: np.ndarray | None = None
-    if config.data.contrast_pair_col is not None or config.preprocess.pair_aware_filter.enabled:
+    if (
+        config.data.contrast_pair_col is not None
+        or config.preprocess.ranked_feature_filter.method == "pair_aware"
+    ):
         contrast_values = train_df.select("contrast_group_id").to_series().to_list()
-        if config.preprocess.pair_aware_filter.enabled and any(v is None for v in contrast_values):
-            raise CVError(
-                "pair_aware_filter requires non-empty contrast_group_id values in each fold"
-            )
-        contrast_groups_train = np.array(contrast_values, dtype=str)
+        contrast_groups_train = np.array(contrast_values, dtype=object)
     _emit_fold_progress(
         "start",
-        (
-            f"n_train_species={len(train_species)}, "
-            f"n_valid_species={len(valid_species)}"
-        ),
+        (f"n_train_species={len(train_species)}, n_valid_species={len(valid_species)}"),
     )
 
+    matrix_slice_started = None if timing_recorder is None else timing_recorder.start()
     x_train_raw, x_valid_raw = _slice_outer_cv_matrix(
         outer_matrix_cache,
         fold_id=fold_id,
         train_species=train_species,
         valid_species=valid_species,
     )
+    x_inference_matrix = _slice_outer_cv_inference_matrix(
+        outer_matrix_cache,
+        species=inference_species,
+    )
+    if timing_recorder is not None and matrix_slice_started is not None:
+        timing_recorder.record_since(
+            matrix_slice_started,
+            scope="outer_fold",
+            stage="matrix_slice",
+            fold_id=fold_id,
+        )
     feature_names = outer_matrix_cache.feature_names
     _emit_fold_progress("matrix_ready", f"n_features_raw={len(feature_names)}")
 
+    sampling_started = None if timing_recorder is None else timing_recorder.start()
+    training_group_selection = _select_training_groups(
+        config,
+        y_train,
+        groups_train,
+        scope="outer_fold",
+        fold_id=fold_id,
+    )
     sampled_sets = _sample_training_sets(
         config=config,
         y_train=y_train,
         groups_train=groups_train,
         training_scope_id=f"fold_{fold_id}",
         warnings=warnings,
+        selected_group_ids=training_group_selection.group_ids,
     )
+    if timing_recorder is not None and sampling_started is not None:
+        timing_recorder.record_since(
+            sampling_started,
+            scope="outer_fold",
+            stage="sampling",
+            fold_id=fold_id,
+        )
     _emit_fold_progress("sampling_done", f"sampled_set_count={len(sampled_sets)}")
     source_sample_set_ids = _selection_source_sample_set_ids(config, len(sampled_sets))
     source_workers, per_source_n_jobs = _sample_set_parallel_plan(
@@ -2974,6 +5441,7 @@ def _run_outer_fold(
 
     def _prepare_source(source_sample_set_id: int) -> tuple[int, SourceSelectionResult, list[str]]:
         local_warnings: list[str] = []
+        selection_started = None if timing_recorder is None else timing_recorder.start()
         source_result = _prepare_source_selection(
             config=source_config,
             training_scope_id=f"outer_fold_{fold_id}",
@@ -2986,7 +5454,16 @@ def _run_outer_fold(
             feature_names=feature_names,
             warnings=local_warnings,
             progress_callback=_emit_fold_progress,
+            timing_recorder=timing_recorder,
         )
+        if timing_recorder is not None and selection_started is not None:
+            timing_recorder.record_since(
+                selection_started,
+                scope="outer_fold",
+                stage="model_selection" if selection_active else "candidate_generation",
+                fold_id=fold_id,
+                sample_set_id=source_sample_set_id,
+            )
         return source_sample_set_id, source_result, local_warnings
 
     source_results: dict[int, SourceSelectionResult] = {}
@@ -3046,6 +5523,7 @@ def _run_outer_fold(
         )
 
     model_selection_trial_rows: list[dict[str, Any]] = []
+    convergence_rows: list[dict[str, Any]] = []
     if selection_active:
         for source_sample_set_id in source_sample_set_ids:
             source_result = source_results[source_sample_set_id]
@@ -3061,6 +5539,23 @@ def _run_outer_fold(
                         "params_json": row["params_json"],
                     }
                 )
+                fit_diagnostic = row.get("fit_diagnostic")
+                if isinstance(fit_diagnostic, EstimatorFitDiagnostic):
+                    convergence_rows.append(
+                        _convergence_diagnostic_row(
+                            fit_diagnostic,
+                            training_scope="outer_fold",
+                            fit_scope="candidate_evaluation",
+                            fold_id=fold_id,
+                            sample_set_id=source_sample_set_id,
+                            selection_source_sample_set_id=source_sample_set_id,
+                            candidate_index=int(row["candidate_index"]),
+                            inner_fold_id=str(row["inner_fold_id"]),
+                            model_index=None,
+                            model_name=config.model.name,
+                            params_json=str(row["params_json"]),
+                        )
+                    )
 
     model_selection_selected_rows: list[dict[str, Any]] = []
     for sample_set_id, _sampled_idx in enumerate(sampled_sets):
@@ -3068,11 +5563,14 @@ def _run_outer_fold(
         source_result = source_results[source_sample_set_id]
         if not source_result.selected_candidates:
             raise CVError(
-                "No candidates were selected for " f"fold={fold_id}, sample_set_id={sample_set_id}"
+                f"No candidates were selected for fold={fold_id}, sample_set_id={sample_set_id}"
             )
         if selection_active:
             for rank, selected in enumerate(source_result.selected_candidates, start=1):
                 selected_score = np.nan if selected.score is None else float(selected.score)
+                selected_score_std_error = (
+                    np.nan if selected.score_std_error is None else float(selected.score_std_error)
+                )
                 model_selection_selected_rows.append(
                     {
                         "selection_scope": "outer_fold",
@@ -3083,6 +5581,8 @@ def _run_outer_fold(
                         "candidate_index": selected.candidate.candidate_index,
                         "metric_name": config.model_selection.selection_metric,
                         "metric_value": selected_score,
+                        "metric_value_se": selected_score_std_error,
+                        "selection_rule": selected.selection_rule,
                         "n_available_candidates": source_result.n_available_candidates,
                         "n_scored_candidates": source_result.n_scored_candidates,
                         "selected_candidate_count_requested": (
@@ -3113,6 +5613,7 @@ def _run_outer_fold(
         sample_set_id: int, sampled_idx: np.ndarray
     ) -> tuple[int, OuterSampleSetFitResult]:
         source_sample_set_id = _selection_source_sample_set_id(config, sample_set_id)
+        sample_fit_started = None if timing_recorder is None else timing_recorder.start()
         fit_result = _with_native_thread_limit_for_config(
             sample_config,
             _fit_outer_sample_set,
@@ -3121,6 +5622,7 @@ def _run_outer_fold(
             sample_set_id=sample_set_id,
             sampled_idx=sampled_idx,
             source_result=source_results[source_sample_set_id],
+            selection_source_sample_set_id=source_sample_set_id,
             base_model_index=model_index_offsets[sample_set_id],
             x_train_raw=x_train_raw,
             y_train=y_train,
@@ -3128,12 +5630,24 @@ def _run_outer_fold(
             contrast_groups_train=contrast_groups_train,
             x_valid_raw=x_valid_raw,
             valid_species=valid_species,
+            x_inference_matrix=x_inference_matrix,
+            inference_transform_applied=outer_matrix_cache.inference_transform_applied,
             feature_names=feature_names,
+            timing_recorder=timing_recorder,
         )
+        if timing_recorder is not None and sample_fit_started is not None:
+            timing_recorder.record_since(
+                sample_fit_started,
+                scope="outer_fold",
+                stage="sample_set_total",
+                fold_id=fold_id,
+                sample_set_id=sample_set_id,
+            )
         return sample_set_id, fit_result
 
     sample_results: dict[int, OuterSampleSetFitResult] = {}
     feature_filter_count_rows: list[dict[str, Any]] = []
+    ranked_feature_score_rows: list[dict[str, Any]] = []
     retained_feature_rows: list[dict[str, Any]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
 
@@ -3148,6 +5662,7 @@ def _run_outer_fold(
                 counts=counts,
             )
         )
+        ranked_feature_score_rows.extend(fit_result.ranked_feature_score_rows)
         retained_feature_rows.extend(
             _retained_feature_rows(
                 scope="outer_fold",
@@ -3157,15 +5672,18 @@ def _run_outer_fold(
             )
         )
         model_sparsity_rows.extend(fit_result.model_sparsity_rows)
+        convergence_rows.extend(fit_result.convergence_rows)
         warnings.extend(fit_result.warnings)
         _emit_fold_progress(
             "preprocess_sample_set_done",
             (
                 f"sample_set_id={sample_set_id}, "
                 f"features_before={counts.n_features_before}, "
-                f"features_after_low_prevalence={counts.n_features_after_low_prevalence}, "
+                f"features_after_sparse_feature_filter="
+                f"{counts.n_features_after_sparse_feature_filter}, "
                 f"features_after_low_variance={counts.n_features_after_low_variance}, "
-                f"features_after_pair_aware={counts.n_features_after_pair_aware}, "
+                "features_after_ranked_feature_filter="
+                f"{counts.n_features_after_ranked_feature_filter}, "
                 f"features_after_correlation={counts.n_features_after_correlation}, "
                 f"features_after={counts.n_features_after_all}"
             ),
@@ -3185,27 +5703,41 @@ def _run_outer_fold(
                 result_id, fit_result = sample_futures[sample_set_id].result()
                 _record_sample_fit_result(result_id, fit_result)
 
+    postprocess_started = None if timing_recorder is None else timing_recorder.start()
     first_sample_result = sample_results.get(0)
     if first_sample_result is None:
         raise CVError(f"Fold {fold_id} produced zero sampled-set fit results")
     first_filter_counts = first_sample_result.filter_counts
     n_features_before_preprocess = first_filter_counts.n_features_before
-    n_features_after_low_prevalence = first_filter_counts.n_features_after_low_prevalence
+    n_features_after_sparse_feature_filter = (
+        first_filter_counts.n_features_after_sparse_feature_filter
+    )
     n_features_after_low_variance = first_filter_counts.n_features_after_low_variance
-    n_features_after_pair_aware = first_filter_counts.n_features_after_pair_aware
+    n_features_after_ranked_feature_filter = (
+        first_filter_counts.n_features_after_ranked_feature_filter
+    )
     n_features_after_correlation = first_filter_counts.n_features_after_correlation
     n_features_after_preprocess = first_filter_counts.n_features_after_all
     _emit_fold_progress("preprocess_done")
 
     model_probs: list[np.ndarray] = []
-    fold_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
+    inference_model_probs: list[np.ndarray] = []
+    evidence_model_entries: list[FinalModelEntry] = []
     interpretation_entries: list[ModelFeatureEntry] = []
     ensemble_model_prob_rows: list[dict[str, float | int | str]] = []
     fold_model_count = 0
     for sample_set_id in range(len(sampled_sets)):
         fit_result = sample_results[sample_set_id]
         model_probs.extend(fit_result.model_probs)
-        fold_models.extend(fit_result.fold_models)
+        inference_model_probs.extend(fit_result.inference_model_probs)
+        evidence_model_entries.extend(
+            FinalModelEntry(
+                feature_names=fit_result.selected_features,
+                scaler=fit_result.scaler,
+                model=model,
+            )
+            for model in fit_result.fold_models
+        )
         interpretation_entries.extend(fit_result.interpretation_entries)
         ensemble_model_prob_rows.extend(fit_result.ensemble_model_prob_rows)
         fold_model_count += fit_result.model_count
@@ -3220,6 +5752,43 @@ def _run_outer_fold(
         aggregation=config.ensemble.probability_aggregation,
     )
     uncertainty_std = _population_std_probability(model_probs)
+    reference_indices = np.unique(
+        np.concatenate([np.asarray(sampled_idx, dtype=int) for sampled_idx in sampled_sets])
+    )
+    (
+        cv_species_evidence,
+        cv_species_feature_evidence,
+        cv_species_reference_expression,
+        cv_species_evidence_warnings,
+    ) = _build_cv_species_evidence(
+        config=config,
+        fold_id=fold_id,
+        model_entries=evidence_model_entries,
+        feature_names=feature_names,
+        train_species=train_species,
+        valid_species=valid_species,
+        valid_group_ids=valid_group_ids,
+        y_train=y_train,
+        y_valid=y_valid,
+        x_train_raw=x_train_raw,
+        x_valid_raw=x_valid_raw,
+        reference_indices=reference_indices,
+        mean_prob=mean_prob,
+        uncertainty_std=uncertainty_std,
+        fixed_threshold=fixed_threshold,
+        top_features=config.figures.top_features,
+    )
+    warnings.extend(cv_species_evidence_warnings)
+    inference_prediction_rows: list[dict[str, float | str]] = []
+    if inference_species:
+        inference_prob = _aggregate_probabilities(
+            probs=inference_model_probs,
+            aggregation=config.ensemble.probability_aggregation,
+        )
+        for species, prob in zip(inference_species, inference_prob.tolist(), strict=True):
+            inference_prediction_rows.append(
+                {"fold_id": fold_id, "species": species, "prob": float(prob)}
+            )
     fold_metrics = _compute_fold_metrics(y_valid, mean_prob, fixed_threshold)
     sampled_train_loss_values: list[float] = []
     sampled_valid_loss_values: list[float] = []
@@ -3309,58 +5878,119 @@ def _run_outer_fold(
                 }
             )
 
-    return OuterFoldResult(
+    if config.abstention.enabled:
+        annotated = _annotate_prediction_abstention(
+            config,
+            pl.DataFrame(oof_rows),
+            valid_species,
+            x_valid_raw,
+            feature_names,
+            evidence_model_entries,
+        ).join(
+            pl.DataFrame({"species": valid_species, "group_id": valid_group_ids}),
+            on="species",
+            how="left",
+        )
+        oof_rows = annotated.to_dicts()
+        cv_species_evidence = cv_species_evidence.join(
+            annotated.select("species", "decision_status", "information_coverage"),
+            on="species",
+            how="left",
+        )
+        if inference_prediction_rows:
+            inference_prediction_rows = _annotate_prediction_abstention(
+                config,
+                pl.DataFrame(inference_prediction_rows),
+                inference_species,
+                x_inference_matrix,
+                feature_names,
+                evidence_model_entries,
+            ).to_dicts()
+
+    result = OuterFoldResult(
         fold_metrics=fold_metrics,
         metric_rows=metric_rows,
         loss_rows=loss_rows,
         oof_rows=oof_rows,
+        inference_prediction_rows=inference_prediction_rows,
         interpretation_entries=interpretation_entries,
         ensemble_model_prob_rows=ensemble_model_prob_rows,
         model_selection_selected_rows=model_selection_selected_rows,
         model_selection_trial_rows=model_selection_trial_rows,
         feature_filter_count_rows=feature_filter_count_rows,
+        ranked_feature_score_rows=ranked_feature_score_rows,
         retained_feature_rows=retained_feature_rows,
         model_sparsity_rows=model_sparsity_rows,
+        training_group_subset_rows=training_group_selection.audit_rows,
         fold_model_count=fold_model_count,
         n_features_before_preprocess=n_features_before_preprocess,
-        n_features_after_low_prevalence=n_features_after_low_prevalence,
+        n_features_after_sparse_feature_filter=n_features_after_sparse_feature_filter,
         n_features_after_low_variance=n_features_after_low_variance,
-        n_features_after_pair_aware=n_features_after_pair_aware,
+        n_features_after_ranked_feature_filter=(n_features_after_ranked_feature_filter),
         n_features_after_correlation=n_features_after_correlation,
         n_features_after_preprocess=n_features_after_preprocess,
         warnings=warnings,
+        convergence_rows=convergence_rows,
+        cv_species_evidence=cv_species_evidence,
+        cv_species_feature_evidence=cv_species_feature_evidence,
+        cv_species_reference_expression=cv_species_reference_expression,
     )
+    if timing_recorder is not None and postprocess_started is not None:
+        timing_recorder.record_since(
+            postprocess_started,
+            scope="outer_fold",
+            stage="postprocess",
+            fold_id=fold_id,
+        )
+    return result
 
 
-def run_outer_cv(
+def _run_outer_cv_impl(
     config: AppConfig,
     split_manifest: pl.DataFrame,
     progress_callback: Callable[[str], None] | None = None,
+    timing_recorder: TimingRecorder | None = None,
 ) -> CVArtifacts:
     """Execute outer CV using split manifest and return evaluation artifacts."""
+    recorder = timing_recorder if timing_recorder is not None else TimingRecorder()
+    timing_start_index = recorder.record_count
+    total_started = recorder.start()
     split_manifest = _with_contrast_group_column(config, split_manifest)
     warnings: list[str] = []
     polars_warning = _polars_thread_pool_warning(config)
     if polars_warning is not None:
         warnings.append(polars_warning)
-    fixed_threshold = float(config.report.fixed_probability_threshold)
+    fixed_threshold = FIXED_PROBABILITY_THRESHOLD_VALUE
     selection_active = _selection_is_active(config)
 
     fold_metric_list: list[dict[str, float]] = []
     metric_rows: list[dict[str, float | int | str | None]] = []
     loss_rows: list[dict[str, float | str]] = []
     oof_rows: list[dict[str, float | int | str]] = []
+    inference_prediction_rows: list[dict[str, float | str]] = []
     interpretation_entries: list[ModelFeatureEntry] = []
     ensemble_model_prob_rows: list[dict[str, float | int | str]] = []
     model_selection_selected_rows: list[dict[str, Any]] = []
     model_selection_trial_rows: list[dict[str, Any]] = []
     feature_filter_count_rows: list[dict[str, Any]] = []
+    ranked_feature_score_rows: list[dict[str, Any]] = []
     retained_feature_rows: list[dict[str, Any]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
+    training_group_subset_rows: list[dict[str, Any]] = []
+    convergence_rows: list[dict[str, Any]] = []
+    cv_species_evidence_frames: list[pl.DataFrame] = []
+    cv_species_feature_evidence_frames: list[pl.DataFrame] = []
+    cv_species_reference_expression_frames: list[pl.DataFrame] = []
     max_fold_ensemble_size = 0
 
     fold_ids = _fold_ids(split_manifest)
+    matrix_build_started = recorder.start()
     outer_matrix_cache = _build_outer_cv_matrix_cache(config, split_manifest)
+    recorder.record_since(
+        matrix_build_started,
+        scope="outer_cv",
+        stage="matrix_build",
+    )
     fold_workers, per_fold_n_jobs = _outer_cv_parallel_plan(config, len(fold_ids))
     fold_config = _config_with_runtime_n_jobs(config, per_fold_n_jobs)
     progress_lock = Lock()
@@ -3386,26 +6016,48 @@ def run_outer_cv(
         metric_rows.extend(fold_result.metric_rows)
         loss_rows.extend(fold_result.loss_rows)
         oof_rows.extend(fold_result.oof_rows)
+        inference_prediction_rows.extend(fold_result.inference_prediction_rows)
         interpretation_entries.extend(fold_result.interpretation_entries)
         ensemble_model_prob_rows.extend(fold_result.ensemble_model_prob_rows)
         model_selection_selected_rows.extend(fold_result.model_selection_selected_rows)
         model_selection_trial_rows.extend(fold_result.model_selection_trial_rows)
         feature_filter_count_rows.extend(fold_result.feature_filter_count_rows)
+        ranked_feature_score_rows.extend(fold_result.ranked_feature_score_rows)
         retained_feature_rows.extend(fold_result.retained_feature_rows)
         model_sparsity_rows.extend(fold_result.model_sparsity_rows)
+        training_group_subset_rows.extend(fold_result.training_group_subset_rows)
+        convergence_rows.extend(fold_result.convergence_rows)
+        cv_species_evidence_frames.append(fold_result.cv_species_evidence)
+        cv_species_feature_evidence_frames.append(fold_result.cv_species_feature_evidence)
+        cv_species_reference_expression_frames.append(
+            fold_result.cv_species_reference_expression
+        )
         max_fold_ensemble_size = max(max_fold_ensemble_size, fold_result.fold_model_count)
 
+    def _execute_fold(fold_id: str) -> OuterFoldResult:
+        fold_started = recorder.start()
+        fold_result = _run_outer_fold(
+            config=fold_config,
+            split_manifest=split_manifest,
+            outer_matrix_cache=outer_matrix_cache,
+            fold_id=fold_id,
+            fixed_threshold=fixed_threshold,
+            selection_active=selection_active,
+            progress_callback=_emit_progress,
+            timing_recorder=recorder,
+        )
+        recorder.record_since(
+            fold_started,
+            scope="outer_fold",
+            stage="total",
+            fold_id=fold_id,
+        )
+        return fold_result
+
+    fold_execution_started = recorder.start()
     if fold_workers == 1:
         for fold_id in fold_ids:
-            fold_result = _run_outer_fold(
-                config=fold_config,
-                split_manifest=split_manifest,
-                outer_matrix_cache=outer_matrix_cache,
-                fold_id=fold_id,
-                fixed_threshold=fixed_threshold,
-                selection_active=selection_active,
-                progress_callback=_emit_progress,
-            )
+            fold_result = _execute_fold(fold_id)
             _consume_fold_result(fold_result)
             completed_count += 1
             _emit_progress(
@@ -3416,14 +6068,8 @@ def run_outer_cv(
         with ThreadPoolExecutor(max_workers=fold_workers) as executor:
             futures = {
                 executor.submit(
-                    _run_outer_fold,
-                    config=fold_config,
-                    split_manifest=split_manifest,
-                    outer_matrix_cache=outer_matrix_cache,
-                    fold_id=fold_id,
-                    fixed_threshold=fixed_threshold,
-                    selection_active=selection_active,
-                    progress_callback=_emit_progress,
+                    _execute_fold,
+                    fold_id,
                 ): fold_id
                 for fold_id in fold_ids
             }
@@ -3436,11 +6082,17 @@ def run_outer_cv(
                     f"Outer CV fold completed (fold_id={fold_id}, "
                     f"progress={completed_count}/{total_folds})."
                 )
+    recorder.record_since(
+        fold_execution_started,
+        scope="outer_cv",
+        stage="fold_execution",
+    )
 
     if not oof_rows:
         raise CVError("No out-of-fold predictions were generated")
 
-    oof_df = pl.DataFrame(oof_rows).sort(["fold_id", "species"])
+    postprocess_started = recorder.start()
+    oof_df = pl.DataFrame(oof_rows, infer_schema_length=None).sort(["fold_id", "species"])
     oof_y = np.array(oof_df.select("label").to_series().to_list(), dtype=int)
     oof_prob = np.array(oof_df.select("prob").to_series().to_list(), dtype=float)
 
@@ -3479,35 +6131,33 @@ def run_outer_cv(
         )
     )
 
-    metrics_df = pl.DataFrame(metric_rows).sort(["aggregate_scope", "fold_id", "metric"])
+    metrics_df = _metrics_dataframe(metric_rows)
     loss_by_split_df = pl.DataFrame(loss_rows).sort(["fold_id", "split"])
-    cv_threshold, threshold_warning = _derive_cv_threshold(config, oof_y, oof_prob)
-    if threshold_warning is not None:
-        warnings.append(threshold_warning)
     thresholds_df = pl.DataFrame(
         [
             {
-                "threshold_name": "fixed_probability_threshold",
+                "threshold_name": FIXED_PROBABILITY_THRESHOLD_NAME,
                 "threshold_value": fixed_threshold,
-                "source": "config",
+                "source": "constant",
+                "policy": FIXED_PROBABILITY_THRESHOLD_POLICY,
+                "derived_from_cv": FIXED_PROBABILITY_THRESHOLD_DERIVED_FROM_CV,
                 "selection_metric": "NA",
                 "selection_scope": "NA",
             },
-            {
-                "threshold_name": "cv_derived_threshold",
-                "threshold_value": cv_threshold,
-                "source": "oof_predictions",
-                "selection_metric": config.report.auto_threshold_selection_metric,
-                "selection_scope": "outer_cv",
-            },
         ]
     ).sort("threshold_name")
+    interpretation_started = recorder.start()
     try:
         interpretation_artifacts = _with_native_thread_limit_for_config(
             config, build_interpretation_tables, interpretation_entries
         )
     except InterpretationError as exc:
         raise CVError(str(exc)) from exc
+    recorder.record_since(
+        interpretation_started,
+        scope="outer_cv",
+        stage="interpretation",
+    )
     warnings.extend(interpretation_artifacts.warnings)
 
     ensemble_model_probs: pl.DataFrame | None = None
@@ -3515,6 +6165,35 @@ def run_outer_cv(
         ensemble_model_probs = pl.DataFrame(ensemble_model_prob_rows).sort(
             ["fold_id", "model_index", "species"]
         )
+    empty_species_evidence, empty_feature_evidence, empty_reference_expression = (
+        _empty_cv_species_evidence()
+    )
+    cv_species_evidence = (
+        pl.concat(cv_species_evidence_frames, how="vertical").sort(
+            ["log_loss", "fold_id", "species"], descending=[True, False, False]
+        )
+        if cv_species_evidence_frames
+        else empty_species_evidence
+    )
+    cv_species_feature_evidence = (
+        pl.concat(cv_species_feature_evidence_frames, how="vertical").sort(
+            ["fold_id", "species", "local_rank"]
+        )
+        if cv_species_feature_evidence_frames
+        else empty_feature_evidence
+    )
+    cv_species_reference_expression = (
+        pl.concat(cv_species_reference_expression_frames, how="diagonal_relaxed").sort(
+            ["fold_id", "target_species", "feature", "label", "species"]
+        )
+        if cv_species_reference_expression_frames
+        else empty_reference_expression
+    )
+    inference_predictions_by_fold: pl.DataFrame | None = None
+    if inference_prediction_rows:
+        inference_predictions_by_fold = pl.DataFrame(
+            inference_prediction_rows, infer_schema_length=None
+        ).sort(["fold_id", "species"])
     model_selection_selected: pl.DataFrame | None = None
     if model_selection_selected_rows:
         model_selection_selected = pl.DataFrame(model_selection_selected_rows).sort(
@@ -3535,16 +6214,48 @@ def run_outer_cv(
         model_selection_trials_summary = _summarize_model_selection_trials(model_selection_trials)
     feature_filter_counts = _build_feature_filter_counts(feature_filter_count_rows)
     feature_filter_counts_summary = _summarize_feature_filter_counts(feature_filter_counts)
+    ranked_feature_scores = _build_ranked_feature_scores(ranked_feature_score_rows)
     retained_features = _build_retained_features(retained_feature_rows)
     retained_features_summary = _summarize_retained_features(retained_features)
     model_sparsity = _build_model_sparsity(model_sparsity_rows)
     model_sparsity_summary = _summarize_model_sparsity(model_sparsity)
+    try:
+        feature_stability = build_feature_stability_tables(
+            feature_importance_by_fold=interpretation_artifacts.feature_importance_by_fold,
+            coefficients_by_fold=interpretation_artifacts.coefficients_by_fold,
+            retained_features=retained_features,
+            nonzero_tolerance=_NONZERO_TOLERANCE,
+        )
+    except FeatureStabilityError as exc:
+        raise CVError(str(exc)) from exc
+    convergence_diagnostics = _build_convergence_diagnostics(convergence_rows)
+    convergence_warning = _convergence_summary_warning(convergence_diagnostics)
+    if convergence_warning is not None:
+        warnings.append(convergence_warning)
+    top_feature_expression = _build_top_feature_expression(
+        outer_matrix_cache,
+        interpretation_artifacts.feature_importance,
+        feature_limit=config.figures.top_features,
+    )
+    if config.preprocess.missing_expression.method == "neutral":
+        top_feature_expression = mark_expression_observations(
+            top_feature_expression,
+            zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
+        )
+    recorder.record_since(
+        postprocess_started,
+        scope="outer_cv",
+        stage="postprocess",
+    )
+    recorder.record_since(total_started, scope="outer_cv", stage="total")
+    timing = recorder.to_frame(start_index=timing_start_index)
 
     return CVArtifacts(
         metrics_cv=metrics_df,
         loss_by_split_cv=loss_by_split_df,
         thresholds=thresholds_df,
         oof_predictions=oof_df,
+        inference_predictions_by_fold=inference_predictions_by_fold,
         feature_importance=interpretation_artifacts.feature_importance,
         coefficients=interpretation_artifacts.coefficients,
         feature_importance_by_fold=interpretation_artifacts.feature_importance_by_fold,
@@ -3555,9 +6266,37 @@ def run_outer_cv(
         model_selection_trials_summary=model_selection_trials_summary,
         feature_filter_counts=feature_filter_counts,
         feature_filter_counts_summary=feature_filter_counts_summary,
+        ranked_feature_scores=ranked_feature_scores,
         retained_features=retained_features,
         retained_features_summary=retained_features_summary,
         model_sparsity=model_sparsity,
         model_sparsity_summary=model_sparsity_summary,
+        feature_stability_by_feature=feature_stability.by_feature,
+        feature_stability_by_fold_pair=feature_stability.by_fold_pair,
+        feature_stability_summary=feature_stability.summary,
+        top_feature_expression=top_feature_expression,
+        training_group_subsets=_build_training_group_subsets(training_group_subset_rows),
+        timing=timing,
         warnings=warnings,
+        convergence_diagnostics=convergence_diagnostics,
+        cv_species_evidence=cv_species_evidence,
+        cv_species_feature_evidence=cv_species_feature_evidence,
+        cv_species_reference_expression=cv_species_reference_expression,
     )
+
+
+def run_outer_cv(
+    config: AppConfig,
+    split_manifest: pl.DataFrame,
+    progress_callback: Callable[[str], None] | None = None,
+    timing_recorder: TimingRecorder | None = None,
+) -> CVArtifacts:
+    """Execute outer CV while recording convergence without stderr warning noise."""
+    with warning_control.catch_warnings():
+        warning_control.simplefilter("ignore", ConvergenceWarning)
+        return _run_outer_cv_impl(
+            config,
+            split_manifest,
+            progress_callback=progress_callback,
+            timing_recorder=timing_recorder,
+        )

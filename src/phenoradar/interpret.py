@@ -6,9 +6,9 @@ from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
+from glum import GeneralizedLinearRegressor
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
 
 _METHOD_COEF_ABS_L1 = "coef_abs_l1_norm"
 _METHOD_IMPORTANCES_L1 = "feature_importances_l1_norm"
@@ -23,7 +23,7 @@ class ModelFeatureEntry:
     """One fitted model with its fold-local selected feature schema."""
 
     feature_names: list[str]
-    model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier
+    model: GeneralizedLinearRegressor | CalibratedClassifierCV | RandomForestClassifier
     fold_id: str = "NA"
 
 
@@ -39,13 +39,13 @@ class InterpretationArtifacts:
 
 
 def _linear_coefficients(
-    model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+    model: GeneralizedLinearRegressor | CalibratedClassifierCV | RandomForestClassifier,
 ) -> np.ndarray | None:
-    if isinstance(model, LogisticRegression):
+    if isinstance(model, GeneralizedLinearRegressor):
         coef = np.asarray(model.coef_, dtype=float)
-        if coef.ndim != 2 or coef.shape[0] < 1:
+        if coef.ndim != 1:
             return None
-        return np.asarray(coef[0], dtype=float)
+        return coef
 
     if isinstance(model, CalibratedClassifierCV):
         calibrated = getattr(model, "calibrated_classifiers_", None)
@@ -66,7 +66,7 @@ def _linear_coefficients(
 
 
 def _raw_importance(
-    model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+    model: GeneralizedLinearRegressor | CalibratedClassifierCV | RandomForestClassifier,
 ) -> np.ndarray:
     linear_coef = _linear_coefficients(model)
     if linear_coef is not None:
@@ -77,7 +77,7 @@ def _raw_importance(
 
 
 def _importance_method(
-    model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+    model: GeneralizedLinearRegressor | CalibratedClassifierCV | RandomForestClassifier,
 ) -> str:
     if isinstance(model, RandomForestClassifier):
         return _METHOD_IMPORTANCES_L1

@@ -5,12 +5,20 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pytest
+from glum import GeneralizedLinearRegressor
+from sklearn import config_context
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import log_loss
+from sklearn.exceptions import ConvergenceWarning
+from sklearn.metrics import (
+    auc,
+    average_precision_score,
+    brier_score_loss,
+    log_loss,
+    precision_recall_curve,
+)
 
 import phenoradar.cv as cv_mod
-from phenoradar.config import load_and_resolve_config
+from phenoradar.config import ConfigError, load_and_resolve_config
 from phenoradar.cv import (
     CVError,
     ExpressionMatrixBuilder,
@@ -19,7 +27,6 @@ from phenoradar.cv import (
     _build_estimator,
     _build_prediction_table,
     _compute_fold_metrics,
-    _derive_cv_threshold,
     _fit_estimator,
     _group_label_inverse_weights,
     _inner_cv_splits,
@@ -48,13 +55,13 @@ def _write_fixture(tmp_path: Path) -> tuple[Path, Path]:
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "sp1\t1\tg1\tno",
-                "sp2\t0\tg1\tno",
-                "sp3\t1\tg2\tno",
-                "sp4\t0\tg2\tno",
-                "sp5\t1\t\tyes",
-                "sp6\t\t\tno",
+                "species\tC4\tcontrast_pair_id",
+                "sp1\t1\tg1",
+                "sp2\t0\tg1",
+                "sp3\t1\tg2",
+                "sp4\t0\tg2",
+                "sp5\t1\t",
+                "sp6\t\t",
             ]
         )
         + "\n",
@@ -121,15 +128,18 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "metric_value",
     }.issubset(cv_artifacts.loss_by_split_cv.columns)
     assert cv_artifacts.loss_by_split_cv.height > 0
-    assert set(cv_artifacts.loss_by_split_cv.select("metric").to_series().to_list()) == {
-        "log_loss"
-    }
+    assert set(cv_artifacts.loss_by_split_cv.select("metric").to_series().to_list()) == {"log_loss"}
     assert set(cv_artifacts.loss_by_split_cv.select("split").to_series().to_list()) == {
         "train",
         "validation",
     }
     threshold_names = set(cv_artifacts.thresholds.select("threshold_name").to_series().to_list())
-    assert threshold_names == {"fixed_probability_threshold", "cv_derived_threshold"}
+    assert threshold_names == {"fixed_probability_threshold"}
+    threshold_row = cv_artifacts.thresholds.row(0, named=True)
+    assert threshold_row["threshold_value"] == pytest.approx(0.5)
+    assert threshold_row["source"] == "constant"
+    assert threshold_row["policy"] == "fixed_constant"
+    assert threshold_row["derived_from_cv"] is False
     assert {
         "feature",
         "importance_mean",
@@ -162,6 +172,38 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "method",
         "reason",
     }.issubset(cv_artifacts.coefficients_by_fold.columns)
+    assert cv_artifacts.feature_stability_by_feature.height > 0
+    assert {
+        "feature",
+        "n_outer_folds",
+        "n_retained_folds",
+        "retained_frequency",
+        "n_nonzero_folds",
+        "selection_frequency",
+        "selection_frequency_when_retained",
+        "n_positive_folds",
+        "n_negative_folds",
+        "dominant_sign",
+        "sign_agreement_rate",
+        "sign_reason",
+    }.issubset(cv_artifacts.feature_stability_by_feature.columns)
+
+    assert cv_artifacts.feature_stability_by_fold_pair.height == 1
+    assert {
+        "fold_id_a",
+        "fold_id_b",
+        "n_intersection",
+        "n_union",
+        "jaccard",
+    }.issubset(cv_artifacts.feature_stability_by_fold_pair.columns)
+    assert cv_artifacts.feature_stability_summary.height == 1
+    assert {
+        "n_outer_folds",
+        "n_fold_pairs",
+        "jaccard_mean",
+        "n_features_ever_selected",
+        "sign_agreement_mean",
+    }.issubset(cv_artifacts.feature_stability_summary.columns)
     aggregate_rows = cv_artifacts.metrics_cv.filter(pl.col("fold_id") == "NA")
     assert aggregate_rows.height > 0
     assert aggregate_rows.filter(pl.col("n_valid_folds").is_null()).height == 0
@@ -170,15 +212,32 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
     assert cv_artifacts.model_selection_selected is None
     assert cv_artifacts.model_selection_trials is None
     assert cv_artifacts.model_selection_trials_summary is None
+    assert cv_artifacts.training_group_subsets.height == 2
+    assert {
+        "scope",
+        "fold_id",
+        "group_col",
+        "group_subsample_repeat_index",
+        "training_group_count_requested",
+        "n_training_groups_available",
+        "n_training_groups_selected",
+        "group_rank",
+        "group_id",
+        "selected",
+        "n_species",
+        "n_label0",
+        "n_label1",
+    }.issubset(cv_artifacts.training_group_subsets.columns)
+    assert cv_artifacts.training_group_subsets.get_column("selected").all()
     assert cv_artifacts.feature_filter_counts.height > 0
     assert {
         "scope",
         "fold_id",
         "sample_set_id",
         "n_features_before",
-        "n_features_after_low_prevalence",
+        "n_features_after_sparse_feature_filter",
         "n_features_after_low_variance",
-        "n_features_after_pair_aware",
+        "n_features_after_ranked_feature_filter",
         "n_features_after_correlation",
         "n_features_after_all",
     }.issubset(cv_artifacts.feature_filter_counts.columns)
@@ -187,9 +246,28 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "scope",
         "stage",
         "n_records",
+        "n_features_q1",
         "n_features_median",
+        "n_features_q3",
+        "retained_ratio_q1",
         "retained_ratio_median",
+        "retained_ratio_q3",
     }.issubset(cv_artifacts.feature_filter_counts_summary.columns)
+    assert cv_artifacts.ranked_feature_scores.height > 0
+    assert {
+        "scope",
+        "fold_id",
+        "sample_set_id",
+        "method",
+        "higher_in_trait",
+        "feature",
+        "direction_match",
+        "score",
+        "rank",
+        "retained",
+        "applied",
+        "skip_reason",
+    }.issubset(cv_artifacts.ranked_feature_scores.columns)
     assert cv_artifacts.retained_features.height > 0
     assert {
         "scope",
@@ -224,6 +302,275 @@ def test_run_outer_cv_generates_metrics_and_thresholds(tmp_path: Path) -> None:
         "n_models",
         "n_models_with_nonzero_count",
     }.issubset(cv_artifacts.model_sparsity_summary.columns)
+    assert set(cv_artifacts.top_feature_expression.columns) == {"species", "feature", "tpm"}
+    assert set(cv_artifacts.top_feature_expression.get_column("species")) == {
+        "sp1",
+        "sp2",
+        "sp3",
+        "sp4",
+    }
+    assert (
+        cv_artifacts.top_feature_expression.filter(
+            (pl.col("species") == "sp1") & (pl.col("feature") == "OG1")
+        )
+        .get_column("tpm")
+        .item()
+        == 1.0
+    )
+    assert {
+        "scope",
+        "stage",
+        "fold_id",
+        "sample_set_id",
+        "candidate_index",
+        "started_at_sec",
+        "ended_at_sec",
+        "duration_sec",
+    } == set(cv_artifacts.timing.columns)
+    timing_pairs = set(cv_artifacts.timing.select("scope", "stage").iter_rows())
+    assert {
+        ("outer_cv", "matrix_build"),
+        ("outer_cv", "fold_execution"),
+        ("outer_cv", "interpretation"),
+        ("outer_cv", "total"),
+        ("outer_fold", "preprocessing"),
+        ("outer_fold", "model_fit"),
+        ("outer_fold", "prediction"),
+        ("outer_fold", "sample_set_total"),
+        ("outer_fold", "total"),
+    }.issubset(timing_pairs)
+    assert cv_artifacts.timing.filter(pl.col("duration_sec") < 0.0).height == 0
+
+
+def test_run_outer_cv_random_forest_preserves_absent_coordinates_as_nan(
+    tmp_path: Path,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "tpm_with_absent_coordinates.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp1\tOG2\t0.5",
+                "sp2\tOG1\t2.0",
+                "sp3\tOG2\t2.0",
+                "sp4\tOG1\t4.0",
+                "sp4\tOG2\t0.1",
+                "sp5\tOG1\t5.0",
+                "sp6\tOG1\t6.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+sampling:
+  strategy: all_samples
+  max_samples_per_label_per_group: null
+  sampled_set_count: 1
+preprocess:
+  absent_feature_fill: nan
+model:
+  name: random_forest
+model_selection:
+  search_space:
+    n_estimators: [5]
+""".strip(),
+            )
+        ]
+    )
+    split_artifacts = build_split_artifacts(config)
+
+    artifacts = run_outer_cv(config, split_artifacts.split_manifest)
+
+    assert artifacts.oof_predictions.height == 4
+    assert artifacts.oof_predictions.get_column("prob").is_finite().all()
+
+
+def test_run_outer_cv_predicts_inference_species_with_each_fold_model(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+runtime:
+  execution_stage: full_run
+""".strip(),
+            )
+        ]
+    )
+    split_artifacts = build_split_artifacts(config)
+
+    cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
+
+    predictions = cv_artifacts.inference_predictions_by_fold
+    assert predictions is not None
+    assert predictions.get_column("species").unique().to_list() == ["sp6"]
+    assert predictions.get_column("fold_id").n_unique() == split_artifacts.fold_count
+    assert predictions.filter((pl.col("prob") < 0.0) | (pl.col("prob") > 1.0)).height == 0
+
+
+@pytest.mark.parametrize(
+    ("method", "expected", "transform_applied"),
+    [
+        ("none", [6.0, 0.2], False),
+        ("log1p", [6.0, 0.2], False),
+        ("sample_rank", [2.0, 1.0], True),
+        ("sample_percentile_rank", [1.0, 0.5], True),
+    ],
+)
+def test_outer_cv_inference_matrix_is_a_shared_read_only_view(
+    tmp_path: Path,
+    method: str,
+    expected: list[float],
+    transform_applied: bool,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra=f"""
+preprocess:
+  expression_transform:
+    method: {method}
+runtime:
+  execution_stage: full_run
+""".strip(),
+            )
+        ]
+    )
+    split_artifacts = build_split_artifacts(config)
+
+    cache = cv_mod._build_outer_cv_matrix_cache(config, split_artifacts.split_manifest)
+    inference_matrix = cv_mod._slice_outer_cv_inference_matrix(cache, species=["sp6"])
+
+    assert cache.inference_transform_applied is transform_applied
+    assert cache.inference_matrix.flags.c_contiguous
+    assert not cache.inference_matrix.flags.writeable
+    assert not inference_matrix.flags.writeable
+    assert np.shares_memory(inference_matrix, cache.inference_matrix)
+    if not transform_applied:
+        assert np.shares_memory(cache.inference_matrix, cache.matrix)
+    assert cache.matrix[cache.species_to_index["sp6"], :] == pytest.approx(
+        np.array([6.0, 0.2], dtype=float)
+    )
+    assert inference_matrix == pytest.approx(np.array([expected], dtype=float))
+
+
+@pytest.mark.parametrize(
+    ("method", "expected_shapes"),
+    [
+        ("log1p", [(1, 1), (1, 1)]),
+        ("sample_percentile_rank", [(1, 2)]),
+    ],
+)
+def test_outer_cv_avoids_full_inference_transform_per_fold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    expected_shapes: list[tuple[int, int]],
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  expression_transform:
+    method: {method}
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: variance
+    max_features: 1
+runtime:
+  n_jobs: 2
+  execution_stage: full_run
+""".strip().format(method=method),
+            )
+        ]
+    )
+    split_artifacts = build_split_artifacts(config)
+    original_transform = cv_mod._apply_expression_transform_for_config
+    original_fit_outer_sample_set = cv_mod._fit_outer_sample_set
+    inference_transform_shapes: list[tuple[int, int]] = []
+    shared_inference_matrices: list[np.ndarray] = []
+
+    def _tracked_transform(config_arg: object, matrix: np.ndarray) -> np.ndarray:
+        if matrix.shape[0] == 1:
+            inference_transform_shapes.append(matrix.shape)
+        return original_transform(config_arg, matrix)  # type: ignore[arg-type]
+
+    def _tracked_fit_outer_sample_set(*args: object, **kwargs: object) -> object:
+        inference_matrix = kwargs["x_inference_matrix"]
+        assert isinstance(inference_matrix, np.ndarray)
+        shared_inference_matrices.append(inference_matrix)
+        return original_fit_outer_sample_set(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cv_mod, "_apply_expression_transform_for_config", _tracked_transform)
+    monkeypatch.setattr(cv_mod, "_fit_outer_sample_set", _tracked_fit_outer_sample_set)
+
+    cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
+
+    assert cv_artifacts.inference_predictions_by_fold is not None
+    assert sorted(inference_transform_shapes) == sorted(expected_shapes)
+    assert len(shared_inference_matrices) == split_artifacts.fold_count
+    assert all(matrix.flags.c_contiguous for matrix in shared_inference_matrices)
+    assert all(not matrix.flags.writeable for matrix in shared_inference_matrices)
+    assert all(
+        np.shares_memory(shared_inference_matrices[0], matrix)
+        for matrix in shared_inference_matrices[1:]
+    )
+
+
+def test_metrics_dataframe_handles_valid_fold_counts_after_schema_inference_limit() -> None:
+    fold_metrics = {f"metric_{index}": float(index) for index in range(5)}
+    metric_rows = [
+        row
+        for fold_index in range(21)
+        for row in cv_mod._metric_rows(
+            fold_id=f"fold_{fold_index}",
+            aggregate_scope="NA",
+            metrics=fold_metrics,
+            n_pos=1,
+            n_neg=1,
+            n_valid_folds=None,
+        )
+    ]
+    metric_rows.extend(
+        cv_mod._metric_rows(
+            fold_id=None,
+            aggregate_scope="macro",
+            metrics=fold_metrics,
+            n_pos=21,
+            n_neg=21,
+            n_valid_folds={metric: 21 for metric in fold_metrics},
+        )
+    )
+
+    metrics_df = cv_mod._metrics_dataframe(metric_rows)
+
+    assert metrics_df.schema["n_valid_folds"] == pl.Int64
+    assert metrics_df.filter(pl.col("aggregate_scope") == "macro").get_column(
+        "n_valid_folds"
+    ).to_list() == [21] * len(fold_metrics)
 
 
 def test_run_outer_cv_oof_species_and_fold_match_validation_manifest(tmp_path: Path) -> None:
@@ -249,6 +596,82 @@ def test_run_outer_cv_oof_species_and_fold_match_validation_manifest(tmp_path: P
     )
 
 
+def test_run_outer_cv_allows_single_class_validation_folds(tmp_path: Path) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\tcontrast_pair_id",
+                "sp1\t1\tg1",
+                "sp2\t1\tg1",
+                "sp3\t0\tg2",
+                "sp4\t0\tg2",
+                "sp5\t1\tg3",
+                "sp6\t0\tg3",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "species\torthogroup\ttpm\n"
+        + "\n".join(
+            [
+                "sp1\tOG1\t6.0",
+                "sp2\tOG1\t5.0",
+                "sp3\tOG1\t1.0",
+                "sp4\tOG1\t2.0",
+                "sp5\tOG1\t4.0",
+                "sp6\tOG1\t3.0",
+            ]
+        )
+        + "\n",
+    )
+    config_path = _write(
+        tmp_path / "config.yml",
+        f"""
+data:
+  metadata_path: {metadata}
+  tpm_path: {tpm}
+sampling:
+  strategy: all_samples
+  max_samples_per_label_per_group: null
+  sampled_set_count: 1
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([config_path])
+    split_artifacts = build_split_artifacts(config)
+
+    artifacts = run_outer_cv(config, split_artifacts.split_manifest)
+
+    assert artifacts.oof_predictions.height == 6
+    per_fold = artifacts.metrics_cv.filter(pl.col("aggregate_scope") == "NA")
+    single_class_folds = per_fold.filter(pl.col("fold_id").is_in(["1", "2"]))
+    assert (
+        single_class_folds.filter(pl.col("metric") == "brier")
+        .select(pl.col("metric_value").is_finite().all())
+        .item()
+    )
+    assert (
+        single_class_folds.filter(
+            pl.col("metric").is_in(["roc_auc", "pr_auc", "balanced_accuracy", "mcc"])
+        )
+        .select(pl.col("metric_value").is_nan().all())
+        .item()
+    )
+
+    macro = artifacts.metrics_cv.filter(pl.col("aggregate_scope") == "macro")
+    valid_counts = dict(macro.select("metric", "n_valid_folds").iter_rows())
+    assert valid_counts == {
+        "balanced_accuracy": 1,
+        "brier": 3,
+        "mcc": 1,
+        "pr_auc": 1,
+        "roc_auc": 1,
+    }
+
+
 def test_run_outer_cv_builds_expression_matrix_once_across_folds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -257,7 +680,14 @@ def test_run_outer_cv_builds_expression_matrix_once_across_folds(
     split_artifacts = build_split_artifacts(config)
 
     build_calls = 0
+    cache_calls = 0
     original_build_matrix = cv_mod.ExpressionMatrixBuilder.build_matrix
+    original_cache_species = cv_mod.ExpressionMatrixBuilder.cache_species
+
+    def _counting_cache_species(self: object, species_order: list[str]) -> None:
+        nonlocal cache_calls
+        cache_calls += 1
+        original_cache_species(self, species_order)
 
     def _counting_build_matrix(
         self: object, species_order: list[str]
@@ -266,12 +696,42 @@ def test_run_outer_cv_builds_expression_matrix_once_across_folds(
         build_calls += 1
         return original_build_matrix(self, species_order)
 
+    monkeypatch.setattr(cv_mod.ExpressionMatrixBuilder, "cache_species", _counting_cache_species)
     monkeypatch.setattr(cv_mod.ExpressionMatrixBuilder, "build_matrix", _counting_build_matrix)
 
     cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
 
     assert cv_artifacts.oof_predictions.height == 4
+    assert cache_calls == 1
     assert build_calls == 1
+
+
+def test_expression_matrix_builder_coordinate_fill_preserves_pivot_semantics() -> None:
+    long_df = pl.DataFrame(
+        {
+            "__species": ["sp2", "sp1", "sp1", "sp1"],
+            "__feature": ["OG2", "OG1", "OG1", "OG_extra"],
+            "__value": [2.0, 1.0, 3.0, 9.0],
+        }
+    )
+    ordering_df = pl.DataFrame(
+        {
+            "__species": ["sp2", "sp1", "sp2"],
+            "__row_idx": [0, 1, 2],
+        }
+    )
+
+    matrix = ExpressionMatrixBuilder._matrix_from_long_df(
+        long_df,
+        ordering_df,
+        ["OG2", "OG_missing", "OG1"],
+    )
+
+    assert matrix.tolist() == [
+        [2.0, 0.0, 0.0],
+        [0.0, 0.0, 4.0],
+        [2.0, 0.0, 0.0],
+    ]
 
 
 def test_run_outer_cv_with_small_max_pivot_cells_uses_feature_chunking(tmp_path: Path) -> None:
@@ -326,15 +786,15 @@ def test_outer_cv_emits_ensemble_artifacts_when_ensemble_size_gt_one(tmp_path: P
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "g1_pos1\t1\tg1\tno",
-                "g1_pos2\t1\tg1\tno",
-                "g1_neg1\t0\tg1\tno",
-                "g1_neg2\t0\tg1\tno",
-                "g2_pos1\t1\tg2\tno",
-                "g2_pos2\t1\tg2\tno",
-                "g2_neg1\t0\tg2\tno",
-                "g2_neg2\t0\tg2\tno",
+                "species\tC4\tcontrast_pair_id",
+                "g1_pos1\t1\tg1",
+                "g1_pos2\t1\tg1",
+                "g1_neg1\t0\tg1",
+                "g1_neg2\t0\tg1",
+                "g2_pos1\t1\tg2",
+                "g2_pos2\t1\tg2",
+                "g2_neg1\t0\tg2",
+                "g2_neg2\t0\tg2",
             ]
         )
         + "\n",
@@ -389,9 +849,7 @@ sampling:
     )
     assert "uncertainty_std" in cv_artifacts.oof_predictions.columns
     assert cv_artifacts.oof_predictions.filter(pl.col("uncertainty_std").is_null()).height == 0
-    assert (
-        cv_artifacts.oof_predictions.filter(pl.col("uncertainty_std") < 0.0).height == 0
-    )
+    assert cv_artifacts.oof_predictions.filter(pl.col("uncertainty_std") < 0.0).height == 0
 
 
 def test_outer_cv_selection_active_emits_selected_and_trials_tables(tmp_path: Path) -> None:
@@ -399,13 +857,13 @@ def test_outer_cv_selection_active_emits_selected_and_trials_tables(tmp_path: Pa
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "g1_pos\t1\tg1\tno",
-                "g1_neg\t0\tg1\tno",
-                "g2_pos\t1\tg2\tno",
-                "g2_neg\t0\tg2\tno",
-                "g3_pos\t1\tg3\tno",
-                "g3_neg\t0\tg3\tno",
+                "species\tC4\tcontrast_pair_id",
+                "g1_pos\t1\tg1",
+                "g1_neg\t0\tg1",
+                "g2_pos\t1\tg2",
+                "g2_neg\t0\tg2",
+                "g3_pos\t1\tg3",
+                "g3_neg\t0\tg3",
                 "g4_pos\t1\tg4",
                 "g4_neg\t0\tg4",
             ]
@@ -450,7 +908,8 @@ split:
 model_selection:
   search_strategy: grid
   search_space:
-    C: [0.5, 1.0]
+    alpha: [0.005, 0.01]
+    max_iter: [1]
   selected_candidate_count: 1
   inner_cv_strategy: logo
 """.strip(),
@@ -466,6 +925,14 @@ model_selection:
     assert cv_artifacts.model_selection_selected.height > 0
     assert cv_artifacts.model_selection_trials.height > 0
     assert cv_artifacts.model_selection_trials_summary.height > 0
+    assert cv_artifacts.convergence_diagnostics.height > 0
+    assert set(cv_artifacts.convergence_diagnostics.get_column("fit_scope")) == {
+        "candidate_evaluation",
+        "selected_model",
+    }
+    assert set(cv_artifacts.convergence_diagnostics.get_column("training_scope")) == {"outer_fold"}
+    assert cv_artifacts.convergence_diagnostics.filter(~pl.col("converged")).height > 0
+    assert any("non-converged fit(s)" in warning for warning in cv_artifacts.warnings)
     assert {
         "selection_scope",
         "fold_id",
@@ -475,6 +942,8 @@ model_selection:
         "candidate_index",
         "metric_name",
         "metric_value",
+        "metric_value_se",
+        "selection_rule",
         "n_available_candidates",
         "n_scored_candidates",
         "selected_candidate_count_requested",
@@ -500,6 +969,7 @@ model_selection:
         "n_valid_inner_folds",
         "metric_value_mean",
         "metric_value_std",
+        "metric_value_se",
     }.issubset(cv_artifacts.model_selection_trials_summary.columns)
 
 
@@ -510,13 +980,13 @@ def test_outer_cv_tpe_selection_active_bypasses_generic_candidate_generation(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "g1_pos\t1\tg1\tno",
-                "g1_neg\t0\tg1\tno",
-                "g2_pos\t1\tg2\tno",
-                "g2_neg\t0\tg2\tno",
-                "g3_pos\t1\tg3\tno",
-                "g3_neg\t0\tg3\tno",
+                "species\tC4\tcontrast_pair_id",
+                "g1_pos\t1\tg1",
+                "g1_neg\t0\tg1",
+                "g2_pos\t1\tg2",
+                "g2_neg\t0\tg2",
+                "g3_pos\t1\tg3",
+                "g3_neg\t0\tg3",
                 "g4_pos\t1\tg4",
                 "g4_neg\t0\tg4",
             ]
@@ -562,7 +1032,7 @@ model_selection:
   search_strategy: tpe
   trial_count: 3
   search_space:
-    C:
+    alpha:
       type: continuous_log_range
       base: 10
       start_exp: -1
@@ -600,13 +1070,13 @@ def test_outer_cv_selection_active_with_percent_emits_selected_and_trials_tables
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "g1_pos\t1\tg1\tno",
-                "g1_neg\t0\tg1\tno",
-                "g2_pos\t1\tg2\tno",
-                "g2_neg\t0\tg2\tno",
-                "g3_pos\t1\tg3\tno",
-                "g3_neg\t0\tg3\tno",
+                "species\tC4\tcontrast_pair_id",
+                "g1_pos\t1\tg1",
+                "g1_neg\t0\tg1",
+                "g2_pos\t1\tg2",
+                "g2_neg\t0\tg2",
+                "g3_pos\t1\tg3",
+                "g3_neg\t0\tg3",
                 "g4_pos\t1\tg4",
                 "g4_neg\t0\tg4",
             ]
@@ -651,7 +1121,7 @@ split:
 model_selection:
   search_strategy: grid
   search_space:
-    C: [0.5, 1.0]
+    alpha: [0.005, 0.01]
   selected_candidate_percent: 50
   inner_cv_strategy: logo
 """.strip(),
@@ -678,15 +1148,8 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     split_artifacts = build_split_artifacts(config)
-    cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
-    cv_threshold = (
-        cv_artifacts.thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
-        .select("threshold_value")
-        .to_series()
-        .item()
-    )
 
-    refit_artifacts = run_final_refit(config, split_artifacts.split_manifest, float(cv_threshold))
+    refit_artifacts = run_final_refit(config, split_artifacts.split_manifest)
 
     assert refit_artifacts.pred_external_test.height == 1
     assert refit_artifacts.pred_inference.height == 1
@@ -698,10 +1161,7 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
         "true_label",
         "prob",
         "pred_label_fixed_threshold",
-        "pred_label_cv_derived_threshold",
-    }.issubset(
-        refit_artifacts.pred_external_test.columns
-    )
+    }.issubset(refit_artifacts.pred_external_test.columns)
     assert {
         "split",
         "metric",
@@ -710,30 +1170,66 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
     assert set(
         refit_artifacts.loss_by_split_final_refit.select("metric").to_series().to_list()
     ) == {"log_loss"}
-    assert set(
-        refit_artifacts.loss_by_split_final_refit.select("split").to_series().to_list()
-    ) == {"train", "external_test"}
+    assert set(refit_artifacts.loss_by_split_final_refit.select("split").to_series().to_list()) == {
+        "train",
+        "external_test",
+    }
     assert {
         "species",
         "prob",
         "pred_label_fixed_threshold",
-        "pred_label_cv_derived_threshold",
         "true_label",
-    }.issubset(
-        refit_artifacts.pred_inference.columns
-    )
+    }.issubset(refit_artifacts.pred_inference.columns)
     assert refit_artifacts.pred_inference.get_column("true_label").null_count() == 1
     assert refit_artifacts.model_selection_selected is None
+    assert refit_artifacts.model_selection_trials is None
+    assert refit_artifacts.model_selection_trials_summary is None
+    assert {
+        "feature",
+        "importance_mean",
+        "importance_std",
+        "n_models",
+        "method",
+    }.issubset(refit_artifacts.feature_importance.columns)
+    assert {
+        "model_index",
+        "feature",
+        "importance",
+        "method",
+    }.issubset(refit_artifacts.feature_importance_by_model.columns)
+    assert {
+        "feature",
+        "coef_mean",
+        "coef_std",
+        "n_models",
+        "method",
+    }.issubset(refit_artifacts.coefficients.columns)
+    assert {
+        "model_index",
+        "feature",
+        "coefficient",
+        "method",
+        "reason",
+    }.issubset(refit_artifacts.coefficients_by_model.columns)
+    assert set(refit_artifacts.top_feature_expression_external.columns) == {
+        "species",
+        "feature",
+        "tpm",
+    }
+    assert refit_artifacts.top_feature_expression_external.get_column(
+        "species"
+    ).unique().to_list() == ["sp5"]
     assert refit_artifacts.feature_filter_counts.height > 0
     assert {
         "scope",
         "fold_id",
         "sample_set_id",
         "n_features_before",
-        "n_features_after_pair_aware",
+        "n_features_after_ranked_feature_filter",
         "n_features_after_all",
     }.issubset(refit_artifacts.feature_filter_counts.columns)
     assert refit_artifacts.feature_filter_counts_summary.height > 0
+    assert refit_artifacts.ranked_feature_scores.height > 0
     assert refit_artifacts.retained_features.height > 0
     assert {
         "scope",
@@ -760,6 +1256,110 @@ def test_run_final_refit_generates_external_and_inference_predictions(tmp_path: 
         "n_nonzero_features",
     }.issubset(refit_artifacts.model_sparsity.columns)
     assert refit_artifacts.model_sparsity_summary.height > 0
+    assert refit_artifacts.training_group_subsets.height == 2
+    assert refit_artifacts.training_group_subsets.get_column("scope").unique().to_list() == [
+        "final_refit"
+    ]
+    timing_stages = set(refit_artifacts.timing.get_column("stage"))
+    assert {
+        "pool_preparation",
+        "matrix_build",
+        "sampling",
+        "candidate_generation",
+        "preprocessing",
+        "model_fit",
+        "prediction",
+        "sample_set_total",
+        "postprocess",
+        "total",
+    }.issubset(timing_stages)
+    assert refit_artifacts.timing.get_column("scope").unique().to_list() == ["final_refit"]
+
+
+def test_run_final_refit_prunes_target_matrix_without_changing_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata = _write(
+        tmp_path / "species_metadata.tsv",
+        "\n".join(
+            [
+                "species\tC4\tcontrast_pair_id",
+                "sp1\t1\tg1",
+                "sp2\t0\tg1",
+                "sp3\t1\tg2",
+                "sp4\t0\tg2",
+                "sp5\t1\t",
+                "sp6\t\t",
+            ]
+        )
+        + "\n",
+    )
+    tpm = _write(
+        tmp_path / "tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp1\tOG2\t0.5",
+                "sp2\tOG1\t2.0",
+                "sp2\tOG2\t0.3",
+                "sp3\tOG1\t3.0",
+                "sp3\tOG2\t2.0",
+                "sp4\tOG1\t4.0",
+                "sp4\tOG2\t0.1",
+                "sp5\tOG1\t5.0",
+                "sp5\tOG2\t0.9",
+                "sp5\tOG_target_only\t7.0",
+                "sp6\tOG1\t6.0",
+                "sp6\tOG2\t0.2",
+                "sp6\tOG_target_only\t8.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    split_artifacts = build_split_artifacts(config)
+    original_cache_species = cv_mod.ExpressionMatrixBuilder.cache_species
+    original_build_matrix = cv_mod.ExpressionMatrixBuilder.build_matrix
+    cache_calls: list[list[str]] = []
+    build_calls: list[tuple[list[str], list[str] | None]] = []
+
+    def _counting_cache_species(self: object, species_order: list[str]) -> None:
+        cache_calls.append(list(species_order))
+        original_cache_species(self, species_order)
+
+    def _counting_build_matrix(
+        self: object,
+        species_order: list[str],
+        feature_order: list[str] | None = None,
+    ) -> tuple[np.ndarray, list[str]]:
+        build_calls.append(
+            (list(species_order), None if feature_order is None else list(feature_order))
+        )
+        return original_build_matrix(self, species_order, feature_order=feature_order)
+
+    monkeypatch.setattr(cv_mod.ExpressionMatrixBuilder, "cache_species", _counting_cache_species)
+    monkeypatch.setattr(cv_mod.ExpressionMatrixBuilder, "build_matrix", _counting_build_matrix)
+    optimized = run_final_refit(config, split_artifacts.split_manifest)
+
+    assert len(cache_calls) == 1
+    target_calls = [call for call in build_calls if call[1] is not None]
+    assert len(target_calls) == 1
+    assert "OG_target_only" not in target_calls[0][1]
+
+    monkeypatch.setattr(cv_mod.ExpressionMatrixBuilder, "build_matrix", original_build_matrix)
+    monkeypatch.setattr(cv_mod, "_final_refit_can_prune_target_matrix", lambda _config: False)
+    full_matrix = run_final_refit(config, split_artifacts.split_manifest)
+
+    assert optimized.pred_external_test.to_dicts() == full_matrix.pred_external_test.to_dicts()
+    assert optimized.pred_inference.to_dicts() == full_matrix.pred_inference.to_dicts()
+    assert (
+        optimized.loss_by_split_final_refit.to_dicts()
+        == full_matrix.loss_by_split_final_refit.to_dicts()
+    )
+    assert (
+        optimized.feature_filter_counts.to_dicts() == full_matrix.feature_filter_counts.to_dicts()
+    )
 
 
 def test_summarize_retained_features_aggregates_count_and_rate() -> None:
@@ -844,15 +1444,15 @@ def test_outer_cv_selection_runs_per_sample_set(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "g1_pos1\t1\tg1\tno",
-                "g1_pos2\t1\tg1\tno",
-                "g1_neg1\t0\tg1\tno",
-                "g1_neg2\t0\tg1\tno",
-                "g2_pos1\t1\tg2\tno",
-                "g2_pos2\t1\tg2\tno",
-                "g2_neg1\t0\tg2\tno",
-                "g2_neg2\t0\tg2\tno",
+                "species\tC4\tcontrast_pair_id",
+                "g1_pos1\t1\tg1",
+                "g1_pos2\t1\tg1",
+                "g1_neg1\t0\tg1",
+                "g1_neg2\t0\tg1",
+                "g2_pos1\t1\tg2",
+                "g2_pos2\t1\tg2",
+                "g2_neg1\t0\tg2",
+                "g2_neg2\t0\tg2",
                 "g3_pos1\t1\tg3",
                 "g3_pos2\t1\tg3",
                 "g3_neg1\t0\tg3",
@@ -904,7 +1504,7 @@ sampling:
 model_selection:
   search_strategy: grid
   search_space:
-    C: [0.5, 1.0]
+    alpha: [0.005, 0.01]
   selected_candidate_count: 1
   inner_cv_strategy: logo
 """.strip(),
@@ -925,6 +1525,16 @@ model_selection:
     assert set(selected.select("selection_source_sample_set_id").to_series().to_list()) == {0, 1}
     assert set(trials.select("sample_set_id").to_series().to_list()) == {0, 1}
     assert set(trials_summary.select("sample_set_id").to_series().to_list()) == {0, 1}
+    candidate_timings = cv_artifacts.timing.filter(pl.col("stage") == "candidate_score")
+    assert candidate_timings.height > 0
+    assert set(candidate_timings.get_column("sample_set_id")) == {0, 1}
+    assert set(candidate_timings.get_column("candidate_index")) == {0, 1}
+    assert candidate_timings.get_column("fold_id").null_count() == 0
+    inner_preprocessing_timings = cv_artifacts.timing.filter(
+        pl.col("stage") == "inner_cv_preprocessing"
+    )
+    assert inner_preprocessing_timings.height > 0
+    assert set(inner_preprocessing_timings.get_column("sample_set_id")) == {0, 1}
 
 
 def test_outer_cv_selection_can_reuse_first_sample_set(
@@ -934,15 +1544,15 @@ def test_outer_cv_selection_can_reuse_first_sample_set(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "g1_pos1\t1\tg1\tno",
-                "g1_pos2\t1\tg1\tno",
-                "g1_neg1\t0\tg1\tno",
-                "g1_neg2\t0\tg1\tno",
-                "g2_pos1\t1\tg2\tno",
-                "g2_pos2\t1\tg2\tno",
-                "g2_neg1\t0\tg2\tno",
-                "g2_neg2\t0\tg2\tno",
+                "species\tC4\tcontrast_pair_id",
+                "g1_pos1\t1\tg1",
+                "g1_pos2\t1\tg1",
+                "g1_neg1\t0\tg1",
+                "g1_neg2\t0\tg1",
+                "g2_pos1\t1\tg2",
+                "g2_pos2\t1\tg2",
+                "g2_neg1\t0\tg2",
+                "g2_neg2\t0\tg2",
                 "g3_pos1\t1\tg3",
                 "g3_pos2\t1\tg3",
                 "g3_neg1\t0\tg3",
@@ -994,7 +1604,7 @@ sampling:
 model_selection:
   search_strategy: grid
   search_space:
-    C: [0.5, 1.0]
+    alpha: [0.005, 0.01]
   selected_candidate_count: 1
   inner_cv_strategy: logo
   candidate_source_policy: reuse_first_sample_set
@@ -1018,15 +1628,13 @@ model_selection:
     assert set(trials_summary.select("sample_set_id").to_series().to_list()) == {0}
 
 
-def test_outer_cv_rejects_model_specific_invalid_search_space_params(tmp_path: Path) -> None:
+def test_logistic_invalid_search_space_is_rejected_before_outer_cv(tmp_path: Path) -> None:
     metadata, tpm = _write_fixture(tmp_path)
-    config = load_and_resolve_config(
-        [
-            _config_path(
-                tmp_path,
-                metadata,
-                tpm,
-                extra="""
+    config_path = _config_path(
+        tmp_path,
+        metadata,
+        tpm,
+        extra="""
 model:
   name: logistic_elasticnet
 model_selection:
@@ -1034,13 +1642,9 @@ model_selection:
   search_space:
     n_estimators: [10]
 """.strip(),
-            )
-        ]
     )
-    split_artifacts = build_split_artifacts(config)
-
-    with pytest.raises(CVError, match="Unsupported model_selection.search_space parameter"):
-        run_outer_cv(config, split_artifacts.split_manifest)
+    with pytest.raises(ConfigError, match="Unsupported model_selection.search_space parameter"):
+        load_and_resolve_config([config_path])
 
 
 def test_outer_cv_is_deterministic_for_same_input_config_and_seed(tmp_path: Path) -> None:
@@ -1139,47 +1743,6 @@ runtime:
     assert set(estimator_n_jobs) == {2}
 
 
-def test_derive_cv_threshold_prefers_smallest_threshold_on_tie(
-    tmp_path: Path, monkeypatch
-) -> None:
-    metadata, tpm = _write_fixture(tmp_path)
-    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
-    y_true = np.array([0, 1], dtype=int)
-    prob = np.array([0.25, 0.75], dtype=float)
-
-    monkeypatch.setattr("phenoradar.cv.matthews_corrcoef", lambda _y, _p: 0.5)
-
-    threshold, warning = _derive_cv_threshold(config, y_true, prob)
-
-    assert threshold == pytest.approx(0.0)
-    assert warning is None
-
-
-def test_derive_cv_threshold_falls_back_when_all_scores_nan(
-    tmp_path: Path, monkeypatch
-) -> None:
-    metadata, tpm = _write_fixture(tmp_path)
-    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
-    y_true = np.array([0, 1], dtype=int)
-    prob = np.array([0.25, 0.75], dtype=float)
-
-    monkeypatch.setattr("phenoradar.cv.matthews_corrcoef", lambda _y, _p: float("nan"))
-
-    threshold, warning = _derive_cv_threshold(config, y_true, prob)
-
-    assert threshold == pytest.approx(0.5)
-    assert warning is not None
-    assert "fallback to 0.5" in warning
-
-
-def test_derive_cv_threshold_rejects_empty_probabilities(tmp_path: Path) -> None:
-    metadata, tpm = _write_fixture(tmp_path)
-    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
-
-    with pytest.raises(CVError, match="empty prediction set"):
-        _derive_cv_threshold(config, np.array([], dtype=int), np.array([], dtype=float))
-
-
 def test_compute_fold_metrics_returns_nan_when_metrics_are_undefined() -> None:
     y_true = np.array([], dtype=int)
     prob = np.array([], dtype=float)
@@ -1191,6 +1754,30 @@ def test_compute_fold_metrics_returns_nan_when_metrics_are_undefined() -> None:
     assert np.isnan(metrics["balanced_accuracy"])
     assert np.isnan(metrics["mcc"])
     assert np.isnan(metrics["brier"])
+
+
+@pytest.mark.parametrize("label", [0, 1])
+def test_compute_fold_metrics_single_class_keeps_only_brier(label: int) -> None:
+    y_true = np.full(3, label, dtype=int)
+    prob = np.array([0.1, 0.4, 0.8], dtype=float)
+
+    metrics = _compute_fold_metrics(y_true, prob, threshold=0.5)
+
+    for metric_name in ("roc_auc", "pr_auc", "balanced_accuracy", "mcc"):
+        assert np.isnan(metrics[metric_name])
+    assert metrics["brier"] == pytest.approx(brier_score_loss(y_true, prob))
+
+
+def test_compute_fold_metrics_pr_auc_key_is_average_precision_not_trapezoidal_auc() -> None:
+    y_true = np.array([1, 0, 1, 0], dtype=int)
+    prob = np.array([0.9, 0.8, 0.7, 0.1], dtype=float)
+
+    metrics = _compute_fold_metrics(y_true, prob, threshold=0.5)
+    precision, recall, _ = precision_recall_curve(y_true, prob)
+    trapezoidal_pr_auc = auc(recall, precision)
+
+    assert metrics["pr_auc"] == pytest.approx(average_precision_score(y_true, prob))
+    assert metrics["pr_auc"] != pytest.approx(trapezoidal_pr_auc)
 
 
 def test_apply_correlation_filter_drops_highly_correlated_feature_pearson(
@@ -1307,6 +1894,7 @@ def test_preprocess_fold_scales_validation_with_training_statistics(tmp_path: Pa
         x_train_raw,
         x_valid_raw,
         ["OG1", "OG2"],
+        y_train=np.array([0, 1, 0], dtype=int),
     )
 
     x_train_log = np.log1p(x_train_raw)
@@ -1334,9 +1922,9 @@ def test_select_feature_indices_raises_when_filters_remove_all_features(
                 tpm,
                 extra="""
 preprocess:
-  low_prevalence_filter:
+  sparse_feature_filter:
     enabled: true
-    min_species_per_feature: 10
+    min_nonzero_fraction: 0.5
 """.strip(),
             )
         ]
@@ -1351,7 +1939,12 @@ preprocess:
     )
 
     with pytest.raises(CVError, match="removed all features"):
-        _select_feature_indices(config, x_train_log, ["OG1", "OG2"])
+        _select_feature_indices(
+            config,
+            x_train_log,
+            ["OG1", "OG2"],
+            y_train=np.array([0, 1, 0], dtype=int),
+        )
 
 
 def test_expression_matrix_builder_rejects_missing_expression_file(tmp_path: Path) -> None:
@@ -1370,14 +1963,25 @@ def test_expression_matrix_builder_rejects_missing_expression_file(tmp_path: Pat
         cv_mod.pl.scan_csv = original_scan_csv  # type: ignore[assignment]
 
 
+def test_expression_matrix_builder_rejects_missing_expression_file_without_mock(
+    tmp_path: Path,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    missing_tpm = tmp_path / "missing_tpm.tsv"
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, missing_tpm)])
+
+    with pytest.raises(CVError, match="Input file not found"):
+        ExpressionMatrixBuilder(config)
+
+
 def test_expression_matrix_builder_rejects_missing_required_columns(tmp_path: Path) -> None:
     metadata = _write(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "sp1\t1\tg1\tno",
-                "sp2\t0\tg1\tno",
+                "species\tC4\tcontrast_pair_id",
+                "sp1\t1\tg1",
+                "sp2\t0\tg1",
             ]
         )
         + "\n",
@@ -1399,6 +2003,25 @@ def test_expression_matrix_builder_rejects_missing_required_columns(tmp_path: Pa
         ExpressionMatrixBuilder(config)
 
 
+def test_expression_matrix_builder_wraps_ragged_expression_row(tmp_path: Path) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "ragged_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0\textra",
+                "sp2\tOG1\t2.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    with pytest.raises(CVError, match="Failed to read expression data"):
+        ExpressionMatrixBuilder(config).build_matrix(["sp1", "sp2"])
+
+
 def test_expression_matrix_builder_build_matrix_rejects_empty_species(tmp_path: Path) -> None:
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
@@ -1417,6 +2040,336 @@ def test_expression_matrix_builder_build_matrix_rejects_missing_selected_species
 
     with pytest.raises(CVError, match="Expression data is missing selected species"):
         builder.build_matrix(["sp1", "sp_missing"])
+
+
+def test_expression_matrix_builder_build_matrix_respects_feature_order_and_zero_fills(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    builder = ExpressionMatrixBuilder(config)
+
+    matrix, features = builder.build_matrix(["sp1", "sp2"], feature_order=["OG2", "OG_missing"])
+
+    assert features == ["OG2", "OG_missing"]
+    assert matrix.tolist() == [[0.5, 0.0], [0.3, 0.0]]
+
+
+@pytest.mark.parametrize("max_pivot_cells", [50_000_000, 1])
+def test_expression_matrix_builder_can_fill_absent_coordinates_with_nan(
+    tmp_path: Path,
+    max_pivot_cells: int,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "missing_coordinates_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp1\tOG2\t0.5",
+                "sp2\tOG1\t2.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra=f"""
+preprocess:
+  max_pivot_cells: {max_pivot_cells}
+  absent_feature_fill: nan
+model:
+  name: random_forest
+""".strip(),
+            )
+        ]
+    )
+
+    matrix, features = ExpressionMatrixBuilder(config).build_matrix(
+        ["sp1", "sp2"],
+        feature_order=["OG2", "OG_missing"],
+    )
+
+    assert features == ["OG2", "OG_missing"]
+    np.testing.assert_allclose(matrix[0], np.array([0.5, np.nan]), equal_nan=True)
+    assert np.isnan(matrix[1]).all()
+
+
+@pytest.mark.parametrize(
+    "feature",
+    ["__species", "__row_idx", "__phenoradar_missing_feature__"],
+)
+def test_expression_matrix_builder_handles_feature_names_that_match_internal_names(
+    tmp_path: Path,
+    feature: str,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "internal_name_feature_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                f"sp1\t{feature}\t1.5",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    matrix, features = ExpressionMatrixBuilder(config).build_matrix(["sp1"])
+
+    assert features == [feature]
+    assert matrix.tolist() == [[1.5]]
+
+
+def test_expression_matrix_builder_validates_features_outside_requested_order(
+    tmp_path: Path,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "invalid_extra_feature_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp1\tOG_extra\tbad",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    with pytest.raises(CVError, match=r"OG_extra.*\(non-numeric\)"):
+        ExpressionMatrixBuilder(config).build_matrix(["sp1"], feature_order=["OG1"])
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "reasons"),
+    [
+        ("1.0", "missing-feature"),
+        ("bad", "non-numeric,missing-feature"),
+    ],
+)
+def test_expression_matrix_builder_rejects_missing_feature_identifier(
+    tmp_path: Path,
+    raw_value: str,
+    reasons: str,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "missing_feature_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                f"sp1\t\t{raw_value}",
+                "sp1\tOG1\t1.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    with pytest.raises(CVError, match=rf"feature=<missing>.*\({reasons}\)"):
+        ExpressionMatrixBuilder(config).build_matrix(["sp1"])
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "reason"),
+    [
+        ("", "missing"),
+        (" ", "missing"),
+        ("NA", "non-numeric"),
+        ("bad", "non-numeric"),
+        ("NaN", "non-finite"),
+        ("inf", "non-finite"),
+        ("-inf", "non-finite"),
+        ("-0.1", "negative"),
+    ],
+)
+def test_expression_matrix_builder_rejects_invalid_tpm_rows_before_pivot(
+    tmp_path: Path,
+    raw_value: str,
+    reason: str,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "invalid_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                f"sp1\tOG1\t{raw_value}",
+                "sp1\tOG2\t1.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    builder = ExpressionMatrixBuilder(config)
+
+    with pytest.raises(CVError) as exc_info:
+        builder.build_matrix(["sp1"])
+
+    message = str(exc_info.value)
+    assert "TPM values must be non-negative finite numbers" in message
+    assert "first_invalid_line=2" in message
+    assert "species='sp1'" in message
+    assert "feature='OG1'" in message
+    assert f"({reason})" in message
+
+
+def test_expression_matrix_builder_rejects_negative_duplicate_before_sum(
+    tmp_path: Path,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "negative_duplicate_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t-1.0",
+                "sp1\tOG1\t2.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    with pytest.raises(CVError, match=r"first_invalid_line=2.*\(negative\)"):
+        ExpressionMatrixBuilder(config).build_matrix(["sp1"])
+
+
+def test_expression_matrix_builder_sums_valid_duplicate_rows(tmp_path: Path) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "duplicate_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp1\tOG1\t2.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    matrix, features = ExpressionMatrixBuilder(config).build_matrix(["sp1"])
+
+    assert features == ["OG1"]
+    assert matrix.tolist() == [[3.0]]
+
+
+def test_expression_matrix_builder_rejects_non_finite_duplicate_sum(tmp_path: Path) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "overflow_duplicate_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1e308",
+                "sp1\tOG1\t1e308",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    with pytest.raises(CVError, match=r"first_invalid_line=2.*\(non-finite-after-sum\)"):
+        ExpressionMatrixBuilder(config).build_matrix(["sp1"])
+
+
+def test_expression_matrix_builder_rejects_invalid_tpm_beyond_inference_window(
+    tmp_path: Path,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    rows = ["species\torthogroup\ttpm"]
+    rows.extend(f"sp1\tOG{index:03d}\t1.0" for index in range(101))
+    rows.append("sp1\tOG_bad\tbad")
+    tpm = _write(tmp_path / "late_invalid_tpm.tsv", "\n".join(rows) + "\n")
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    with pytest.raises(CVError, match=r"first_invalid_line=103.*\(non-numeric\)"):
+        ExpressionMatrixBuilder(config).build_matrix(["sp1"])
+
+
+def test_expression_matrix_builder_chunking_rejects_invalid_tpm(tmp_path: Path) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "chunked_invalid_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\t1.0",
+                "sp1\tOG2\tNaN",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  max_pivot_cells: 1
+""".strip(),
+            )
+        ]
+    )
+
+    with pytest.raises(CVError, match=r"first_invalid_line=3.*\(non-finite\)"):
+        ExpressionMatrixBuilder(config).build_matrix(["sp1"])
+
+
+def test_expression_matrix_builder_cache_species_rejects_invalid_tpm(
+    tmp_path: Path,
+) -> None:
+    metadata, _ = _write_fixture(tmp_path)
+    tpm = _write(
+        tmp_path / "cached_invalid_tpm.tsv",
+        "\n".join(
+            [
+                "species\torthogroup\ttpm",
+                "sp1\tOG1\tbad",
+                "sp2\tOG1\t1.0",
+            ]
+        )
+        + "\n",
+    )
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    builder = ExpressionMatrixBuilder(config)
+
+    with pytest.raises(CVError, match=r"first_invalid_line=2.*\(non-numeric\)"):
+        builder.cache_species(["sp1", "sp2"])
+
+    assert builder._cache_tempdir is None
+    assert builder._cached_long_path is None
+    assert builder._cached_species is None
+
+
+def test_expression_matrix_builder_cache_species_reuses_cached_subset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    builder = ExpressionMatrixBuilder(config)
+    builder.cache_species(["sp1", "sp2"])
+
+    def _fail_raw_scan(_species: list[str]) -> pl.LazyFrame:
+        raise AssertionError("raw scan should not be used for cached species")
+
+    monkeypatch.setattr(builder, "_raw_long_scan_for_species", _fail_raw_scan)
+    matrix, features = builder.build_matrix(["sp2"], feature_order=["OG1"])
+
+    assert features == ["OG1"]
+    assert matrix.tolist() == [[2.0]]
 
 
 def test_preprocess_train_and_target_rejects_negative_tpm_values(tmp_path: Path) -> None:
@@ -1456,6 +2409,7 @@ def test_preprocess_train_and_target_returns_training_fitted_scaler(tmp_path: Pa
         x_train_raw,
         x_target_raw,
         ["OG1", "OG2"],
+        y_train=np.array([0, 1, 0], dtype=int),
     )
 
     x_train_log = np.log1p(x_train_raw)
@@ -1496,6 +2450,17 @@ def test_sample_percentile_rank_transform_preserves_zero_values() -> None:
     assert transformed == pytest.approx(expected)
 
 
+@pytest.mark.parametrize("method", ["sample_rank", "sample_percentile_rank"])
+def test_sample_rank_transforms_preserve_nan_values(method: str) -> None:
+    raw = np.array([[0.0, 10.0, np.nan, 5.0]], dtype=float)
+
+    transformed = apply_expression_transform(raw, method)
+
+    assert transformed[0, 0] == 0.0
+    assert np.isnan(transformed[0, 2])
+    assert transformed[0, 1] > transformed[0, 3] > 0.0
+
+
 def test_preprocess_train_and_target_can_disable_feature_scaling(tmp_path: Path) -> None:
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config(
@@ -1508,7 +2473,7 @@ def test_preprocess_train_and_target_can_disable_feature_scaling(tmp_path: Path)
 preprocess:
   expression_transform:
     method: sample_percentile_rank
-  low_prevalence_filter:
+  sparse_feature_filter:
     enabled: false
   feature_scaling:
     method: none
@@ -1552,7 +2517,6 @@ def test_build_prediction_table_rejects_probability_length_mismatch() -> None:
             species=["sp1", "sp2"],
             prob=np.array([0.5], dtype=float),
             fixed_threshold=0.5,
-            cv_threshold=0.4,
             uncertainty_std=None,
         )
 
@@ -1563,7 +2527,6 @@ def test_build_prediction_table_rejects_uncertainty_length_mismatch() -> None:
             species=["sp1", "sp2"],
             prob=np.array([0.2, 0.8], dtype=float),
             fixed_threshold=0.5,
-            cv_threshold=0.4,
             uncertainty_std=np.array([0.1], dtype=float),
         )
 
@@ -1574,7 +2537,6 @@ def test_build_prediction_table_rejects_true_label_length_mismatch() -> None:
             species=["sp1", "sp2"],
             prob=np.array([0.2, 0.8], dtype=float),
             fixed_threshold=0.5,
-            cv_threshold=0.4,
             uncertainty_std=None,
             true_label=np.array([1], dtype=int),
         )
@@ -1585,7 +2547,6 @@ def test_build_prediction_table_can_include_empty_true_label_column() -> None:
         species=["sp1", "sp2"],
         prob=np.array([0.2, 0.8], dtype=float),
         fixed_threshold=0.5,
-        cv_threshold=0.4,
         uncertainty_std=None,
         include_true_label_column=True,
     )
@@ -1594,26 +2555,142 @@ def test_build_prediction_table_can_include_empty_true_label_column() -> None:
     assert table.get_column("true_label").null_count() == 2
 
 
-def test_fit_estimator_falls_back_when_sample_weight_not_supported() -> None:
+def test_fit_estimator_rejects_unsupported_sample_weight_before_fit() -> None:
     class _NoWeightEstimator:
         def __init__(self) -> None:
-            self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+            self.call_count = 0
 
-        def fit(self, *args: object, **kwargs: object) -> None:
-            self.calls.append((args, kwargs))
-            if "sample_weight" in kwargs:
-                raise TypeError("sample_weight is unsupported")
+        def fit(self, _x: np.ndarray, _y: np.ndarray) -> None:
+            self.call_count += 1
 
     estimator = _NoWeightEstimator()
     x = np.array([[0.0], [1.0]], dtype=float)
     y = np.array([0, 1], dtype=int)
     sample_weight = np.array([1.0, 1.0], dtype=float)
 
-    _fit_estimator(estimator, x, y, sample_weight)
+    with pytest.raises(CVError, match="does not support sample_weight"):
+        _fit_estimator(estimator, x, y, sample_weight)  # type: ignore[arg-type]
 
-    assert len(estimator.calls) == 2
-    assert "sample_weight" in estimator.calls[0][1]
-    assert estimator.calls[1][1] == {}
+    assert estimator.call_count == 0
+
+
+def test_fit_estimator_does_not_hide_internal_type_error_or_retry() -> None:
+    class _BrokenWeightEstimator:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def fit(
+            self,
+            _x: np.ndarray,
+            _y: np.ndarray,
+            sample_weight: np.ndarray | None = None,
+        ) -> None:
+            self.call_count += 1
+            assert sample_weight is not None
+            raise TypeError("internal fit failure")
+
+    estimator = _BrokenWeightEstimator()
+    x = np.array([[0.0], [1.0]], dtype=float)
+    y = np.array([0, 1], dtype=int)
+    sample_weight = np.array([1.0, 1.0], dtype=float)
+
+    with pytest.raises(
+        CVError,
+        match="fit failed while applying sample_weight: internal fit failure",
+    ) as exc_info:
+        _fit_estimator(estimator, x, y, sample_weight)  # type: ignore[arg-type]
+
+    assert estimator.call_count == 1
+    assert isinstance(exc_info.value.__cause__, TypeError)
+
+
+def test_fit_estimator_passes_sample_weight_once_without_modification() -> None:
+    class _WeightEstimator:
+        def __init__(self) -> None:
+            self.call_count = 0
+            self.received_sample_weight: np.ndarray | None = None
+
+        def fit(
+            self,
+            _x: np.ndarray,
+            _y: np.ndarray,
+            sample_weight: np.ndarray | None = None,
+        ) -> None:
+            self.call_count += 1
+            self.received_sample_weight = sample_weight
+
+    estimator = _WeightEstimator()
+    x = np.array([[0.0], [1.0]], dtype=float)
+    y = np.array([0, 1], dtype=int)
+    sample_weight = np.array([0.5, 1.5], dtype=float)
+
+    _fit_estimator(estimator, x, y, sample_weight)  # type: ignore[arg-type]
+
+    assert estimator.call_count == 1
+    assert estimator.received_sample_weight is sample_weight
+
+
+def test_fit_estimator_captures_logistic_convergence_diagnostic() -> None:
+    estimator = GeneralizedLinearRegressor(
+        family="binomial",
+        solver="irls-cd",
+        alpha=0.01,
+        l1_ratio=0.5,
+        max_iter=1,
+        gradient_tol=1e-12,
+        scale_predictors=False,
+    )
+    x = np.array(
+        [
+            [0.0, 0.0],
+            [0.1, 1.0],
+            [0.2, 2.0],
+            [1.0, 0.1],
+            [2.0, 0.2],
+            [3.0, 0.3],
+        ],
+        dtype=float,
+    )
+    y = np.array([0, 0, 0, 1, 1, 1], dtype=int)
+
+    with pytest.warns(ConvergenceWarning):
+        diagnostic = _fit_estimator(estimator, x, y, sample_weight=None)
+
+    assert diagnostic.estimator_class == "GeneralizedLinearRegressor"
+    assert diagnostic.convergence_applicable is True
+    assert diagnostic.converged is False
+    assert diagnostic.n_iter_values == (1,)
+    assert diagnostic.max_iter == 1
+    assert diagnostic.convergence_warning_count == 1
+    assert diagnostic.convergence_warning_messages
+
+
+def test_linear_svm_accepts_sample_weight_with_metadata_routing_enabled(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+model:
+  name: linear_svm
+""".strip(),
+            )
+        ]
+    )
+    x = np.arange(12, dtype=float).reshape(6, 2)
+    y = np.array([0, 0, 0, 1, 1, 1], dtype=int)
+    sample_weight = np.array([1.0, 1.5, 0.5, 1.0, 1.5, 0.5], dtype=float)
+    estimator = _build_estimator(config, model_seed=42, y_train=y)
+
+    with config_context(enable_metadata_routing=True):
+        _fit_estimator(estimator, x, y, sample_weight)
+
+    assert hasattr(estimator, "calibrated_classifiers_")
 
 
 def test_predict_positive_probability_rejects_invalid_shape() -> None:
@@ -1673,19 +2750,19 @@ def test_build_estimator_logistic_elasticnet_uses_l1_ratio_semantics() -> None:
         config,
         model_seed=123,
         y_train=y_train,
-        model_params={"C": 0.7, "l1_ratio": 0.0, "max_iter": 5000},
+        model_params={"alpha": 0.07, "l1_ratio": 0.0, "max_iter": 5000},
     )
     elasticnet_estimator = _build_estimator(
         config,
         model_seed=123,
         y_train=y_train,
-        model_params={"C": 0.7, "l1_ratio": 0.5, "max_iter": 5000},
+        model_params={"alpha": 0.07, "l1_ratio": 0.5, "max_iter": 5000},
     )
 
-    assert isinstance(l2_estimator, LogisticRegression)
-    assert isinstance(elasticnet_estimator, LogisticRegression)
-    assert l2_estimator.solver == "saga"
-    assert elasticnet_estimator.solver == "saga"
+    assert isinstance(l2_estimator, GeneralizedLinearRegressor)
+    assert isinstance(elasticnet_estimator, GeneralizedLinearRegressor)
+    assert l2_estimator.solver == "irls-cd"
+    assert elasticnet_estimator.solver == "irls-cd"
     assert l2_estimator.l1_ratio == pytest.approx(0.0)
     assert elasticnet_estimator.l1_ratio == pytest.approx(0.5)
 
@@ -1693,6 +2770,45 @@ def test_build_estimator_logistic_elasticnet_uses_l1_ratio_semantics() -> None:
     _fit_estimator(elasticnet_estimator, x_train, y_train, sample_weight=None)
 
     assert not np.allclose(l2_estimator.coef_, elasticnet_estimator.coef_)
+
+
+def test_build_estimator_logistic_glum_supports_l1_and_sample_weight(
+    tmp_path: Path,
+) -> None:
+    config_path = _write(
+        tmp_path / "glum.yml",
+        """
+model:
+  name: logistic_elasticnet
+model_selection:
+  search_space:
+    l1_ratio: [1]
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([config_path])
+    x_train = np.array(
+        [[0.0, 0.0], [0.5, 1.0], [1.0, 0.0], [1.5, 1.0], [2.0, 0.0], [2.5, 1.0]],
+        dtype=float,
+    )
+    y_train = np.array([0, 0, 0, 1, 1, 1], dtype=int)
+    sample_weight = np.array([1.0, 0.5, 1.5, 1.0, 0.5, 1.5], dtype=float)
+    estimator = _build_estimator(
+        config,
+        model_seed=123,
+        y_train=y_train,
+        model_params={"alpha": 0.01, "l1_ratio": 1.0, "max_iter": 100},
+    )
+
+    diagnostic = _fit_estimator(estimator, x_train, y_train, sample_weight)
+
+    assert isinstance(estimator, GeneralizedLinearRegressor)
+    assert estimator.solver == "irls-cd"
+    assert estimator.l1_ratio == pytest.approx(1.0)
+    assert np.count_nonzero(estimator.coef_) > 0
+    assert diagnostic.convergence_applicable is True
+    assert diagnostic.converged is True
+    assert _predict_positive_probability(estimator, x_train).shape == (6,)
 
 
 def test_build_estimator_random_forest_respects_explicit_n_jobs(tmp_path: Path) -> None:
@@ -1720,6 +2836,43 @@ model:
 
     assert isinstance(estimator, RandomForestClassifier)
     assert estimator.n_jobs == 2
+
+
+def test_random_forest_fit_and_prediction_accept_nan_features(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  absent_feature_fill: nan
+model:
+  name: random_forest
+""".strip(),
+            )
+        ]
+    )
+    y = np.array([0, 0, 1, 1], dtype=int)
+    estimator = _build_estimator(
+        config,
+        model_seed=42,
+        y_train=y,
+        model_params={"n_estimators": 10},
+        rf_n_jobs=1,
+    )
+    x = np.array(
+        [[0.0, np.nan], [1.0, 0.5], [2.0, np.nan], [3.0, 1.5]],
+        dtype=float,
+    )
+
+    _fit_estimator(estimator, x, y, sample_weight=None)
+    probabilities = _predict_positive_probability(estimator, x)
+
+    assert probabilities.shape == (4,)
+    assert np.isfinite(probabilities).all()
 
 
 def test_inner_cv_splits_requires_strategy_when_mutated_to_none(tmp_path: Path) -> None:
@@ -1790,6 +2943,79 @@ def test_inner_cv_splits_wraps_value_error_from_splitter(
         )
 
 
+@pytest.mark.parametrize("method", ["none", "log1p", "sample_rank", "sample_percentile_rank"])
+def test_inner_cv_preprocessing_applies_row_local_expression_transform_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra=f"""
+preprocess:
+  expression_transform:
+    method: {method}
+  sparse_feature_filter:
+    enabled: false
+model_selection:
+  selected_candidate_count: 1
+  inner_cv_strategy: logo
+""".strip(),
+            )
+        ]
+    )
+    original_transform = cv_mod._apply_expression_transform_for_config
+    call_count = 0
+    x_source_raw = np.array(
+        [[0.0, 3.0], [2.0, 1.0], [1.0, 4.0], [3.0, 2.0]],
+        dtype=float,
+    )
+    y_source = np.array([0, 1, 0, 1], dtype=int)
+    groups_source = np.array(["g1", "g1", "g2", "g2"], dtype=str)
+    expected = []
+    for train_idx, valid_idx, _inner_fold_id in cv_mod._inner_cv_splits(
+        config, y_source, groups_source
+    ):
+        expected.append(
+            cv_mod._preprocess_fold(
+                config,
+                x_source_raw[train_idx, :],
+                x_source_raw[valid_idx, :],
+                ["OG1", "OG2"],
+                y_train=y_source[train_idx],
+                groups_train=None,
+            )
+        )
+
+    def _counted_transform(config_arg: object, matrix: np.ndarray) -> np.ndarray:
+        nonlocal call_count
+        call_count += 1
+        return original_transform(config_arg, matrix)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cv_mod, "_apply_expression_transform_for_config", _counted_transform)
+    folds = cv_mod._build_inner_cv_preprocessed_folds(
+        config=config,
+        x_source_raw=x_source_raw,
+        y_source=y_source,
+        groups_source=groups_source,
+        contrast_groups_source=None,
+        feature_names=["OG1", "OG2"],
+    )
+
+    assert len(folds) == 2
+    assert call_count == 1
+    for fold, (expected_train, expected_valid, _expected_features) in zip(
+        folds, expected, strict=True
+    ):
+        np.testing.assert_array_equal(fold.x_train, expected_train)
+        np.testing.assert_array_equal(fold.x_valid, expected_valid)
+
+
 def test_prepare_source_selection_wraps_candidate_generation_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1858,23 +3084,27 @@ model_selection:
         cv_mod,
         "generate_candidates",
         lambda **_kwargs: [
-            Candidate(candidate_index=0, params={"C": 0.1}),
-            Candidate(candidate_index=1, params={"C": 1.0}),
-            Candidate(candidate_index=2, params={"C": 10.0}),
+            Candidate(candidate_index=0, params={"alpha": 0.1}),
+            Candidate(candidate_index=1, params={"alpha": 1.0}),
+            Candidate(candidate_index=2, params={"alpha": 10.0}),
         ],
     )
 
-    original_preprocess_fold = cv_mod._preprocess_fold
+    original_preprocess_fold = cv_mod._preprocess_transformed_fold_with_counts
     preprocess_call_count = 0
 
     def _counting_preprocess_fold(
         *args: object, **kwargs: object
-    ) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    ) -> tuple[np.ndarray, np.ndarray, list[str], cv_mod.FeatureFilterCounts]:
         nonlocal preprocess_call_count
         preprocess_call_count += 1
         return original_preprocess_fold(*args, **kwargs)
 
-    monkeypatch.setattr(cv_mod, "_preprocess_fold", _counting_preprocess_fold)
+    monkeypatch.setattr(
+        cv_mod,
+        "_preprocess_transformed_fold_with_counts",
+        _counting_preprocess_fold,
+    )
 
     seen_cache_ids: list[int] = []
 
@@ -1939,7 +3169,7 @@ model_selection:
     monkeypatch.setattr(
         cv_mod,
         "generate_candidates",
-        lambda **_kwargs: [Candidate(candidate_index=0, params={"C": 1.0})],
+        lambda **_kwargs: [Candidate(candidate_index=0, params={"alpha": 1.0})],
     )
     monkeypatch.setattr(
         cv_mod,
@@ -1989,8 +3219,8 @@ model_selection:
         cv_mod,
         "generate_candidates",
         lambda **_kwargs: [
-            Candidate(candidate_index=0, params={"C": 1.0}),
-            Candidate(candidate_index=1, params={"C": 1.0}),
+            Candidate(candidate_index=0, params={"alpha": 1.0}),
+            Candidate(candidate_index=1, params={"alpha": 1.0}),
         ],
     )
 
@@ -2051,9 +3281,9 @@ model_selection:
         cv_mod,
         "generate_candidates",
         lambda **_kwargs: [
-            Candidate(candidate_index=0, params={"C": 0.1}),
-            Candidate(candidate_index=1, params={"C": 1.0}),
-            Candidate(candidate_index=2, params={"C": 10.0}),
+            Candidate(candidate_index=0, params={"alpha": 0.1}),
+            Candidate(candidate_index=1, params={"alpha": 1.0}),
+            Candidate(candidate_index=2, params={"alpha": 10.0}),
         ],
     )
 
@@ -2168,8 +3398,8 @@ model_selection:
         cv_mod,
         "generate_candidates",
         lambda **_kwargs: [
-            Candidate(candidate_index=0, params={"C": 0.5}),
-            Candidate(candidate_index=1, params={"C": 1.0}),
+            Candidate(candidate_index=0, params={"alpha": 0.5}),
+            Candidate(candidate_index=1, params={"alpha": 1.0}),
         ],
     )
 
@@ -2196,6 +3426,79 @@ model_selection:
     )
 
     assert result.selected_candidates[0].candidate.candidate_index == 0
+
+
+def test_prepare_source_selection_one_se_prefers_simpler_candidate_within_best_se(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    x_train_raw, y_train, groups_train = _selection_source_arrays()
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+model_selection:
+  selected_candidate_count: 1
+  inner_cv_strategy: logo
+  selection_metric: log_loss
+  selection_rule: one_se
+""".strip(),
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        cv_mod,
+        "generate_candidates",
+        lambda **_kwargs: [
+            Candidate(candidate_index=0, params={"alpha": 1.0}),
+            Candidate(candidate_index=1, params={"alpha": 0.1}),
+            Candidate(candidate_index=2, params={"alpha": 0.01}),
+        ],
+    )
+
+    def _fake_score_candidate_inner_cv(**kwargs: object) -> tuple[float, list[dict[str, object]]]:
+        candidate = kwargs["candidate"]
+        if not isinstance(candidate, Candidate):
+            raise AssertionError("candidate must be a Candidate instance")
+        fold_values_by_candidate = {
+            0: [0.40, 0.40],
+            1: [0.23, 0.23],
+            2: [0.15, 0.25],
+        }
+        fold_values = fold_values_by_candidate[candidate.candidate_index]
+        rows = [
+            {
+                "candidate_index": candidate.candidate_index,
+                "inner_fold_id": str(inner_fold_id),
+                "metric_name": "log_loss",
+                "metric_value": value,
+                "params_json": "{}",
+            }
+            for inner_fold_id, value in enumerate(fold_values, start=1)
+        ]
+        return float(np.mean(fold_values)), rows
+
+    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+
+    result = _prepare_source_selection(
+        config=config,
+        training_scope_id="fold_0",
+        source_sample_set_id=0,
+        sampled_idx=np.array([0, 1, 2, 3], dtype=int),
+        x_train_raw=x_train_raw,
+        y_train=y_train,
+        groups_train=groups_train,
+        feature_names=["OG1"],
+        warnings=[],
+    )
+
+    selected = result.selected_candidates[0]
+    assert selected.candidate.candidate_index == 1
+    assert selected.score == pytest.approx(0.23)
+    assert selected.selection_rule == "one_se"
 
 
 def test_score_candidate_inner_cv_uses_estimator_n_jobs_for_native_thread_limit(
@@ -2305,6 +3608,83 @@ def test_with_native_thread_limit_reuses_threadpool_controller(
     assert captured_limits == [2, 3]
 
 
+def test_score_candidate_inner_cv_reuses_logistic_estimators_for_warm_start_path(
+    tmp_path: Path,
+) -> None:
+    config_path = _write(
+        tmp_path / "warm_start.yml",
+        """
+model:
+  name: logistic_elasticnet
+  logistic_warm_start_path: true
+model_selection:
+  search_space:
+    alpha: [0.1, 0.01]
+    l1_ratio: [1]
+""".strip()
+        + "\n",
+    )
+    config = load_and_resolve_config([config_path])
+    folds = [
+        cv_mod.InnerCvPreprocessedFold(
+            inner_fold_id="0",
+            x_train=np.array([[0.0, 0.0], [0.2, 1.0], [1.0, 0.2], [1.2, 1.0]], dtype=float),
+            x_valid=np.array([[0.1, 0.1], [1.1, 0.9]], dtype=float),
+            y_train=np.array([0, 0, 1, 1], dtype=int),
+            y_valid=np.array([0, 1], dtype=int),
+            sample_weight=None,
+        ),
+        cv_mod.InnerCvPreprocessedFold(
+            inner_fold_id="1",
+            x_train=np.array([[0.0, 1.0], [0.3, 0.0], [1.0, 1.0], [1.3, 0.0]], dtype=float),
+            x_valid=np.array([[0.2, 0.8], [1.2, 0.2]], dtype=float),
+            y_train=np.array([0, 0, 1, 1], dtype=int),
+            y_valid=np.array([0, 1], dtype=int),
+            sample_weight=None,
+        ),
+    ]
+    cache: dict[str, GeneralizedLinearRegressor] = {}
+
+    first_score, first_rows = cv_mod._score_candidate_inner_cv(
+        config=config,
+        training_scope_id="outer_fold_0",
+        source_sample_set_id=0,
+        candidate=Candidate(candidate_index=0, params={"alpha": 0.1, "l1_ratio": 1}),
+        preprocessed_folds=folds,
+        warm_start_estimators=cache,
+    )
+    cached_ids = {fold_id: id(estimator) for fold_id, estimator in cache.items()}
+    second_score, second_rows = cv_mod._score_candidate_inner_cv(
+        config=config,
+        training_scope_id="outer_fold_0",
+        source_sample_set_id=0,
+        candidate=Candidate(candidate_index=1, params={"alpha": 0.01, "l1_ratio": 1}),
+        preprocessed_folds=folds,
+        warm_start_estimators=cache,
+    )
+
+    assert np.isfinite(first_score)
+    assert np.isfinite(second_score)
+    assert len(first_rows) == len(second_rows) == 2
+    assert set(cache) == {"0", "1"}
+    assert {fold_id: id(estimator) for fold_id, estimator in cache.items()} == cached_ids
+    assert all(estimator.warm_start for estimator in cache.values())
+    assert all(pytest.approx(0.01) == estimator.alpha for estimator in cache.values())
+    for fold in folds:
+        cold_estimator = _build_estimator(
+            config,
+            model_seed=42,
+            y_train=fold.y_train,
+            model_params={"alpha": 0.01, "l1_ratio": 1},
+        )
+        _fit_estimator(cold_estimator, fold.x_train, fold.y_train, fold.sample_weight)
+        np.testing.assert_allclose(
+            _predict_positive_probability(cache[fold.inner_fold_id], fold.x_valid),
+            _predict_positive_probability(cold_estimator, fold.x_valid),
+            atol=1e-5,
+        )
+
+
 def test_with_native_thread_limit_falls_back_when_controller_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2354,11 +3734,11 @@ runtime:
     source_result = cv_mod.SourceSelectionResult(
         selected_candidates=[
             cv_mod.SelectedCandidate(
-                candidate=Candidate(candidate_index=0, params={"C": 1.0}),
+                candidate=Candidate(candidate_index=0, params={"alpha": 1.0}),
                 score=None,
             ),
             cv_mod.SelectedCandidate(
-                candidate=Candidate(candidate_index=1, params={"C": 0.5}),
+                candidate=Candidate(candidate_index=1, params={"alpha": 0.5}),
                 score=None,
             ),
         ],
@@ -2413,11 +3793,11 @@ def test_run_final_refit_supports_no_external_or_inference_species(tmp_path: Pat
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "sp1\t1\tg1\tno",
-                "sp2\t0\tg1\tno",
-                "sp3\t1\tg2\tno",
-                "sp4\t0\tg2\tno",
+                "species\tC4\tcontrast_pair_id",
+                "sp1\t1\tg1",
+                "sp2\t0\tg1",
+                "sp3\t1\tg2",
+                "sp4\t0\tg2",
             ]
         )
         + "\n",
@@ -2437,15 +3817,8 @@ def test_run_final_refit_supports_no_external_or_inference_species(tmp_path: Pat
     )
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     split_artifacts = build_split_artifacts(config)
-    cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
-    cv_threshold = (
-        cv_artifacts.thresholds.filter(pl.col("threshold_name") == "cv_derived_threshold")
-        .select("threshold_value")
-        .to_series()
-        .item()
-    )
 
-    refit = run_final_refit(config, split_artifacts.split_manifest, float(cv_threshold))
+    refit = run_final_refit(config, split_artifacts.split_manifest)
 
     assert refit.pred_external_test.height == 0
     assert refit.pred_inference.height == 0
@@ -2466,7 +3839,7 @@ def test_run_final_refit_rejects_empty_training_pool(tmp_path: Path) -> None:
     )
 
     with pytest.raises(CVError, match="No species available for final refit training pool"):
-        run_final_refit(config, split_manifest, cv_threshold=0.5)
+        run_final_refit(config, split_manifest)
 
 
 def test_run_outer_cv_wraps_interpretation_error(
@@ -2483,19 +3856,6 @@ def test_run_outer_cv_wraps_interpretation_error(
 
     with pytest.raises(CVError, match="forced interp fail"):
         run_outer_cv(config, split_artifacts.split_manifest)
-
-
-def test_run_outer_cv_appends_threshold_warning(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    metadata, tpm = _write_fixture(tmp_path)
-    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
-    split_artifacts = build_split_artifacts(config)
-    monkeypatch.setattr(cv_mod, "_derive_cv_threshold", lambda *_args, **_kwargs: (0.5, "warn"))
-
-    artifacts = run_outer_cv(config, split_artifacts.split_manifest)
-
-    assert "warn" in artifacts.warnings
 
 
 def test_prepare_source_selection_tpe_requires_selection_setting(
@@ -2626,7 +3986,7 @@ def test_prepare_source_selection_tpe_emits_capping_warnings_for_trials_and_sele
                 update={
                     "search_strategy": "tpe",
                     "trial_count": 5,
-                    "search_space": {"C": [0.1]},
+                    "search_space": {"alpha": [0.1]},
                     "selected_candidate_count": 3,
                     "inner_cv_strategy": "logo",
                 }
@@ -2694,7 +4054,7 @@ def test_prepare_source_selection_tpe_deduplicates_selected_candidates_by_params
                 update={
                     "search_strategy": "tpe",
                     "trial_count": 2,
-                    "search_space": {"C": [0.1, 1.0]},
+                    "search_space": {"alpha": [0.1, 1.0]},
                     "selected_candidate_count": 2,
                     "inner_cv_strategy": "logo",
                 }
@@ -2774,7 +4134,7 @@ def test_prepare_source_selection_tpe_supports_selected_candidate_percent(
                 update={
                     "search_strategy": "tpe",
                     "trial_count": 3,
-                    "search_space": {"C": [0.1, 1.0, 10.0]},
+                    "search_space": {"alpha": [0.1, 1.0, 10.0]},
                     "selected_candidate_count": None,
                     "selected_candidate_percent": 50,
                     "inner_cv_strategy": "logo",
@@ -2848,7 +4208,7 @@ def test_prepare_source_selection_tpe_uses_minimize_direction_for_log_loss(
                     "search_strategy": "tpe",
                     "selection_metric": "log_loss",
                     "trial_count": 2,
-                    "search_space": {"C": [0.1, 1.0]},
+                    "search_space": {"alpha": [0.1, 1.0]},
                     "selected_candidate_count": 1,
                     "inner_cv_strategy": "logo",
                 }
@@ -2944,10 +4304,7 @@ def test_expression_matrix_builder_rejects_empty_matrix_for_selected_species(
 ) -> None:
     metadata = _write(
         tmp_path / "species_metadata.tsv",
-        "\n".join(
-            ["species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout", "sp1\t1\tg1\tno"]
-        )
-        + "\n",
+        "\n".join(["species\tC4\tcontrast_pair_id", "sp1\t1\tg1"]) + "\n",
     )
     tpm = _write(
         tmp_path / "tpm.tsv",
@@ -2956,7 +4313,7 @@ def test_expression_matrix_builder_rejects_empty_matrix_for_selected_species(
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
     builder = ExpressionMatrixBuilder(config)
 
-    with pytest.raises(CVError, match="Expression matrix is empty for the selected species"):
+    with pytest.raises(CVError, match="missing-feature"):
         builder.build_matrix(["sp1"])
 
 
@@ -2967,9 +4324,9 @@ def test_expression_matrix_builder_chunking_single_feature_returns_single_chunk(
         tmp_path / "species_metadata.tsv",
         "\n".join(
             [
-                "species\tC4\tcontrast_pair_id\tcontrast_pair_test_holdout",
-                "sp1\t1\tg1\tno",
-                "sp2\t0\tg1\tno",
+                "species\tC4\tcontrast_pair_id",
+                "sp1\t1\tg1",
+                "sp2\t0\tg1",
             ]
         )
         + "\n",
@@ -3006,7 +4363,7 @@ preprocess:
     assert features == ["OG1"]
 
 
-def test_select_feature_indices_rejects_missing_low_prevalence_threshold_when_mutated(
+def test_select_feature_indices_rejects_missing_sparse_feature_threshold_when_mutated(
     tmp_path: Path,
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
@@ -3015,19 +4372,120 @@ def test_select_feature_indices_rejects_missing_low_prevalence_threshold_when_mu
         update={
             "preprocess": config.preprocess.model_copy(
                 update={
-                    "low_prevalence_filter": config.preprocess.low_prevalence_filter.model_copy(
-                        update={"enabled": True, "min_species_per_feature": None}
+                    "sparse_feature_filter": config.preprocess.sparse_feature_filter.model_copy(
+                        update={
+                            "enabled": True,
+                            "min_nonzero_fraction": None,
+                        }
                     )
                 }
             )
         }
     )
 
-    with pytest.raises(CVError, match="min_species_per_feature is missing"):
+    with pytest.raises(CVError, match="min_nonzero_fraction is missing"):
         _select_feature_indices(
             config_bad,
             np.array([[0.0, 0.1], [0.2, 0.3]], dtype=float),
             ["OG1", "OG2"],
+            y_train=np.array([0, 1], dtype=int),
+        )
+
+
+def test_select_feature_indices_sparse_feature_filter_keeps_any_trait_signal(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [1.0, 1.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [1.5, 0.0, 0.0],
+                [0.0, 1.0, 3.0],
+                [0.0, 0.0, 4.0],
+                [0.0, 0.0, 5.0],
+            ],
+            dtype=float,
+        ),
+        ["OG_C3", "OG_RARE", "OG_C4"],
+        y_train=np.array([0, 0, 0, 1, 1, 1], dtype=int),
+    )
+
+    assert selected.tolist() == [0, 2]
+
+
+@pytest.mark.parametrize(("scope", "expected"), [("trait_0", [0]), ("trait_1", [1])])
+def test_select_feature_indices_sparse_feature_filter_can_target_one_trait(
+    tmp_path: Path,
+    scope: str,
+    expected: list[int],
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra=f"""
+preprocess:
+  sparse_feature_filter:
+    min_nonzero_fraction: 0.8
+    scope: {scope}
+""".strip(),
+            )
+        ]
+    )
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [2.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [0.0, 3.0, 1.0],
+                [0.0, 3.0, 0.0],
+                [0.0, 3.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        ["trait_0_common", "trait_1_common", "trait_1_rare"],
+        y_train=np.array([0, 0, 0, 1, 1, 1], dtype=int),
+    )
+
+    assert selected.tolist() == expected
+
+
+def test_sparse_feature_filter_rejects_target_trait_missing_from_training_rows(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    scope: trait_1
+""".strip(),
+            )
+        ]
+    )
+
+    with pytest.raises(CVError, match="scope=trait_1 requires trait 1"):
+        _select_feature_indices(
+            config,
+            np.array([[1.0], [2.0]], dtype=float),
+            ["OG1"],
+            y_train=np.array([0, 0], dtype=int),
         )
 
 
@@ -3040,9 +4498,12 @@ def test_select_feature_indices_rejects_missing_low_variance_threshold_when_muta
         update={
             "preprocess": config.preprocess.model_copy(
                 update={
+                    "sparse_feature_filter": config.preprocess.sparse_feature_filter.model_copy(
+                        update={"enabled": False}
+                    ),
                     "low_variance_filter": config.preprocess.low_variance_filter.model_copy(
                         update={"enabled": True, "min_variance": None}
-                    )
+                    ),
                 }
             )
         }
@@ -3066,6 +4527,8 @@ def test_select_feature_indices_applies_low_variance_filter(tmp_path: Path) -> N
                 tpm,
                 extra="""
 preprocess:
+  sparse_feature_filter:
+    enabled: false
   low_variance_filter:
     enabled: true
     min_variance: 0.01
@@ -3101,10 +4564,10 @@ def test_select_feature_indices_pair_aware_filter_prefers_consistent_signal(
                 tpm,
                 extra="""
 preprocess:
-  low_prevalence_filter:
+  sparse_feature_filter:
     enabled: false
-  pair_aware_filter:
-    enabled: true
+  ranked_feature_filter:
+    method: pair_aware
     max_features: 1
 """.strip(),
             )
@@ -3137,6 +4600,172 @@ preprocess:
     assert warnings == []
 
 
+def test_pair_aware_filter_higher_in_trait_1_excludes_trait_0_signal(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: pair_aware
+    max_features: 2
+    higher_in_trait: 1
+""".strip(),
+            )
+        ]
+    )
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [10.0, 0.0],
+                [0.0, 2.0],
+                [9.0, 0.0],
+                [0.0, 3.0],
+            ],
+            dtype=float,
+        ),
+        ["trait_0_signal", "trait_1_signal"],
+        y_train=np.array([0, 1, 0, 1], dtype=int),
+        groups_train=np.array(["g1", "g1", "g2", "g2"], dtype=str),
+        warnings=[],
+    )
+
+    assert selected.tolist() == [1]
+
+
+def test_pair_aware_filter_breaks_score_ties_by_feature_name(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: pair_aware
+    max_features: 2
+""".strip(),
+            )
+        ]
+    )
+
+    selected = _select_feature_indices(
+        config,
+        np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], dtype=float),
+        ["OG_z", "OG_a", "OG_m"],
+        y_train=np.array([0, 1], dtype=int),
+        groups_train=np.array(["g1", "g1"], dtype=str),
+        warnings=[],
+    )
+
+    assert selected.tolist() == [1, 2]
+
+
+def test_select_feature_indices_pair_aware_filter_uses_available_valid_contrast_pairs(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: pair_aware
+    max_features: 1
+    min_contrast_pairs: 2
+""".strip(),
+            )
+        ]
+    )
+    warnings: list[str] = []
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [0.0, 0.0],
+                [2.0, 1.0],
+                [0.0, 100.0],
+                [5.0, 5.0],
+                [0.0, 0.0],
+                [2.2, -1.0],
+            ],
+            dtype=float,
+        ),
+        ["OG1", "OG2"],
+        y_train=np.array([0, 1, 0, 1, 0, 1], dtype=int),
+        groups_train=np.array(["g1", "g1", None, "g2", "g3", "g3"], dtype=object),
+        warnings=warnings,
+    )
+
+    assert selected.tolist() == [0]
+    assert warnings == []
+
+
+def test_select_feature_indices_pair_aware_filter_uses_single_valid_pair_by_default(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: pair_aware
+    max_features: 1
+""".strip(),
+            )
+        ]
+    )
+    warnings: list[str] = []
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [0.0, 0.0],
+                [1.0, 5.0],
+            ],
+            dtype=float,
+        ),
+        ["OG1", "OG2"],
+        y_train=np.array([0, 1], dtype=int),
+        groups_train=np.array(["g1", "g1"], dtype=object),
+        warnings=warnings,
+    )
+
+    assert selected.tolist() == [1]
+    assert any("standard errors were unavailable" in item for item in warnings)
+
+
 def test_select_feature_indices_pair_aware_filter_skips_when_too_few_groups(
     tmp_path: Path,
 ) -> None:
@@ -3149,11 +4778,12 @@ def test_select_feature_indices_pair_aware_filter_skips_when_too_few_groups(
                 tpm,
                 extra="""
 preprocess:
-  low_prevalence_filter:
+  sparse_feature_filter:
     enabled: false
-  pair_aware_filter:
-    enabled: true
+  ranked_feature_filter:
+    method: pair_aware
     max_features: 1
+    min_contrast_pairs: 2
 """.strip(),
             )
         ]
@@ -3176,7 +4806,343 @@ preprocess:
     )
 
     assert selected.tolist() == [0, 1]
-    assert any("fewer than 2 training groups" in item for item in warnings)
+    assert any("too few valid contrast pairs" in item for item in warnings)
+
+
+def test_pair_aware_higher_in_trait_fails_closed_when_too_few_groups(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: pair_aware
+    max_features: 1
+    min_contrast_pairs: 2
+    higher_in_trait: 1
+""".strip(),
+            )
+        ]
+    )
+
+    with pytest.raises(CVError, match="cannot enforce higher_in_trait=1"):
+        _select_feature_indices(
+            config,
+            np.array([[0.0], [2.0]], dtype=float),
+            ["trait_1_signal"],
+            y_train=np.array([0, 1], dtype=int),
+            groups_train=np.array(["g1", "g1"], dtype=str),
+            warnings=[],
+        )
+
+
+def test_ranked_feature_filter_unpaired_uses_label_difference(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: unpaired
+    max_features: 1
+""".strip(),
+            )
+        ]
+    )
+    score_rows: list[dict[str, object]] = []
+
+    selected, counts = cv_mod._select_feature_indices_with_counts(
+        config,
+        np.array(
+            [
+                [0.0, 0.0],
+                [0.0, 10.0],
+                [2.0, 0.0],
+                [2.0, 10.0],
+            ],
+            dtype=float,
+        ),
+        ["label_signal", "within_label_variance"],
+        y_train=np.array([0, 0, 1, 1], dtype=int),
+        ranked_feature_score_rows=score_rows,
+    )
+
+    assert selected.tolist() == [0]
+    assert counts.n_features_after_ranked_feature_filter == 1
+    assert {row["method"] for row in score_rows} == {"unpaired"}
+    retained = {str(row["feature"]): bool(row["retained"]) for row in score_rows}
+    assert retained == {"label_signal": True, "within_label_variance": False}
+
+
+def test_ranked_feature_filter_higher_in_trait_1_excludes_stronger_trait_0_signal(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: unpaired
+    max_features: 2
+    higher_in_trait: 1
+""".strip(),
+            )
+        ]
+    )
+    score_rows: list[dict[str, object]] = []
+
+    selected, counts = cv_mod._select_feature_indices_with_counts(
+        config,
+        np.array(
+            [
+                [10.0, 0.0, 1.0],
+                [10.0, 0.0, 2.0],
+                [0.0, 2.0, 1.0],
+                [0.0, 2.0, 2.0],
+            ],
+            dtype=float,
+        ),
+        ["strong_trait_0_signal", "trait_1_signal", "no_label_effect"],
+        y_train=np.array([0, 0, 1, 1], dtype=int),
+        ranked_feature_score_rows=score_rows,
+    )
+
+    assert selected.tolist() == [1]
+    assert counts.n_features_after_ranked_feature_filter == 1
+    assert {row["higher_in_trait"] for row in score_rows} == {1}
+    retained = {str(row["feature"]): bool(row["retained"]) for row in score_rows}
+    assert retained == {
+        "strong_trait_0_signal": False,
+        "trait_1_signal": True,
+        "no_label_effect": False,
+    }
+    eligibility = {str(row["feature"]): bool(row["direction_match"]) for row in score_rows}
+    assert eligibility == {
+        "strong_trait_0_signal": False,
+        "trait_1_signal": True,
+        "no_label_effect": False,
+    }
+    ranks = {str(row["feature"]): row["rank"] for row in score_rows}
+    assert ranks["trait_1_signal"] == 1
+    assert ranks["strong_trait_0_signal"] is None
+    assert ranks["no_label_effect"] is None
+
+
+def test_ranked_feature_filter_can_retain_features_higher_in_trait_0(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: unpaired
+    max_features: 2
+    higher_in_trait: 0
+""".strip(),
+            )
+        ]
+    )
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [10.0, 0.0],
+                [10.0, 0.0],
+                [0.0, 2.0],
+                [0.0, 2.0],
+            ],
+            dtype=float,
+        ),
+        ["trait_0_signal", "trait_1_signal"],
+        y_train=np.array([0, 0, 1, 1], dtype=int),
+    )
+
+    assert selected.tolist() == [0]
+
+
+def test_ranked_feature_filter_higher_in_trait_fails_closed_when_no_feature_matches(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: unpaired
+    max_features: 2
+    higher_in_trait: 1
+""".strip(),
+            )
+        ]
+    )
+
+    with pytest.raises(CVError, match="higher_in_trait=1"):
+        _select_feature_indices(
+            config,
+            np.array(
+                [
+                    [10.0, 3.0],
+                    [10.0, 3.0],
+                    [0.0, 3.0],
+                    [0.0, 3.0],
+                ],
+                dtype=float,
+            ),
+            ["trait_0_signal", "no_label_effect"],
+            y_train=np.array([0, 0, 1, 1], dtype=int),
+        )
+
+
+def test_ranked_feature_filter_variance_is_label_independent(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: variance
+    max_features: 1
+""".strip(),
+            )
+        ]
+    )
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [0.0, 0.0],
+                [0.0, 10.0],
+                [1.0, 0.0],
+                [1.0, 10.0],
+            ],
+            dtype=float,
+        ),
+        ["label_signal", "high_variance"],
+    )
+
+    assert selected.tolist() == [1]
+
+
+def test_low_variance_and_ranked_filters_use_observed_nan_values(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  absent_feature_fill: nan
+  sparse_feature_filter:
+    enabled: false
+  low_variance_filter:
+    enabled: true
+    min_variance: 0.1
+  ranked_feature_filter:
+    method: variance
+    max_features: 1
+model:
+  name: random_forest
+""".strip(),
+            )
+        ]
+    )
+
+    selected = _select_feature_indices(
+        config,
+        np.array(
+            [
+                [0.0, 5.0, np.nan],
+                [1.0, np.nan, 0.0],
+                [np.nan, 5.0, 10.0],
+                [2.0, 5.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        ["moderate_variance", "constant", "high_variance"],
+    )
+
+    assert selected.tolist() == [2]
+
+
+def test_ranked_feature_filter_none_keeps_all_candidates(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  sparse_feature_filter:
+    enabled: false
+  ranked_feature_filter:
+    method: none
+    max_features: 1
+""".strip(),
+            )
+        ]
+    )
+    score_rows: list[dict[str, object]] = []
+
+    selected, _counts = cv_mod._select_feature_indices_with_counts(
+        config,
+        np.array([[0.0, 2.0], [1.0, 3.0]], dtype=float),
+        ["OG1", "OG2"],
+        ranked_feature_score_rows=score_rows,
+    )
+
+    assert selected.tolist() == [0, 1]
+    assert all(row["retained"] is True for row in score_rows)
+    assert all(row["skip_reason"] == "method_none" for row in score_rows)
 
 
 def test_select_feature_indices_calls_correlation_filter_when_enabled(
@@ -3191,7 +5157,7 @@ def test_select_feature_indices_calls_correlation_filter_when_enabled(
                 tpm,
                 extra="""
 preprocess:
-  low_prevalence_filter:
+  sparse_feature_filter:
     enabled: false
   correlation_filter:
     enabled: true
@@ -3256,6 +5222,47 @@ preprocess:
     assert kept.tolist() == [1]
 
 
+def test_apply_correlation_filter_uses_pairwise_complete_nan_observations(
+    tmp_path: Path,
+) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+preprocess:
+  absent_feature_fill: nan
+  correlation_filter:
+    enabled: true
+    max_abs_correlation: 0.9
+model:
+  name: random_forest
+""".strip(),
+            )
+        ]
+    )
+
+    kept = _apply_correlation_filter(
+        config,
+        x_train_log=np.array(
+            [
+                [0.0, 0.0],
+                [1.0, 1.0],
+                [2.0, np.nan],
+                [np.nan, 2.0],
+            ],
+            dtype=float,
+        ),
+        selected=np.array([0, 1], dtype=int),
+        feature_names=["OG1", "OG2"],
+    )
+
+    assert kept.tolist() == [0]
+
+
 def test_apply_correlation_filter_rejects_missing_threshold_when_mutated(tmp_path: Path) -> None:
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
@@ -3303,6 +5310,112 @@ sampling:
             training_scope_id="fold_0",
             warnings=[],
         )
+
+
+def test_training_group_subsets_are_reproducible_and_nested(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    y_train = np.array([0, 1] * 4, dtype=int)
+    groups_train = np.array(
+        ["g1", "g1", "g2", "g2", "g3", "g3", "g4", "g4"],
+        dtype=str,
+    )
+    config_two = config.model_copy(
+        update={
+            "sampling": config.sampling.model_copy(
+                update={"training_group_count": 2, "group_subsample_repeat_index": 3}
+            )
+        }
+    )
+    config_three = config.model_copy(
+        update={
+            "sampling": config.sampling.model_copy(
+                update={"training_group_count": 3, "group_subsample_repeat_index": 3}
+            )
+        }
+    )
+
+    selected_two = cv_mod._select_training_groups(
+        config_two,
+        y_train,
+        groups_train,
+        scope="outer_fold",
+        fold_id="1",
+    )
+    selected_two_again = cv_mod._select_training_groups(
+        config_two,
+        y_train,
+        groups_train,
+        scope="outer_fold",
+        fold_id="1",
+    )
+    selected_three = cv_mod._select_training_groups(
+        config_three,
+        y_train,
+        groups_train,
+        scope="outer_fold",
+        fold_id="1",
+    )
+
+    assert selected_two.group_ids == selected_two_again.group_ids
+    assert set(selected_two.group_ids) < set(selected_three.group_ids)
+    assert [row["group_rank"] for row in selected_three.audit_rows] == [1, 2, 3, 4]
+    assert sum(bool(row["selected"]) for row in selected_two.audit_rows) == 2
+
+
+def test_training_group_count_rejects_fewer_available_groups(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    strict_config = config.model_copy(
+        update={"sampling": config.sampling.model_copy(update={"training_group_count": 5})}
+    )
+
+    with pytest.raises(
+        CVError,
+        match="requires exactly 5 training groups, but only 4 are available",
+    ):
+        cv_mod._select_training_groups(
+            strict_config,
+            np.array([0, 1] * 4, dtype=int),
+            np.array(
+                ["g1", "g1", "g2", "g2", "g3", "g3", "g4", "g4"],
+                dtype=str,
+            ),
+            scope="outer_fold",
+            fold_id="1",
+        )
+
+
+def test_sample_training_sets_uses_only_selected_groups(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config(
+        [
+            _config_path(
+                tmp_path,
+                metadata,
+                tpm,
+                extra="""
+sampling:
+  strategy: all_samples
+  max_samples_per_label_per_group: null
+  sampled_set_count: 1
+  training_group_count: 1
+""".strip(),
+            )
+        ]
+    )
+
+    sampled_sets = cv_mod._sample_training_sets(
+        config=config,
+        y_train=np.array([0, 1, 0, 1], dtype=int),
+        groups_train=np.array(["g1", "g1", "g2", "g2"], dtype=str),
+        training_scope_id="fold_1",
+        warnings=[],
+        selected_group_ids=("g2",),
+    )
+
+    assert len(sampled_sets) == 1
+    assert sampled_sets[0].tolist() == [2, 3]
 
 
 def test_sample_training_sets_rejects_k_zero_when_mutated(tmp_path: Path) -> None:
@@ -3490,6 +5603,30 @@ def test_inner_cv_splits_supports_group_kfold(tmp_path: Path) -> None:
     assert len(rows) == 2
 
 
+def test_inner_cv_splits_supports_stratified_group_kfold(tmp_path: Path) -> None:
+    metadata, tpm = _write_fixture(tmp_path)
+    config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
+    stratified_config = config.model_copy(
+        update={
+            "model_selection": config.model_selection.model_copy(
+                update={
+                    "inner_cv_strategy": "stratified_group_kfold",
+                    "inner_cv_n_splits": 2,
+                }
+            )
+        }
+    )
+    y = np.array([1, 0, 1, 0, 1, 0, 1, 0], dtype=int)
+    groups = np.array(["g1", "g1", "g2", "g2", "g3", "g3", "g4", "g4"], dtype=str)
+
+    rows = _inner_cv_splits(stratified_config, y, groups)
+
+    assert len(rows) == 2
+    for train_idx, valid_idx, _fold_id in rows:
+        assert set(groups[train_idx]).isdisjoint(set(groups[valid_idx]))
+        assert set(y[valid_idx]) == {0, 1}
+
+
 def test_inner_cv_splits_rejects_empty_train_or_validation_split(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3600,7 +5737,7 @@ def test_prepare_source_selection_tpe_maps_nan_objective_score_to_none(
                 update={
                     "search_strategy": "tpe",
                     "trial_count": 1,
-                    "search_space": {"C": [0.1]},
+                    "search_space": {"alpha": [0.1]},
                     "selected_candidate_count": 1,
                     "inner_cv_strategy": "logo",
                 }
@@ -3647,7 +5784,7 @@ model_selection:
     monkeypatch.setattr(
         cv_mod,
         "generate_candidates",
-        lambda **_kwargs: [Candidate(candidate_index=0, params={"C": 1.0})],
+        lambda **_kwargs: [Candidate(candidate_index=0, params={"alpha": 1.0})],
     )
 
     with pytest.raises(CVError, match="Selection source sampled set became single-class"):
@@ -3664,38 +5801,11 @@ model_selection:
         )
 
 
-def test_derive_cv_threshold_supports_balanced_accuracy_metric(tmp_path: Path) -> None:
-    metadata, tpm = _write_fixture(tmp_path)
-    config = load_and_resolve_config(
-        [
-            _config_path(
-                tmp_path,
-                metadata,
-                tpm,
-                extra="""
-report:
-  auto_threshold_selection_metric: balanced_accuracy
-""".strip(),
-            )
-        ]
-    )
-
-    threshold, warning = _derive_cv_threshold(
-        config,
-        y_true=np.array([0, 1], dtype=int),
-        prob=np.array([0.2, 0.8], dtype=float),
-    )
-
-    assert threshold == pytest.approx(0.8)
-    assert warning is None
-
-
 def test_build_prediction_table_includes_uncertainty_when_provided() -> None:
     table = _build_prediction_table(
         species=["sp1", "sp2"],
         prob=np.array([0.2, 0.8], dtype=float),
         fixed_threshold=0.5,
-        cv_threshold=0.4,
         uncertainty_std=np.array([0.01, 0.02], dtype=float),
     )
 
@@ -3716,7 +5826,7 @@ def test_run_final_refit_rejects_null_label_or_group_values(tmp_path: Path) -> N
     )
 
     with pytest.raises(CVError, match="contains null label/group values"):
-        run_final_refit(config, split_manifest, cv_threshold=0.5)
+        run_final_refit(config, split_manifest)
 
 
 def _one_selected_candidate_result() -> cv_mod.SourceSelectionResult:
@@ -3752,7 +5862,7 @@ def test_run_final_refit_rejects_when_no_candidates_are_selected(
     )
 
     with pytest.raises(CVError, match="No candidates were selected for final_refit"):
-        run_final_refit(config, split_artifacts.split_manifest, cv_threshold=0.5)
+        run_final_refit(config, split_artifacts.split_manifest)
 
 
 def test_run_final_refit_rejects_single_class_sampled_training_set(
@@ -3773,7 +5883,7 @@ def test_run_final_refit_rejects_single_class_sampled_training_set(
     )
 
     with pytest.raises(CVError, match="Final refit sampled training set became single-class"):
-        run_final_refit(config, split_artifacts.split_manifest, cv_threshold=0.5)
+        run_final_refit(config, split_artifacts.split_manifest)
 
 
 def test_run_outer_cv_rejects_fold_with_empty_train_or_validation_split(tmp_path: Path) -> None:

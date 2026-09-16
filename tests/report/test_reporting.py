@@ -7,8 +7,10 @@ import polars as pl
 import pytest
 
 import phenoradar.reporting as reporting_mod
+from phenoradar import __version__
 from phenoradar.figures import FigureError
-from phenoradar.reporting import ReportError, ReportOptions, generate_report
+from phenoradar.metrics import evaluation_metric_contract
+from phenoradar.reporting import PrimaryMetric, ReportError, ReportOptions, generate_report
 
 
 def _write(path: Path, text: str) -> Path:
@@ -24,23 +26,47 @@ def _write_run_dir(
     stage: str,
     start_time: str,
     metric_value: float | None,
+    metric_name: PrimaryMetric = "mcc",
     include_metrics: bool = True,
     metrics_valid_schema: bool = True,
+    experiment_fingerprint_value: str | None = "c" * 64,
+    phenoradar_version_value: str | None = __version__,
 ) -> Path:
     run_dir = runs_root / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
+    metadata = {
+        "command": "predict" if stage == "predict" else "run",
+        "execution_stage": stage,
+        "status": "ok",
+        "start_time": start_time,
+        "end_time": start_time,
+        "duration_sec": 1.0,
+        "warnings": [],
+        "provenance_schema_version": 1,
+        "phenoradar_install_type": "installed_distribution",
+        "git_source": "unavailable",
+        "git_commit": "unknown",
+        "git_dirty": None,
+        "git_worktree_patch_sha256": None,
+        "evaluation_contract": {
+            "metric_contract": evaluation_metric_contract(),
+        },
+    }
+    if phenoradar_version_value is not None:
+        metadata["phenoradar_version"] = phenoradar_version_value
+    if experiment_fingerprint_value is not None:
+        metadata.update(
+            {
+                "fingerprint_schema_version": 1,
+                "dataset_fingerprint": "a" * 64,
+                "split_fingerprint": "b" * 64,
+                "experiment_fingerprint": experiment_fingerprint_value,
+            }
+        )
     _write(
         run_dir / "run_metadata.json",
         json.dumps(
-            {
-                "command": "predict" if stage == "predict" else "run",
-                "execution_stage": stage,
-                "status": "ok",
-                "start_time": start_time,
-                "end_time": start_time,
-                "duration_sec": 1.0,
-                "warnings": [],
-            },
+            metadata,
             ensure_ascii=True,
             sort_keys=True,
             indent=2,
@@ -57,7 +83,7 @@ def _write_run_dir(
                 {
                     "aggregate_scope": ["macro"],
                     "fold_id": ["NA"],
-                    "metric": ["mcc"],
+                    "metric": [metric_name],
                     "metric_value": [metric_value if metric_value is not None else float("nan")],
                 }
             ).write_csv(run_dir / "metrics_cv.tsv", separator="\t")
@@ -74,17 +100,20 @@ def _write_run_dir(
 
 def _options(
     *,
+    primary_metric: PrimaryMetric = "mcc",
     include_stage: str = "all",
     strict: bool = True,
+    allow_mixed_experiments: bool = False,
 ) -> ReportOptions:
     return ReportOptions(
-        primary_metric="mcc",
+        primary_metric=primary_metric,
         aggregate_scope="macro",
         include_stage=include_stage,
         output_format="tsv",
         strict=strict,
         run_glob="*",
         latest=None,
+        allow_mixed_experiments=allow_mixed_experiments,
     )
 
 
@@ -137,14 +166,34 @@ def test_load_metric_value_returns_none_when_multiple_rows_match(tmp_path: Path)
     assert value is None
 
 
-def test_load_metric_value_returns_none_for_nan_metric(tmp_path: Path) -> None:
+def test_load_metric_value_reads_na_fold_after_many_numeric_folds(tmp_path: Path) -> None:
+    metrics_path = tmp_path / "metrics_cv.tsv"
+    rows = ["aggregate_scope\tfold_id\tmetric\tmetric_value"]
+    rows.extend(f"NA\t{fold_id}\tmcc\t0.5" for fold_id in range(1, 102))
+    rows.append("micro\tNA\tmcc\t0.8")
+    _write(metrics_path, "\n".join(rows) + "\n")
+
+    value = reporting_mod._load_metric_value(
+        metrics_path=metrics_path,
+        aggregate_scope="micro",
+        primary_metric="mcc",
+    )
+
+    assert value == pytest.approx(0.8)
+
+
+@pytest.mark.parametrize("invalid_metric", [float("nan"), float("inf"), float("-inf")])
+def test_load_metric_value_returns_none_for_non_finite_metric(
+    tmp_path: Path,
+    invalid_metric: float,
+) -> None:
     metrics_path = tmp_path / "metrics_cv.tsv"
     pl.DataFrame(
         {
             "aggregate_scope": ["macro"],
             "fold_id": ["NA"],
             "metric": ["mcc"],
-            "metric_value": [float("nan")],
+            "metric_value": [invalid_metric],
         }
     ).write_csv(metrics_path, separator="\t")
 
@@ -157,7 +206,90 @@ def test_load_metric_value_returns_none_for_nan_metric(tmp_path: Path) -> None:
     assert value is None
 
 
-def test_generate_report_ranking_tie_breaks_by_start_time_then_run_id(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    (
+        "primary_metric",
+        "metric_values",
+        "expected_run_ids",
+        "expected_values",
+        "expected_direction",
+    ),
+    [
+        (
+            "mcc",
+            (-0.2, 0.1, 0.8),
+            ["20260101T000003Z_run_c", "20260101T000002Z_run_b", "20260101T000001Z_run_a"],
+            [0.8, 0.1, -0.2],
+            "maximize",
+        ),
+        (
+            "brier",
+            (0.20, 0.40, 0.05),
+            ["20260101T000003Z_run_c", "20260101T000001Z_run_a", "20260101T000002Z_run_b"],
+            [0.05, 0.20, 0.40],
+            "minimize",
+        ),
+    ],
+)
+def test_generate_report_ranks_metrics_in_their_better_direction(
+    tmp_path: Path,
+    primary_metric: PrimaryMetric,
+    metric_values: tuple[float, float, float],
+    expected_run_ids: list[str],
+    expected_values: list[float],
+    expected_direction: str,
+) -> None:
+    runs_root = tmp_path / "runs"
+    for run_id, start_time, metric_value in zip(
+        [
+            "20260101T000001Z_run_a",
+            "20260101T000002Z_run_b",
+            "20260101T000003Z_run_c",
+        ],
+        [
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-02T00:00:00+00:00",
+            "2026-01-03T00:00:00+00:00",
+        ],
+        metric_values,
+        strict=True,
+    ):
+        _write_run_dir(
+            runs_root,
+            run_id=run_id,
+            stage="full_run",
+            start_time=start_time,
+            metric_value=metric_value,
+            metric_name=primary_metric,
+        )
+
+    out_dir = tmp_path / "report_out"
+    generate_report(
+        run_dirs=[],
+        runs_root=runs_root,
+        run_glob="*",
+        latest=None,
+        options=_options(primary_metric=primary_metric),
+        output_dir=out_dir,
+    )
+
+    ranking = pl.read_csv(out_dir / "report_ranking.tsv", separator="\t")
+    assert ranking.select("run_id").to_series().to_list() == expected_run_ids
+    assert ranking.select("metric_value").to_series().to_list() == expected_values
+    assert ranking.select("rank").to_series().to_list() == [1, 2, 3]
+    manifest = json.loads((out_dir / "report_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["report_options"]["metric_direction"] == expected_direction
+    direction_label = "higher is better" if expected_direction == "maximize" else "lower is better"
+    for figure_name in ["report_metric_ranking.svg", "report_metric_comparison.svg"]:
+        figure_text = (out_dir / "figures" / figure_name).read_text(encoding="utf-8")
+        assert direction_label in figure_text
+
+
+@pytest.mark.parametrize("primary_metric", ["mcc", "brier"])
+def test_generate_report_ranking_tie_breaks_by_start_time_then_run_id(
+    tmp_path: Path,
+    primary_metric: PrimaryMetric,
+) -> None:
     runs_root = tmp_path / "runs"
     _write_run_dir(
         runs_root,
@@ -165,6 +297,7 @@ def test_generate_report_ranking_tie_breaks_by_start_time_then_run_id(tmp_path: 
         stage="full_run",
         start_time="2026-01-02T00:00:00+00:00",
         metric_value=0.8,
+        metric_name=primary_metric,
     )
     _write_run_dir(
         runs_root,
@@ -172,6 +305,7 @@ def test_generate_report_ranking_tie_breaks_by_start_time_then_run_id(tmp_path: 
         stage="full_run",
         start_time="2026-01-01T00:00:00+00:00",
         metric_value=0.8,
+        metric_name=primary_metric,
     )
     _write_run_dir(
         runs_root,
@@ -179,6 +313,7 @@ def test_generate_report_ranking_tie_breaks_by_start_time_then_run_id(tmp_path: 
         stage="full_run",
         start_time="2026-01-01T00:00:00+00:00",
         metric_value=0.8,
+        metric_name=primary_metric,
     )
     out_dir = tmp_path / "report_out"
 
@@ -187,7 +322,7 @@ def test_generate_report_ranking_tie_breaks_by_start_time_then_run_id(tmp_path: 
         runs_root=runs_root,
         run_glob="*",
         latest=None,
-        options=_options(include_stage="all", strict=True),
+        options=_options(primary_metric=primary_metric, include_stage="all", strict=True),
         output_dir=out_dir,
     )
 
@@ -198,6 +333,283 @@ def test_generate_report_ranking_tie_breaks_by_start_time_then_run_id(tmp_path: 
         "20260101T000003Z_run_z",
     ]
     assert ranking.select("rank").to_series().to_list() == [1, 2, 3]
+
+
+def test_generate_report_records_average_precision_definition_for_pr_auc(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    _write_run_dir(
+        runs_root,
+        run_id="20260101T000001Z_run_pr",
+        stage="full_run",
+        start_time="2026-01-01T00:00:00+00:00",
+        metric_value=0.7,
+        metric_name="pr_auc",
+    )
+    out_dir = tmp_path / "report_out"
+
+    generate_report(
+        run_dirs=[],
+        runs_root=runs_root,
+        run_glob="*",
+        latest=None,
+        options=_options(primary_metric="pr_auc"),
+        output_dir=out_dir,
+    )
+
+    ranking = pl.read_csv(out_dir / "report_ranking.tsv", separator="\t")
+    row = ranking.row(0, named=True)
+    assert row["metric_display_name"] == "Average Precision"
+    assert row["metric_implementation"] == "sklearn.metrics.average_precision_score"
+    assert row["metric_threshold_name"] is None
+    manifest = json.loads((out_dir / "report_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["report_options"]["metric_display_name"] == "Average Precision"
+    assert (
+        manifest["report_options"]["metric_implementation"]
+        == "sklearn.metrics.average_precision_score"
+    )
+    figure_text = (out_dir / "figures" / "report_metric_ranking.svg").read_text(
+        encoding="utf-8"
+    )
+    assert "Average Precision [pr_auc]" in figure_text
+
+
+def test_generate_report_rejects_mixed_experiment_fingerprints_by_default(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    _write_run_dir(
+        runs_root,
+        run_id="20260101T000001Z_run_a",
+        stage="full_run",
+        start_time="2026-01-01T00:00:00+00:00",
+        metric_value=0.7,
+        experiment_fingerprint_value="c" * 64,
+    )
+    _write_run_dir(
+        runs_root,
+        run_id="20260101T000002Z_run_b",
+        stage="full_run",
+        start_time="2026-01-02T00:00:00+00:00",
+        metric_value=0.8,
+        experiment_fingerprint_value="d" * 64,
+    )
+
+    with pytest.raises(ReportError, match="--allow-mixed-experiments"):
+        generate_report(
+            run_dirs=[],
+            runs_root=runs_root,
+            run_glob="*",
+            latest=None,
+            options=_options(),
+            output_dir=tmp_path / "report_out",
+        )
+
+
+def test_generate_report_allows_mixed_experiments_only_with_explicit_override(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    for run_id, fingerprint in [
+        ("20260101T000001Z_run_a", "c" * 64),
+        ("20260101T000002Z_run_b", "d" * 64),
+    ]:
+        _write_run_dir(
+            runs_root,
+            run_id=run_id,
+            stage="full_run",
+            start_time="2026-01-01T00:00:00+00:00",
+            metric_value=0.8,
+            experiment_fingerprint_value=fingerprint,
+        )
+    out_dir = tmp_path / "report_out"
+
+    generate_report(
+        run_dirs=[],
+        runs_root=runs_root,
+        run_glob="*",
+        latest=None,
+        options=_options(allow_mixed_experiments=True),
+        output_dir=out_dir,
+    )
+
+    report_runs = pl.read_csv(out_dir / "report_runs.tsv", separator="\t")
+    assert {
+        "fingerprint_schema_version",
+        "dataset_fingerprint",
+        "split_fingerprint",
+        "experiment_fingerprint",
+    }.issubset(report_runs.columns)
+    warnings = pl.read_csv(out_dir / "report_warnings.tsv", separator="\t")
+    assert warnings.filter(pl.col("warning_type") == "mixed_experiments").height == 2
+    manifest = json.loads((out_dir / "report_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["experiment_compatibility"]["status"] == "mixed_override"
+    assert manifest["experiment_compatibility"]["mixed"] is True
+    assert manifest["report_options"]["allow_mixed_experiments"] is True
+
+
+def test_generate_report_warns_when_phenoradar_versions_are_mixed(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    for run_id, version in [
+        ("20260101T000001Z_run_a", "0.4.0"),
+        ("20260101T000002Z_run_b", "0.5.0"),
+    ]:
+        _write_run_dir(
+            runs_root,
+            run_id=run_id,
+            stage="full_run",
+            start_time="2026-01-01T00:00:00+00:00",
+            metric_value=0.8,
+            phenoradar_version_value=version,
+        )
+    out_dir = tmp_path / "report_out"
+
+    generate_report(
+        run_dirs=[],
+        runs_root=runs_root,
+        run_glob="*",
+        latest=None,
+        options=_options(),
+        output_dir=out_dir,
+    )
+
+    report_runs = pl.read_csv(out_dir / "report_runs.tsv", separator="\t")
+    assert {
+        "provenance_schema_version",
+        "phenoradar_version",
+        "phenoradar_install_type",
+        "git_source",
+        "git_commit",
+        "git_dirty",
+        "git_worktree_patch_sha256",
+    }.issubset(report_runs.columns)
+    warnings = pl.read_csv(out_dir / "report_warnings.tsv", separator="\t")
+    assert warnings.filter(pl.col("warning_type") == "mixed_phenoradar_versions").height == 2
+    manifest = json.loads((out_dir / "report_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["software_compatibility"] == {
+        "dirty_run_ids": [],
+        "mixed": True,
+        "phenoradar_versions": ["0.4.0", "0.5.0"],
+        "status": "mixed",
+        "unknown_run_ids": [],
+    }
+    assert manifest["generated_by"]["phenoradar_version"] == __version__
+
+
+def test_generate_report_warns_when_phenoradar_version_is_missing(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    _write_run_dir(
+        runs_root,
+        run_id="20260101T000001Z_run_legacy",
+        stage="full_run",
+        start_time="2026-01-01T00:00:00+00:00",
+        metric_value=0.7,
+        phenoradar_version_value=None,
+    )
+    out_dir = tmp_path / "report_out"
+
+    generate_report(
+        run_dirs=[],
+        runs_root=runs_root,
+        run_glob="*",
+        latest=None,
+        options=_options(strict=False),
+        output_dir=out_dir,
+    )
+
+    warnings = pl.read_csv(out_dir / "report_warnings.tsv", separator="\t")
+    assert warnings.filter(pl.col("warning_type") == "missing_phenoradar_version").height == 1
+    manifest = json.loads((out_dir / "report_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["software_compatibility"]["status"] == "legacy_unverified"
+    assert manifest["software_compatibility"]["unknown_run_ids"] == [
+        "20260101T000001Z_run_legacy"
+    ]
+
+
+def test_generate_report_legacy_fingerprint_policy_depends_on_strict_mode(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    _write_run_dir(
+        runs_root,
+        run_id="20260101T000001Z_run_legacy",
+        stage="full_run",
+        start_time="2026-01-01T00:00:00+00:00",
+        metric_value=0.7,
+        experiment_fingerprint_value=None,
+    )
+    non_strict_out = tmp_path / "report_non_strict"
+
+    generate_report(
+        run_dirs=[],
+        runs_root=runs_root,
+        run_glob="*",
+        latest=None,
+        options=_options(strict=False),
+        output_dir=non_strict_out,
+    )
+
+    warnings = pl.read_csv(non_strict_out / "report_warnings.tsv", separator="\t")
+    assert warnings.filter(
+        pl.col("warning_type") == "missing_experiment_fingerprint"
+    ).height == 1
+    manifest = json.loads(
+        (non_strict_out / "report_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["experiment_compatibility"]["status"] == "legacy_unverified"
+
+    with pytest.raises(ReportError, match="missing or invalid experiment fingerprint"):
+        generate_report(
+            run_dirs=[],
+            runs_root=runs_root,
+            run_glob="*",
+            latest=None,
+            options=_options(strict=True),
+            output_dir=tmp_path / "report_strict",
+        )
+
+
+def test_generate_report_does_not_infer_missing_run_metric_contract(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = _write_run_dir(
+        runs_root,
+        run_id="20260101T000001Z_run_old_contract",
+        stage="full_run",
+        start_time="2026-01-01T00:00:00+00:00",
+        metric_value=0.7,
+    )
+    metadata_path = run_dir / "run_metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.pop("evaluation_contract")
+    _write(metadata_path, json.dumps(metadata, sort_keys=True, indent=2) + "\n")
+    non_strict_out = tmp_path / "report_non_strict"
+
+    generate_report(
+        run_dirs=[],
+        runs_root=runs_root,
+        run_glob="*",
+        latest=None,
+        options=_options(strict=False),
+        output_dir=non_strict_out,
+    )
+
+    warnings = pl.read_csv(non_strict_out / "report_warnings.tsv", separator="\t")
+    assert warnings.filter(pl.col("warning_type") == "missing_metric_contract").height == 1
+    report_runs = pl.read_csv(non_strict_out / "report_runs.tsv", separator="\t")
+    assert report_runs.row(0, named=True)["metric_implementation"] is None
+
+    with pytest.raises(ReportError, match="Missing or invalid evaluation contract"):
+        generate_report(
+            run_dirs=[],
+            runs_root=runs_root,
+            run_glob="*",
+            latest=None,
+            options=_options(strict=True),
+            output_dir=tmp_path / "report_strict",
+        )
 
 
 def test_generate_report_include_stage_predict_filters_and_leaves_empty_ranking(
@@ -658,6 +1070,13 @@ def test_generate_report_collects_run_warning_entries_from_metadata(tmp_path: Pa
                 "end_time": "2026-01-01T00:00:00+00:00",
                 "duration_sec": 1.0,
                 "warnings": ["warning-a", "warning-b"],
+                "fingerprint_schema_version": 1,
+                "dataset_fingerprint": "a" * 64,
+                "split_fingerprint": "b" * 64,
+                "experiment_fingerprint": "c" * 64,
+                "evaluation_contract": {
+                    "metric_contract": evaluation_metric_contract(),
+                },
             },
             ensure_ascii=True,
         )
