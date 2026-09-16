@@ -20,7 +20,6 @@ OuterCvStrategy = Literal["logo", "group_kfold", "stratified_group_kfold"]
 SamplingStrategy = Literal["all_samples", "group_balanced"]
 WeightingMode = Literal["none", "group_label_inverse"]
 ModelName = Literal["logistic_elasticnet", "linear_svm", "random_forest"]
-LogisticSolver = Literal["saga", "liblinear"]
 ProbabilityAggregation = Literal["mean", "median"]
 SearchStrategy = Literal["grid", "random", "tpe"]
 CandidateSourcePolicy = Literal["per_sample_set", "reuse_first_sample_set"]
@@ -332,7 +331,6 @@ class ModelConfig(StrictModel):
     """Model family selection."""
 
     name: ModelName = "logistic_elasticnet"
-    logistic_solver: LogisticSolver = "saga"
     logistic_warm_start_path: bool = False
 
 
@@ -572,38 +570,21 @@ class AppConfig(StrictModel):
                     "groups required by model-selection inner CV; "
                     f"required={required_groups}"
                 )
-        if self.model.logistic_solver == "liblinear":
-            if self.model.name != "logistic_elasticnet":
+        if self.model.name == "logistic_elasticnet":
+            supported = {"alpha", "l1_ratio", "max_iter", "gradient_tol"}
+            unsupported = sorted(set(self.model_selection.search_space) - supported)
+            if unsupported:
                 raise ValueError(
-                    "model.logistic_solver=liblinear is only valid when "
-                    "model.name=logistic_elasticnet"
-                )
-            l1_ratio_values = self.model_selection.search_space.get("l1_ratio")
-            if not isinstance(l1_ratio_values, list) or not l1_ratio_values:
-                raise ValueError(
-                    "model.logistic_solver=liblinear requires an explicit "
-                    "model_selection.search_space.l1_ratio list containing only 0 or 1"
-                )
-            try:
-                unsupported_l1_ratio = any(
-                    float(value) not in {0.0, 1.0} for value in l1_ratio_values
-                )
-            except (TypeError, ValueError):
-                unsupported_l1_ratio = True
-            if unsupported_l1_ratio:
-                raise ValueError(
-                    "model.logistic_solver=liblinear supports only l1_ratio values 0 or 1"
+                    "Unsupported model_selection.search_space parameter(s) for "
+                    f"logistic_elasticnet: {', '.join(unsupported)}. "
+                    "Use glum parameters alpha, l1_ratio, max_iter, gradient_tol; "
+                    "alpha controls regularization directly (larger means stronger)."
                 )
         if self.model.logistic_warm_start_path:
             if self.model.name != "logistic_elasticnet":
                 raise ValueError(
                     "model.logistic_warm_start_path=true is only valid when "
                     "model.name=logistic_elasticnet"
-                )
-            if self.model.logistic_solver != "saga":
-                raise ValueError(
-                    "model.logistic_warm_start_path=true requires "
-                    "model.logistic_solver=saga"
                 )
             if self.model_selection.search_strategy != "grid":
                 raise ValueError(

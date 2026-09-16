@@ -229,6 +229,18 @@ After all folds:
 
 ## Model selection behavior details
 
+Logistic elastic net uses glum's binomial GLM with the `irls-cd` solver,
+an unpenalized intercept, and no additional predictor scaling inside glum.
+The native `alpha` parameter penalizes the sample-weighted mean log loss;
+larger `alpha` means stronger regularization. SVM and random forest retain
+their scikit-learn implementations.
+
+An optional serial grid path (`model.logistic_warm_start_path=true`) reuses
+coefficients within each inner fold, fitting descending `alpha` values for
+candidates with identical remaining parameters. Coefficients are never shared
+between folds. The one-SE rule prefers larger `alpha` and then larger
+`l1_ratio` among eligible logistic candidates.
+
 Neutral logistic regression retains missing values throughout feature filtering
 and fits standardization only on training observations. Its persisted scaler
 replaces missing standardized values with zero immediately before the model.

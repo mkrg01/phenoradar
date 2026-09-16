@@ -34,7 +34,7 @@ def test_annotated_config_round_trips_all_fields_and_quoted_values() -> None:
     assert yaml.safe_load(rendered) == config.model_dump(mode="python")
     assert serialize_resolved_config(config) == rendered
     assert "require_both_labels_per_group: false  # choices: true, false" in rendered
-    assert "logistic_solver: saga  # choices: saga, liblinear" in rendered
+    assert "logistic_solver" not in rendered
     assert "logistic_warm_start_path: false  # choices: true, false" in rendered
     assert "higher_in_trait: null  # choices: 0, 1, null" in rendered
     assert (
@@ -63,7 +63,7 @@ def test_annotated_search_space_preserves_values_and_lists_range_types(
             "model_selection": {
                 "search_strategy": "tpe",
                 "trial_count": 3,
-                "search_space": {"C": spec, "l1_ratio": [0.0, 1.0]},
+                "search_space": {"alpha": spec, "l1_ratio": [0.0, 1.0]},
             }
         }
     )
@@ -96,7 +96,7 @@ sampling:
   weighting: none
 model_selection:
   search_space:
-    C: [0.1, 1.0]
+    alpha: [0.1, 1.0]
 """.strip()
         + "\n",
     )
@@ -107,7 +107,7 @@ sampling:
   weighting: group_label_inverse
 model_selection:
   search_space:
-    C: [10.0]
+    alpha: [10.0]
 """.strip()
         + "\n",
     )
@@ -116,7 +116,7 @@ model_selection:
 
     assert resolved.runtime.seed == 99
     assert resolved.sampling.weighting == "group_label_inverse"
-    assert resolved.model_selection.search_space["C"] == [10.0]
+    assert resolved.model_selection.search_space["alpha"] == [10.0]
 
 
 def test_missing_config_file_is_rejected(tmp_path: Path) -> None:
@@ -139,7 +139,6 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.sampling.group_subsample_repeats == 1
     assert resolved.sampling.group_subsample_repeat_index == 1
     assert resolved.sampling.weighting == "none"
-    assert resolved.model.logistic_solver == "saga"
     assert resolved.model.logistic_warm_start_path is False
     assert resolved.model_selection.selection_metric == "log_loss"
     assert resolved.model_selection.selection_rule == "best"
@@ -357,7 +356,7 @@ def test_grid_rejects_continuous_search_space(tmp_path: Path) -> None:
 model_selection:
   search_strategy: grid
   search_space:
-    C:
+    alpha:
       type: continuous_range
       start: 0.1
       end: 1.0
@@ -377,7 +376,7 @@ model_selection:
   search_strategy: random
   trial_count: 2
   search_space:
-    C:
+    alpha:
       type: log_range
       base: 10
       start_exp: -1
@@ -943,7 +942,7 @@ def test_log_range_rejects_end_exp_less_than_start_exp(tmp_path: Path) -> None:
         """
 model_selection:
   search_space:
-    C:
+    alpha:
       type: log_range
       base: 10
       start_exp: 1.0
@@ -965,7 +964,7 @@ model_selection:
   search_strategy: random
   trial_count: 10
   search_space:
-    C:
+    alpha:
       type: continuous_log_range
       base: 10
       start_exp: 1.0
@@ -984,7 +983,7 @@ def test_model_selection_search_space_rejects_empty_list(tmp_path: Path) -> None
         """
 model_selection:
   search_space:
-    C: []
+    alpha: []
 """.strip()
         + "\n",
     )
@@ -1008,71 +1007,66 @@ model:
         load_and_resolve_config([cfg])
 
 
-def test_liblinear_solver_accepts_explicit_l1_or_l2_ratios(tmp_path: Path) -> None:
+@pytest.mark.parametrize("solver", ["saga", "liblinear"])
+def test_legacy_logistic_solver_is_rejected(tmp_path: Path, solver: str) -> None:
+    cfg = _write(tmp_path / "legacy.yml", f"model:\n  logistic_solver: {solver}\n")
+
+    with pytest.raises(ConfigError, match="logistic_solver"):
+        load_and_resolve_config([cfg])
+
+
+def test_glum_search_space_accepts_full_elastic_net_range(tmp_path: Path) -> None:
     cfg = _write(
-        tmp_path / "liblinear.yml",
+        tmp_path / "glum.yml",
         """
 model:
   name: logistic_elasticnet
-  logistic_solver: liblinear
+  logistic_warm_start_path: true
 model_selection:
   search_space:
-    l1_ratio: [0, 1]
-""".strip()
-        + "\n",
+    alpha: [0.0001, 0.01, 0.1]
+    l1_ratio: [0, 0.5, 1]
+    max_iter: [100]
+    gradient_tol: [1.0e-6]
+""".lstrip(),
     )
 
     resolved = load_and_resolve_config([cfg])
 
-    assert resolved.model.logistic_solver == "liblinear"
+    assert resolved.model.logistic_warm_start_path is True
+    assert resolved.model_selection.search_space == {
+        "alpha": [0.0001, 0.01, 0.1],
+        "l1_ratio": [0, 0.5, 1],
+        "max_iter": [100],
+        "gradient_tol": [1.0e-6],
+    }
 
 
-@pytest.mark.parametrize(
-    "extra, message",
-    [
-        (
-            """
-model:
-  name: logistic_elasticnet
-  logistic_solver: liblinear
-""",
-            "requires an explicit",
-        ),
-        (
-            """
-model:
-  name: logistic_elasticnet
-  logistic_solver: liblinear
-model_selection:
-  search_space:
-    l1_ratio: [0.5]
-""",
-            "supports only l1_ratio values 0 or 1",
-        ),
-        (
-            """
-model:
-  name: random_forest
-  logistic_solver: liblinear
-model_selection:
-  search_space:
-    l1_ratio: [1]
-""",
-            "only valid when model.name=logistic_elasticnet",
-        ),
-    ],
-)
-def test_liblinear_solver_rejects_incompatible_config(
-    tmp_path: Path,
-    extra: str,
-    message: str,
+@pytest.mark.parametrize("parameter", ["C", "tol", "penalty"])
+def test_logistic_search_space_rejects_sklearn_parameters(
+    tmp_path: Path, parameter: str
 ) -> None:
-    cfg = _write(tmp_path / "invalid_liblinear.yml", extra.strip() + "\n")
+    cfg = _write(
+        tmp_path / "legacy.yml",
+        f"model_selection:\n  search_space:\n    {parameter}: [1.0]\n",
+    )
 
-    with pytest.raises(ConfigError, match=message):
+    with pytest.raises(ConfigError, match="Use glum parameters alpha"):
         load_and_resolve_config([cfg])
 
 
+def test_linear_svm_retains_c_search_parameter(tmp_path: Path) -> None:
+    cfg = _write(
+        tmp_path / "svm.yml",
+        "model:\n  name: linear_svm\n"
+        "model_selection:\n  search_space:\n    C: [0.1, 1.0]\n",
+    )
+
+    assert load_and_resolve_config([cfg]).model_selection.search_space == {
+        "C": [0.1, 1.0]
+    }
+
+
 @pytest.mark.parametrize(
     "extra, message",
     [
@@ -1083,18 +1077,6 @@ model:
   logistic_warm_start_path: true
 """,
             "only valid when model.name=logistic_elasticnet",
-        ),
-        (
-            """
-model:
-  name: logistic_elasticnet
-  logistic_solver: liblinear
-  logistic_warm_start_path: true
-model_selection:
-  search_space:
-    l1_ratio: [1]
-""",
-            "requires model.logistic_solver=saga",
         ),
         (
             """
@@ -1140,7 +1122,7 @@ def test_range_requires_stop_greater_or_equal_start(tmp_path: Path) -> None:
         """
 model_selection:
   search_space:
-    C:
+    alpha:
       type: range
       start: 1.0
       end: 0.1
@@ -1178,7 +1160,7 @@ def test_log_range_requires_valid_base(tmp_path: Path) -> None:
         """
 model_selection:
   search_space:
-    C:
+    alpha:
       type: log_range
       base: 1
       start_exp: -1
@@ -1200,7 +1182,7 @@ model_selection:
   search_strategy: random
   trial_count: 2
   search_space:
-    C:
+    alpha:
       type: continuous_log_range
       base: 1
       start_exp: -1

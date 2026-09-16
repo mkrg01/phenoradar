@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Breaking Changes
+
+* replace scikit-learn logistic elastic net with glum's weighted binomial GLM;
+  replace logistic `C` with native `alpha`, add `gradient_tol`, and remove
+  `model.logistic_solver`; use defaults `alpha=0.01`, `l1_ratio=0.5`,
+  `max_iter=100`, and `gradient_tol=1e-6`
+* fit optional logistic warm-start paths in descending `alpha` order and prefer
+  larger `alpha` under one-SE selection; regenerate previous logistic configs
+  and model bundles for the new backend
+
 ### Features
 
 * add optional `split.require_both_labels_per_group` filtering before CV,

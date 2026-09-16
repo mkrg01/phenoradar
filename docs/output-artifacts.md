@@ -976,7 +976,8 @@ when individual folds are single-label.
 - `cv/figures/model_selection_one_se_curve.svg` (candidate selection active)
   - Shows candidate mean score with SE, one-SE threshold, best mean candidate,
     one-SE-eligible candidates, and the selected candidate.
-  - Uses `log10(C)` on the x-axis when all candidates expose positive `C`;
+  - Uses `log10(alpha)` for logistic elastic net when all candidates expose
+    positive `alpha`, or `log10(C)` for positive SVM `C` values;
     otherwise falls back to `candidate_index`.
   - All folds are shown; per fold, only the first `sample_set_id` is plotted.
 - `model/figures/final_refit_feature_importance_top.svg` (`full_run`)

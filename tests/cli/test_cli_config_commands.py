@@ -1190,7 +1190,7 @@ split:
 model_selection:
   search_strategy: grid
   search_space:
-    C: [0.5, 1.0]
+    alpha: [0.5, 1.0]
   selected_candidate_count: 1
   inner_cv_strategy: logo
 """.strip()

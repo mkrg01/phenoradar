@@ -78,7 +78,7 @@ values. In particular, this remains one inner model-selection search space:
 ```yaml
 model_selection:
   search_space:
-    C: [0.01, 0.1, 1.0, 10.0]
+    alpha: [0.0001, 0.001, 0.01, 0.1]
 ```
 
 Multi-condition runs share one realized outer split. Condition lists are
@@ -153,7 +153,6 @@ preprocess:
     method: standard  # choices: none, standard
 model:
   name: logistic_elasticnet  # choices: logistic_elasticnet, linear_svm, random_forest
-  logistic_solver: saga  # choices: saga, liblinear
   logistic_warm_start_path: false  # choices: true, false
 abstention:
   enabled: false  # choices: true, false
@@ -625,31 +624,34 @@ multivariable model.
 - `model.name`
   - type: `logistic_elasticnet | linear_svm | random_forest`
   - default: `logistic_elasticnet`
-  - note:
-    - `logistic_elasticnet` assumes scikit-learn `>= 1.8`.
-    - with the built-in `saga` solver, `l1_ratio=0` gives L2, `l1_ratio=1`
-      gives L1, and `0 < l1_ratio < 1` gives elastic-net.
-- `model.logistic_solver`
-  - type: `saga | liblinear`
-  - default: `saga`
   - behavior:
-    - applies only to `model.name=logistic_elasticnet`
-    - `saga` supports the full `l1_ratio` range from 0 through 1
-    - `liblinear` supports only explicit `l1_ratio` list values of 0 (L2) or 1 (L1)
-    - `liblinear` can be faster for small-sample, moderate-feature binary problems
+    - `logistic_elasticnet` uses glum's `GeneralizedLinearRegressor` with
+      `family="binomial"`, `solver="irls-cd"`, and an unpenalized intercept
+      (`fit_intercept=True`).
+    - `l1_ratio=0` gives L2, `l1_ratio=1` gives L1, and
+      `0 < l1_ratio < 1` gives elastic net.
+    - `scale_predictors=False`: feature scaling is controlled by
+      `preprocess.feature_scaling`, including observed-only scaling for neutral
+      missing-expression inputs.
+    - `linear_svm` and `random_forest` use scikit-learn.
 - `model.logistic_warm_start_path`
   - type: `bool`
   - default: `false`
   - behavior:
-    - experimental opt-in for reducing repeated SAGA iterations during model selection
-    - reuses fold-local SAGA coefficients between grid candidates that differ in `C`
-    - requires `model.name=logistic_elasticnet`, `model.logistic_solver=saga`, and
+    - reuses fold-local glum coefficients between grid candidates that differ
+      only in `alpha`, fitting from largest to smallest `alpha` (strongest to
+      weakest regularization)
+    - requires `model.name=logistic_elasticnet` and
       `model_selection.search_strategy=grid`
     - applies when candidate scoring is serial; parallel candidate scoring falls back to
       independent fits and records a warning
-    - because SAGA stops at a numerical tolerance, warm-start and independent fits can
-      produce different candidate scores and therefore select different hyperparameters;
-      validate the resulting metrics before adopting it for a production analysis
+    - finite optimization tolerances can produce small differences between
+      warm-start and independent fits
+
+The previous `model.logistic_solver` setting has been removed. Logistic models
+no longer accept scikit-learn's `C`; select a new grid using glum's native
+`alpha` scale. Configs using removed keys must be updated, and persisted
+scikit-learn logistic bundles must be regenerated.
 
 ## `model_selection`
 
@@ -700,8 +702,8 @@ Compatibility rules:
 - `selected_candidate_count` and `selected_candidate_percent` are mutually exclusive.
 - `selected_candidate_count` or `selected_candidate_percent` requires `inner_cv_strategy`.
 - when selection is active, top-N selection is applied per sampled set and selected models are always distinct by hyperparameter set.
-- with `selection_rule=one_se`, "simpler" means smaller `C` for linear SVM and
-  logistic elastic-net; for logistic elastic-net, larger `l1_ratio` breaks ties.
+- with `selection_rule=one_se`, "simpler" means larger `alpha` for logistic
+  elastic net (then larger `l1_ratio`), or smaller `C` for linear SVM.
   For random forest, shallower trees, larger split/leaf minima, and fewer trees
   are preferred in that order.
 - `candidate_source_policy=per_sample_set`: select candidates independently for each sampled set.
@@ -714,7 +716,7 @@ Compatibility rules:
 
 Each parameter value can be one of:
 
-- explicit list, e.g. `C: [0.1, 1.0, 10.0]`
+- explicit list, e.g. `alpha: [0.0001, 0.001, 0.01]`
 - `range`
 - `int_range`
 - `log_range`
@@ -753,15 +755,15 @@ Example:
 
 ```yaml
 search_space:
-  C:
+  alpha:
     type: range
-    start: 0.1
-    end: 1.1
-    step: 0.2
+    start: 0.001
+    end: 0.011
+    step: 0.002
     inclusive_end: true
 ```
 
-Expanded values: `0.1, 0.3, 0.5, 0.7, 0.9, 1.1`
+Expanded values: `0.001, 0.003, 0.005, 0.007, 0.009, 0.011`
 
 #### `int_range` (discrete integer values)
 
@@ -808,16 +810,16 @@ Example:
 
 ```yaml
 search_space:
-  C:
+  alpha:
     type: log_range
     base: 10
-    start_exp: -3
-    end_exp: 1
+    start_exp: -5
+    end_exp: -1
     step_exp: 1
     inclusive_end: true
 ```
 
-Expanded values: `0.001, 0.01, 0.1, 1.0, 10.0`
+Expanded values: `0.00001, 0.0001, 0.001, 0.01, 0.1`
 
 #### `continuous_range` and `continuous_log_range`
 
@@ -835,11 +837,11 @@ model_selection:
   search_strategy: random
   trial_count: 30
   search_space:
-    C:
+    alpha:
       type: log_range
       base: 10
-      start_exp: -3
-      end_exp: 3
+      start_exp: -5
+      end_exp: -1
       step_exp: 1
     l1_ratio:
       type: continuous_range
@@ -854,19 +856,52 @@ model_selection:
   search_strategy: grid
   trial_count: null
   search_space:
-    C: [0.01, 0.1, 1.0]
+    alpha: [0.0001, 0.001, 0.01]
     l1_ratio: [0.2, 0.5, 0.8]
     max_iter: [200]
 ```
 
 ### Allowed search-space parameter names by model
 
-- `logistic_elasticnet`: `C`, `l1_ratio`, `max_iter`
+- `logistic_elasticnet`: `alpha`, `l1_ratio`, `max_iter`, `gradient_tol`
 - `linear_svm`: `C`, `max_iter`
 - `random_forest`: `n_estimators`, `max_depth`, `min_samples_split`,
   `min_samples_leaf`
 
-Unknown parameter names are rejected at training time.
+Unknown logistic parameter names are rejected during config validation;
+unsupported parameters for other models are rejected at training time.
+
+For logistic elastic net, defaults are `alpha=0.01`, `l1_ratio=0.5`,
+`max_iter=100`, and `gradient_tol=1e-6`. `alpha >= 0` sets regularization
+strength directly: larger values shrink coefficients more. `l1_ratio` is in
+`[0, 1]`, `max_iter` is a positive integer, and `gradient_tol > 0` controls the
+optimization stopping tolerance.
+
+The optimized objective is the sample-weighted mean binary log loss plus
+`alpha * l1_ratio * sum(abs(beta))` and
+`0.5 * alpha * (1 - l1_ratio) * sum(beta ** 2)`. The intercept is unpenalized.
+Multiplying all sample weights by the same positive constant leaves this
+objective unchanged. There is no conversion from the previous `C` scale.
+
+A starting grid for the working expression model is:
+
+```yaml
+model_selection:
+  search_space:
+    alpha:
+      type: log_range
+      base: 10
+      start_exp: -5
+      end_exp: -1
+      step_exp: 0.5
+      inclusive_end: true
+    l1_ratio: [1]
+    max_iter: [100]
+    gradient_tol: [1.0e-6]
+```
+
+This evaluates nine regularization strengths. Re-tune this grid for the data;
+it is not a numerical translation of a previous scikit-learn run.
 
 ## `ensemble`
 

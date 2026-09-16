@@ -164,7 +164,7 @@ def test_existing_search_space_lists_remain_one_config_value(tmp_path: Path) -> 
         """
 model_selection:
   search_space:
-    C: [0.1, 1.0, 10.0]
+    alpha: [0.1, 1.0, 10.0]
     l1_ratio: [0.0, 1.0]
 """.lstrip(),
     )
@@ -173,7 +173,7 @@ model_selection:
     condition_set = load_config_conditions([config_path])
     assert condition_set.dimensions == ()
     assert len(condition_set.conditions) == 1
-    assert condition_set.conditions[0].config.model_selection.search_space["C"] == [
+    assert condition_set.conditions[0].config.model_selection.search_space["alpha"] == [
         0.1,
         1.0,
         10.0,

@@ -3945,7 +3945,7 @@ def _model_selection_one_se_curve(
     panels: list[dict[str, Any]] = []
     all_x: list[float] = []
     all_y: list[float] = []
-    use_log_c_values: list[bool] = []
+    x_labels: list[str] = []
 
     for fold_id in fold_ids:
         sample_set_ids = sorted(
@@ -3964,20 +3964,24 @@ def _model_selection_one_se_curve(
                 continue
 
             rows = panel_data.to_dicts()
-            c_values = [
-                _numeric_param_from_json(
-                    None if row["__params_json"] is None else str(row["__params_json"]), "C"
-                )
-                for row in rows
-            ]
-            use_log_c = all(value is not None and value > 0.0 for value in c_values)
-            if use_log_c:
-                positive_c_values = [float(value) for value in c_values if value is not None]
-                x_values = np.array([np.log10(value) for value in positive_c_values], dtype=float)
-                x_label = "log10(C)"
-            else:
-                x_values = np.array([int(row["__candidate_index"]) for row in rows], dtype=float)
-                x_label = "candidate_index"
+            x_values = np.array([int(row["__candidate_index"]) for row in rows], dtype=float)
+            x_label = "candidate_index"
+            for param_name in ("alpha", "C"):
+                param_values = [
+                    _numeric_param_from_json(
+                        None if row["__params_json"] is None else str(row["__params_json"]),
+                        param_name,
+                    )
+                    for row in rows
+                ]
+                if all(value is not None and value > 0.0 for value in param_values):
+                    x_values = np.log10(
+                        np.array(
+                            [value for value in param_values if value is not None], dtype=float
+                        )
+                    )
+                    x_label = f"log10({param_name})"
+                    break
             means = np.array([float(row["__mean"]) for row in rows], dtype=float)
             ses = np.array([float(row["__se_plot"]) for row in rows], dtype=float)
             candidate_indices = [int(row["__candidate_index"]) for row in rows]
@@ -4013,12 +4017,12 @@ def _model_selection_one_se_curve(
             for mean, se in zip(means.tolist(), ses.tolist(), strict=True):
                 all_y.extend([mean - se, mean + se])
             all_y.append(threshold)
-            use_log_c_values.append(use_log_c)
+            x_labels.append(x_label)
 
     if not panels:
         return
 
-    x_label = "log10(C)" if all(use_log_c_values) else "candidate_index"
+    x_label = x_labels[0] if len(set(x_labels)) == 1 else "candidate_index"
     metric_axis_label = _model_selection_metric_axis_label(
         [panel["metric_name"] for panel in panels]
     )

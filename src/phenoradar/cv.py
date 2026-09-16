@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from hashlib import sha256
 from math import comb
+from numbers import Real
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
@@ -18,13 +19,13 @@ from typing import Any
 import numpy as np
 import optuna
 import polars as pl
+from glum import GeneralizedLinearRegressor
 from optuna.samplers import TPESampler
 from scipy.stats import rankdata
 from sklearn import get_config
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.exceptions import ConvergenceWarning
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     balanced_accuracy_score,
     matthews_corrcoef,
@@ -71,6 +72,7 @@ from phenoradar.model_selection import (
 from phenoradar.timing import TimingRecorder
 
 type FeatureScaler = StandardScaler | None
+type FittedEstimator = GeneralizedLinearRegressor | CalibratedClassifierCV | RandomForestClassifier
 
 try:
     from threadpoolctl import (  # type: ignore[import-untyped]
@@ -155,7 +157,7 @@ class FinalRefitArtifacts:
     transform_feature_names: list[str]
     feature_names: list[str]
     scaler: FeatureScaler
-    models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
+    models: list[FittedEstimator]
     convergence_diagnostics: pl.DataFrame
     top_feature_expression_external: pl.DataFrame
     model_entries: list[FinalModelEntry] = field(default_factory=list)
@@ -271,7 +273,7 @@ class OuterSampleSetFitResult:
     model_probs: list[np.ndarray]
     train_model_probs: list[np.ndarray]
     inference_model_probs: list[np.ndarray]
-    fold_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
+    fold_models: list[FittedEstimator]
     interpretation_entries: list[ModelFeatureEntry]
     ensemble_model_prob_rows: list[dict[str, float | int | str]]
     model_sparsity_rows: list[dict[str, Any]]
@@ -290,7 +292,7 @@ class FinalSampleSetFitResult:
 
     model_probs: list[np.ndarray]
     train_model_probs: list[np.ndarray]
-    fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier]
+    fitted_models: list[FittedEstimator]
     model_sparsity_rows: list[dict[str, Any]]
     selected_features: list[str]
     scaler: FeatureScaler
@@ -320,7 +322,7 @@ class FinalModelEntry:
 
     feature_names: list[str]
     scaler: FeatureScaler
-    model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier
+    model: FittedEstimator
 
 
 @dataclass(frozen=True)
@@ -692,9 +694,9 @@ def _coef_nonzero_count(coefficients: np.ndarray, *, tolerance: float) -> int:
 
 
 def _model_nonzero_count(
-    model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+    model: FittedEstimator,
 ) -> tuple[int | None, str, str]:
-    if isinstance(model, LogisticRegression):
+    if isinstance(model, GeneralizedLinearRegressor):
         count = _coef_nonzero_count(model.coef_, tolerance=_NONZERO_TOLERANCE)
         return count, "coef_abs_gt_tol", "ok"
 
@@ -740,7 +742,7 @@ def _model_sparsity_row(
     model_index: int,
     model_name: str,
     n_features_after_all: int,
-    model: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+    model: FittedEstimator,
 ) -> dict[str, Any]:
     n_nonzero, count_method, reason = _model_nonzero_count(model)
     if n_nonzero is None:
@@ -2577,7 +2579,7 @@ def _fit_sample_weights(config: AppConfig, y: np.ndarray, groups: np.ndarray) ->
 
 def _validate_model_params(model_name: str, model_params: dict[str, Any]) -> None:
     allowed: dict[str, set[str]] = {
-        "logistic_elasticnet": {"C", "l1_ratio", "max_iter"},
+        "logistic_elasticnet": {"alpha", "l1_ratio", "max_iter", "gradient_tol"},
         "linear_svm": {"C", "max_iter"},
         "random_forest": {"n_estimators", "max_depth", "min_samples_split", "min_samples_leaf"},
     }
@@ -2588,6 +2590,36 @@ def _validate_model_params(model_name: str, model_params: dict[str, Any]) -> Non
             f"Unsupported model_selection.search_space parameter(s) for {model_name}: "
             f"{disallowed_text}"
         )
+    if model_name != "logistic_elasticnet":
+        return
+
+    requirements = {
+        "alpha": "a finite number >= 0",
+        "l1_ratio": "a finite number in [0, 1]",
+        "gradient_tol": "a finite number > 0",
+        "max_iter": "a finite positive integer (booleans are not accepted)",
+    }
+    for name, value in model_params.items():
+        numeric = isinstance(value, Real) and not isinstance(value, (bool, np.bool_))
+        try:
+            number = float(value) if numeric else float("nan")
+        except (OverflowError, ValueError):
+            number = float("nan")
+        valid = bool(np.isfinite(number))
+        if name == "alpha":
+            valid = valid and number >= 0
+        elif name == "l1_ratio":
+            valid = valid and 0 <= number <= 1
+        elif name == "gradient_tol":
+            valid = valid and number > 0
+        else:
+            # Discrete float ranges can legitimately produce values such as 100.0.
+            valid = valid and number >= 1 and number.is_integer()
+        if not valid:
+            raise CVError(
+                f"model_selection.search_space.{name} for logistic_elasticnet "
+                f"must be {requirements[name]}; got {value!r}"
+            )
 
 
 def _build_estimator(
@@ -2596,19 +2628,24 @@ def _build_estimator(
     y_train: np.ndarray,
     model_params: dict[str, Any] | None = None,
     rf_n_jobs: int | None = None,
-) -> LogisticRegression | CalibratedClassifierCV | RandomForestClassifier:
+) -> FittedEstimator:
     params = {} if model_params is None else dict(model_params)
     _validate_model_params(config.model.name, params)
 
     if config.model.name == "logistic_elasticnet":
-        c_value = float(params.get("C", 1.0))
+        alpha = float(params.get("alpha", 0.01))
         l1_ratio = float(params.get("l1_ratio", 0.5))
-        max_iter = int(params.get("max_iter", 5000))
-        return LogisticRegression(
-            solver=config.model.logistic_solver,
+        max_iter = int(params.get("max_iter", 100))
+        gradient_tol = float(params.get("gradient_tol", 1e-6))
+        return GeneralizedLinearRegressor(
+            family="binomial",
+            solver="irls-cd",
+            alpha=alpha,
             l1_ratio=l1_ratio,
-            C=c_value,
             max_iter=max_iter,
+            gradient_tol=gradient_tol,
+            fit_intercept=True,
+            scale_predictors=False,
             random_state=model_seed,
         )
 
@@ -2648,7 +2685,7 @@ def _build_estimator(
 
 
 def _fit_estimator(
-    estimator: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+    estimator: FittedEstimator,
     x_train: np.ndarray,
     y_train: np.ndarray,
     sample_weight: np.ndarray | None,
@@ -2674,10 +2711,29 @@ def _fit_estimator(
                 f"{type(estimator).__name__}.fit failed while applying sample_weight: {exc}"
             ) from exc
 
-    iterative_estimators: list[LogisticRegression | LinearSVC] = []
-    if isinstance(estimator, LogisticRegression):
-        iterative_estimators.append(estimator)
-    elif isinstance(estimator, CalibratedClassifierCV) and isinstance(
+    if isinstance(estimator, GeneralizedLinearRegressor):
+        # IRLS may converge on its last allowed iteration, so n_iter_ alone
+        # cannot determine convergence. Read its final optimality residual.
+        diagnostics = estimator.diagnostics_
+        residual = float(diagnostics[-1]["convergence"])
+        tolerance = float(estimator.gradient_tol or 1e-4)
+        converged = bool(np.isfinite(residual) and residual < tolerance)
+        messages = () if converged else (
+            f"Binomial GLM did not reach gradient_tol={tolerance:g}; "
+            f"final convergence residual={residual:g}",
+        )
+        return EstimatorFitDiagnostic(
+            estimator_class=type(estimator).__name__,
+            convergence_applicable=True,
+            converged=converged,
+            n_iter_values=(int(estimator.n_iter_),),
+            max_iter=int(estimator.max_iter),
+            convergence_warning_count=0 if converged else 1,
+            convergence_warning_messages=messages,
+        )
+
+    iterative_estimators: list[LinearSVC] = []
+    if isinstance(estimator, CalibratedClassifierCV) and isinstance(
         estimator.estimator, LinearSVC
     ):
         calibrated_estimators = [
@@ -2765,9 +2821,14 @@ def _convergence_diagnostic_row(
 
 
 def _predict_positive_probability(
-    estimator: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+    estimator: FittedEstimator,
     x_valid: np.ndarray,
 ) -> np.ndarray:
+    if isinstance(estimator, GeneralizedLinearRegressor):
+        probability = np.asarray(estimator.predict(x_valid), dtype=float)
+        if probability.shape != (x_valid.shape[0],):
+            raise CVError("Binomial GLM predict returned unexpected shape")
+        return probability
     probabilities = np.asarray(estimator.predict_proba(x_valid), dtype=float)
     if probabilities.ndim != 2 or probabilities.shape[1] < 2:
         raise CVError("predict_proba returned unexpected shape")
@@ -2893,11 +2954,12 @@ def _numeric_candidate_param(candidate: Candidate, name: str, default: float) ->
 
 
 def _candidate_simplicity_sort_key(candidate: Candidate, model_name: str) -> tuple[float, ...]:
-    if model_name in {"logistic_elasticnet", "linear_svm"}:
+    if model_name == "logistic_elasticnet":
+        alpha = _numeric_candidate_param(candidate, "alpha", 0.01)
+        l1_ratio = _numeric_candidate_param(candidate, "l1_ratio", 0.5)
+        return (-alpha, -l1_ratio, float(candidate.candidate_index))
+    if model_name == "linear_svm":
         c_value = _numeric_candidate_param(candidate, "C", np.inf)
-        if model_name == "logistic_elasticnet":
-            l1_ratio = _numeric_candidate_param(candidate, "l1_ratio", 0.0)
-            return (c_value, -l1_ratio, float(candidate.candidate_index))
         return (c_value, float(candidate.candidate_index))
 
     if model_name == "random_forest":
@@ -3153,7 +3215,7 @@ def _score_candidate_inner_cv(
     preprocessed_folds: list[InnerCvPreprocessedFold],
     estimator_n_jobs: int | None = None,
     timing_recorder: TimingRecorder | None = None,
-    warm_start_estimators: dict[str, LogisticRegression] | None = None,
+    warm_start_estimators: dict[str, GeneralizedLinearRegressor] | None = None,
 ) -> tuple[float, list[dict[str, Any]]]:
     resolved_estimator_n_jobs = (
         _runtime_n_jobs(config) if estimator_n_jobs is None else int(estimator_n_jobs)
@@ -3178,11 +3240,11 @@ def _score_candidate_inner_cv(
                 model_params=candidate.params,
                 rf_n_jobs=resolved_estimator_n_jobs,
             )
-            estimator: LogisticRegression | CalibratedClassifierCV | RandomForestClassifier
+            estimator: FittedEstimator
             if warm_start_estimators is None:
                 estimator = fresh_estimator
             else:
-                if not isinstance(fresh_estimator, LogisticRegression):
+                if not isinstance(fresh_estimator, GeneralizedLinearRegressor):
                     raise CVError("Warm-start candidate path requires logistic regression")
                 cached_estimator = warm_start_estimators.get(fold.inner_fold_id)
                 if cached_estimator is None:
@@ -3191,9 +3253,10 @@ def _score_candidate_inner_cv(
                     warm_start_estimators[fold.inner_fold_id] = fresh_estimator
                 else:
                     cached_estimator.set_params(
-                        C=fresh_estimator.C,
+                        alpha=fresh_estimator.alpha,
                         l1_ratio=fresh_estimator.l1_ratio,
                         max_iter=fresh_estimator.max_iter,
+                        gradient_tol=fresh_estimator.gradient_tol,
                         random_state=fresh_estimator.random_state,
                         warm_start=True,
                     )
@@ -3554,12 +3617,17 @@ def _prepare_source_selection(
     trial_rows: list[dict[str, Any]] = []
     if worker_count == 1:
         scored_rows: list[tuple[float, list[dict[str, Any]]]] = []
-        warm_start_caches: dict[str, dict[str, LogisticRegression]] = {}
+        warm_start_caches: dict[str, dict[str, GeneralizedLinearRegressor]] = {}
+        if config.model.logistic_warm_start_path:
+            candidates = sorted(
+                candidates,
+                key=lambda item: -_numeric_candidate_param(item, "alpha", 0.01),
+            )
         for candidate_progress, candidate in enumerate(candidates, start=1):
-            warm_start_estimators: dict[str, LogisticRegression] | None = None
+            warm_start_estimators: dict[str, GeneralizedLinearRegressor] | None = None
             if config.model.logistic_warm_start_path:
                 path_params = {
-                    name: value for name, value in candidate.params.items() if name != "C"
+                    name: value for name, value in candidate.params.items() if name != "alpha"
                 }
                 path_key = json.dumps(path_params, ensure_ascii=True, sort_keys=True)
                 warm_start_estimators = warm_start_caches.setdefault(path_key, {})
@@ -4298,7 +4366,7 @@ def _fit_outer_sample_set(
     model_probs: list[np.ndarray] = []
     train_model_probs: list[np.ndarray] = []
     inference_model_probs: list[np.ndarray] = []
-    fold_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
+    fold_models: list[FittedEstimator] = []
     interpretation_entries: list[ModelFeatureEntry] = []
     ensemble_model_prob_rows: list[dict[str, float | int | str]] = []
     model_sparsity_rows: list[dict[str, Any]] = []
@@ -4500,14 +4568,14 @@ def _fit_final_refit_sample_set(
         selected: SelectedCandidate,
     ) -> tuple[
         int,
-        LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+        FittedEstimator,
         np.ndarray,
         np.ndarray,
         EstimatorFitDiagnostic,
     ]:
         def _fit_one_limited() -> tuple[
             int,
-            LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+            FittedEstimator,
             np.ndarray,
             np.ndarray,
             EstimatorFitDiagnostic,
@@ -4557,7 +4625,7 @@ def _fit_final_refit_sample_set(
     results: list[
         tuple[
             int,
-            LogisticRegression | CalibratedClassifierCV | RandomForestClassifier,
+            FittedEstimator,
             np.ndarray,
             np.ndarray,
             EstimatorFitDiagnostic,
@@ -4576,7 +4644,7 @@ def _fit_final_refit_sample_set(
                 results.append(futures[selected_offset].result())
 
     ordered_results = sorted(results, key=lambda item: item[0])
-    fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
+    fitted_models: list[FittedEstimator] = []
     model_probs: list[np.ndarray] = []
     train_model_probs: list[np.ndarray] = []
     model_sparsity_rows: list[dict[str, Any]] = []
@@ -4763,7 +4831,7 @@ def _run_final_refit_impl(
     )
 
     model_probs: list[np.ndarray] = []
-    fitted_models: list[LogisticRegression | CalibratedClassifierCV | RandomForestClassifier] = []
+    fitted_models: list[FittedEstimator] = []
     selection_active = _selection_is_active(config)
     model_selection_selected_rows: list[dict[str, Any]] = []
     model_selection_trial_rows: list[dict[str, Any]] = []

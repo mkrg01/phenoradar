@@ -56,7 +56,6 @@ preprocess:
 
 model:
   name: logistic_elasticnet  # choices: logistic_elasticnet, linear_svm, random_forest
-  logistic_solver: saga  # choices: saga, liblinear
   logistic_warm_start_path: false  # choices: true, false
 
 model_selection:
@@ -66,15 +65,16 @@ model_selection:
   search_strategy: grid  # choices: grid, random, tpe
   trial_count: null  # type: integer or null
   search_space:
-    C:
+    alpha:
       type: log_range  # choices: range, int_range, log_range, continuous_range, continuous_log_range
       base: 10
-      start_exp: -1
-      end_exp: 3
+      start_exp: -5
+      end_exp: -1
       step_exp: 0.5
       inclusive_end: true  # choices: true, false
     l1_ratio: [1]
-    max_iter: [10000]
+    max_iter: [100]
+    gradient_tol: [1.0e-6]
   inner_cv_strategy: stratified_group_kfold  # choices: logo, group_kfold, stratified_group_kfold, null
   inner_cv_n_splits: 5  # type: integer or null
   selection_metric: log_loss  # choices: mcc, balanced_accuracy, log_loss

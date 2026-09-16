@@ -4,12 +4,15 @@ import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import replace
+from importlib.metadata import version
 from pathlib import Path
 
 import joblib
 import numpy as np
 import polars as pl
 import pytest
+from glum import GeneralizedLinearRegressor
+from scipy.special import expit
 
 import phenoradar.bundle as bundle_mod
 from phenoradar.bundle import (
@@ -204,6 +207,24 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
         thresholds=cv_artifacts.thresholds,
     )
     bundle = load_model_bundle(export_result.bundle_dir)
+    assert bundle.models
+    for original, loaded in zip(refit.models, bundle.models, strict=True):
+        assert isinstance(original, GeneralizedLinearRegressor)
+        assert isinstance(loaded, GeneralizedLinearRegressor)
+        assert loaded.family == "binomial"
+        assert loaded.coef_.ndim == 1
+        assert np.ndim(loaded.intercept_) == 0
+        np.testing.assert_array_equal(loaded.coef_, original.coef_)
+        assert loaded.intercept_ == original.intercept_
+        probe = np.vstack(
+            [np.zeros_like(original.coef_), original.coef_, -original.coef_]
+        )
+        np.testing.assert_allclose(
+            bundle_mod._predict_probability(loaded, probe),
+            expit(probe @ original.coef_ + original.intercept_),
+            rtol=0.0,
+            atol=1e-12,
+        )
     threshold_fixed = (
         cv_artifacts.thresholds.filter(pl.col("threshold_name") == "fixed_probability_threshold")
         .select("threshold_value")
@@ -256,6 +277,7 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
     assert manifest["library_versions"]["phenoradar"] == manifest[
         "source_phenoradar_version"
     ]
+    assert manifest["library_versions"]["glum"] == version("glum")
 
     assert pred_df.get_column("species").to_list() == refit_pred_df.get_column("species").to_list()
     np.testing.assert_allclose(

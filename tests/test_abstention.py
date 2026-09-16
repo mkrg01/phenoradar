@@ -209,7 +209,7 @@ def test_cv_refit_bundle_with_real_missingness(tmp_path: Path, prune: bool) -> N
             "selected_candidate_count": 1,
             "inner_cv_strategy": "group_kfold",
             "inner_cv_n_splits": 2,
-            "search_space": {"C": [1.0, 10.0]},
+            "search_space": {"alpha": [0.01, 0.1]},
         },
     )
     config.preprocess.sparse_feature_filter.enabled = prune

@@ -12,6 +12,7 @@ from typing import Any
 import joblib
 import numpy as np
 import polars as pl
+from glum import GeneralizedLinearRegressor
 from pydantic import ValidationError
 from sklearn.preprocessing import StandardScaler
 
@@ -696,6 +697,11 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
 
 
 def _predict_probability(estimator: Any, x: np.ndarray) -> np.ndarray:
+    if isinstance(estimator, GeneralizedLinearRegressor):
+        probability = np.asarray(estimator.predict(x), dtype=float)
+        if probability.shape != (x.shape[0],):
+            raise BundleError("Loaded binomial GLM returned invalid probability shape")
+        return probability
     probabilities = np.asarray(estimator.predict_proba(x), dtype=float)
     if probabilities.ndim != 2 or probabilities.shape[1] < 2:
         raise BundleError("Loaded model returned invalid probability shape")

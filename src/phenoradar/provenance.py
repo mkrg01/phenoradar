@@ -64,6 +64,7 @@ def runtime_environment_snapshot() -> dict[str, Any]:
             "phenoradar": __version__,
             "polars": package_version("polars"),
             "scikit-learn": package_version("scikit-learn"),
+            "glum": package_version("glum"),
             "pydantic": package_version("pydantic"),
             "typer": package_version("typer"),
         },
