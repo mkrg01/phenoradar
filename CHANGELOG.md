@@ -14,6 +14,9 @@
 
 ### Features
 
+* compute abstention coverage and missing-feature evidence only from features
+  with positive coefficient weight, with bounded observation masks and full-input
+  validation; record inference preprocessing, prediction, and abstention timings
 * preprocess inner CV from shared transformed matrices and fold row indices,
   gathering training and validation matrices only for selected features while
   preserving fold-local statistics, numerical results, and candidate caches

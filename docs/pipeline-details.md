@@ -300,6 +300,22 @@ fold and in final prediction. It adds no learning or threshold-selection step.
 All-species probability metrics remain available; separate abstention tables
 report selective performance and the number of accepted/rejected species.
 
+Abstention validates all supplied expression values in bounded blocks, including
+columns that do not contribute to the model. It preserves per-model absolute
+coefficient normalization and the averaging denominator for intercept-only
+models. Coverage and missing-feature evidence then use only columns with positive
+combined coefficient weight. Observation masks are computed directly from finite
+values and the configured zero-as-missing policy in row blocks; no full-width
+NaN-filled expression copy is needed. The existing threshold and inclusive
+`1e-12` comparison tolerance are unchanged. Floating-point summation can differ
+at the last few bits when zero-weight columns are omitted.
+
+Timing records distinguish outer-fold `inference_preprocessing`,
+`inference_prediction`, `validation_abstention`, and `inference_abstention`.
+Final refit records `external_test_abstention` and `inference_abstention`.
+These are nested measurements included in the existing enclosing stages, so
+their durations must not be added to those enclosing stages.
+
 Candidate generation strategy:
 
 - `grid`: deterministic full discrete Cartesian product.

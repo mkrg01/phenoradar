@@ -4554,10 +4554,16 @@ def _annotate_prediction_abstention(
     matrix: np.ndarray,
     feature_names: list[str],
     entries: list[FinalModelEntry],
+    *,
+    timing_recorder: TimingRecorder | None = None,
+    timing_scope: str = "outer_fold",
+    timing_stage: str = "abstention",
+    fold_id: str | None = None,
 ) -> pl.DataFrame:
     if not config.abstention.enabled:
         return predictions
-    return annotate_abstention(
+    started = None if timing_recorder is None else timing_recorder.start()
+    annotated = annotate_abstention(
         predictions,
         species=species,
         matrix=matrix,
@@ -4567,6 +4573,11 @@ def _annotate_prediction_abstention(
         threshold=config.abstention.threshold,
         top_features=config.figures.top_features,
     )
+    if timing_recorder is not None and started is not None:
+        timing_recorder.record_since(
+            started, scope=timing_scope, stage=timing_stage, fold_id=fold_id
+        )
+    return annotated
 
 
 def _fit_outer_sample_set(
@@ -4632,6 +4643,7 @@ def _fit_outer_sample_set(
     if x_inference_matrix.shape[0] == 0:
         x_inference = np.empty((0, len(selected_features)), dtype=float)
     else:
+        inference_started = None if timing_recorder is None else timing_recorder.start()
         # none/log1p are column-local, so project to the fold's retained
         # features before transforming. Contextual rank transforms were
         # applied once to the complete row when the shared cache was built.
@@ -4645,6 +4657,11 @@ def _fit_outer_sample_set(
             scaler,
             config.preprocess.feature_scaling.method,
         )
+        if timing_recorder is not None and inference_started is not None:
+            timing_recorder.record_since(
+                inference_started, scope="outer_fold", stage="inference_preprocessing",
+                fold_id=fold_id, sample_set_id=sample_set_id,
+            )
 
     model_probs: list[np.ndarray] = []
     train_model_probs: list[np.ndarray] = []
@@ -4716,7 +4733,14 @@ def _fit_outer_sample_set(
         if x_inference.shape[0] == 0:
             inference_model_probs.append(np.empty(0, dtype=float))
         else:
+            inference_started = None if timing_recorder is None else timing_recorder.start()
             inference_model_probs.append(_predict_positive_probability(estimator, x_inference))
+            if timing_recorder is not None and inference_started is not None:
+                timing_recorder.record_since(
+                    inference_started, scope="outer_fold", stage="inference_prediction",
+                    fold_id=fold_id, sample_set_id=sample_set_id,
+                    candidate_index=selected.candidate.candidate_index,
+                )
         interpretation_entries.append(
             ModelFeatureEntry(
                 feature_names=selected_features,
@@ -5478,6 +5502,9 @@ def _run_final_refit_impl(
             target_matrix[:external_count],
             target_feature_names,
             model_entries,
+            timing_recorder=recorder,
+            timing_scope="final_refit",
+            timing_stage="external_test_abstention",
         )
         pred_inference = _annotate_prediction_abstention(
             config,
@@ -5486,6 +5513,9 @@ def _run_final_refit_impl(
             target_matrix[external_count:],
             target_feature_names,
             model_entries,
+            timing_recorder=recorder,
+            timing_scope="final_refit",
+            timing_stage="inference_abstention",
         )
     interpretation_started = recorder.start()
     try:
@@ -6173,6 +6203,9 @@ def _run_outer_fold(
             x_valid_raw,
             feature_names,
             evidence_model_entries,
+            timing_recorder=timing_recorder,
+            timing_stage="validation_abstention",
+            fold_id=fold_id,
         ).join(
             pl.DataFrame({"species": valid_species, "group_id": valid_group_ids}),
             on="species",
@@ -6192,6 +6225,9 @@ def _run_outer_fold(
                 x_inference_matrix,
                 feature_names,
                 evidence_model_entries,
+                timing_recorder=timing_recorder,
+                timing_stage="inference_abstention",
+                fold_id=fold_id,
             ).to_dicts()
 
     result = OuterFoldResult(

@@ -220,9 +220,16 @@ def test_cv_refit_bundle_with_real_missingness(tmp_path: Path, prune: bool) -> N
     assert cv.oof_predictions["information_coverage"].is_not_null().all()
     assert cv.inference_predictions_by_fold is not None
     assert cv.inference_predictions_by_fold["decision_status"].unique().to_list() == ["abstained"]
+    assert {
+        "validation_abstention", "inference_abstention",
+        "inference_preprocessing", "inference_prediction",
+    }.issubset(set(cv.timing["stage"]))
     refit = run_final_refit(config, split.split_manifest)
     assert refit.pred_inference["information_coverage"].item() == 0
     assert refit.pred_inference["pred_label_selective"].item() is None
+    assert {"external_test_abstention", "inference_abstention"}.issubset(
+        set(refit.timing["stage"])
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     write_resolved_config(config, run_dir / "resolved_config.yml")
