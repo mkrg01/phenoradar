@@ -154,7 +154,7 @@ preprocess:
     method: standard  # choices: none, standard
 model:
   name: logistic_elasticnet  # choices: logistic_elasticnet, linear_svm, random_forest
-  logistic_warm_start_path: false  # choices: true, false
+  logistic_warm_start_path: true  # choices: true, false
 abstention:
   enabled: false  # choices: true, false
   threshold: 0.8
@@ -637,15 +637,18 @@ multivariable model.
     - `linear_svm` and `random_forest` use scikit-learn.
 - `model.logistic_warm_start_path`
   - type: `bool`
-  - default: `false`
+  - default: `true`
   - behavior:
     - reuses fold-local glum coefficients between grid candidates that differ
       only in `alpha`, fitting from largest to smallest `alpha` (strongest to
       weakest regularization)
-    - requires `model.name=logistic_elasticnet` and
-      `model_selection.search_strategy=grid`
-    - applies when candidate scoring is serial; parallel candidate scoring falls back to
-      independent fits and records a warning
+    - applies to inner-CV model selection with `model.name=logistic_elasticnet`
+      and `model_selection.search_strategy=grid`; other models and search
+      strategies use independent fits
+    - parallelizes independent inner folds and parameter paths within
+      `runtime.n_jobs`; candidates on each alpha path are fitted sequentially
+    - set `false` to fit every candidate independently
+    - one-feature folds use independent fits to avoid a glum warm-start shape error
     - finite optimization tolerances can produce small differences between
       warm-start and independent fits
 

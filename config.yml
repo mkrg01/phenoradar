@@ -55,7 +55,7 @@ preprocess:
 
 model:
   name: logistic_elasticnet  # choices: logistic_elasticnet, linear_svm, random_forest
-  logistic_warm_start_path: false  # choices: true, false
+  logistic_warm_start_path: true  # choices: true, false
 
 model_selection:
   selected_candidate_count: 1  # type: integer or null

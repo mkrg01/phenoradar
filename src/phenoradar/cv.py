@@ -3241,7 +3241,9 @@ def _score_candidate_inner_cv(
                 rf_n_jobs=resolved_estimator_n_jobs,
             )
             estimator: FittedEstimator
-            if warm_start_estimators is None:
+            # glum 3.4.1's warm-start centering squeezes one-feature means to a
+            # scalar and fails. Single-feature fits therefore start independently.
+            if warm_start_estimators is None or fold.x_train.shape[1] == 1:
                 estimator = fresh_estimator
             else:
                 if not isinstance(fresh_estimator, GeneralizedLinearRegressor):
@@ -3515,6 +3517,101 @@ def _prepare_source_selection_tpe(
     )
 
 
+def _score_parallel_warm_start_paths(
+    *,
+    config: AppConfig,
+    training_scope_id: str,
+    source_sample_set_id: int,
+    candidates: list[Candidate],
+    preprocessed_folds: list[InnerCvPreprocessedFold],
+    progress_callback: Callable[[str, str | None], None] | None,
+    timing_recorder: TimingRecorder | None,
+) -> list[tuple[float, list[dict[str, Any]]]]:
+    """Score independent fold/parameter paths while keeping each alpha path sequential."""
+    paths: dict[str, list[Candidate]] = {}
+    for candidate in sorted(
+        candidates, key=lambda item: -_numeric_candidate_param(item, "alpha", 0.01)
+    ):
+        path_params = {name: value for name, value in candidate.params.items() if name != "alpha"}
+        path_key = json.dumps(path_params, ensure_ascii=True, sort_keys=True)
+        paths.setdefault(path_key, []).append(candidate)
+    tasks = [
+        (fold_index, fold, path)
+        for path in paths.values()
+        for fold_index, fold in enumerate(preprocessed_folds)
+    ]
+    worker_count, estimator_n_jobs = _selection_parallel_plan(config, len(tasks))
+    by_candidate: dict[int, dict[int, tuple[float, list[dict[str, Any]]]]] = {
+        candidate.candidate_index: {} for candidate in candidates
+    }
+
+    def score_path(
+        fold: InnerCvPreprocessedFold, path: list[Candidate]
+    ) -> list[tuple[int, float, list[dict[str, Any]]]]:
+        # Each task owns one fold's estimators; no fitted state crosses folds or paths.
+        cache: dict[str, GeneralizedLinearRegressor] = {}
+        results = []
+        for candidate in path:
+            score, rows = _score_candidate_inner_cv(
+                config=config,
+                training_scope_id=training_scope_id,
+                source_sample_set_id=source_sample_set_id,
+                candidate=candidate,
+                preprocessed_folds=[fold],
+                estimator_n_jobs=estimator_n_jobs,
+                timing_recorder=timing_recorder,
+                warm_start_estimators=cache,
+            )
+            results.append((candidate.candidate_index, score, rows))
+        return results
+
+    completed = 0
+
+    def consume(fold_index: int, results: list[tuple[int, float, list[dict[str, Any]]]]) -> None:
+        nonlocal completed
+        for candidate_index, score, rows in results:
+            by_candidate[candidate_index][fold_index] = (score, rows)
+            if len(by_candidate[candidate_index]) == len(preprocessed_folds):
+                completed += 1
+                if progress_callback is not None:
+                    scores = [
+                        result[0] for _, result in sorted(by_candidate[candidate_index].items())
+                    ]
+                    valid_scores = [value for value in scores if not np.isnan(value)]
+                    score_repr = f"{float(np.mean(valid_scores)):.6f}" if valid_scores else "NA"
+                    progress_callback(
+                        "selection_candidate_done",
+                        (
+                            f"source_sample_set_id={source_sample_set_id}, "
+                            f"candidate_index={candidate_index}, "
+                            f"candidate_progress={completed}/{len(candidates)}, "
+                            f"metric_value={score_repr}"
+                        ),
+                    )
+
+    if worker_count == 1:
+        for fold_index, fold, path in tasks:
+            consume(fold_index, score_path(fold, path))
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(score_path, fold, path): fold_index
+                for fold_index, fold, path in tasks
+            }
+            for future in as_completed(futures):
+                consume(futures[future], future.result())
+
+    scored_rows = []
+    for candidate in candidates:
+        fold_results = [
+            result for _, result in sorted(by_candidate[candidate.candidate_index].items())
+        ]
+        scores = [score for score, _ in fold_results if not np.isnan(score)]
+        mean_score = float(np.mean(scores)) if scores else np.nan
+        scored_rows.append((mean_score, [row for _, rows in fold_results for row in rows]))
+    return scored_rows
+
+
 def _prepare_source_selection(
     *,
     config: AppConfig,
@@ -3613,19 +3710,35 @@ def _prepare_source_selection(
         )
 
     worker_count, estimator_n_jobs = _selection_parallel_plan(config, available)
+    use_warm_start = (
+        config.model.logistic_warm_start_path
+        and config.model.name == "logistic_elasticnet"
+        and config.model_selection.search_strategy == "grid"
+    )
     scored: list[SelectedCandidate] = []
     trial_rows: list[dict[str, Any]] = []
-    if worker_count == 1:
-        scored_rows: list[tuple[float, list[dict[str, Any]]]] = []
+    scored_rows: list[tuple[float, list[dict[str, Any]]]]
+    if use_warm_start and worker_count > 1:
+        scored_rows = _score_parallel_warm_start_paths(
+            config=config,
+            training_scope_id=training_scope_id,
+            source_sample_set_id=source_sample_set_id,
+            candidates=candidates,
+            preprocessed_folds=preprocessed_folds,
+            progress_callback=progress_callback,
+            timing_recorder=timing_recorder,
+        )
+    elif worker_count == 1:
+        scored_rows = []
         warm_start_caches: dict[str, dict[str, GeneralizedLinearRegressor]] = {}
-        if config.model.logistic_warm_start_path:
+        if use_warm_start:
             candidates = sorted(
                 candidates,
                 key=lambda item: -_numeric_candidate_param(item, "alpha", 0.01),
             )
         for candidate_progress, candidate in enumerate(candidates, start=1):
             warm_start_estimators: dict[str, GeneralizedLinearRegressor] | None = None
-            if config.model.logistic_warm_start_path:
+            if use_warm_start:
                 path_params = {
                     name: value for name, value in candidate.params.items() if name != "alpha"
                 }
@@ -3654,11 +3767,6 @@ def _prepare_source_selection(
                     ),
                 )
     else:
-        if config.model.logistic_warm_start_path:
-            warnings.append(
-                "model.logistic_warm_start_path was not applied because candidate "
-                f"scoring used {worker_count} parallel workers"
-            )
         scored_rows_by_index: dict[int, tuple[float, list[dict[str, Any]]]] = {}
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = {

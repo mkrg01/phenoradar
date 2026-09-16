@@ -14,6 +14,9 @@
 
 ### Features
 
+* enable logistic grid-search warm starts by default, configurable with
+  `model.logistic_warm_start_path`; parallelize independent fold/parameter
+  paths while fitting each alpha path from strongest to weakest regularization
 * add optional `split.require_both_labels_per_group` filtering before CV,
   routing single-label groups to external test and keeping them out of CV
   and final-refit training; support family-level eligibility from existing

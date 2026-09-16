@@ -37,7 +37,7 @@ def test_annotated_config_round_trips_all_fields_and_quoted_values() -> None:
     assert serialize_resolved_config(config) == rendered
     assert "require_both_labels_per_group: false  # choices: true, false" in rendered
     assert "logistic_solver" not in rendered
-    assert "logistic_warm_start_path: false  # choices: true, false" in rendered
+    assert "logistic_warm_start_path: true  # choices: true, false" in rendered
     assert "higher_in_trait: null  # choices: 0, 1, null" in rendered
     assert (
         "inner_cv_strategy: null  # choices: logo, group_kfold, stratified_group_kfold, null"
@@ -143,7 +143,7 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.sampling.group_subsample_repeats == 1
     assert resolved.sampling.group_subsample_repeat_index == 1
     assert resolved.sampling.weighting == "none"
-    assert resolved.model.logistic_warm_start_path is False
+    assert resolved.model.logistic_warm_start_path is True
     assert resolved.model_selection.selection_metric == "log_loss"
     assert resolved.model_selection.selection_rule == "best"
     assert resolved.model_selection.candidate_source_policy == "per_sample_set"
@@ -1019,13 +1019,16 @@ def test_legacy_logistic_solver_is_rejected(tmp_path: Path, solver: str) -> None
         load_and_resolve_config([cfg])
 
 
-def test_glum_search_space_accepts_full_elastic_net_range(tmp_path: Path) -> None:
+@pytest.mark.parametrize("warm_start", [True, False])
+def test_glum_search_space_accepts_full_elastic_net_range(
+    tmp_path: Path, warm_start: bool
+) -> None:
     cfg = _write(
         tmp_path / "glum.yml",
-        """
+        f"""
 model:
   name: logistic_elasticnet
-  logistic_warm_start_path: true
+  logistic_warm_start_path: {str(warm_start).lower()}
 model_selection:
   search_space:
     alpha: [0.0001, 0.01, 0.1]
@@ -1037,7 +1040,7 @@ model_selection:
 
     resolved = load_and_resolve_config([cfg])
 
-    assert resolved.model.logistic_warm_start_path is True
+    assert resolved.model.logistic_warm_start_path is warm_start
     assert resolved.model_selection.search_space == {
         "alpha": [0.0001, 0.01, 0.1],
         "l1_ratio": [0, 0.5, 1],
@@ -1072,38 +1075,27 @@ def test_linear_svm_retains_c_search_parameter(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "extra, message",
+    "model_name, strategy",
     [
-        (
-            """
-model:
-  name: random_forest
-  logistic_warm_start_path: true
-""",
-            "only valid when model.name=logistic_elasticnet",
-        ),
-        (
-            """
-model:
-  name: logistic_elasticnet
-  logistic_warm_start_path: true
-model_selection:
-  search_strategy: random
-  trial_count: 2
-""",
-            "currently requires model_selection.search_strategy=grid",
-        ),
+        ("random_forest", "grid"),
+        ("linear_svm", "grid"),
+        ("logistic_elasticnet", "random"),
+        ("logistic_elasticnet", "tpe"),
     ],
 )
-def test_logistic_warm_start_path_rejects_incompatible_config(
+def test_default_warm_start_allows_other_models_and_search_strategies(
     tmp_path: Path,
-    extra: str,
-    message: str,
+    model_name: str,
+    strategy: str,
 ) -> None:
-    cfg = _write(tmp_path / "invalid_warm_start.yml", extra.strip() + "\n")
+    cfg = _write(
+        tmp_path / "warm_start.yml",
+        f"model:\n  name: {model_name}\n"
+        f"model_selection:\n  search_strategy: {strategy}\n"
+        + ("  trial_count: 2\n" if strategy != "grid" else ""),
+    )
 
-    with pytest.raises(ConfigError, match=message):
-        load_and_resolve_config([cfg])
+    assert load_and_resolve_config([cfg]).model.logistic_warm_start_path is True
 
 
 def test_tpe_strategy_requires_trial_count(tmp_path: Path) -> None:

@@ -331,7 +331,7 @@ class ModelConfig(StrictModel):
     """Model family selection."""
 
     name: ModelName = "logistic_elasticnet"
-    logistic_warm_start_path: bool = False
+    logistic_warm_start_path: bool = True
 
 
 class SamplingConfig(StrictModel):
@@ -579,16 +579,5 @@ class AppConfig(StrictModel):
                     f"logistic_elasticnet: {', '.join(unsupported)}. "
                     "Use glum parameters alpha, l1_ratio, max_iter, gradient_tol; "
                     "alpha controls regularization directly (larger means stronger)."
-                )
-        if self.model.logistic_warm_start_path:
-            if self.model.name != "logistic_elasticnet":
-                raise ValueError(
-                    "model.logistic_warm_start_path=true is only valid when "
-                    "model.name=logistic_elasticnet"
-                )
-            if self.model_selection.search_strategy != "grid":
-                raise ValueError(
-                    "model.logistic_warm_start_path=true currently requires "
-                    "model_selection.search_strategy=grid"
                 )
         return self

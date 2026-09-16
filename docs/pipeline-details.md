@@ -235,10 +235,13 @@ The native `alpha` parameter penalizes the sample-weighted mean log loss;
 larger `alpha` means stronger regularization. SVM and random forest retain
 their scikit-learn implementations.
 
-An optional serial grid path (`model.logistic_warm_start_path=true`) reuses
+The default grid path (`model.logistic_warm_start_path=true`) reuses
 coefficients within each inner fold, fitting descending `alpha` values for
 candidates with identical remaining parameters. Coefficients are never shared
-between folds. The one-SE rule prefers larger `alpha` and then larger
+between folds. Independent inner folds and parameter paths can run in parallel;
+each alpha path is sequential. Set the option to `false` for independent
+candidate fits. Non-logistic models and random/TPE searches use independent
+fits regardless of this option. The one-SE rule prefers larger `alpha` and then larger
 `l1_ratio` among eligible logistic candidates.
 
 Neutral logistic regression retains missing values throughout feature filtering
