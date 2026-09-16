@@ -161,6 +161,20 @@ For each outer fold:
 6. Aggregate model probabilities (`mean` or `median`).
 7. Compute fold metrics.
 
+Feature filtering screens sparse columns immediately after the complete expression
+transform, before computing neutral missing-expression eligibility statistics.
+The sparsity fractions use bounded column blocks; only surviving columns need
+neutral variance, label-observation, and contrast-pair calculations. Neutral
+eligibility statistics also use bounded column blocks to limit temporary memory
+when most features survive sparsity. Rank and percentile-rank transforms still
+see all features before screening. The recorded
+`n_features_after_sparse_feature_filter` includes both neutral eligibility and
+sparsity, preserving its existing meaning and the ranking candidate population.
+Pair-aware and unpaired statistics gather only the required rows and columns,
+preserving the prior reduction layout. Inner CV computes the same rankings and
+warnings but omits unused per-feature diagnostic rows; outer and final-refit
+diagnostic tables remain available.
+
 After all folds:
 
 - write macro/micro aggregate metrics.

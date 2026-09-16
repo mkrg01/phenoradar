@@ -1723,6 +1723,16 @@ def _column_nan_variance(values: np.ndarray, *, ddof: int) -> np.ndarray:
     )
 
 
+def _take_feature_rows(
+    matrix: np.ndarray, rows: np.ndarray, columns: np.ndarray
+) -> np.ndarray:
+    """Gather only needed cells, preserving the layout of matrix[rows][:, columns]."""
+    # Transposing the gathered result keeps columns contiguous, as in the old
+    # two-step indexing, without first copying every column of the chosen rows.
+    values: np.ndarray = matrix.T[np.ix_(columns, rows)].T
+    return values
+
+
 def _pair_group_contrasts(
     x_train_expr: np.ndarray,
     y_train: np.ndarray,
@@ -1750,8 +1760,8 @@ def _pair_group_contrasts(
         label1_idx = group_indices[y_train[group_indices] == 1]
         if label0_idx.size == 0 or label1_idx.size == 0:
             continue
-        label1_mean = _column_nan_mean(x_train_expr[label1_idx][:, selected])
-        label0_mean = _column_nan_mean(x_train_expr[label0_idx][:, selected])
+        label1_mean = _column_nan_mean(_take_feature_rows(x_train_expr, label1_idx, selected))
+        label0_mean = _column_nan_mean(_take_feature_rows(x_train_expr, label0_idx, selected))
         contrast_rows.append(np.asarray(label1_mean - label0_mean, dtype=float))
 
     if not contrast_rows:
@@ -1827,6 +1837,8 @@ def _apply_ranked_feature_filter(
     y_train: np.ndarray | None = None,
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
+    *,
+    collect_score_rows: bool = True,
 ) -> RankedFeatureFilterResult:
     filter_config = config.preprocess.ranked_feature_filter
     method = filter_config.method
@@ -1849,6 +1861,9 @@ def _apply_ranked_feature_filter(
             raise CVError("ranked_feature_filter y_train length does not match training rows")
         n_label0 = int(np.count_nonzero(y_train == 0))
         n_label1 = int(np.count_nonzero(y_train == 1))
+
+    if method == "none" and not collect_score_rows:
+        return RankedFeatureFilterResult(selected=selected, priority_scores=None, score_rows=[])
 
     empty_values = np.full(candidate_count, np.nan, dtype=float)
     if method == "none":
@@ -1922,7 +1937,7 @@ def _apply_ranked_feature_filter(
                 max_features_effective=candidate_count,
                 applied=False,
                 skip_reason="too_few_valid_contrast_pairs",
-            )
+            ) if collect_score_rows else []
             return RankedFeatureFilterResult(
                 selected=selected, priority_scores=None, score_rows=rows
             )
@@ -1947,8 +1962,8 @@ def _apply_ranked_feature_filter(
         label1_idx = np.flatnonzero(y_train == 1)
         if label0_idx.size == 0 or label1_idx.size == 0:
             raise CVError("ranked_feature_filter method unpaired requires both labels")
-        label0_values = x_train_expr[label0_idx][:, selected]
-        label1_values = x_train_expr[label1_idx][:, selected]
+        label0_values = _take_feature_rows(x_train_expr, label0_idx, selected)
+        label1_values = _take_feature_rows(x_train_expr, label1_idx, selected)
         effect = _column_nan_mean(label1_values) - _column_nan_mean(label0_values)
         if label0_idx.size > 1 and label1_idx.size > 1:
             label0_counts = np.count_nonzero(np.isfinite(label0_values), axis=0)
@@ -2018,8 +2033,9 @@ def _apply_ranked_feature_filter(
     if higher_in_trait is not None:
         secondary = np.where(direction_match, secondary, 0.0)
     order = np.lexsort((feature_keys, -secondary, -score))
-    rank_by_local = np.empty(candidate_count, dtype=int)
-    rank_by_local[order] = np.arange(1, candidate_count + 1, dtype=int)
+    rank_by_local = np.empty(candidate_count if collect_score_rows else 0, dtype=int)
+    if collect_score_rows:
+        rank_by_local[order] = np.arange(1, candidate_count + 1, dtype=int)
 
     if higher_in_trait is not None and not np.any(direction_match):
         expected_effect = "> 0" if higher_in_trait == 1 else "< 0"
@@ -2051,7 +2067,7 @@ def _apply_ranked_feature_filter(
             max_features_effective=candidate_count,
             applied=False,
             skip_reason="all_scores_zero_or_non_finite",
-        )
+        ) if collect_score_rows else []
         return RankedFeatureFilterResult(selected=selected, priority_scores=None, score_rows=rows)
 
     eligible_order = order[direction_match[order]]
@@ -2074,7 +2090,7 @@ def _apply_ranked_feature_filter(
         max_features_effective=keep_count,
         applied=True,
         skip_reason=None,
-    )
+    ) if collect_score_rows else []
     kept_global = selected[kept_local]
     kept_priority = score[kept_local]
     order_by_feature = np.argsort(kept_global)
@@ -2083,6 +2099,85 @@ def _apply_ranked_feature_filter(
         priority_scores=np.asarray(kept_priority[order_by_feature], dtype=float),
         score_rows=rows,
     )
+
+
+_SPARSE_FILTER_BLOCK_CELLS = 1_000_000
+_NEUTRAL_FILTER_BLOCK_CELLS = 1_000_000
+
+
+def _sparse_feature_indices(
+    config: AppConfig,
+    x_train_expr: np.ndarray,
+    y_train: np.ndarray | None,
+) -> np.ndarray:
+    """Screen transformed columns with bounded temporary masks and train-only counts."""
+    filter_config = config.preprocess.sparse_feature_filter
+    n_samples, n_features = x_train_expr.shape
+    if not filter_config.enabled:
+        return np.arange(n_features, dtype=int)
+    min_fraction = filter_config.min_nonzero_fraction
+    if min_fraction is None:
+        raise CVError("sparse_feature_filter is enabled but min_nonzero_fraction is missing")
+    if n_samples == 0:
+        raise CVError("sparse_feature_filter requires at least one training row")
+
+    scope = filter_config.scope
+    trait_masks: list[np.ndarray] = []
+    if scope != "all_samples":
+        if y_train is None:
+            raise CVError("sparse_feature_filter requires y_train in preprocessing")
+        if len(y_train) != n_samples:
+            raise CVError("sparse_feature_filter y_train length does not match training rows")
+        labels = np.asarray(y_train)
+        if scope == "any_trait":
+            trait_values = np.unique(labels)
+        else:
+            target_trait = 0 if scope == "trait_0" else 1
+            if not np.any(labels == target_trait):
+                raise CVError(
+                    f"sparse_feature_filter scope={scope} requires trait {target_trait} "
+                    "in training rows"
+                )
+            trait_values = np.asarray([target_trait], dtype=int)
+        trait_masks = [labels == value for value in trait_values]
+
+    keep = np.empty(n_features, dtype=bool)
+    block_size = max(1, _SPARSE_FILTER_BLOCK_CELLS // n_samples)
+    for start in range(0, n_features, block_size):
+        stop = min(start + block_size, n_features)
+        nonzero = x_train_expr[:, start:stop] > _NONZERO_TOLERANCE
+        if scope == "all_samples":
+            fraction = np.count_nonzero(nonzero, axis=0) / n_samples
+        else:
+            fraction = np.zeros(stop - start, dtype=float)
+            for trait_mask in trait_masks:
+                trait_count = int(np.count_nonzero(trait_mask))
+                if trait_count:
+                    trait_fraction = np.count_nonzero(nonzero[trait_mask, :], axis=0) / trait_count
+                    fraction = np.maximum(fraction, trait_fraction)
+        keep[start:stop] = fraction >= float(min_fraction)
+    return np.flatnonzero(keep)
+
+
+def _neutral_feature_values(x_train_expr: np.ndarray, selected: np.ndarray) -> np.ndarray:
+    """Narrow neutral statistics without changing the axis-0 reduction layout."""
+    if selected.size == x_train_expr.shape[1]:
+        return x_train_expr
+    column_contiguous = abs(x_train_expr.strides[0]) < abs(x_train_expr.strides[1])
+    # A sole C-order column becomes contiguous along axis 0, which can switch
+    # NumPy to pairwise summation and alter a tiny variance's > 0 decision.
+    # One dummy column preserves the original slow-axis reduction in that case.
+    pad_column = not column_contiguous and x_train_expr.shape[1] > 1 and selected.size == 1
+    width = int(selected.size) + int(pad_column)
+    values = np.empty(
+        (x_train_expr.shape[0], width),
+        dtype=x_train_expr.dtype,
+        order="F" if column_contiguous else "C",
+    )
+    values[:, :selected.size] = x_train_expr[:, selected]
+    if pad_column:
+        values[:, -1] = 0.0
+    return values
 
 
 def _select_feature_indices_with_counts(
@@ -2094,75 +2189,54 @@ def _select_feature_indices_with_counts(
     warnings: list[str] | None = None,
     ranked_feature_score_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[np.ndarray, FeatureFilterCounts]:
-    selected = np.arange(x_train_expr.shape[1], dtype=int)
-    n_features_before = int(selected.size)
+    n_features_before = int(x_train_expr.shape[1])
+    # Both predicates are column-local on the already transformed matrix. Keep
+    # the historical neutral validation even when the sparse screen is empty.
+    if (
+        config.preprocess.missing_expression.method == "neutral"
+        and y_train is not None
+        and config.preprocess.ranked_feature_filter.method == "pair_aware"
+        and groups_train is None
+    ):
+        raise CVError("Pair-aware neutral preprocessing requires contrast groups")
+    selected = _sparse_feature_indices(config, x_train_expr, y_train)
     if config.preprocess.missing_expression.method == "neutral":
-        observations = np.count_nonzero(np.isfinite(x_train_expr), axis=0)
-        variance = _column_nan_variance(x_train_expr, ddof=0)
-        selected = selected[(observations >= 2) & np.isfinite(variance) & (variance > 0)]
-        if y_train is not None and config.preprocess.ranked_feature_filter.method in {
-            "pair_aware",
-            "unpaired",
-        }:
-            observed_in_both = np.all(
-                [
-                    np.any(np.isfinite(x_train_expr[np.asarray(y_train) == label]), axis=0)
-                    for label in (0, 1)
-                ],
-                axis=0,
-            )
-            selected = selected[observed_in_both[selected]]
-            if config.preprocess.ranked_feature_filter.method == "pair_aware":
-                if groups_train is None:
-                    raise CVError("Pair-aware neutral preprocessing requires contrast groups")
-                contrasts = _pair_group_contrasts(x_train_expr, y_train, groups_train, selected)
-                counts_per_feature = np.count_nonzero(np.isfinite(contrasts), axis=0)
-                selected = selected[
-                    counts_per_feature >= config.preprocess.ranked_feature_filter.min_contrast_pairs
-                ]
+        eligible = np.empty(selected.size, dtype=bool)
+        block_size = max(1, _NEUTRAL_FILTER_BLOCK_CELLS // max(1, x_train_expr.shape[0]))
+        # Bound the extra matrix and variance workspaces even when most columns
+        # survive sparsity. Process an empty block too, preserving validation.
+        for start in range(0, max(1, selected.size), block_size):
+            stop = min(start + block_size, selected.size)
+            width = stop - start
+            neutral_values = _neutral_feature_values(x_train_expr, selected[start:stop])
+            observations = np.count_nonzero(np.isfinite(neutral_values), axis=0)[:width]
+            variance = _column_nan_variance(neutral_values, ddof=0)[:width]
+            block_eligible = (observations >= 2) & np.isfinite(variance) & (variance > 0)
+            if y_train is not None and config.preprocess.ranked_feature_filter.method in {
+                "pair_aware",
+                "unpaired",
+            }:
+                observed_in_both = np.all(
+                    [
+                        np.any(np.isfinite(neutral_values[np.asarray(y_train) == label]), axis=0)
+                        for label in (0, 1)
+                    ],
+                    axis=0,
+                )[:width]
+                block_eligible &= observed_in_both
+            eligible[start:stop] = block_eligible
+            del neutral_values, observations, variance
+        selected = selected[eligible]
+        if y_train is not None and config.preprocess.ranked_feature_filter.method == "pair_aware":
+            if groups_train is None:
+                raise CVError("Pair-aware neutral preprocessing requires contrast groups")
+            contrasts = _pair_group_contrasts(x_train_expr, y_train, groups_train, selected)
+            counts_per_feature = np.count_nonzero(np.isfinite(contrasts), axis=0)
+            selected = selected[
+                counts_per_feature >= config.preprocess.ranked_feature_filter.min_contrast_pairs
+            ]
 
-    if config.preprocess.sparse_feature_filter.enabled:
-        min_fraction = (
-            config.preprocess.sparse_feature_filter.min_nonzero_fraction
-        )
-        if min_fraction is None:
-            raise CVError(
-                "sparse_feature_filter is enabled but "
-                "min_nonzero_fraction is missing"
-            )
-        if x_train_expr.shape[0] == 0:
-            raise CVError("sparse_feature_filter requires at least one training row")
-        scope = config.preprocess.sparse_feature_filter.scope
-        nonzero_mask = x_train_expr[:, selected] > _NONZERO_TOLERANCE
-        if scope == "all_samples":
-            nonzero_fraction = np.count_nonzero(nonzero_mask, axis=0) / x_train_expr.shape[0]
-        else:
-            if y_train is None:
-                raise CVError("sparse_feature_filter requires y_train in preprocessing")
-            if len(y_train) != x_train_expr.shape[0]:
-                raise CVError("sparse_feature_filter y_train length does not match training rows")
-            y_train_arr = np.asarray(y_train)
-            if scope == "any_trait":
-                trait_values = np.unique(y_train_arr)
-            else:
-                target_trait = 0 if scope == "trait_0" else 1
-                if not np.any(y_train_arr == target_trait):
-                    raise CVError(
-                        f"sparse_feature_filter scope={scope} requires trait {target_trait} "
-                        "in training rows"
-                    )
-                trait_values = np.asarray([target_trait], dtype=int)
-            nonzero_fraction = np.zeros(selected.size, dtype=float)
-            for trait_value in trait_values:
-                trait_mask = y_train_arr == trait_value
-                trait_count = int(np.count_nonzero(trait_mask))
-                if trait_count == 0:
-                    continue
-                trait_nonzero_fraction = (
-                    np.count_nonzero(nonzero_mask[trait_mask, :], axis=0) / trait_count
-                )
-                nonzero_fraction = np.maximum(nonzero_fraction, trait_nonzero_fraction)
-        selected = selected[nonzero_fraction >= float(min_fraction)]
+    # This count has always included neutral eligibility as well as sparsity.
     n_features_after_sparse_feature_filter = int(selected.size)
 
     if config.preprocess.low_variance_filter.enabled:
@@ -2181,6 +2255,7 @@ def _select_feature_indices_with_counts(
         y_train=y_train,
         groups_train=groups_train,
         warnings=warnings,
+        collect_score_rows=ranked_feature_score_rows is not None,
     )
     selected = ranked_result.selected
     if ranked_feature_score_rows is not None:

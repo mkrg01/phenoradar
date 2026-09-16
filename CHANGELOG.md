@@ -14,6 +14,10 @@
 
 ### Features
 
+* screen sparse features before neutral eligibility statistics, bound filtering
+  workspaces in column blocks, avoid full-width row copies in supervised feature
+  filters, and skip unused inner-CV diagnostic rows while preserving
+  feature-selection criteria and reported counts
 * reuse stronger candidate lambdas as native paths for selected logistic models
   in outer CV and final refit, preserving the exact selected lambda and fitting
   each path on that refit's own training data
