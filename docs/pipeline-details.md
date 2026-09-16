@@ -175,6 +175,15 @@ preserving the prior reduction layout. Inner CV computes the same rankings and
 warnings but omits unused per-feature diagnostic rows; outer and final-refit
 diagnostic tables remain available.
 
+Inner CV shares the complete transformed source matrix across its splits and
+passes integer row indices to feature filtering. Sparsity and neutral statistics
+read bounded column blocks from training rows; supervised and correlation filters
+also use only those rows. Full-width training and validation copies are avoided.
+Once feature selection is complete, only the selected rows and columns are
+gathered for scaling. Scaling is fitted on training rows, and the resulting
+per-fold matrices remain cached for candidate evaluation. Row order and reduction
+layout are preserved, including when the source matrix uses Fortran layout.
+
 After all folds:
 
 - write macro/micro aggregate metrics.

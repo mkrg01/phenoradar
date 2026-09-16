@@ -14,6 +14,9 @@
 
 ### Features
 
+* preprocess inner CV from shared transformed matrices and fold row indices,
+  gathering training and validation matrices only for selected features while
+  preserving fold-local statistics, numerical results, and candidate caches
 * screen sparse features before neutral eligibility statistics, bound filtering
   workspaces in column blocks, avoid full-width row copies in supervised feature
   filters, and skip unused inner-CV diagnostic rows while preserving

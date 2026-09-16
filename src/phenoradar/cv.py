@@ -1733,11 +1733,22 @@ def _take_feature_rows(
     return values
 
 
+def _feature_values(
+    matrix: np.ndarray, columns: np.ndarray, rows: np.ndarray | None = None
+) -> np.ndarray:
+    """Select columns, optionally gathering fold-local rows from a shared matrix."""
+    if rows is not None:
+        return _take_feature_rows(matrix, rows, columns)
+    return np.asarray(matrix[:, columns])
+
+
 def _pair_group_contrasts(
     x_train_expr: np.ndarray,
     y_train: np.ndarray,
     groups_train: np.ndarray,
     selected: np.ndarray,
+    *,
+    train_rows: np.ndarray | None = None,
 ) -> np.ndarray:
     groups_by_key: dict[str, list[int]] = {}
     for idx, raw_group in enumerate(groups_train.tolist()):
@@ -1760,6 +1771,9 @@ def _pair_group_contrasts(
         label1_idx = group_indices[y_train[group_indices] == 1]
         if label0_idx.size == 0 or label1_idx.size == 0:
             continue
+        if train_rows is not None:
+            label0_idx = train_rows[label0_idx]
+            label1_idx = train_rows[label1_idx]
         label1_mean = _column_nan_mean(_take_feature_rows(x_train_expr, label1_idx, selected))
         label0_mean = _column_nan_mean(_take_feature_rows(x_train_expr, label0_idx, selected))
         contrast_rows.append(np.asarray(label1_mean - label0_mean, dtype=float))
@@ -1839,6 +1853,7 @@ def _apply_ranked_feature_filter(
     warnings: list[str] | None = None,
     *,
     collect_score_rows: bool = True,
+    train_rows: np.ndarray | None = None,
 ) -> RankedFeatureFilterResult:
     filter_config = config.preprocess.ranked_feature_filter
     method = filter_config.method
@@ -1855,9 +1870,10 @@ def _apply_ranked_feature_filter(
     max_features_requested = None if max_features is None else int(max_features)
     n_label0: int | None = None
     n_label1: int | None = None
+    n_train = x_train_expr.shape[0] if train_rows is None else train_rows.size
     if y_train is not None:
         y_train = np.asarray(y_train)
-        if y_train.shape[0] != x_train_expr.shape[0]:
+        if y_train.shape[0] != n_train:
             raise CVError("ranked_feature_filter y_train length does not match training rows")
         n_label0 = int(np.count_nonzero(y_train == 0))
         n_label1 = int(np.count_nonzero(y_train == 1))
@@ -1901,7 +1917,9 @@ def _apply_ranked_feature_filter(
             raise CVError(
                 "ranked_feature_filter method pair_aware requires y_train and groups_train"
             )
-        contrasts = _pair_group_contrasts(x_train_expr, y_train, groups_train, selected)
+        contrasts = _pair_group_contrasts(
+            x_train_expr, y_train, groups_train, selected, train_rows=train_rows
+        )
         n_valid_contrast_pairs = int(contrasts.shape[0])
         min_contrast_pairs = int(filter_config.min_contrast_pairs)
         if n_valid_contrast_pairs < min_contrast_pairs:
@@ -1962,6 +1980,9 @@ def _apply_ranked_feature_filter(
         label1_idx = np.flatnonzero(y_train == 1)
         if label0_idx.size == 0 or label1_idx.size == 0:
             raise CVError("ranked_feature_filter method unpaired requires both labels")
+        if train_rows is not None:
+            label0_idx = train_rows[label0_idx]
+            label1_idx = train_rows[label1_idx]
         label0_values = _take_feature_rows(x_train_expr, label0_idx, selected)
         label1_values = _take_feature_rows(x_train_expr, label1_idx, selected)
         effect = _column_nan_mean(label1_values) - _column_nan_mean(label0_values)
@@ -1985,8 +2006,10 @@ def _apply_ranked_feature_filter(
         else:
             fallback_to_unstandardized_effect = True
     elif method == "variance":
-        if x_train_expr.shape[0] > 1:
-            score = _column_nan_variance(x_train_expr[:, selected], ddof=1)
+        if n_train > 1:
+            score = _column_nan_variance(
+                _feature_values(x_train_expr, selected, train_rows), ddof=1
+            )
         else:
             score = np.zeros(candidate_count, dtype=float)
     else:  # pragma: no cover - guarded by config validation.
@@ -2109,10 +2132,14 @@ def _sparse_feature_indices(
     config: AppConfig,
     x_train_expr: np.ndarray,
     y_train: np.ndarray | None,
+    *,
+    train_rows: np.ndarray | None = None,
 ) -> np.ndarray:
     """Screen transformed columns with bounded temporary masks and train-only counts."""
     filter_config = config.preprocess.sparse_feature_filter
     n_samples, n_features = x_train_expr.shape
+    if train_rows is not None:
+        n_samples = train_rows.size
     if not filter_config.enabled:
         return np.arange(n_features, dtype=int)
     min_fraction = filter_config.min_nonzero_fraction
@@ -2145,7 +2172,13 @@ def _sparse_feature_indices(
     block_size = max(1, _SPARSE_FILTER_BLOCK_CELLS // n_samples)
     for start in range(0, n_features, block_size):
         stop = min(start + block_size, n_features)
-        nonzero = x_train_expr[:, start:stop] > _NONZERO_TOLERANCE
+        values = (
+            x_train_expr[:, start:stop]
+            if train_rows is None
+            else x_train_expr[train_rows, start:stop]
+        )
+        nonzero = values > _NONZERO_TOLERANCE
+        del values
         if scope == "all_samples":
             fraction = np.count_nonzero(nonzero, axis=0) / n_samples
         else:
@@ -2159,22 +2192,34 @@ def _sparse_feature_indices(
     return np.flatnonzero(keep)
 
 
-def _neutral_feature_values(x_train_expr: np.ndarray, selected: np.ndarray) -> np.ndarray:
+def _neutral_feature_values(
+    x_train_expr: np.ndarray,
+    selected: np.ndarray,
+    train_rows: np.ndarray | None = None,
+) -> np.ndarray:
     """Narrow neutral statistics without changing the axis-0 reduction layout."""
-    if selected.size == x_train_expr.shape[1]:
+    if train_rows is None and selected.size == x_train_expr.shape[1]:
         return x_train_expr
-    column_contiguous = abs(x_train_expr.strides[0]) < abs(x_train_expr.strides[1])
+    # Advanced row indexing previously made a C-order training copy, even when
+    # the shared source was F-order. Keep that reduction layout for indexed folds.
+    column_contiguous = (
+        train_rows is None and abs(x_train_expr.strides[0]) < abs(x_train_expr.strides[1])
+    )
     # A sole C-order column becomes contiguous along axis 0, which can switch
     # NumPy to pairwise summation and alter a tiny variance's > 0 decision.
     # One dummy column preserves the original slow-axis reduction in that case.
     pad_column = not column_contiguous and x_train_expr.shape[1] > 1 and selected.size == 1
     width = int(selected.size) + int(pad_column)
+    n_train = x_train_expr.shape[0] if train_rows is None else train_rows.size
     values = np.empty(
-        (x_train_expr.shape[0], width),
+        (n_train, width),
         dtype=x_train_expr.dtype,
         order="F" if column_contiguous else "C",
     )
-    values[:, :selected.size] = x_train_expr[:, selected]
+    if train_rows is None:
+        values[:, :selected.size] = x_train_expr[:, selected]
+    else:
+        values[:, :selected.size] = x_train_expr[np.ix_(train_rows, selected)]
     if pad_column:
         values[:, -1] = 0.0
     return values
@@ -2188,6 +2233,8 @@ def _select_feature_indices_with_counts(
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
     ranked_feature_score_rows: list[dict[str, Any]] | None = None,
+    *,
+    train_rows: np.ndarray | None = None,
 ) -> tuple[np.ndarray, FeatureFilterCounts]:
     n_features_before = int(x_train_expr.shape[1])
     # Both predicates are column-local on the already transformed matrix. Keep
@@ -2199,16 +2246,19 @@ def _select_feature_indices_with_counts(
         and groups_train is None
     ):
         raise CVError("Pair-aware neutral preprocessing requires contrast groups")
-    selected = _sparse_feature_indices(config, x_train_expr, y_train)
+    selected = _sparse_feature_indices(config, x_train_expr, y_train, train_rows=train_rows)
     if config.preprocess.missing_expression.method == "neutral":
         eligible = np.empty(selected.size, dtype=bool)
-        block_size = max(1, _NEUTRAL_FILTER_BLOCK_CELLS // max(1, x_train_expr.shape[0]))
+        n_train = x_train_expr.shape[0] if train_rows is None else train_rows.size
+        block_size = max(1, _NEUTRAL_FILTER_BLOCK_CELLS // max(1, n_train))
         # Bound the extra matrix and variance workspaces even when most columns
         # survive sparsity. Process an empty block too, preserving validation.
         for start in range(0, max(1, selected.size), block_size):
             stop = min(start + block_size, selected.size)
             width = stop - start
-            neutral_values = _neutral_feature_values(x_train_expr, selected[start:stop])
+            neutral_values = _neutral_feature_values(
+                x_train_expr, selected[start:stop], train_rows
+            )
             observations = np.count_nonzero(np.isfinite(neutral_values), axis=0)[:width]
             variance = _column_nan_variance(neutral_values, ddof=0)[:width]
             block_eligible = (observations >= 2) & np.isfinite(variance) & (variance > 0)
@@ -2230,7 +2280,9 @@ def _select_feature_indices_with_counts(
         if y_train is not None and config.preprocess.ranked_feature_filter.method == "pair_aware":
             if groups_train is None:
                 raise CVError("Pair-aware neutral preprocessing requires contrast groups")
-            contrasts = _pair_group_contrasts(x_train_expr, y_train, groups_train, selected)
+            contrasts = _pair_group_contrasts(
+                x_train_expr, y_train, groups_train, selected, train_rows=train_rows
+            )
             counts_per_feature = np.count_nonzero(np.isfinite(contrasts), axis=0)
             selected = selected[
                 counts_per_feature >= config.preprocess.ranked_feature_filter.min_contrast_pairs
@@ -2243,7 +2295,9 @@ def _select_feature_indices_with_counts(
         min_variance = config.preprocess.low_variance_filter.min_variance
         if min_variance is None:
             raise CVError("low_variance_filter is enabled but min_variance is missing")
-        variances = _column_nan_variance(x_train_expr[:, selected], ddof=0)
+        variances = _column_nan_variance(
+            _feature_values(x_train_expr, selected, train_rows), ddof=0
+        )
         selected = selected[variances >= float(min_variance)]
     n_features_after_low_variance = int(selected.size)
 
@@ -2256,6 +2310,7 @@ def _select_feature_indices_with_counts(
         groups_train=groups_train,
         warnings=warnings,
         collect_score_rows=ranked_feature_score_rows is not None,
+        train_rows=train_rows,
     )
     selected = ranked_result.selected
     if ranked_feature_score_rows is not None:
@@ -2269,6 +2324,7 @@ def _select_feature_indices_with_counts(
             selected,
             feature_names,
             priority_scores=ranked_result.priority_scores,
+            train_rows=train_rows,
         )
     n_features_after_correlation = int(selected.size)
 
@@ -2309,6 +2365,8 @@ def _apply_correlation_filter(
     selected: np.ndarray,
     feature_names: list[str],
     priority_scores: np.ndarray | None = None,
+    *,
+    train_rows: np.ndarray | None = None,
 ) -> np.ndarray:
     max_abs_corr = config.preprocess.correlation_filter.max_abs_correlation
     if max_abs_corr is None:
@@ -2316,7 +2374,7 @@ def _apply_correlation_filter(
     if priority_scores is not None and priority_scores.shape[0] != selected.size:
         raise CVError("ranked feature priority scores must align with the selected feature set")
 
-    train_selected = x_train_log[:, selected]
+    train_selected = _feature_values(x_train_log, selected, train_rows)
     method = config.preprocess.correlation_filter.method
     feature_count = train_selected.shape[1]
     if np.isfinite(train_selected).all():
@@ -2408,8 +2466,15 @@ def _preprocess_transformed_fold_with_counts(
     groups_train: np.ndarray | None = None,
     warnings: list[str] | None = None,
     ranked_feature_score_rows: list[dict[str, Any]] | None = None,
+    *,
+    train_rows: np.ndarray | None = None,
+    valid_rows: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts, FeatureScaler]:
-    """Preprocess a fold whose row-local expression transform is already applied."""
+    """Preprocess transformed matrices, optionally using integer row indices.
+
+    Indexed folds read from shared source matrices and gather full training and
+    validation arrays only after selection. Labels and groups stay fold-local.
+    """
 
     selected, counts = _select_feature_indices_with_counts(
         config,
@@ -2419,11 +2484,12 @@ def _preprocess_transformed_fold_with_counts(
         groups_train=groups_train,
         warnings=warnings,
         ranked_feature_score_rows=ranked_feature_score_rows,
+        train_rows=train_rows,
     )
     selected_features = [feature_names[idx] for idx in selected]
 
-    x_train_selected = x_train_expr[:, selected]
-    x_valid_selected = x_valid_expr[:, selected]
+    x_train_selected = _feature_values(x_train_expr, selected, train_rows)
+    x_valid_selected = _feature_values(x_valid_expr, selected, valid_rows)
 
     x_train_scaled, x_valid_scaled, scaler = fit_feature_scaling(
         config, x_train_selected, x_valid_selected
@@ -3297,8 +3363,6 @@ def _build_inner_cv_preprocessed_folds(
         for train_idx, valid_idx, inner_fold_id in _inner_cv_splits(
             config, y_source, groups_source
         ):
-            x_train_expr = x_source_expr[train_idx, :]
-            x_valid_expr = x_source_expr[valid_idx, :]
             y_train = y_source[train_idx]
             y_valid = y_source[valid_idx]
             groups_train = groups_source[train_idx]
@@ -3309,12 +3373,14 @@ def _build_inner_cv_preprocessed_folds(
             x_train, x_valid, _selected, _counts, _scaler = (
                 _preprocess_transformed_fold_with_counts(
                     config,
-                    x_train_expr,
-                    x_valid_expr,
+                    x_source_expr,
+                    x_source_expr,
                     feature_names,
                     y_train=y_train,
                     groups_train=contrast_groups_train,
                     warnings=warnings,
+                    train_rows=train_idx,
+                    valid_rows=valid_idx,
                 )
             )
             sample_weight = _fit_sample_weights(config, y_train, groups_train)
