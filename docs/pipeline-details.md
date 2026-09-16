@@ -244,6 +244,19 @@ candidates. Candidate scores use the exact requested lambda, without interpolati
 or additional internal cross-validation. The one-SE rule prefers larger `lambda`
 and then larger `alpha` among eligible logistic candidates.
 
+Selected logistic models in outer CV and final refit use the descending prefix
+of that source sample set's candidate lambdas, ending at the exact selected
+lambda. Only candidates with matching `alpha`, `thresh`, and `maxit` contribute
+to the prefix. Evaluated candidates are available for grid, random, and TPE
+selection; without inner CV, the configured ensemble candidates supply the path.
+If no matching stronger lambda is available, the model uses a single-lambda fit.
+Each refit starts a new native path on its own preprocessed training samples and
+weights. Inner-fold coefficients and scalers are not reused. Intermediate models
+are discarded, and candidate selection, ensemble ordering, and the convergence
+threshold are preserved. Reported coordinate passes cover the entire refit path.
+Changing the optimization path can produce small numerical differences in fitted
+coefficients and predictions, particularly with correlated Lasso features.
+
 The backend accepts dense and CSC sparse matrices, sample weights, and one-feature
 folds. An all-constant training matrix is fitted with the exact weighted intercept
 and zero coefficients. Native errors and incomplete paths stop training. Stored

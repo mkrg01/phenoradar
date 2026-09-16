@@ -2697,6 +2697,65 @@ def _glmnet_fit_diagnostic(estimator: GlmnetLogisticRegression) -> EstimatorFitD
     )
 
 
+def _selected_glmnet_lambda_path(
+    estimator: GlmnetLogisticRegression,
+    source_result: SourceSelectionResult,
+) -> list[float]:
+    """Recover the selected candidate's descending prefix without changing its lambda.
+
+    Selection results contain parameter values only, never fitted inner-fold state.
+    Unscored ensembles have no trial rows, so include their selected candidates too.
+    """
+    target = float(estimator.lambda_)
+    path_key = (float(estimator.alpha), float(estimator.thresh), int(estimator.maxit))
+    parameters = [item.candidate.params for item in source_result.selected_candidates]
+    # Each candidate has one diagnostic row per inner fold; parse it only once.
+    parameters.extend(
+        json.loads(value) for value in {row["params_json"] for row in source_result.trial_rows}
+    )
+    lambdas = {target}
+    for params in parameters:
+        key = (
+            float(params.get("alpha", DEFAULT_ALPHA)),
+            float(params.get("thresh", DEFAULT_THRESH)),
+            int(params.get("maxit", DEFAULT_MAXIT)),
+        )
+        strength = float(params.get("lambda", DEFAULT_LAMBDA))
+        if key == path_key and strength >= target:
+            lambdas.add(strength)
+    return sorted(lambdas, reverse=True)
+
+
+def _fit_selected_estimator(
+    estimator: FittedEstimator,
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    sample_weight: np.ndarray | None,
+    source_result: SourceSelectionResult,
+) -> EstimatorFitDiagnostic:
+    """Refit a selected model using only this training set's preprocessed arrays."""
+    if not isinstance(estimator, GlmnetLogisticRegression):
+        return _fit_estimator(estimator, x_train, y_train, sample_weight)
+    lambdas = _selected_glmnet_lambda_path(estimator, source_result)
+    if len(lambdas) == 1:
+        return _fit_estimator(estimator, x_train, y_train, sample_weight)
+    try:
+        model = fit_glmnet_path(
+            x_train,
+            y_train,
+            lambdas,
+            alpha=estimator.alpha,
+            thresh=estimator.thresh,
+            maxit=estimator.maxit,
+            sample_weight=sample_weight,
+        )[-1]
+    except GlmnetError as exc:
+        raise CVError(str(exc)) from exc
+    # Retain only the exact selected-lambda model; intermediate models are temporary.
+    estimator.__dict__.update(model.__dict__)
+    return _glmnet_fit_diagnostic(estimator)
+
+
 def _fit_estimator(
     estimator: FittedEstimator,
     x_train: np.ndarray,
@@ -4468,7 +4527,9 @@ def _fit_outer_sample_set(
             model_params=selected.candidate.params,
         )
         fit_started = None if timing_recorder is None else timing_recorder.start()
-        fit_diagnostic = _fit_estimator(estimator, x_sampled, y_sampled, sample_weight)
+        fit_diagnostic = _fit_selected_estimator(
+            estimator, x_sampled, y_sampled, sample_weight, source_result
+        )
         if timing_recorder is not None and fit_started is not None:
             timing_recorder.record_since(
                 fit_started,
@@ -4672,7 +4733,9 @@ def _fit_final_refit_sample_set(
                 model_params=selected.candidate.params,
             )
             fit_started = None if timing_recorder is None else timing_recorder.start()
-            fit_diagnostic = _fit_estimator(estimator, x_sampled, y_sampled, sample_weight)
+            fit_diagnostic = _fit_selected_estimator(
+                estimator, x_sampled, y_sampled, sample_weight, source_result
+            )
             if timing_recorder is not None and fit_started is not None:
                 timing_recorder.record_since(
                     fit_started,

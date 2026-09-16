@@ -640,6 +640,12 @@ has independent fitted state. Independent folds and paths are scheduled within
 `runtime.n_jobs`. TPE proposes candidates sequentially and uses individual fits.
 Path fitting is automatic; there is no solver or warm-start switch.
 
+Outer-CV and final-refit training also use the available stronger candidate lambdas
+with matching `alpha`, `thresh`, and `maxit` as a descending path to the selected
+lambda. Each refit uses its own training data and retains only the selected model.
+No extra candidate lambdas are generated; if no matching stronger candidate exists,
+the refit uses the selected lambda alone. This behavior requires no config change.
+
 The logistic search parameters are now `lambda`, `alpha`, `maxit`, and `thresh`.
 Configs using removed keys must be updated, and previously saved logistic model
 bundles must be regenerated. In particular, `alpha` now means the L1 fraction.

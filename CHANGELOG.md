@@ -14,6 +14,9 @@
 
 ### Features
 
+* reuse stronger candidate lambdas as native paths for selected logistic models
+  in outer CV and final refit, preserving the exact selected lambda and fitting
+  each path on that refit's own training data
 * enable logistic grid-search warm starts by default, configurable with
   `model.logistic_warm_start_path`; parallelize independent fold/parameter
   paths while fitting each alpha path from strongest to weakest regularization
