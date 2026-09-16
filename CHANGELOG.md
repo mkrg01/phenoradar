@@ -14,6 +14,9 @@
 
 ### Features
 
+* reuse one run-scoped normalized expression cache across outer CV and final
+  refit, preserving stage-local feature schemas and cleaning up on success or
+  failure without caching external/inference rows for `cv_only`
 * compute abstention coverage and missing-feature evidence only from features
   with positive coefficient weight, with bounded observation masks and full-input
   validation; record inference preprocessing, prediction, and abstention timings

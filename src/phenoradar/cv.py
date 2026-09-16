@@ -1509,6 +1509,14 @@ class ExpressionMatrixBuilder:
         self._cached_long_path = cache_path
         self._cached_species = requested_species
 
+    def close(self) -> None:
+        """Release the normalized-expression cache owned by this builder."""
+        if self._cache_tempdir is not None:
+            self._cache_tempdir.cleanup()
+        self._cache_tempdir = None
+        self._cached_long_path = None
+        self._cached_species = None
+
     @staticmethod
     def _normalize_feature_order(feature_order: list[str]) -> list[str]:
         feature_names = [str(value).strip() for value in feature_order]
@@ -1689,6 +1697,46 @@ class ExpressionMatrixBuilder:
             matrix[:, start:stop] = chunk_matrix
 
         return matrix, feature_names
+
+
+class RunExpressionCache:
+    """Own one lazily created expression builder for sequential stages of a run.
+
+    Only normalized raw expression is shared. Feature selection, transforms,
+    scaling, and model fitting remain local to their existing training scopes.
+    """
+
+    def __init__(self) -> None:
+        self._builder: ExpressionMatrixBuilder | None = None
+        self._signature: tuple[object, ...] | None = None
+
+    def get_builder(self, config: AppConfig) -> ExpressionMatrixBuilder:
+        signature = (
+            Path(config.data.tpm_path).resolve(),
+            config.data.species_col,
+            config.data.feature_col,
+            config.data.value_col,
+            config.preprocess.absent_feature_fill,
+            config.preprocess.max_pivot_cells,
+        )
+        if self._builder is None:
+            self._builder = ExpressionMatrixBuilder(config)
+            self._signature = signature
+        elif signature != self._signature:
+            raise CVError("Run expression cache cannot be reused with different input settings")
+        return self._builder
+
+    def close(self) -> None:
+        if self._builder is not None:
+            self._builder.close()
+        self._builder = None
+        self._signature = None
+
+    def __enter__(self) -> RunExpressionCache:
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.close()
 
 
 def _column_nan_mean(values: np.ndarray) -> np.ndarray:
@@ -4105,7 +4153,10 @@ def _outer_cv_inference_species(config: AppConfig, split_manifest: pl.DataFrame)
 
 
 def _build_outer_cv_matrix_cache(
-    config: AppConfig, split_manifest: pl.DataFrame
+    config: AppConfig,
+    split_manifest: pl.DataFrame,
+    *,
+    expression_cache: RunExpressionCache | None = None,
 ) -> OuterCvMatrixCache:
     cv_species = _outer_cv_species(split_manifest)
     if not cv_species:
@@ -4113,11 +4164,30 @@ def _build_outer_cv_matrix_cache(
     inference_species = _outer_cv_inference_species(config, split_manifest)
     species_order = [*cv_species, *inference_species]
 
-    matrix_builder = ExpressionMatrixBuilder(config)
+    matrix_builder = (
+        ExpressionMatrixBuilder(config)
+        if expression_cache is None
+        else expression_cache.get_builder(config)
+    )
+    cache_species = species_order
+    if expression_cache is not None and config.runtime.execution_stage == "full_run":
+        # Normalize the union once for CV and final refit. The CV feature schema
+        # below still comes exclusively from the train/validation pool.
+        cache_species = (
+            split_manifest.filter(
+                pl.col("pool").is_in(
+                    ["train", "validation", "external_test", "discovery_inference"]
+                )
+            )
+            .get_column("species")
+            .unique()
+            .sort()
+            .to_list()
+        )
     _with_native_thread_limit_for_config(
         config,
         matrix_builder.cache_species,
-        species_order,
+        cache_species,
     )
     cv_matrix, feature_names = _with_native_thread_limit_for_config(
         config,
@@ -5021,6 +5091,8 @@ def _run_final_refit_impl(
     config: AppConfig,
     split_manifest: pl.DataFrame,
     timing_recorder: TimingRecorder | None = None,
+    *,
+    expression_cache: RunExpressionCache | None = None,
 ) -> FinalRefitArtifacts:
     """Refit final model(s) on full training pool and predict external/inference pools."""
     recorder = timing_recorder if timing_recorder is not None else TimingRecorder()
@@ -5031,7 +5103,11 @@ def _run_final_refit_impl(
     polars_warning = _polars_thread_pool_warning(config)
     if polars_warning is not None:
         warnings.append(polars_warning)
-    matrix_builder = ExpressionMatrixBuilder(config)
+    matrix_builder = (
+        ExpressionMatrixBuilder(config)
+        if expression_cache is None
+        else expression_cache.get_builder(config)
+    )
 
     pool_preparation_started = recorder.start()
     train_pool = (
@@ -5636,11 +5712,15 @@ def run_final_refit(
     config: AppConfig,
     split_manifest: pl.DataFrame,
     timing_recorder: TimingRecorder | None = None,
+    *,
+    expression_cache: RunExpressionCache | None = None,
 ) -> FinalRefitArtifacts:
     """Refit final models while recording convergence without stderr warning noise."""
     with warning_control.catch_warnings():
         warning_control.simplefilter("ignore", ConvergenceWarning)
-        return _run_final_refit_impl(config, split_manifest, timing_recorder)
+        return _run_final_refit_impl(
+            config, split_manifest, timing_recorder, expression_cache=expression_cache
+        )
 
 
 def _run_outer_fold(
@@ -6273,6 +6353,8 @@ def _run_outer_cv_impl(
     split_manifest: pl.DataFrame,
     progress_callback: Callable[[str], None] | None = None,
     timing_recorder: TimingRecorder | None = None,
+    *,
+    expression_cache: RunExpressionCache | None = None,
 ) -> CVArtifacts:
     """Execute outer CV using split manifest and return evaluation artifacts."""
     recorder = timing_recorder if timing_recorder is not None else TimingRecorder()
@@ -6308,7 +6390,9 @@ def _run_outer_cv_impl(
 
     fold_ids = _fold_ids(split_manifest)
     matrix_build_started = recorder.start()
-    outer_matrix_cache = _build_outer_cv_matrix_cache(config, split_manifest)
+    outer_matrix_cache = _build_outer_cv_matrix_cache(
+        config, split_manifest, expression_cache=expression_cache
+    )
     recorder.record_since(
         matrix_build_started,
         scope="outer_cv",
@@ -6613,6 +6697,8 @@ def run_outer_cv(
     split_manifest: pl.DataFrame,
     progress_callback: Callable[[str], None] | None = None,
     timing_recorder: TimingRecorder | None = None,
+    *,
+    expression_cache: RunExpressionCache | None = None,
 ) -> CVArtifacts:
     """Execute outer CV while recording convergence without stderr warning noise."""
     with warning_control.catch_warnings():
@@ -6622,4 +6708,5 @@ def run_outer_cv(
             split_manifest,
             progress_callback=progress_callback,
             timing_recorder=timing_recorder,
+            expression_cache=expression_cache,
         )

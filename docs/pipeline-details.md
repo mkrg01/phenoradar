@@ -106,8 +106,8 @@ Outer folds can execute in parallel (up to `runtime.n_jobs`) with per-fold CPU b
 
 Before fold execution:
 
-- scan and normalize the long TPM rows for all outer-CV train/validation
-  species once into a temporary Parquet cache;
+- scan and normalize the long TPM rows for the required species once into a
+  temporary Parquet cache;
 - build one shared species x feature matrix by mapping the cached long rows to
   integer coordinates; absent coordinates are initialized according to
   `preprocess.absent_feature_fill` (`0` by default, optionally `nan` for
@@ -116,6 +116,23 @@ Before fold execution:
   tree heatmaps do not rescan the full TPM input when species coverage matches;
 - retain `preprocess.max_pivot_cells` as the dense-cell limit used to split
   oversized matrices into feature chunks.
+
+The CLI keeps one normalized-expression cache through outer CV and final refit.
+For `full_run`, its species set includes train/validation, discovery inference,
+and external test, so refit reuses the validated raw rows without parsing and
+aggregating the TSV again. CV feature names still come only from train/validation
+species; refit preserves its existing feature schema and target-matrix pruning
+rules. Feature selection, transforms, scaling, and model fitting retain their
+existing training scopes. This sharing does not retain CV's dense matrices for
+refit. For `cv_only`, the cache contains only train/validation species.
+
+The cache is local to one run (including one condition in a study), and is
+removed after these stages or on an exception. It is not a persistent cache
+between runs. Because `full_run` prepares the complete raw species set before
+CV, invalid external/inference input can now fail at that preparation step.
+No such extra validation is performed for `cv_only`. Python callers can opt
+into the same lifecycle with a `RunExpressionCache` context passed via
+`expression_cache` to `run_outer_cv` and `run_final_refit`.
 
 For each outer fold:
 

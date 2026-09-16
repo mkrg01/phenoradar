@@ -42,7 +42,7 @@ from phenoradar.config import (
     load_config_conditions,
     write_resolved_config,
 )
-from phenoradar.cv import CVError, run_final_refit, run_outer_cv
+from phenoradar.cv import CVError, RunExpressionCache, run_final_refit, run_outer_cv
 from phenoradar.figures import (
     FigureError,
     figure_annotation_features,
@@ -954,92 +954,95 @@ def _run_single(
         stage="fingerprint_generation",
     )
 
-    _log("Run outer cross-validation.")
+    with RunExpressionCache() as expression_cache:
+        _log("Run outer cross-validation.")
 
-    def _outer_cv_progress(message: str) -> None:
-        _log(message, detail=message.startswith("Outer CV fold stage"))
+        def _outer_cv_progress(message: str) -> None:
+            _log(message, detail=message.startswith("Outer CV fold stage"))
 
-    outer_cv_started = timing_recorder.start()
-    try:
-        cv_artifacts = run_outer_cv(
-            resolved,
-            split_artifacts.split_manifest,
-            progress_callback=_outer_cv_progress,
-            timing_recorder=timing_recorder,
-        )
-    except CVError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    timing_recorder.record_since(
-        outer_cv_started,
-        scope="run",
-        stage="outer_cv",
-    )
-    _log("Outer cross-validation completed.")
-
-    _emit_run_metric_summary(
-        cv_artifacts.metrics_cv,
-        start_time=start_time,
-        log_verbosity=log_verbosity,
-    )
-
-    warnings = list(cv_artifacts.warnings)
-    group_bootstrap_artifacts: GroupBootstrapArtifacts | None = None
-    group_bootstrap_config = resolved.evaluation.group_bootstrap
-    if group_bootstrap_config.enabled:
-        _log(
-            "Run OOF group bootstrap "
-            f"(group_col={resolved.split.group_col}, "
-            f"n_resamples={group_bootstrap_config.n_resamples})."
-        )
-        group_bootstrap_started = timing_recorder.start()
+        outer_cv_started = timing_recorder.start()
         try:
-            group_bootstrap_artifacts = run_oof_group_bootstrap(
-                oof_predictions=cv_artifacts.oof_predictions,
-                split_manifest=split_artifacts.split_manifest,
-                group_col=resolved.split.group_col,
-                n_resamples=int(group_bootstrap_config.n_resamples),
-                confidence_level=float(group_bootstrap_config.confidence_level),
-                runtime_seed=int(resolved.runtime.seed),
-            )
-        except GroupBootstrapError as exc:
-            raise typer.BadParameter(str(exc)) from exc
-        timing_recorder.record_since(
-            group_bootstrap_started,
-            scope="run",
-            stage="group_bootstrap",
-        )
-        warnings.extend(group_bootstrap_artifacts.warnings)
-        _log(
-            "OOF group bootstrap completed "
-            f"(n_groups={group_bootstrap_artifacts.n_groups}, "
-            f"seed={group_bootstrap_artifacts.seed})."
-        )
-    else:
-        _log("Skip OOF group bootstrap (evaluation.group_bootstrap.enabled=false).")
-
-    status = "cv_completed"
-    final_refit_artifacts = None
-    if resolved.runtime.execution_stage == "full_run":
-        _log("Run final refit stage.")
-        final_refit_started = timing_recorder.start()
-        try:
-            final_refit_artifacts = run_final_refit(
-                config=resolved,
-                split_manifest=split_artifacts.split_manifest,
+            cv_artifacts = run_outer_cv(
+                resolved,
+                split_artifacts.split_manifest,
+                progress_callback=_outer_cv_progress,
                 timing_recorder=timing_recorder,
+                expression_cache=expression_cache,
             )
         except CVError as exc:
             raise typer.BadParameter(str(exc)) from exc
         timing_recorder.record_since(
-            final_refit_started,
+            outer_cv_started,
             scope="run",
-            stage="final_refit",
+            stage="outer_cv",
         )
-        warnings.extend(final_refit_artifacts.warnings)
-        status = "full_run_completed"
-        _log("Final refit completed.")
-    else:
-        _log("Skip final refit stage (execution_stage=cv_only).")
+        _log("Outer cross-validation completed.")
+
+        _emit_run_metric_summary(
+            cv_artifacts.metrics_cv,
+            start_time=start_time,
+            log_verbosity=log_verbosity,
+        )
+
+        warnings = list(cv_artifacts.warnings)
+        group_bootstrap_artifacts: GroupBootstrapArtifacts | None = None
+        group_bootstrap_config = resolved.evaluation.group_bootstrap
+        if group_bootstrap_config.enabled:
+            _log(
+                "Run OOF group bootstrap "
+                f"(group_col={resolved.split.group_col}, "
+                f"n_resamples={group_bootstrap_config.n_resamples})."
+            )
+            group_bootstrap_started = timing_recorder.start()
+            try:
+                group_bootstrap_artifacts = run_oof_group_bootstrap(
+                    oof_predictions=cv_artifacts.oof_predictions,
+                    split_manifest=split_artifacts.split_manifest,
+                    group_col=resolved.split.group_col,
+                    n_resamples=int(group_bootstrap_config.n_resamples),
+                    confidence_level=float(group_bootstrap_config.confidence_level),
+                    runtime_seed=int(resolved.runtime.seed),
+                )
+            except GroupBootstrapError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+            timing_recorder.record_since(
+                group_bootstrap_started,
+                scope="run",
+                stage="group_bootstrap",
+            )
+            warnings.extend(group_bootstrap_artifacts.warnings)
+            _log(
+                "OOF group bootstrap completed "
+                f"(n_groups={group_bootstrap_artifacts.n_groups}, "
+                f"seed={group_bootstrap_artifacts.seed})."
+            )
+        else:
+            _log("Skip OOF group bootstrap (evaluation.group_bootstrap.enabled=false).")
+
+        status = "cv_completed"
+        final_refit_artifacts = None
+        if resolved.runtime.execution_stage == "full_run":
+            _log("Run final refit stage.")
+            final_refit_started = timing_recorder.start()
+            try:
+                final_refit_artifacts = run_final_refit(
+                    config=resolved,
+                    split_manifest=split_artifacts.split_manifest,
+                    timing_recorder=timing_recorder,
+                    expression_cache=expression_cache,
+                )
+            except CVError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+            timing_recorder.record_since(
+                final_refit_started,
+                scope="run",
+                stage="final_refit",
+            )
+            warnings.extend(final_refit_artifacts.warnings)
+            status = "full_run_completed"
+            _log("Final refit completed.")
+        else:
+            _log("Skip final refit stage (execution_stage=cv_only).")
 
     _log("Create run directory and write core tabular artifacts.")
     artifact_writing_started = timing_recorder.start()
