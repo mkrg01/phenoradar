@@ -158,6 +158,14 @@ The main stage directories are `split/`, `cv/`, `model/`, `summary/`, `runtime/`
 
 - `runs/<timestamp>_predict_<id>/...`
 
+Prediction always saves a `resolved_config.yml` containing only effective
+prediction inputs, memory guard, execution, and summary settings, even when no
+input config was supplied. Model and learned preprocessing state remain in the
+source bundle, linked by path and hashes in `run_metadata.json`. The latter
+records `runtime_n_jobs`, a deterministic prediction seed policy, and only input
+files that were actually supplied; optional metadata and config need not exist.
+
+
 `phenoradar report` writes:
 
 - `reports/<timestamp>_report_<id>/...`

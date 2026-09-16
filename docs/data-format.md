@@ -12,11 +12,17 @@ Default path/key:
 
 - `data.metadata_path` (default: `testdata/c4_tiny/species_metadata.tsv`)
 
-Required columns (default names):
+Required columns for training with `run` (default names):
 
 - `species` (`data.species_col`)
 - `C4` (`data.trait_col`)
 - `contrast_pair_id` (`split.group_col`; also `data.contrast_pair_col` by default)
+
+For `predict`, metadata is optional. Without it, the distinct species in the TPM
+file define all prediction targets. If provided, only `species` (or
+`data.species_col`) is required; the metadata selects a subset and can supply
+annotations. Trait and contrast-pair columns are not required, including for
+prediction trees. Empty species names in a TPM-only prediction input are errors.
 
 Optional annotation columns:
 

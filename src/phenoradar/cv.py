@@ -35,7 +35,7 @@ from sklearn.svm import LinearSVC
 from sklearn.utils.validation import has_fit_parameter
 
 from phenoradar.abstention import annotate_abstention
-from phenoradar.config import AppConfig
+from phenoradar.config import AppConfig, PredictConfig
 from phenoradar.feature_stability import (
     FeatureStabilityError,
     build_feature_stability_tables,
@@ -235,6 +235,7 @@ class OuterFoldResult:
     cv_species_evidence: pl.DataFrame
     cv_species_feature_evidence: pl.DataFrame
     cv_species_reference_expression: pl.DataFrame
+    inference_plan: OuterInferencePlan | None = None
 
 
 @dataclass(frozen=True)
@@ -252,6 +253,7 @@ class OuterCvMatrixCache:
     feature_names: list[str]
     species_to_index: dict[str, int]
     inference_species_to_index: dict[str, int]
+    deferred_inference_builder: ExpressionMatrixBuilder | None = None
 
 
 @dataclass(frozen=True)
@@ -331,6 +333,23 @@ class FinalModelEntry:
     feature_names: list[str]
     scaler: FeatureScaler
     model: FittedEstimator
+
+
+@dataclass(frozen=True)
+class OuterInferenceSampleSet:
+    """Fitted state needed for inference, without training arrays or diagnostics."""
+
+    sample_set_id: int
+    feature_names: list[str]
+    scaler: FeatureScaler
+    models: list[FittedEstimator]
+    candidate_indices: list[int]
+
+
+@dataclass(frozen=True)
+class OuterInferencePlan:
+    fold_id: str
+    sample_sets: list[OuterInferenceSampleSet]
 
 
 @dataclass(frozen=True)
@@ -1285,13 +1304,20 @@ class ExpressionMatrixBuilder:
     )
     _MISSING_FEATURE_SENTINEL = "__phenoradar_missing_feature__"
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(
+        self, config: AppConfig | PredictConfig, *, absent_feature_fill: int | str | None = None
+    ) -> None:
+        self._timing_recorder: TimingRecorder | None = None
+        self._timing_scope = "expression_input"
         self._tpm_path = Path(config.data.tpm_path)
         self._species_col = config.data.species_col
         self._feature_col = config.data.feature_col
         self._value_col = config.data.value_col
         self._max_pivot_cells = int(config.preprocess.max_pivot_cells)
-        absent_feature_fill = config.preprocess.absent_feature_fill
+        if absent_feature_fill is None:
+            absent_feature_fill = (
+                config.preprocess.absent_feature_fill if isinstance(config, AppConfig) else 0
+            )
         if absent_feature_fill != 0 and absent_feature_fill != "nan":
             raise CVError(
                 "Unsupported preprocess.absent_feature_fill: "
@@ -1336,11 +1362,29 @@ class ExpressionMatrixBuilder:
         except (OSError, pl.exceptions.PolarsError) as exc:
             raise CVError(f"Failed to read expression data: {self._tpm_path}") from exc
 
-    def _collect_expression(self, scan: pl.LazyFrame) -> pl.DataFrame:
+    def configure_timing(self, recorder: TimingRecorder | None, *, scope: str) -> None:
+        self._timing_recorder = recorder
+        self._timing_scope = scope
+
+    def _start_timing(self) -> float | None:
+        return None if self._timing_recorder is None else self._timing_recorder.start()
+
+    def _record_timing(self, started: float | None, stage: str) -> None:
+        if self._timing_recorder is not None and started is not None:
+            self._timing_recorder.record_since(
+                started, scope=self._timing_scope, stage=stage
+            )
+
+    def _collect_expression(
+        self, scan: pl.LazyFrame, *, stage: str = "input_schema_read"
+    ) -> pl.DataFrame:
+        started = self._start_timing()
         try:
             return scan.collect()
         except (OSError, pl.exceptions.PolarsError) as exc:
             raise CVError(f"Failed to read expression data: {self._tpm_path}: {exc}") from exc
+        finally:
+            self._record_timing(started, stage)
 
     def _raw_long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
         raw_value = pl.col(self._value_col).cast(pl.String, strict=False).str.strip_chars()
@@ -1454,12 +1498,16 @@ class ExpressionMatrixBuilder:
     def _validate_tpm_scan(self, long_scan: pl.LazyFrame) -> None:
         invalid_scan = long_scan.filter(pl.col("__invalid_count") > 0)
         invalid_rows = self._collect_expression(
-            invalid_scan.sort("__invalid_line").head(self._INVALID_TPM_PREVIEW_LIMIT)
+            invalid_scan.sort("__invalid_line").head(self._INVALID_TPM_PREVIEW_LIMIT),
+            stage="input_validation_read",
         )
         if invalid_rows.height == 0:
             return
         total = int(
-            self._collect_expression(invalid_scan.select(pl.col("__invalid_count").sum())).item()
+            self._collect_expression(
+                invalid_scan.select(pl.col("__invalid_count").sum()),
+                stage="input_validation_read",
+            ).item()
         )
         self._raise_invalid_tpm_values(invalid_rows, total)
 
@@ -1491,6 +1539,7 @@ class ExpressionMatrixBuilder:
 
         cache_tempdir = TemporaryDirectory(prefix="phenoradar-expression-")
         cache_path = Path(cache_tempdir.name) / "expression_long.parquet"
+        started = self._start_timing()
         try:
             self._raw_long_scan_for_species(unique_species).sink_parquet(
                 cache_path,
@@ -1499,6 +1548,8 @@ class ExpressionMatrixBuilder:
         except (OSError, pl.exceptions.PolarsError) as exc:
             cache_tempdir.cleanup()
             raise CVError(f"Failed to read expression data: {self._tpm_path}: {exc}") from exc
+        finally:
+            self._record_timing(started, "input_normalize_cache")
         cached_scan = pl.scan_parquet(cache_path)
         try:
             self._validate_tpm_scan(cached_scan)
@@ -1658,31 +1709,35 @@ class ExpressionMatrixBuilder:
         )
         estimated_cells = len(unique_species) * len(feature_names)
         if estimated_cells <= self._max_pivot_cells:
-            long_df = self._collect_expression(long_scan)
+            long_df = self._collect_expression(long_scan, stage="input_matrix_read")
+            started = self._start_timing()
             self._validate_tpm_frame(long_df)
             long_df = long_df.select(["__species", "__feature", "__value"])
-            return (
-                self._matrix_from_long_df(
-                    long_df,
-                    ordering_df,
-                    feature_names,
-                    self._absent_feature_fill_value,
-                ),
+            matrix = self._matrix_from_long_df(
+                long_df,
+                ordering_df,
                 feature_names,
+                self._absent_feature_fill_value,
             )
+            self._record_timing(started, "input_dense_assembly")
+            return matrix, feature_names
 
         feature_chunk_size = max(1, self._max_pivot_cells // max(1, len(unique_species)))
+        started = self._start_timing()
         matrix = np.full(
             (len(species_order), len(feature_names)),
             self._absent_feature_fill_value,
             dtype=float,
         )
+        self._record_timing(started, "input_dense_assembly")
         for start in range(0, len(feature_names), feature_chunk_size):
             stop = min(start + feature_chunk_size, len(feature_names))
             chunk_features = feature_names[start:stop]
             chunk_df = self._collect_expression(
-                long_scan.filter(pl.col("__feature").is_in(chunk_features))
+                long_scan.filter(pl.col("__feature").is_in(chunk_features)),
+                stage="input_matrix_read",
             )
+            started = self._start_timing()
             self._validate_tpm_frame(chunk_df)
             chunk_df = chunk_df.select(["__species", "__feature", "__value"])
             chunk_matrix = self._matrix_from_long_df(
@@ -1695,6 +1750,7 @@ class ExpressionMatrixBuilder:
             if chunk_matrix.shape != expected_shape:
                 raise CVError("Expression matrix chunking produced inconsistent chunk shape")
             matrix[:, start:stop] = chunk_matrix
+            self._record_timing(started, "input_dense_assembly")
 
         return matrix, feature_names
 
@@ -1731,6 +1787,24 @@ class RunExpressionCache:
             self._builder.close()
         self._builder = None
         self._signature = None
+
+    def prepare(
+        self,
+        config: AppConfig,
+        split_manifest: pl.DataFrame,
+        timing_recorder: TimingRecorder | None = None,
+    ) -> None:
+        """Prepare the raw input shared by the full-run stages, before their timers."""
+        pools = ["train", "validation"]
+        if config.runtime.execution_stage == "full_run":
+            pools.extend(["external_test", "discovery_inference"])
+        species = (
+            split_manifest.filter(pl.col("pool").is_in(pools))
+            .get_column("species").unique().sort().to_list()
+        )
+        builder = self.get_builder(config)
+        builder.configure_timing(timing_recorder, scope="expression_input")
+        _with_native_thread_limit_for_config(config, builder.cache_species, species)
 
     def __enter__(self) -> RunExpressionCache:
         return self
@@ -4157,6 +4231,8 @@ def _build_outer_cv_matrix_cache(
     split_manifest: pl.DataFrame,
     *,
     expression_cache: RunExpressionCache | None = None,
+    timing_recorder: TimingRecorder | None = None,
+    defer_inference: bool = False,
 ) -> OuterCvMatrixCache:
     cv_species = _outer_cv_species(split_manifest)
     if not cv_species:
@@ -4169,7 +4245,11 @@ def _build_outer_cv_matrix_cache(
         if expression_cache is None
         else expression_cache.get_builder(config)
     )
+    matrix_builder.configure_timing(timing_recorder, scope="outer_cv")
     cache_species = species_order
+    if defer_inference:
+        species_order = cv_species
+        inference_species = []
     if expression_cache is not None and config.runtime.execution_stage == "full_run":
         # Normalize the union once for CV and final refit. The CV feature schema
         # below still comes exclusively from the train/validation pool.
@@ -4239,6 +4319,7 @@ def _build_outer_cv_matrix_cache(
         feature_names=feature_names,
         species_to_index=species_to_index,
         inference_species_to_index=inference_species_to_index,
+        deferred_inference_builder=matrix_builder if defer_inference else None,
     )
 
 
@@ -5108,6 +5189,7 @@ def _run_final_refit_impl(
         if expression_cache is None
         else expression_cache.get_builder(config)
     )
+    matrix_builder.configure_timing(recorder, scope="final_refit")
 
     pool_preparation_started = recorder.start()
     train_pool = (
@@ -5733,6 +5815,7 @@ def _run_outer_fold(
     selection_active: bool,
     progress_callback: Callable[[str], None] | None = None,
     timing_recorder: TimingRecorder | None = None,
+    defer_inference: bool = False,
 ) -> OuterFoldResult:
     warnings: list[str] = []
 
@@ -5759,7 +5842,9 @@ def _run_outer_fold(
         "" if value is None else str(value)
         for value in valid_df.select("group_id").to_series().to_list()
     ]
-    inference_species = _outer_cv_inference_species(config, split_manifest)
+    inference_species = (
+        [] if defer_inference else _outer_cv_inference_species(config, split_manifest)
+    )
     y_train = np.array(train_df.select("label").to_series().to_list(), dtype=int)
     y_valid = np.array(valid_df.select("label").to_series().to_list(), dtype=int)
     groups_train = np.array(train_df.select("group_id").to_series().to_list(), dtype=str)
@@ -6337,6 +6422,27 @@ def _run_outer_fold(
         cv_species_evidence=cv_species_evidence,
         cv_species_feature_evidence=cv_species_feature_evidence,
         cv_species_reference_expression=cv_species_reference_expression,
+        inference_plan=(
+            OuterInferencePlan(
+                fold_id=fold_id,
+                sample_sets=[
+                    OuterInferenceSampleSet(
+                        sample_set_id=sample_set_id,
+                        feature_names=sample_results[sample_set_id].selected_features,
+                        scaler=sample_results[sample_set_id].scaler,
+                        models=sample_results[sample_set_id].fold_models,
+                        candidate_indices=[
+                            selected.candidate.candidate_index
+                            for selected in source_results[
+                                _selection_source_sample_set_id(config, sample_set_id)
+                            ].selected_candidates
+                        ],
+                    )
+                    for sample_set_id in range(len(sampled_sets))
+                ],
+            )
+            if defer_inference else None
+        ),
     )
     if timing_recorder is not None and postprocess_started is not None:
         timing_recorder.record_since(
@@ -6346,6 +6452,107 @@ def _run_outer_fold(
             fold_id=fold_id,
         )
     return result
+
+
+def _can_defer_outer_inference(config: AppConfig) -> bool:
+    # Rank transforms depend on the entire original feature row. Keep their
+    # existing full-row transform path until a separate equivalent projection
+    # strategy is available.
+    return config.preprocess.expression_transform.method in {"none", "log1p"}
+
+
+def _predict_outer_inference_plan(
+    config: AppConfig,
+    plan: OuterInferencePlan,
+    species: list[str],
+    raw_matrix: np.ndarray,
+    feature_names: list[str],
+    recorder: TimingRecorder,
+) -> list[dict[str, float | str]]:
+    started = recorder.start()
+    feature_index = {name: i for i, name in enumerate(feature_names)}
+    model_probs: list[np.ndarray] = []
+    entries: list[FinalModelEntry] = []
+    for sample in plan.sample_sets:
+        preprocess_started = recorder.start()
+        indices = np.array([feature_index[name] for name in sample.feature_names], dtype=int)
+        selected = _apply_expression_transform_for_config(config, raw_matrix[:, indices])
+        transformed = apply_feature_scaling(
+            selected, sample.scaler, config.preprocess.feature_scaling.method
+        )
+        recorder.record_since(
+            preprocess_started, scope="outer_fold", stage="inference_preprocessing",
+            fold_id=plan.fold_id, sample_set_id=sample.sample_set_id,
+        )
+        for model, candidate_index in zip(sample.models, sample.candidate_indices, strict=True):
+            prediction_started = recorder.start()
+            model_probs.append(_predict_positive_probability(model, transformed))
+            recorder.record_since(
+                prediction_started, scope="outer_fold", stage="inference_prediction",
+                fold_id=plan.fold_id, sample_set_id=sample.sample_set_id,
+                candidate_index=candidate_index,
+            )
+            entries.append(FinalModelEntry(sample.feature_names, sample.scaler, model))
+    probabilities = _aggregate_probabilities(
+        model_probs, aggregation=config.ensemble.probability_aggregation
+    )
+    predictions = pl.DataFrame({
+        "fold_id": [plan.fold_id] * len(species),
+        "species": species,
+        "prob": probabilities,
+    })
+    predictions = _annotate_prediction_abstention(
+        config, predictions, species, raw_matrix, feature_names, entries,
+        timing_recorder=recorder, timing_stage="inference_abstention", fold_id=plan.fold_id,
+    )
+    recorder.record_since(
+        started, scope="outer_fold", stage="deferred_inference", fold_id=plan.fold_id
+    )
+    return predictions.to_dicts()
+
+
+def _run_deferred_outer_inference(
+    config: AppConfig,
+    cache: OuterCvMatrixCache,
+    plans: list[OuterInferencePlan],
+    species: list[str],
+    recorder: TimingRecorder,
+) -> tuple[list[dict[str, float | str]], np.ndarray, list[str]]:
+    builder = cache.deferred_inference_builder
+    if builder is None:
+        raise CVError("Deferred outer-CV inference requires the validated expression cache")
+    retained = {
+        feature for plan in plans for sample in plan.sample_sets for feature in sample.feature_names
+    }
+    # Preserve the original CV feature order, independently of fold completion.
+    feature_union = [feature for feature in cache.feature_names if feature in retained]
+    matrix_started = recorder.start()
+    raw_matrix, feature_names = _with_native_thread_limit_for_config(
+        config, builder.build_matrix, species, feature_order=feature_union
+    )
+    raw_matrix.setflags(write=False)
+    recorder.record_since(matrix_started, scope="outer_cv", stage="inference_matrix_build")
+
+    workers, per_fold_n_jobs = _outer_cv_parallel_plan(config, len(plans))
+    fold_config = _config_with_runtime_n_jobs(config, per_fold_n_jobs)
+
+    def predict(plan: OuterInferencePlan) -> list[dict[str, float | str]]:
+        return _with_native_thread_limit_for_config(
+            fold_config, _predict_outer_inference_plan, fold_config, plan, species,
+            raw_matrix, feature_names, recorder,
+        )
+
+    execution_started = recorder.start()
+    rows: list[dict[str, float | str]] = []
+    if workers == 1:
+        for plan in plans:
+            rows.extend(predict(plan))
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            for fold_rows in executor.map(predict, plans):
+                rows.extend(fold_rows)
+    recorder.record_since(execution_started, scope="outer_cv", stage="inference_execution")
+    return rows, raw_matrix, feature_names
 
 
 def _run_outer_cv_impl(
@@ -6389,9 +6596,15 @@ def _run_outer_cv_impl(
     max_fold_ensemble_size = 0
 
     fold_ids = _fold_ids(split_manifest)
+    inference_species = _outer_cv_inference_species(config, split_manifest)
+    defer_inference = bool(inference_species and _can_defer_outer_inference(config))
+    inference_plans: dict[str, OuterInferencePlan] = {}
+    inference_raw: np.ndarray | None = None
+    inference_feature_names: list[str] = []
     matrix_build_started = recorder.start()
     outer_matrix_cache = _build_outer_cv_matrix_cache(
-        config, split_manifest, expression_cache=expression_cache
+        config, split_manifest, expression_cache=expression_cache, timing_recorder=recorder,
+        defer_inference=defer_inference,
     )
     recorder.record_since(
         matrix_build_started,
@@ -6424,6 +6637,8 @@ def _run_outer_cv_impl(
         loss_rows.extend(fold_result.loss_rows)
         oof_rows.extend(fold_result.oof_rows)
         inference_prediction_rows.extend(fold_result.inference_prediction_rows)
+        if fold_result.inference_plan is not None:
+            inference_plans[fold_result.inference_plan.fold_id] = fold_result.inference_plan
         interpretation_entries.extend(fold_result.interpretation_entries)
         ensemble_model_prob_rows.extend(fold_result.ensemble_model_prob_rows)
         model_selection_selected_rows.extend(fold_result.model_selection_selected_rows)
@@ -6452,6 +6667,7 @@ def _run_outer_cv_impl(
             selection_active=selection_active,
             progress_callback=_emit_progress,
             timing_recorder=recorder,
+            defer_inference=defer_inference,
         )
         recorder.record_since(
             fold_started,
@@ -6497,6 +6713,15 @@ def _run_outer_cv_impl(
 
     if not oof_rows:
         raise CVError("No out-of-fold predictions were generated")
+
+    if defer_inference:
+        _emit_progress("Build retained-feature inference matrix and predict outer folds.")
+        deferred_rows, inference_raw, inference_feature_names = _run_deferred_outer_inference(
+            config, outer_matrix_cache, [inference_plans[fold_id] for fold_id in fold_ids],
+            inference_species, recorder,
+        )
+        inference_prediction_rows.extend(deferred_rows)
+        inference_plans.clear()
 
     postprocess_started = recorder.start()
     oof_df = pl.DataFrame(oof_rows, infer_schema_length=None).sort(["fold_id", "species"])
@@ -6644,6 +6869,17 @@ def _run_outer_cv_impl(
         interpretation_artifacts.feature_importance,
         feature_limit=config.figures.top_features,
     )
+    if inference_raw is not None:
+        top_feature_expression = pl.concat([
+            top_feature_expression,
+            _build_top_feature_expression_from_matrix(
+                species_order=inference_species,
+                matrix=inference_raw,
+                feature_names=inference_feature_names,
+                feature_importance=interpretation_artifacts.feature_importance,
+                feature_limit=config.figures.top_features,
+            ),
+        ])
     if config.preprocess.missing_expression.method == "neutral":
         top_feature_expression = mark_expression_observations(
             top_feature_expression,

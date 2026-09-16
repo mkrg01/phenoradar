@@ -85,7 +85,7 @@ def _stub_resolved_config(
     tree_path: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        runtime=SimpleNamespace(execution_stage=execution_stage, seed=42),
+        runtime=SimpleNamespace(execution_stage=execution_stage, seed=42, n_jobs=1),
         split=SimpleNamespace(group_col="contrast_pair_id"),
         evaluation=SimpleNamespace(
             group_bootstrap=SimpleNamespace(
@@ -164,6 +164,9 @@ def _stub_fingerprint_metadata() -> dict[str, object]:
 
 
 def _stub_run_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "phenoradar.cli.RunExpressionCache.prepare", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr("phenoradar.cli.collect_input_files", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         "phenoradar.cli._build_run_fingerprint_metadata",
@@ -1212,6 +1215,14 @@ model_selection:
 
     run_dirs = sorted((tmp_path / "runs").glob("*_run_*"))
     assert len(run_dirs) == 1
+    timing = pl.read_csv(run_dirs[0] / "runtime/tables/timing.tsv", separator="\t")
+    preparation = timing.filter(
+        (pl.col("scope") == "run") & (pl.col("stage") == "expression_preparation")
+    )
+    outer_cv = timing.filter((pl.col("scope") == "run") & (pl.col("stage") == "outer_cv"))
+    assert preparation.height == outer_cv.height == 1
+    assert preparation["ended_at_sec"].item() <= outer_cv["started_at_sec"].item()
+    assert timing.filter(pl.col("stage") == "input_normalize_cache").height == 1
     selected_path = run_dirs[0] / "model" / "tables" / "model_selection_selected.tsv"
     trials_path = run_dirs[0] / "cv" / "tables" / "model_selection_trials.tsv"
     trials_summary_path = run_dirs[0] / "cv" / "tables" / "model_selection_trials_summary.tsv"
@@ -2000,6 +2011,33 @@ def test_run_fails_when_final_refit_raises(tmp_path: Path, monkeypatch: pytest.M
     assert "final refit failure" in result.output
 
 
+def test_run_fails_before_cv_when_expression_preparation_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = _write(tmp_path / "config.yml", "{}\n")
+    _stub_run_provenance(monkeypatch)
+    monkeypatch.setattr(
+        "phenoradar.cli.load_and_resolve_config",
+        lambda *_args, **_kwargs: _stub_resolved_config(execution_stage="full_run"),
+    )
+    monkeypatch.setattr(
+        "phenoradar.cli.build_split_artifacts",
+        lambda *_args, **_kwargs: _stub_split_artifacts(),
+    )
+    monkeypatch.setattr(
+        "phenoradar.cli.RunExpressionCache.prepare",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(CVError("expression preparation failure")),
+    )
+    monkeypatch.setattr(
+        "phenoradar.cli.run_outer_cv",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("CV must not start")),
+    )
+    result = CliRunner().invoke(app, ["run", "-c", str(config)])
+    assert result.exit_code != 0
+    assert "expression preparation failure" in result.output
+
+
 def test_run_fails_when_bundle_export_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2256,7 +2294,7 @@ def test_predict_fails_when_config_resolution_raises(
     bundle_dir.mkdir()
 
     monkeypatch.setattr(
-        "phenoradar.cli.load_and_resolve_config",
+        "phenoradar.cli.load_predict_config",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ConfigError("predict config failure")),
     )
 
@@ -2276,7 +2314,7 @@ def test_predict_fails_when_bundle_loading_raises(
     bundle_dir.mkdir()
 
     monkeypatch.setattr(
-        "phenoradar.cli.load_and_resolve_config",
+        "phenoradar.cli.load_predict_config",
         lambda *_args, **_kwargs: _stub_resolved_config(execution_stage="cv_only"),
     )
     monkeypatch.setattr(
@@ -2300,7 +2338,7 @@ def test_predict_fails_when_input_provenance_collection_raises(
     bundle_dir.mkdir()
 
     monkeypatch.setattr(
-        "phenoradar.cli.load_and_resolve_config",
+        "phenoradar.cli.load_predict_config",
         lambda *_args, **_kwargs: _stub_resolved_config(execution_stage="cv_only"),
     )
     monkeypatch.setattr(

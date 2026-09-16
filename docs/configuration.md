@@ -12,12 +12,12 @@ For runtime execution flow tied to config keys, see
 CLI config input is one YAML file:
 
 - `run`: required (`-c config.yml`)
-- `predict`: required (`-c config.yml`)
+- `predict`: optional (`-c predict_config.yml`); see [prediction settings](#prediction-settings)
 - `config`: optional (`-c config.yml`), omitted means built-in defaults only
 
 Resolution and override rules:
 
-- CLI accepts one `-c` file (`run`/`predict` required, `config` optional).
+- CLI accepts one `-c` file (`run` required, `predict`/`config` optional).
 - Unspecified keys are filled by built-in defaults.
 - Generated YAML explicitly includes every user-facing setting, including inactive fields,
   `null` values, and empty sections. Comments list enum and boolean choices;
@@ -33,6 +33,46 @@ Use `config` to inspect resolved output:
 ```bash
 phenoradar config [--out resolved.yml]
 ```
+
+### Prediction settings
+
+`predict` requires a model bundle and an explicit TPM path, supplied through
+`--tpm-path` or `data.tpm_path`. It never falls back to the bundled example data.
+`--tpm-path`, `--metadata-path`, and `--n-jobs` override corresponding config
+values; otherwise prediction-specific defaults apply.
+
+Only these settings are used and saved in prediction `resolved_config.yml`:
+
+| Setting | Default / meaning |
+| --- | --- |
+| `data.tpm_path` | Required input expression TSV |
+| `data.metadata_path` | `null`; all TPM species, or the supplied metadata's species subset |
+| `data.species_col`, `data.feature_col`, `data.value_col` | `species`, `orthogroup`, `tpm` |
+| `data.tree_path` | `null`; optional prediction tree |
+| `data.trait_col`, `data.contrast_pair_col` | `C4`, `contrast_pair_id`; optional tree annotations |
+| `preprocess.max_pivot_cells` | `50000000`; memory guard |
+| `runtime.n_jobs` | `1`; positive prediction worker/thread count |
+| `summary.group_col` | `family`; grouped summaries when metadata supplies this column |
+
+A metadata TSV needs only the species column. Missing trait and contrast-pair
+columns do not prevent prediction or tree output. Without metadata, no group
+summary is attempted. Use metadata with a grouping column for grouped summaries.
+
+Legacy run configs remain accepted. Recognized training sections and training-only
+keys in the sections above are ignored, without running training validation;
+for example, `model`, `split`, `sampling`, `model_selection`, and learned
+preprocessing choices cannot alter predictions. Unknown prediction-setting keys
+are rejected. Bundle state supplies all learned preprocessing and decision
+policies. Its source and hashes are saved in `run_metadata.json`, together with
+the effective worker count and hashes of the input files actually supplied.
+Prediction is deterministic from the fitted bundle and does not use `runtime.seed`.
+
+For `predict`, the launcher sets `POLARS_MAX_THREADS` from the effective worker
+count before importing Polars, replacing any inherited value. The inference
+calls also cap native BLAS/OpenMP threads and temporarily set the loaded
+estimator's worker count when supported. This does not change saved bundle files.
+
+The remaining sections describe the training/config-generation schema.
 
 ### Ordered multi-condition runs
 

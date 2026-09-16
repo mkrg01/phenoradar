@@ -19,6 +19,7 @@ from phenoradar.cv import (
     run_outer_cv,
 )
 from phenoradar.split import build_split_artifacts
+from phenoradar.timing import TimingRecorder
 
 
 def _config(tmp_path: Path) -> AppConfig:
@@ -87,7 +88,8 @@ def _assert_tables_equal(
             assert_frame_equal(a, b, check_exact=False, rel_tol=1e-12, abs_tol=1e-14)
         elif a is None:
             assert b is None, field.name
-    assert actual.warnings == expected.warnings
+    # Fold completion order is intentionally unconstrained under parallelism.
+    assert sorted(actual.warnings) == sorted(expected.warnings)
 
 
 @pytest.mark.parametrize("max_pivot_cells", [8, 50_000_000])
@@ -239,3 +241,153 @@ def test_run_cache_rejects_changed_input_settings(tmp_path: Path, setting: str) 
         setattr(owner, setting, value)
         with pytest.raises(CVError, match="different input settings"):
             cache.get_builder(config)
+
+
+@pytest.mark.parametrize("n_jobs", [1, 2])
+@pytest.mark.parametrize("aggregation", ["mean", "median"])
+@pytest.mark.parametrize("mode", ["none", "log1p", "neutral", "forest", "rank", "sampled", "dense"])
+def test_deferred_inference_matches_eager_full_matrix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    n_jobs: int,
+    aggregation: str,
+    mode: str,
+) -> None:
+    config = _config(tmp_path)
+    config.runtime.n_jobs = n_jobs
+    config.ensemble.probability_aggregation = aggregation
+    config.preprocess.ranked_feature_filter.method = "variance"
+    config.preprocess.ranked_feature_filter.max_features = 1
+    config.preprocess.max_pivot_cells = 8
+    config.model_selection.selected_candidate_count = 2
+    if mode in {"none", "log1p"}:
+        config.preprocess.expression_transform.method = mode
+    elif mode == "rank":
+        config.preprocess.expression_transform.method = "sample_percentile_rank"
+    elif mode == "neutral":
+        config.preprocess.absent_feature_fill = "nan"
+        config.preprocess.missing_expression.method = "neutral"
+        config.preprocess.missing_expression.zero_as_missing = True
+        config.abstention.enabled = True
+    elif mode == "forest":
+        config.model.name = "random_forest"
+        config.preprocess.absent_feature_fill = "nan"
+        config.model_selection.search_space = {"n_estimators": [3, 5]}
+    elif mode == "dense":
+        config.preprocess.sparse_feature_filter.enabled = False
+        config.preprocess.low_variance_filter.enabled = False
+        config.preprocess.ranked_feature_filter.method = "none"
+        config.preprocess.correlation_filter.enabled = False
+    elif mode == "sampled":
+        metadata_path, tpm_path = Path(config.data.metadata_path), Path(config.data.tpm_path)
+        with metadata_path.open("a") as out:
+            for line in metadata_path.read_text().splitlines()[1:]:
+                species, label, group = line.split("\t")
+                if group:
+                    out.write(f"{species}_copy\t{label}\t{group}\n")
+        with tpm_path.open("a") as out:
+            for line in tpm_path.read_text().splitlines()[1:]:
+                species, feature, value = line.split("\t")
+                if species.startswith("s"):
+                    out.write(f"{species}_copy\t{feature}\t{float(value) * 1.1}\n")
+        config.sampling.strategy = "group_balanced"
+        config.sampling.max_samples_per_label_per_group = 1
+        config.sampling.sampled_set_count = 2
+    split = build_split_artifacts(config).split_manifest
+    with monkeypatch.context() as reference:
+        reference.setattr(cv_mod, "_can_defer_outer_inference", lambda _config: False)
+        expected = run_outer_cv(config, split)
+    actual = run_outer_cv(config, split)
+    _assert_tables_equal(expected, actual)
+    stages = set(actual.timing["stage"])
+    assert ("inference_matrix_build" in stages) == (mode != "rank")
+    assert ("deferred_inference" in stages) == (mode != "rank")
+    assert "inference" in set(actual.top_feature_expression["species"])
+    if mode == "sampled":
+        assert set(actual.retained_features["sample_set_id"]) == {0, 1}
+    if mode == "dense":
+        assert set(actual.retained_features["feature"]) == {"BASE", "DOWN", "UP"}
+
+
+def test_deferred_inference_builds_only_retained_union_after_all_fits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    config.preprocess.ranked_feature_filter.method = "variance"
+    config.preprocess.ranked_feature_filter.max_features = 1
+    split = build_split_artifacts(config)
+    completed_fits: list[str] = []
+    inference_builds: list[tuple[tuple[int, ...], list[str]]] = []
+    build = cv_mod.ExpressionMatrixBuilder.build_matrix
+    fit = cv_mod._fit_outer_sample_set
+
+    def tracked_fit(**kwargs: object) -> object:
+        matrix = kwargs["x_inference_matrix"]
+        assert isinstance(matrix, np.ndarray) and matrix.shape[0] == 0
+        result = fit(**kwargs)
+        completed_fits.append(str(kwargs["fold_id"]))
+        return result
+
+    def tracked_build(
+        self: cv_mod.ExpressionMatrixBuilder,
+        species_order: list[str],
+        feature_order: list[str] | None = None,
+    ) -> tuple[np.ndarray, list[str]]:
+        if "inference" in species_order:
+            assert len(completed_fits) == split.fold_count
+            assert species_order == ["inference"] and feature_order is not None
+        matrix, names = build(self, species_order, feature_order)
+        if "inference" in species_order:
+            inference_builds.append((matrix.shape, names))
+        return matrix, names
+
+    monkeypatch.setattr(cv_mod, "_fit_outer_sample_set", tracked_fit)
+    monkeypatch.setattr(cv_mod.ExpressionMatrixBuilder, "build_matrix", tracked_build)
+    result = run_outer_cv(config, split.split_manifest)
+    retained = set(result.retained_features["feature"])
+    assert len(inference_builds) == 1
+    shape, names = inference_builds[0]
+    assert shape == (1, len(retained)) and set(names) == retained
+    assert len(names) < 3
+
+
+def test_deferred_inference_preserves_zero_coefficient_abstention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    config.preprocess.absent_feature_fill = "nan"
+    config.preprocess.missing_expression.method = "neutral"
+    config.preprocess.missing_expression.zero_as_missing = True
+    config.abstention.enabled = True
+    config.model_selection.search_space = {"lambda": [1e6]}
+    split = build_split_artifacts(config).split_manifest
+    with monkeypatch.context() as reference:
+        reference.setattr(cv_mod, "_can_defer_outer_inference", lambda _config: False)
+        expected = run_outer_cv(config, split)
+    actual = run_outer_cv(config, split)
+    _assert_tables_equal(expected, actual)
+    predictions = actual.inference_predictions_by_fold
+    assert predictions is not None
+    assert set(predictions["abstention_reason"]) == {"no_informative_coefficients"}
+
+
+def test_input_timing_separates_preparation_from_matrix_work(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.preprocess.max_pivot_cells = 8
+    split = build_split_artifacts(config).split_manifest
+    recorder = TimingRecorder()
+    with RunExpressionCache() as cache:
+        cache.prepare(config, split, recorder)
+        preparation = recorder.to_frame()
+        assert set(preparation["scope"]) == {"expression_input"}
+        assert {"input_normalize_cache", "input_validation_read"} == set(preparation["stage"])
+        cv = run_outer_cv(config, split, expression_cache=cache, timing_recorder=recorder)
+        refit = run_final_refit(config, split, expression_cache=cache, timing_recorder=recorder)
+    for artifact in (cv, refit):
+        assert {"input_schema_read", "input_matrix_read", "input_dense_assembly"}.issubset(
+            set(artifact.timing["stage"])
+        )
+        assert "input_normalize_cache" not in artifact.timing["stage"]
+    assert cv.timing["started_at_sec"].min() >= preparation["ended_at_sec"].max()

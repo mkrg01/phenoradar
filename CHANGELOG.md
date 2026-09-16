@@ -14,6 +14,16 @@
 
 ### Features
 
+* predict directly from a model bundle and TPM without metadata or config;
+  add `--tpm-path`, optional `--metadata-path`, and `--n-jobs` overrides with
+  prediction-only resolved settings, legacy config compatibility, optional
+  species-subset annotations, and inference worker/native thread controls
+
+* defer outer-CV inference for none/log1p transforms until all folds are fitted,
+  build its matrix from the retained-feature union, and reuse the narrow raw
+  matrix for abstention and figure data while preserving rank-transform behavior
+* time shared input preparation separately from CV and expose normalization,
+  validation, schema reads, expression reads, and dense matrix assembly timings
 * reuse one run-scoped normalized expression cache across outer CV and final
   refit, preserving stage-local feature schemas and cleaning up on success or
   failure without caching external/inference rows for `cv_only`

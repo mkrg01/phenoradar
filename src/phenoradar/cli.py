@@ -37,9 +37,11 @@ from phenoradar.config import (
     ConfigConditionSet,
     ConfigError,
     ExecutionStage,
+    PredictConfig,
     has_condition_dimensions,
     load_and_resolve_config,
     load_config_conditions,
+    load_predict_config,
     write_resolved_config,
 )
 from phenoradar.cv import CVError, RunExpressionCache, run_final_refit, run_outer_cv
@@ -249,8 +251,10 @@ def _write_group_summary_artifacts(
     stage: str,
     predictions: pl.DataFrame,
     source_table_name: str,
-    config: AppConfig,
+    config: AppConfig | PredictConfig,
 ) -> list[str]:
+    if config.data.metadata_path is None:
+        return []
     try:
         artifacts = build_group_summary_artifacts(
             predictions=predictions,
@@ -955,6 +959,18 @@ def _run_single(
     )
 
     with RunExpressionCache() as expression_cache:
+        if resolved.runtime.execution_stage == "full_run":
+            _log("Prepare shared expression input for CV and final refit.")
+            input_started = timing_recorder.start()
+            try:
+                expression_cache.prepare(
+                    resolved, split_artifacts.split_manifest, timing_recorder
+                )
+            except CVError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+            timing_recorder.record_since(
+                input_started, scope="run", stage="expression_preparation"
+            )
         _log("Run outer cross-validation.")
 
         def _outer_cv_progress(message: str) -> None:
@@ -2277,11 +2293,39 @@ def dataset(
 @app.command()
 def predict(
     model_bundle: ModelBundleArg,
-    config: ConfigPathsArg,
+    config: OptionalConfigPathsArg = None,
+    tpm_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--tpm-path",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="TPM TSV. Defaults to data.tpm_path in the optional config.",
+        ),
+    ] = None,
+    metadata_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--metadata-path",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="Optional species subset and annotations; otherwise predict all TPM species.",
+        ),
+    ] = None,
+    n_jobs: Annotated[
+        int | None,
+        typer.Option(
+            "--n-jobs",
+            min=1,
+            help="Prediction workers and native thread limit (default: config or 1).",
+        ),
+    ] = None,
     verbose: VerboseArg = False,
     quiet: QuietArg = False,
 ) -> None:
-    """Predict using an exported model bundle."""
+    """Predict from a model bundle and TPM; config and metadata are optional."""
     start_time = datetime.now(UTC)
     log_verbosity = _resolve_log_verbosity(verbose=verbose, quiet=quiet)
 
@@ -2295,14 +2339,18 @@ def predict(
         )
 
     config_paths = _normalize_config_paths(config)
-    if not config_paths:
-        raise typer.BadParameter("`--config` / `-c` is required.")
-    config_path = config_paths[0]
+    overrides: dict[str, Any] = {"data": {}}
+    if tpm_path is not None:
+        overrides["data"]["tpm_path"] = str(tpm_path)
+    if metadata_path is not None:
+        overrides["data"]["metadata_path"] = str(metadata_path)
+    if n_jobs is not None:
+        overrides["runtime"] = {"n_jobs": n_jobs}
 
     _log("Start prediction pipeline.")
     _log("Load and resolve configuration.")
     try:
-        resolved = load_and_resolve_config([config_path])
+        resolved = load_predict_config(config_paths, overrides=overrides)
     except ConfigError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -2367,7 +2415,11 @@ def predict(
             tree_warnings = write_predict_tree_prediction_artifacts(
                 run_dir=run_dir,
                 tree_path=Path(tree_path),
-                metadata_path=Path(resolved.data.metadata_path),
+                metadata_path=(
+                    Path(resolved.data.metadata_path)
+                    if resolved.data.metadata_path is not None
+                    else None
+                ),
                 species_col=resolved.data.species_col,
                 trait_col=resolved.data.trait_col,
                 group_col=contrast_pair_col,
@@ -2385,8 +2437,12 @@ def predict(
     try:
         input_files = collect_input_files(
             [
-                config_path,
-                Path(resolved.data.metadata_path),
+                *config_paths,
+                *(
+                    []
+                    if resolved.data.metadata_path is None
+                    else [Path(resolved.data.metadata_path)]
+                ),
                 Path(resolved.data.tpm_path),
                 *([] if tree_path is None else [Path(tree_path)]),
                 model_bundle / "bundle_manifest.json",
@@ -2407,9 +2463,8 @@ def predict(
             "start_time": start_time.isoformat(),
             "end_time": end_time.isoformat(),
             "duration_sec": (end_time - start_time).total_seconds(),
-            "seed_policy": {
-                "runtime_seed": resolved.runtime.seed,
-            },
+            "seed_policy": {"prediction": "deterministic_from_bundle"},
+            "runtime_n_jobs": resolved.runtime.n_jobs,
             "model_bundle_path": str(model_bundle),
             "model_bundle_manifest_sha256": bundle.manifest_sha256,
             "model_bundle_payload_sha256": payload_sha,

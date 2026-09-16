@@ -16,13 +16,14 @@ from pydantic import ValidationError
 from sklearn.preprocessing import StandardScaler
 
 from phenoradar.abstention import annotate_abstention
-from phenoradar.config import AppConfig
+from phenoradar.config import AppConfig, PredictConfig
 from phenoradar.config.schema import AbstentionConfig, MissingExpressionConfig
 from phenoradar.cv import (
     CVError,
     ExpressionMatrixBuilder,
     FeatureScaler,
     FinalRefitArtifacts,
+    _with_native_thread_limit,
     apply_expression_transform,
     apply_feature_scaling,
 )
@@ -711,41 +712,58 @@ def _aggregate_probabilities(probs: list[np.ndarray], aggregation: str) -> np.nd
     raise BundleError(f"Unsupported probability aggregation: {aggregation}")
 
 
+def _prediction_species(config: AppConfig | PredictConfig) -> list[str]:
+    metadata_path = config.data.metadata_path
+    path = metadata_path if metadata_path is not None else config.data.tpm_path
+    source = "Metadata" if metadata_path is not None else "TPM"
+    try:
+        frame = pl.scan_csv(path, separator="\t")
+        if config.data.species_col not in frame.collect_schema().names():
+            raise BundleError(f"{source} is missing species column: {config.data.species_col}")
+        species = (
+            frame.select(
+                pl.col(config.data.species_col)
+                .cast(pl.String, strict=False)
+                .str.strip_chars()
+                .alias("species")
+            )
+            .unique()
+            .collect()
+        )
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise BundleError(f"Failed to read prediction {source} file: {path}: {exc}") from exc
+    invalid_species = pl.col("species").is_null() | (pl.col("species") == "")
+    if metadata_path is None and species.filter(invalid_species).height:
+        raise BundleError("Prediction TPM contains empty species names")
+    species_list = species.filter(~invalid_species).unique().sort("species").to_series().to_list()
+    if not species_list:
+        raise BundleError(f"Predict {source.lower()} produced zero valid species")
+    return [str(value) for value in species_list]
+
+
+def _predict_with_jobs(estimator: Any, x: np.ndarray, n_jobs: int) -> np.ndarray:
+    """Temporarily override a loaded estimator's worker count without refitting."""
+    has_n_jobs = hasattr(estimator, "n_jobs")
+    previous = getattr(estimator, "n_jobs", None)
+    try:
+        if has_n_jobs:
+            estimator.n_jobs = n_jobs
+        return _with_native_thread_limit(n_jobs, _predict_probability, estimator, x)
+    finally:
+        if has_n_jobs:
+            estimator.n_jobs = previous
+
+
 def predict_with_bundle(
-    config: AppConfig, bundle: LoadedBundle
+    config: AppConfig | PredictConfig, bundle: LoadedBundle
 ) -> tuple[pl.DataFrame, list[str]]:
     """Run deterministic inference using a loaded model bundle."""
-    metadata = pl.read_csv(config.data.metadata_path, separator="\t")
-    if config.data.species_col not in metadata.columns:
-        raise BundleError(f"Metadata is missing species column: {config.data.species_col}")
-
-    species = (
-        metadata.select(
-            pl.col(config.data.species_col)
-            .cast(pl.String, strict=False)
-            .str.strip_chars()
-            .alias("species")
-        )
-        .filter(pl.col("species").is_not_null() & (pl.col("species") != ""))
-        .unique()
-        .sort("species")
-        .select("species")
-        .to_series()
-        .to_list()
-    )
-    species_list = [str(v) for v in species]
-    if not species_list:
-        raise BundleError("Predict metadata produced zero valid species")
+    species_list = _prediction_species(config)
 
     try:
-        matrix_config = config.model_copy(
-            update={
-                "preprocess": config.preprocess.model_copy(
-                    update={"absent_feature_fill": bundle.absent_feature_fill}
-                )
-            }
+        matrix_builder = ExpressionMatrixBuilder(
+            config, absent_feature_fill=bundle.absent_feature_fill
         )
-        matrix_builder = ExpressionMatrixBuilder(matrix_config)
         x_raw, input_features = matrix_builder.build_matrix(species_list)
     except CVError as exc:
         raise BundleError(str(exc)) from exc
@@ -764,9 +782,7 @@ def predict_with_bundle(
         alignment_features = bundle_features
     alignment_feature_set = set(alignment_features)
 
-    absent_feature_fill_value = (
-        0.0 if bundle.absent_feature_fill == 0 else float("nan")
-    )
+    absent_feature_fill_value = 0.0 if bundle.absent_feature_fill == 0 else float("nan")
     aligned_raw = np.full(
         (len(species_list), len(alignment_features)),
         absent_feature_fill_value,
@@ -827,7 +843,7 @@ def predict_with_bundle(
             )
         except CVError as exc:
             raise BundleError(str(exc)) from exc
-        model_probs.append(_predict_probability(model, x_model_scaled))
+        model_probs.append(_predict_with_jobs(model, x_model_scaled, config.runtime.n_jobs))
 
     prob = _aggregate_probabilities(model_probs, bundle.probability_aggregation)
     uncertainty_std = np.std(np.vstack(model_probs), axis=0) if len(model_probs) > 1 else None

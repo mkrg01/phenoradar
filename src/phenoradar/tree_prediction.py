@@ -333,7 +333,7 @@ def write_predict_tree_prediction_artifacts(
     *,
     run_dir: Path,
     tree_path: Path | None,
-    metadata_path: Path,
+    metadata_path: Path | None,
     species_col: str,
     trait_col: str,
     group_col: str,
@@ -343,13 +343,19 @@ def write_predict_tree_prediction_artifacts(
     if tree_path is None:
         return []
     _require_tree(tree_path)
-    metadata = _load_metadata(
-        metadata_path,
-        species_col=species_col,
-        trait_col=trait_col,
-        group_col=group_col,
-        require_trait=False,
-    )
+    if metadata_path is None:
+        metadata = pred_predict.select("species").with_columns(
+            pl.lit(None, dtype=pl.Int8).alias("true_label"),
+            pl.lit(None, dtype=pl.String).alias(group_col),
+        )
+    else:
+        metadata = _load_metadata(
+            metadata_path,
+            species_col=species_col,
+            trait_col=trait_col,
+            group_col=group_col,
+            require_trait=False,
+        )
     annotation = build_predict_tree_prediction_annotation(
         metadata=metadata,
         pred_predict=pred_predict,
@@ -733,10 +739,12 @@ def _load_metadata(
     except Exception as exc:
         raise TreePredictionError(f"Failed to read metadata TSV: {path}") from exc
 
-    required = {species_col, group_col}
+    required = {species_col}
     if require_trait:
-        required.add(trait_col)
+        required.update({trait_col, group_col})
     _require_columns(metadata, required, "metadata TSV")
+    if group_col not in metadata.columns:
+        metadata = metadata.with_columns(pl.lit(None, dtype=pl.String).alias(group_col))
     normalized = metadata.with_columns(
         pl.col(species_col).cast(pl.String, strict=False).str.strip_chars().alias("species"),
         pl.col(group_col).cast(pl.String, strict=False).str.strip_chars().alias(group_col),

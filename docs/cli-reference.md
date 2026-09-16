@@ -173,18 +173,42 @@ Options:
 
 ## `predict`
 
-Predict from an exported bundle (no retraining).
+Predict from an exported bundle (no retraining). Config and metadata are optional.
 
 ```bash
+phenoradar predict --model-bundle runs/<run_id>/model_bundle --tpm-path data/tpm.tsv --n-jobs 4
 phenoradar predict --model-bundle runs/<run_id>/model_bundle -c predict_config.yml
 ```
 
 Options:
 
 - `--model-bundle` (required): bundle directory
-- `--config`, `-c` (required): prediction config (exactly once)
+- `--tpm-path`: expression TSV; required unless `data.tpm_path` is in the config
+- `--metadata-path`: optional species subset and annotation TSV; defaults to
+  `data.metadata_path` in the config, or no metadata
+- `--n-jobs`: positive worker/thread count; defaults to `runtime.n_jobs` in the
+  config, or `1`
+- `--config`, `-c`: optional prediction config (at most once)
 - `--verbose`, `-v`: detailed stage-level logs
 - `--quiet`, `-q`: suppress progress logs
+
+Explicit CLI values override config values before validation. Without metadata,
+all distinct species in the TPM file are predicted; empty species names are an
+error. With metadata, its species column selects the targets, as in earlier
+versions. Additional columns can supply group summaries. Omitting metadata skips
+these summaries without a missing-metadata warning. Trees can still be plotted
+when `data.tree_path` is supplied.
+
+`--n-jobs` sets Polars' process pool before import (overriding any inherited
+`POLARS_MAX_THREADS` for `predict`) and controls supported estimator workers and
+native BLAS/OpenMP threads during inference. Bundled estimators' saved worker
+counts are overridden temporarily; models are evaluated sequentially.
+
+Existing training configs remain accepted, but training-only settings are
+ignored. Prediction validates and records only the input, memory, execution, and
+summary settings described in [configuration.md](configuration.md#prediction-settings).
+The model, transformations, fitted scaling, absent-feature policy, ensemble
+aggregation, threshold, and abstention policy come from the bundle.
 
 Outputs:
 

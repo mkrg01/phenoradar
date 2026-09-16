@@ -134,6 +134,21 @@ No such extra validation is performed for `cv_only`. Python callers can opt
 into the same lifecycle with a `RunExpressionCache` context passed via
 `expression_cache` to `run_outer_cv` and `run_final_refit`.
 
+For `none` and `log1p` transforms, outer CV initially builds only the raw
+train/validation matrix. After all folds finish fitting and validation, it
+builds one inference matrix from the union of their retained features, in the
+original feature order. Each sampled set applies its own selected columns,
+transform, and fitted scaler, then predicts with its fitted models in the
+original ensemble order. Abstention and inference-species figure data reuse
+this narrow raw matrix. Model selection and training never use inference rows.
+Only fitted models, scalers, and feature schemas are retained for this second
+phase; sample-set training arrays are not retained for inference.
+
+`sample_rank` and `sample_percentile_rank` keep the existing full-row inference
+path because their results depend on features outside the retained union.
+When most features survive filtering, the union may still be wide. The raw
+input cache also continues to validate all consumed expression values.
+
 For each outer fold:
 
 1. Slice shared matrix rows into fold-local train/valid arrays by species.
@@ -249,6 +264,19 @@ After all folds:
   successful `run` command.
 - Top-level rows cover config, provenance, split construction, outer CV,
   optional group bootstrap/final refit, artifact writing, and figures.
+- Full runs record shared input preparation as the independent run stage
+  `expression_preparation`, before the outer-CV timer. Its `expression_input`
+  rows include `input_normalize_cache` (TSV scan, normalization, aggregation,
+  and Parquet write) and `input_validation_read`.
+- Builders also record `input_schema_read`, `input_matrix_read`, and
+  `input_dense_assembly` under the current stage's scope. The latter includes
+  frame validation, coordinate mapping, allocation, filling, and chunk copying.
+  Chunked matrices emit multiple rows; sum the same scope/stage for their cost.
+- Deferred inference records outer-CV `inference_matrix_build` and
+  `inference_execution`, and per-fold `deferred_inference` with preprocessing,
+  prediction, and abstention details. Fold `total` and `fold_execution` cover
+  fitting/validation in this path; the outer-CV total also includes deferred
+  inference. Nested timings must not be added to their enclosing durations.
 - Nested rows cover outer-CV matrix construction, individual folds,
   sample-set preprocessing, inner-CV preprocessing, selected-model
   fitting/prediction, and inner-CV candidate scoring. Final refit uses the same

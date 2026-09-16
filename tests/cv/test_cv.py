@@ -509,6 +509,7 @@ runtime:
     split_artifacts = build_split_artifacts(config)
     original_transform = cv_mod._apply_expression_transform_for_config
     original_fit_outer_sample_set = cv_mod._fit_outer_sample_set
+    original_predict_inference_plan = cv_mod._predict_outer_inference_plan
     inference_transform_shapes: list[tuple[int, int]] = []
     shared_inference_matrices: list[np.ndarray] = []
 
@@ -520,11 +521,19 @@ runtime:
     def _tracked_fit_outer_sample_set(*args: object, **kwargs: object) -> object:
         inference_matrix = kwargs["x_inference_matrix"]
         assert isinstance(inference_matrix, np.ndarray)
-        shared_inference_matrices.append(inference_matrix)
+        if inference_matrix.shape[0]:
+            shared_inference_matrices.append(inference_matrix)
         return original_fit_outer_sample_set(*args, **kwargs)  # type: ignore[arg-type]
+
+    def _tracked_predict_inference_plan(*args: object) -> object:
+        inference_matrix = args[3]
+        assert isinstance(inference_matrix, np.ndarray)
+        shared_inference_matrices.append(inference_matrix)
+        return original_predict_inference_plan(*args)  # type: ignore[arg-type]
 
     monkeypatch.setattr(cv_mod, "_apply_expression_transform_for_config", _tracked_transform)
     monkeypatch.setattr(cv_mod, "_fit_outer_sample_set", _tracked_fit_outer_sample_set)
+    monkeypatch.setattr(cv_mod, "_predict_outer_inference_plan", _tracked_predict_inference_plan)
 
     cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
 
