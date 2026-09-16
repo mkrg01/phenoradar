@@ -5275,10 +5275,12 @@ def _candidate_evidence_figure(
     trait_name: str,
     out_path: Path,
     evidence_context: str = "candidate",
+    probability_threshold: float = FIXED_PROBABILITY_THRESHOLD_VALUE,
 ) -> None:
-    if evidence_context not in {"candidate", "cv_error"}:
+    if evidence_context not in {"candidate", "cv_error", "predict"}:
         raise FigureError(f"Unsupported species evidence context: {evidence_context}")
     is_cv_error = evidence_context == "cv_error"
+    is_predict = evidence_context == "predict"
     expression_col = (
         "target_log2_tpm_plus1" if is_cv_error else "candidate_log2_tpm_plus1"
     )
@@ -5322,7 +5324,10 @@ def _candidate_evidence_figure(
         metadata_text = f"Family: {candidate['family']}"
 
     feature_count = len(features)
-    figure_height = max(4.8, 1.85 + 0.39 * feature_count)
+    row_height = 0.39
+    if is_predict:
+        row_height = max(row_height, 0.14 * max(len(label.splitlines()) for label in labels) + 0.12)
+    figure_height = max(4.8, 1.85 + row_height * feature_count)
     fig = plt.figure(
         figsize=(_NATURE_DOUBLE_COLUMN_WIDTH_PX / _FIG_DPI, figure_height),
         dpi=_FIG_DPI,
@@ -5386,12 +5391,24 @@ def _candidate_evidence_figure(
             color=_MUTED_TEXT_COLOR,
         )
 
+    if is_predict and candidate.get("information_coverage") is not None:
+        fig.text(
+            0.98, 0.87,
+            f"Information coverage {float(candidate['information_coverage']):.1%} "
+            f"(required {float(candidate['abstention_threshold']):.0%})",
+            ha="right", va="top", fontsize=6, color=_MUTED_TEXT_COLOR,
+        )
+    stability_title = (
+        "A   OOF prediction across fold ensemble models" if is_cv_error
+        else "A   Prediction stability across outer-CV models"
+    )
+    if is_predict:
+        stability_title = (
+            "A   Prediction from fitted model" if cross_fold_predictions.height == 1
+            else "A   Predictions across fitted models"
+        )
     ax_stability.set_title(
-        (
-            "A   OOF prediction across fold ensemble models"
-            if is_cv_error
-            else "A   Prediction stability across outer-CV models"
-        ),
+        stability_title,
         loc="left",
         fontsize=8,
         pad=6,
@@ -5403,7 +5420,7 @@ def _candidate_evidence_figure(
         dtype=float,
     )
     fold_values = fold_values[np.isfinite(fold_values)]
-    if fold_values.size > 0:
+    if fold_values.size > (1 if is_predict else 0):
         q1, median, q3 = np.quantile(fold_values, [0.25, 0.50, 0.75])
         ax_stability.hlines(
             0.0,
@@ -5440,7 +5457,7 @@ def _candidate_evidence_figure(
             linewidths=0.5,
             zorder=4,
         )
-        summary_label = "Ensemble" if is_cv_error else "Outer-CV"
+        summary_label = "Ensemble" if (is_cv_error or is_predict) else "Outer-CV"
         summary_text = (
             f"{summary_label} median {float(median):.3f} "
             f"(range {float(np.min(fold_values)):.3f}–{float(np.max(fold_values)):.3f})"
@@ -5464,14 +5481,18 @@ def _candidate_evidence_figure(
         edgecolors="white",
         linewidths=0.55,
         zorder=5,
-        label="OOF aggregate" if is_cv_error else "Final refit",
+        label=(
+            "Final model" if is_predict
+            else "OOF aggregate" if is_cv_error else "Final refit"
+        ),
+        clip_on=False,
     )
     ax_stability.set_xlim(0.0, 1.0)
     ax_stability.set_ylim(-0.14, 0.22)
     ax_stability.set_yticks([])
     ax_stability.set_xlabel(f"Predicted probability of {trait_name} = 1", labelpad=2)
     ax_stability.axvline(
-        FIXED_PROBABILITY_THRESHOLD_VALUE,
+        probability_threshold,
         color=_PROBABILITY_THRESHOLD_COLOR,
         linewidth=0.8,
         linestyle=(0, (4, 4)),
@@ -5515,6 +5536,12 @@ def _candidate_evidence_figure(
     expression_colors = {0: "#D55E00", 1: _TRAIT_POSITIVE_COLOR}
     offsets = {0: -0.14, 1: 0.14}
     for feature_idx, feature in enumerate(features):
+        if is_predict and reference.filter(pl.col("feature") == feature).height == 0:
+            ax_expression.text(
+                0.98, float(feature_idx), "Reference unavailable",
+                transform=ax_expression.get_yaxis_transform(), ha="right", va="center",
+                fontsize=5, color=_MUTED_TEXT_COLOR,
+            )
         for label in (0, 1):
             values = np.asarray(
                 reference.filter((pl.col("feature") == feature) & (pl.col("label") == label))
@@ -5614,6 +5641,8 @@ def _candidate_evidence_figure(
             label="OOF species" if is_cv_error else "Candidate",
         ),
     ]
+    if is_predict and reference.height == 0:
+        legend_handles = legend_handles[-1:]
     ax_expression.legend(
         handles=legend_handles,
         loc="lower right",
@@ -5642,6 +5671,8 @@ def write_candidate_evidence_figures(
     trait_name: str,
     orthogroup_annotations: pl.DataFrame | None = None,
     parallel_workers: int = 1,
+    evidence_context: str = "candidate",
+    probability_threshold: float = FIXED_PROBABILITY_THRESHOLD_VALUE,
 ) -> tuple[pl.DataFrame, list[str]]:
     """Write one publication-oriented candidate-evidence PDF per positive species."""
     if candidates.height == 0 or features.height == 0:
@@ -5686,6 +5717,8 @@ def write_candidate_evidence_figures(
                     "orthogroup_annotations": orthogroup_annotations,
                     "trait_name": trait_name,
                     "out_path": out_path,
+                    "evidence_context": evidence_context,
+                    "probability_threshold": probability_threshold,
                 },
                 False,
             )
@@ -5727,6 +5760,11 @@ def write_candidate_evidence_figures(
     manifest = pl.DataFrame(manifest_rows, schema=_CANDIDATE_MANIFEST_SCHEMA).sort(
         ["prob", "species"], descending=[True, False]
     )
+    if evidence_context == "predict":
+        manifest = manifest.rename({
+            name: name.replace("cross_fold", "model") for name in manifest.columns
+            if name.startswith("cross_fold_")
+        }).rename({"n_cross_fold_predictions": "n_bundle_models"})
     manifest.write_csv(
         output_root / "candidate_manifest.tsv",
         separator="\t",

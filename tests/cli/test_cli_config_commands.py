@@ -16,7 +16,7 @@ import phenoradar.cli as cli_mod
 from phenoradar import __version__
 from phenoradar.bundle import BundleError
 from phenoradar.cli import app
-from phenoradar.config import AppConfig, ConfigConditionSet, ConfigError
+from phenoradar.config import AppConfig, ConfigConditionSet, ConfigError, PredictConfig
 from phenoradar.cv import CVError
 from phenoradar.figures import FigureError
 from phenoradar.provenance import ProvenanceError
@@ -1739,6 +1739,7 @@ data:
         "phenoradar.cli.load_model_bundle",
         lambda *_args, **_kwargs: SimpleNamespace(
             models=[object()],
+            abstention_top_features=30,
             manifest_sha256="manifest-sha",
             source_run_id="source-run",
             manifest={},
@@ -2315,7 +2316,9 @@ def test_predict_fails_when_bundle_loading_raises(
 
     monkeypatch.setattr(
         "phenoradar.cli.load_predict_config",
-        lambda *_args, **_kwargs: _stub_resolved_config(execution_stage="cv_only"),
+        lambda *_args, **_kwargs: PredictConfig.model_validate(
+            {"data": {"metadata_path": "metadata.tsv", "tpm_path": "tpm.tsv"}}
+        ),
     )
     monkeypatch.setattr(
         "phenoradar.cli.load_model_bundle",
@@ -2339,12 +2342,15 @@ def test_predict_fails_when_input_provenance_collection_raises(
 
     monkeypatch.setattr(
         "phenoradar.cli.load_predict_config",
-        lambda *_args, **_kwargs: _stub_resolved_config(execution_stage="cv_only"),
+        lambda *_args, **_kwargs: PredictConfig.model_validate(
+            {"data": {"metadata_path": "metadata.tsv", "tpm_path": "tpm.tsv"}}
+        ),
     )
     monkeypatch.setattr(
         "phenoradar.cli.load_model_bundle",
         lambda *_args, **_kwargs: SimpleNamespace(
             models=[object()],
+            abstention_top_features=30,
             manifest_sha256="manifest-sha",
             source_run_id="source-run",
             manifest={},

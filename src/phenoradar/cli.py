@@ -72,6 +72,7 @@ from phenoradar.orthogroup_annotation import (
     OrthogroupAnnotationError,
     load_orthogroup_annotations,
 )
+from phenoradar.predict_evidence import build_predict_evidence_artifacts
 from phenoradar.provenance import (
     FINGERPRINT_SCHEMA_VERSION,
     ProvenanceError,
@@ -166,7 +167,7 @@ def _build_run_fingerprint_metadata(
     }
 
 
-def _artifact_parallel_workers(config: AppConfig) -> int:
+def _artifact_parallel_workers(config: AppConfig | PredictConfig) -> int:
     runtime_n_jobs = int(getattr(config.runtime, "n_jobs", 1))
     return max(1, min(runtime_n_jobs, _ARTIFACT_PARALLEL_WORKER_CAP))
 
@@ -1246,6 +1247,7 @@ def _run_single(
                     else None
                 ),
                 top_features=resolved.figures.top_features,
+                include_model_reference=True,
             )
         except CandidateEvidenceError as exc:
             raise typer.BadParameter(str(exc)) from exc
@@ -1263,6 +1265,7 @@ def _run_single(
                 float_precision=8,
                 null_value="NA",
             )
+        if candidate_evidence_artifacts.reference_expression.height > 0:
             candidate_evidence_artifacts.reference_expression.write_csv(
                 inference_tables_dir / "candidate_reference_expression.tsv",
                 separator="\t",
@@ -1305,8 +1308,14 @@ def _run_single(
                 config=resolved,
                 final_refit_artifacts=final_refit_artifacts,
                 thresholds=cv_artifacts.thresholds,
+                reference_expression=candidate_evidence_artifacts.reference_expression,
+                orthogroup_annotations=load_orthogroup_annotations(
+                    None if orthogroup_annotation_path is None
+                    else Path(orthogroup_annotation_path),
+                    feature_names=candidate_evidence_artifacts.reference_expression["feature"],
+                ),
             )
-        except BundleError as exc:
+        except (BundleError, OrthogroupAnnotationError) as exc:
             raise typer.BadParameter(str(exc)) from exc
         _log(f"Model bundle exported: {bundle_export_result.bundle_dir}.")
     model_selection_selected_table: pl.DataFrame | None = None
@@ -2357,6 +2366,8 @@ def predict(
     _log("Load model bundle and run predictions.")
     try:
         bundle = load_model_bundle(model_bundle)
+        if "figures" not in resolved.model_fields_set:
+            resolved.figures.top_features = bundle.abstention_top_features
         pred_predict, predict_warnings = predict_with_bundle(resolved, bundle)
     except BundleError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -2378,6 +2389,15 @@ def predict(
     )
     _emit_predict_summary(pred_predict, start_time=start_time, log_verbosity=log_verbosity)
 
+    _log("Build candidate interpretation tables.")
+    try:
+        evidence = build_predict_evidence_artifacts(
+            config=resolved, bundle=bundle, predictions=pred_predict,
+        )
+    except (BundleError, CVError, ValueError, OSError, pl.exceptions.PolarsError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    predict_warnings.extend(evidence.warnings)
+
     _log("Write prediction artifacts.")
     run_dir = _build_run_dir("predict")
     inference_tables_dir = _stage_tables_dir(run_dir, "inference")
@@ -2389,6 +2409,15 @@ def predict(
         null_value="NA",
     )
     write_abstention_artifacts(pred_predict, inference_tables_dir)
+    if evidence.features.height > 0:
+        for table, name in [
+            (evidence.candidates, "candidate_evidence_candidates.tsv"),
+            (evidence.features, "candidate_feature_evidence.tsv"),
+            (evidence.reference_expression, "candidate_reference_expression.tsv"),
+            (evidence.model_predictions, "candidate_model_probabilities.tsv"),
+        ]:
+            table.write_csv(inference_tables_dir / name, separator="\t",
+                            float_precision=8, null_value="NA")
     if pred_predict.height > 0:
         predict_warnings.extend(
             _write_group_summary_artifacts(
@@ -2409,6 +2438,19 @@ def predict(
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    if evidence.features.height > 0:
+        try:
+            _, evidence_warnings = write_candidate_evidence_figures(
+                run_dir=run_dir, candidates=evidence.candidates, features=evidence.features,
+                reference_expression=evidence.reference_expression,
+                cross_fold_predictions=evidence.model_predictions,
+                trait_name=evidence.trait_name, orthogroup_annotations=evidence.annotations,
+                parallel_workers=_artifact_parallel_workers(resolved), evidence_context="predict",
+                probability_threshold=bundle.threshold_fixed,
+            )
+        except FigureError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        predict_warnings.extend(evidence_warnings)
     contrast_pair_col = resolved.data.contrast_pair_col
     if tree_path is not None and contrast_pair_col is not None:
         try:
@@ -2438,6 +2480,7 @@ def predict(
         input_files = collect_input_files(
             [
                 *config_paths,
+                *evidence.input_paths,
                 *(
                     []
                     if resolved.data.metadata_path is None

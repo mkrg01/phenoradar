@@ -159,7 +159,7 @@ The main stage directories are `split/`, `cv/`, `model/`, `summary/`, `runtime/`
 - `runs/<timestamp>_predict_<id>/...`
 
 Prediction always saves a `resolved_config.yml` containing only effective
-prediction inputs, memory guard, execution, and summary settings, even when no
+prediction inputs, memory guard, execution, figures, and summary settings, even when no
 input config was supplied. Model and learned preprocessing state remain in the
 source bundle, linked by path and hashes in `run_metadata.json`. The latter
 records `runtime_n_jobs`, a deterministic prediction seed policy, and only input
@@ -1091,7 +1091,7 @@ when individual folds are single-label.
 
 ## `predict` artifacts (schemas and interpretation)
 
-- `resolved_config.yml`
+- `resolved_config.yml` (including the effective figure settings)
 - `inference/tables/prediction_inference.tsv`
   - columns:
     - `species`, `true_label`, `prob`
@@ -1112,7 +1112,38 @@ when individual folds are single-label.
   - `probability_by_<group>.svg` (when `summary.group_col` is present in metadata)
   - optional `predict_uncertainty.svg` (bundle ensemble size > 1)
 
+- `inference/tables/candidate_evidence_candidates.tsv` (linear bundle, accepted positives)
+  - candidate species, probability, family (or `unassigned`), and available
+    selective-decision / coverage columns
+- `inference/tables/candidate_feature_evidence.tsv`
+  - same local contribution and raw-expression columns as the `full_run` table;
+    each model uses its saved feature order, transformation, and fitted scaler
+  - ensemble features are ranked by mean absolute contribution; the signed mean,
+    minimum, and maximum are also retained. Contributions describe linear scores,
+    not an additive decomposition of the aggregated probability.
+- `inference/tables/candidate_model_probabilities.tsv`
+  - `species`, zero-based `model_index`, `prob`; the models are fitted bundle
+    members, not independently refitted CV models
+- `inference/tables/candidate_reference_expression.tsv`
+  - known-trait reference rows for plotted features; missing references remain
+    unavailable and are never inferred from predictions
+- `inference/figures/candidate_evidence/candidate_manifest.tsv`
+  - species, probability bin, relative PDF path, feature count, `n_bundle_models`,
+    and `model_prob_*` summaries
+- `run_metadata.json.input_files` additionally records any legacy reference TSV
+  or annotation input consumed outside the integrity-verified bundle
+
 ### Predict figures
+
+- `inference/figures/candidate_evidence/<probability_bin>/<species>.pdf`
+  - one figure per accepted positive species with nonzero local linear evidence
+  - fitted-model probabilities (with the bundled classification threshold),
+    signed local contributions, and candidate versus known-trait expression
+  - information coverage and its acceptance threshold when available
+  - unavailable references are explicitly marked; absent outer-CV models are
+    never represented as a CV stability assessment
+  - local feature count follows `figures.top_features`, defaulting to the bundle's
+    saved training value when the `figures` section is omitted
 
 - `inference/figures/predict_probability_distribution.svg`
   - Histogram of predicted probabilities in bins `[0.0, 0.1), ... , [0.9, 1.0]`.
@@ -1229,3 +1260,21 @@ Bundle format compatibility:
   `model/tables/convergence_diagnostics.tsv`; raw `ConvergenceWarning` messages are not left
   only on stderr.
 - `report_warnings.tsv` includes per-run ingestion warnings during report aggregation.
+
+### Portable interpretation snapshots
+
+New `full_run` bundles optionally include `reference_expression.parquet` and
+`orthogroup_annotations.parquet`. Both are recorded in the bundle manifest and
+covered by the existing size/hash integrity checks. Reference expression covers
+nonzero-coefficient features from the final models and only known-trait species
+in the training/validation pool; external-test and unknown-trait species are
+excluded. References are saved even when that run has no positive inference
+candidates. The manifest also records the learned trait name for figure labels.
+
+Older version 1–3 bundles remain supported. If no reference snapshot is present,
+`predict` can read the original run's `candidate_reference_expression.tsv`.
+That legacy table may cover only some local features; the others are marked as
+unavailable. If neither source exists, local contributions and candidate
+expression are still plotted. Training data are never rescanned or refitted by
+this fallback. Annotation labels can similarly use an accessible annotation path
+in the saved training config, or an explicit prediction annotation input.

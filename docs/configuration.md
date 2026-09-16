@@ -49,6 +49,8 @@ Only these settings are used and saved in prediction `resolved_config.yml`:
 | `data.metadata_path` | `null`; all TPM species, or the supplied metadata's species subset |
 | `data.species_col`, `data.feature_col`, `data.value_col` | `species`, `orthogroup`, `tpm` |
 | `data.tree_path` | `null`; optional prediction tree |
+| `data.orthogroup_annotation_path` | `null`; optional labels overriding bundled annotations |
+| `figures.top_features` | Bundle's training-time value when `figures` is omitted; otherwise `30` unless specified |
 | `data.trait_col`, `data.contrast_pair_col` | `C4`, `contrast_pair_id`; optional tree annotations |
 | `preprocess.max_pivot_cells` | `50000000`; memory guard |
 | `runtime.n_jobs` | `1`; positive prediction worker/thread count |

@@ -251,6 +251,14 @@ With:
 - `resolved_config.yml` (effective prediction settings)
 - `run_metadata.json`
 - `inference/figures/`
+- `inference/figures/candidate_evidence/` (one PDF per accepted positive species
+  for linear bundles), plus the underlying contribution, reference-expression,
+  and model-probability TSVs
+
+The species PDFs explain which features supported or opposed the prediction and
+compare expression with known-trait species when reference data are available.
+Optional `figures.top_features` in the prediction config controls the number of
+features; otherwise the bundle's training-time figure setting is used.
 
 ## 7) Aggregate multiple runs
 

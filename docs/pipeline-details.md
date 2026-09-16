@@ -126,6 +126,15 @@ rules. Feature selection, transforms, scaling, and model fitting retain their
 existing training scopes. This sharing does not retain CV's dense matrices for
 refit. For `cv_only`, the cache contains only train/validation species.
 
+Cache construction expresses missing-feature normalization and invalid-row
+diagnostics as row-wise operations followed by scalar sum/min/max aggregates.
+This lets the Parquet sink stream these operations without first materializing
+all normalized input rows. Duplicate species/feature coordinates are still
+summed, and validation retains invalid-row counts, source-line examples, and
+checks for overflow after summation. The aggregation still needs state for the
+distinct coordinates, so its memory usage can grow with the input size. This
+optimization applies even when every feature is retained for modeling.
+
 The cache is local to one run (including one condition in a study), and is
 removed after these stages or on an exception. It is not a persistent cache
 between runs. Because `full_run` prepares the complete raw species set before

@@ -14,6 +14,14 @@
 
 ### Features
 
+* generate per-species local contribution and expression-reference PDFs from
+  `predict`, with fitted-member probability tables, coverage labels, and honest
+  unavailable-reference markers; preserve training reference/annotation snapshots
+  in new model bundles and support original-run references for legacy bundles
+
+* stream expression-cache normalization and duplicate aggregation without
+  whole-input materialization for missing-feature handling or invalid-row
+  diagnostics, preserving input validation and coordinate sums
 * predict directly from a model bundle and TPM without metadata or config;
   add `--tpm-path`, optional `--metadata-path`, and `--n-jobs` overrides with
   prediction-only resolved settings, legacy config compatibility, optional

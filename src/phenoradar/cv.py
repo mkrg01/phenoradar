@@ -1420,8 +1420,9 @@ class ExpressionMatrixBuilder:
                 .cast(pl.String, strict=False)
                 .str.strip_chars()
                 .alias("__species"),
-                feature_value.fill_null(self._MISSING_FEATURE_SENTINEL)
-                .replace("", self._MISSING_FEATURE_SENTINEL)
+                pl.when(feature_value.is_null() | (feature_value == ""))
+                .then(pl.lit(self._MISSING_FEATURE_SENTINEL))
+                .otherwise(feature_value)
                 .alias("__feature"),
                 parsed_value.alias("__parsed_value"),
                 invalid_reason_mask.alias("__invalid_reason_mask"),
@@ -1436,11 +1437,20 @@ class ExpressionMatrixBuilder:
             )
         )
         invalid = pl.col("__invalid_reason_mask") != 0
+        # Keep expressions outside the aggregations so the Parquet sink can
+        # stream normalization and aggregation without an in-memory fallback.
+        normalized = normalized.with_columns(
+            invalid.cast(pl.UInt32).alias("__invalid_count"),
+            pl.when(invalid)
+            .then(pl.col("__source_line"))
+            .otherwise(None)
+            .alias("__invalid_line"),
+        )
         aggregated = normalized.group_by(["__species", "__feature"]).agg(
             pl.col("__value").sum(),
-            invalid.sum().alias("__invalid_count"),
+            pl.col("__invalid_count").sum(),
             pl.col("__source_line").min().alias("__group_first_line"),
-            pl.col("__source_line").filter(invalid).min().alias("__invalid_line"),
+            pl.col("__invalid_line").min(),
             pl.col("__invalid_reason_mask").max().alias("__invalid_reason_mask"),
         )
         aggregate_overflow = (pl.col("__invalid_count") == 0) & ~pl.col("__value").is_finite()

@@ -73,8 +73,9 @@ preprocess:
 
 
 @pytest.mark.parametrize("group_col", ["family", "order"])
+@pytest.mark.parametrize("include_model_reference", [False, True])
 def test_build_candidate_evidence_uses_candidate_local_contribution(
-    tmp_path: Path, group_col: str
+    tmp_path: Path, group_col: str, include_model_reference: bool
 ) -> None:
     _metadata, _tpm, config_path = _candidate_fixture(tmp_path)
     config = load_and_resolve_config([config_path])
@@ -121,6 +122,7 @@ def test_build_candidate_evidence_uses_candidate_local_contribution(
         final_refit=final_refit,  # type: ignore[arg-type]
         cross_fold_predictions=cross_fold,
         top_features=1,
+        include_model_reference=include_model_reference,
     )
 
     assert artifacts.candidates.row(0, named=True)["family"] == "Family three"
@@ -128,8 +130,33 @@ def test_build_candidate_evidence_uses_candidate_local_contribution(
     assert artifacts.features.height == 1
     assert artifacts.features.row(0, named=True)["feature"] == "OG1"
     assert artifacts.features.row(0, named=True)["local_rank"] == 1
-    assert artifacts.reference_expression.height == 4
+    assert artifacts.reference_expression.height == (8 if include_model_reference else 4)
     assert artifacts.cross_fold_predictions.height == 2
+
+
+def test_reference_snapshot_is_available_without_positive_inference(tmp_path: Path) -> None:
+    _, _, path = _candidate_fixture(tmp_path)
+    config = load_and_resolve_config([path])
+    split = pl.DataFrame({
+        "species": ["known_0a", "known_0b", "known_1a", "known_1b", "candidate_a"],
+        "pool": ["train", "validation", "train", "validation", "discovery_inference"],
+        "label": [0, 0, 1, 1, None],
+    })
+    model = GlmnetLogisticRegression()
+    model.coef_ = np.array([1.0, -1.0])
+    refit = SimpleNamespace(
+        pred_inference=pl.DataFrame({
+            "species": ["candidate_a"], "prob": [0.1], "pred_label_fixed_threshold": [0],
+        }),
+        model_entries=[FinalModelEntry(feature_names=["OG1", "OG2"], scaler=None, model=model)],
+    )
+    evidence = build_candidate_evidence_artifacts(
+        config=config, split_manifest=split, final_refit=refit,
+        cross_fold_predictions=None, top_features=1, include_model_reference=True,
+    )
+    assert evidence.features.is_empty()
+    assert evidence.reference_expression.height == 8
+    assert "candidate_a" not in evidence.reference_expression["species"].to_list()
 
 
 def test_write_candidate_evidence_figures_writes_probability_bin_pdf_and_manifest(

@@ -205,7 +205,7 @@ native BLAS/OpenMP threads during inference. Bundled estimators' saved worker
 counts are overridden temporarily; models are evaluated sequentially.
 
 Existing training configs remain accepted, but training-only settings are
-ignored. Prediction validates and records only the input, memory, execution, and
+ignored. Prediction validates and records only the input, memory, execution, figure, and
 summary settings described in [configuration.md](configuration.md#prediction-settings).
 The model, transformations, fitted scaling, absent-feature policy, ensemble
 aggregation, threshold, and abstention policy come from the bundle.
@@ -218,6 +218,28 @@ Outputs:
 - `inference/figures/`
   - `predict_probability_distribution.svg`
   - optional `predict_uncertainty.svg` (bundle ensemble size > 1)
+  - `candidate_evidence/<probability_bin>/<species>.pdf` for each accepted positive
+    candidate when the bundle supports local linear contributions
+- `inference/figures/candidate_evidence/candidate_manifest.tsv`
+- `inference/tables/candidate_evidence_candidates.tsv`
+- `inference/tables/candidate_feature_evidence.tsv`
+- `inference/tables/candidate_reference_expression.tsv`
+- `inference/tables/candidate_model_probabilities.tsv`
+
+Candidate PDFs show signed local contributions, candidate expression against
+known-trait references when available, the probabilities from fitted bundle
+members, and information coverage when abstention is enabled. Bundle members
+are not outer-CV models. Abstained candidates are excluded, matching `full_run`.
+Nonlinear models without local linear coefficients retain the standard prediction
+outputs and report that candidate contribution figures are unavailable.
+
+`figures.top_features` controls the number of local features per species. If the
+prediction config omits `figures`, the training-time value saved in the bundle is
+used. `data.orthogroup_annotation_path` can optionally supply annotation labels.
+New `full_run` bundles contain reference-expression and annotation snapshots;
+older bundles can reuse the original run's reference TSV when available. Missing
+reference features are explicitly marked in the figure, and prediction remains
+available when the source run has been moved or deleted.
 
 Prediction-time feature alignment policy:
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +10,13 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from phenoradar.bundle import export_model_bundle, load_model_bundle, predict_with_bundle
+from phenoradar.bundle import (
+    BundleError,
+    export_model_bundle,
+    load_model_bundle,
+    predict_with_bundle,
+)
+from phenoradar.candidate_evidence import build_candidate_evidence_artifacts
 from phenoradar.cli import app
 from phenoradar.config import AppConfig, write_resolved_config
 from phenoradar.cv import run_final_refit, run_outer_cv
@@ -37,12 +44,17 @@ def trained_bundle(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path
     refit = run_final_refit(config, split.split_manifest)
     resolved = root / "resolved_config.yml"
     write_resolved_config(config, resolved)
+    evidence = build_candidate_evidence_artifacts(
+        config=config, split_manifest=split.split_manifest, final_refit=refit,
+        cross_fold_predictions=None, top_features=30, include_model_reference=True,
+    )
     exported = export_model_bundle(
         run_dir=root,
         resolved_config_path=resolved,
         config=config,
         final_refit_artifacts=refit,
         thresholds=cv.thresholds,
+        reference_expression=evidence.reference_expression,
     )
     return exported.bundle_dir, tpm, metadata
 
@@ -87,6 +99,44 @@ def test_predict_all_tpm_species_without_metadata_or_training(
     provenance = json.loads((run / "run_metadata.json").read_text())
     assert not any("metadata.tsv" in str(item) for item in provenance["input_files"])
     assert not any("group summary" in message for message in provenance["warnings"])
+
+
+def test_predict_generates_species_evidence_from_portable_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trained_bundle: tuple[Path, Path, Path],
+) -> None:
+    bundle_dir = tmp_path / "portable_bundle"
+    shutil.copytree(trained_bundle[0], bundle_dir)
+    monkeypatch.chdir(tmp_path)
+    tpm = tmp_path / "new.tsv"
+    tpm.write_text("species\torthogroup\ttpm\nnew_species\tOG1\t100\n")
+    result = CliRunner().invoke(app, [
+        "predict", "--model-bundle", str(bundle_dir), "--tpm-path", str(tpm),
+    ])
+    assert result.exit_code == 0, result.output
+    run = next((tmp_path / "runs").glob("*_predict_*"))
+    figures = run / "inference/figures/candidate_evidence"
+    assert len(list(figures.glob("*/*.pdf"))) == 1
+    manifest = pl.read_csv(figures / "candidate_manifest.tsv", separator="\t")
+    assert manifest["species"].to_list() == ["new_species"]
+    assert manifest["n_bundle_models"].to_list() == [1]
+    reference = pl.read_csv(
+        run / "inference/tables/candidate_reference_expression.tsv", separator="\t"
+    )
+    assert reference["species"].n_unique() == 4
+    assert "novel" not in reference["species"].to_list()
+    assert (run / "inference/tables/candidate_model_probabilities.tsv").exists()
+
+
+def test_bundle_verifies_optional_interpretation_snapshot(
+    tmp_path: Path, trained_bundle: tuple[Path, Path, Path],
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    shutil.copytree(trained_bundle[0], bundle_dir)
+    assert load_model_bundle(bundle_dir).reference_expression is not None
+    with (bundle_dir / "reference_expression.parquet").open("ab") as handle:
+        handle.write(b"corrupted")
+    with pytest.raises(BundleError, match="integrity check failed"):
+        load_model_bundle(bundle_dir)
 
 
 def test_predict_cli_overrides_config_and_selects_metadata_species(

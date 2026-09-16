@@ -69,11 +69,16 @@ _CROSS_FOLD_SCHEMA = {
 _NONZERO_TOLERANCE = 1e-12
 
 
-def _empty_artifacts(*, warnings: list[str]) -> CandidateEvidenceArtifacts:
+def _empty_artifacts(
+    *, warnings: list[str], reference_expression: pl.DataFrame | None = None
+) -> CandidateEvidenceArtifacts:
     return CandidateEvidenceArtifacts(
         candidates=pl.DataFrame(schema=_CANDIDATE_SCHEMA),
         features=pl.DataFrame(schema=_FEATURE_SCHEMA),
-        reference_expression=pl.DataFrame(schema=_REFERENCE_SCHEMA),
+        reference_expression=(
+            pl.DataFrame(schema=_REFERENCE_SCHEMA)
+            if reference_expression is None else reference_expression
+        ),
         cross_fold_predictions=pl.DataFrame(schema=_CROSS_FOLD_SCHEMA),
         warnings=warnings,
     )
@@ -208,6 +213,33 @@ def _normalized_cross_fold_predictions(
     )
 
 
+def _reference_expression(
+    config: AppConfig,
+    matrix_builder: ExpressionMatrixBuilder,
+    known: pl.DataFrame,
+    features: list[str],
+) -> pl.DataFrame:
+    if not features or known.height == 0:
+        return pl.DataFrame(schema=_REFERENCE_SCHEMA)
+    species = [str(value) for value in known["species"].to_list()]
+    try:
+        raw, _ = matrix_builder.build_matrix(species, feature_order=features)
+    except CVError as exc:
+        raise CandidateEvidenceError(str(exc)) from exc
+    table = pl.DataFrame({
+        "species": np.repeat(species, len(features)),
+        "label": np.repeat(known["label"].to_numpy(), len(features)),
+        "feature": np.tile(features, len(species)),
+        "tpm": raw.reshape(-1),
+        "log2_tpm_plus1": np.log2(raw.reshape(-1) + 1.0),
+    }, schema=_REFERENCE_SCHEMA).sort(["feature", "label", "species"])
+    if config.preprocess.missing_expression.method == "neutral":
+        table = mark_expression_observations(
+            table, zero_as_missing=config.preprocess.missing_expression.zero_as_missing
+        )
+    return table
+
+
 def build_candidate_evidence_artifacts(
     *,
     config: AppConfig,
@@ -215,6 +247,7 @@ def build_candidate_evidence_artifacts(
     final_refit: FinalRefitArtifacts,
     cross_fold_predictions: pl.DataFrame | None,
     top_features: int,
+    include_model_reference: bool = False,
 ) -> CandidateEvidenceArtifacts:
     """Build candidate-local contributions and known-trait expression references."""
     if top_features < 1:
@@ -222,7 +255,7 @@ def build_candidate_evidence_artifacts(
 
     warnings: list[str] = []
     positive = _positive_candidates(final_refit.pred_inference)
-    if positive.height == 0:
+    if positive.height == 0 and not include_model_reference:
         warnings.append("Skipped candidate evidence figures: no inference species predicted as 1")
         return _empty_artifacts(warnings=warnings)
 
@@ -244,6 +277,23 @@ def build_candidate_evidence_artifacts(
                 "Final model coefficient width does not match its feature schema"
             )
         coefficients.append(np.asarray(coef, dtype=float))
+
+    active_features = sorted({
+        feature for entry, coef in zip(entries, coefficients, strict=True)
+        for feature, value in zip(entry.feature_names, coef, strict=True) if value != 0.0
+    })
+    if positive.height == 0:
+        try:
+            reference = _reference_expression(
+                config, ExpressionMatrixBuilder(config), _known_species(split_manifest),
+                active_features,
+            )
+        except CVError as exc:
+            raise CandidateEvidenceError(str(exc)) from exc
+        return _empty_artifacts(
+            warnings=["Skipped candidate evidence figures: no inference species predicted as 1"],
+            reference_expression=reference,
+        )
 
     candidate_species = [str(value) for value in positive.get_column("species").to_list()]
     known = _known_species(split_manifest)
@@ -358,36 +408,8 @@ def build_candidate_evidence_artifacts(
     )
     warnings.extend(metadata_warnings)
 
-    reference_features = sorted(selected_features)
-    try:
-        reference_raw, _ = matrix_builder.build_matrix(
-            known_species,
-            feature_order=reference_features,
-        )
-    except CVError as exc:
-        raise CandidateEvidenceError(str(exc)) from exc
-    known_labels = [int(value) for value in known.get_column("label").to_list()]
-    reference_rows: list[dict[str, Any]] = []
-    for species_idx, (species, label) in enumerate(zip(known_species, known_labels, strict=True)):
-        for feature_idx, feature in enumerate(reference_features):
-            raw_value = float(reference_raw[species_idx, feature_idx])
-            reference_rows.append(
-                {
-                    "species": species,
-                    "label": label,
-                    "feature": feature,
-                    "tpm": raw_value,
-                    "log2_tpm_plus1": float(np.log2(raw_value + 1.0)),
-                }
-            )
-    reference_expression = pl.DataFrame(reference_rows, schema=_REFERENCE_SCHEMA).sort(
-        ["feature", "label", "species"]
-    )
-    if config.preprocess.missing_expression.method == "neutral":
-        reference_expression = mark_expression_observations(
-            reference_expression,
-            zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
-        )
+    reference_features = active_features if include_model_reference else sorted(selected_features)
+    reference_expression = _reference_expression(config, matrix_builder, known, reference_features)
     normalized_cross_fold = _normalized_cross_fold_predictions(
         cross_fold_predictions,
         candidate_species=[str(value) for value in retained_candidate_species],

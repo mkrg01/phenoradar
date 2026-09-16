@@ -224,6 +224,98 @@ def test_run_cache_cleans_up_if_a_later_stage_fails(tmp_path: Path) -> None:
     cache.close()  # Idempotent cleanup.
 
 
+@pytest.mark.parametrize("max_pivot_cells", [64, 50_000_000])
+@pytest.mark.parametrize("fill", [0, "nan"])
+def test_streamed_cache_preserves_wide_matrix_and_duplicate_coordinates(
+    tmp_path: Path, max_pivot_cells: int, fill: int | str
+) -> None:
+    config = _config(tmp_path)
+    config.preprocess.max_pivot_cells = max_pivot_cells
+    config.preprocess.absent_feature_fill = fill
+    features = [f"f{i:04d}" for i in range(1024)]
+    # Split duplicate coordinates across distant input rows and reverse the
+    # requested feature order so hash-group output order cannot affect alignment.
+    rows = ["species\torthogroup\ttpm"]
+    for species in ["a", "b"]:
+        rows.extend(f" {species} \t {feature} \t0.25" for feature in features)
+    rows.append("a\tONLY_A\t0")
+    rows.append("ignored\t\tbad")
+    for species in ["b", "a"]:
+        rows.extend(f"{species}\t{feature}\t0.5" for feature in reversed(features))
+    Path(config.data.tpm_path).write_text("\n".join(rows) + "\n")
+    order = ["ONLY_A", *reversed(features), "ABSENT"]
+    species_order = ["b", "a", "b"]
+    direct = cv_mod.ExpressionMatrixBuilder(config)
+    expected, expected_names = direct.build_matrix(species_order, feature_order=order)
+    with RunExpressionCache() as cache:
+        builder = cache.get_builder(config)
+        builder.cache_species(["a", "b"])
+        actual, names = builder.build_matrix(species_order, feature_order=order)
+    assert names == expected_names == order
+    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(actual[:, 1:-1], np.full((3, len(features)), 0.75))
+    assert actual[1, 0] == 0.0  # Observed zero must remain distinct from absence.
+    missing = np.nan if fill == "nan" else 0.0
+    np.testing.assert_array_equal(actual[:, -1], np.full(3, missing))
+    np.testing.assert_array_equal(actual[[0, 2], 0], np.full(2, missing))
+
+
+@pytest.mark.parametrize(
+    "values,feature,total,line,reason",
+    [
+        (["1", "bad", "-2"], "F", 2, 3, "negative"),
+        (["1", "", "2"], "F", 1, 3, "missing"),
+        (["1", "NaN", "2"], "F", 1, 3, "non-finite"),
+        (["1", "1e308", "1e308"], "F", 1, 2, "non-finite-after-sum"),
+        (["1", "2", "3"], " ", 3, 2, "missing-feature"),
+        (["bad", "1", "2"], "", 3, 2, "non-numeric,missing-feature"),
+    ],
+)
+def test_streamed_cache_preserves_invalid_duplicate_diagnostics(
+    tmp_path: Path,
+    values: list[str],
+    feature: str,
+    total: int,
+    line: int,
+    reason: str,
+) -> None:
+    config = _config(tmp_path)
+    rows = ["species\torthogroup\ttpm", *(f"a\t{feature}\t{v}" for v in values)]
+    rows.extend(["a\tVALID\t1", "ignored\t\tbad"])
+    Path(config.data.tpm_path).write_text("\n".join(rows) + "\n")
+    with pytest.raises(CVError) as direct_error:
+        cv_mod.ExpressionMatrixBuilder(config).build_matrix(["a"], feature_order=["VALID"])
+    with RunExpressionCache() as cache, pytest.raises(CVError) as cached_error:
+        cache.get_builder(config).cache_species(["a"])
+    message = str(cached_error.value)
+    assert message == str(direct_error.value)
+    assert f"invalid_rows={total};" in message
+    assert f"first_invalid_line={line}:" in message
+    assert f"example_reasons_in_coordinate=({reason})" in message
+
+
+def test_streamed_cache_sums_many_floating_point_duplicates(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    rng = np.random.default_rng(42)
+    values = rng.uniform(0.0, 100.0, size=(4000, 8))
+    rows = ["species\torthogroup\ttpm"]
+    rows.extend(
+        f"a\tF{feature}\t{value}"
+        for row in values
+        for feature, value in enumerate(row)
+    )
+    Path(config.data.tpm_path).write_text("\n".join(rows) + "\n")
+    direct, names = cv_mod.ExpressionMatrixBuilder(config).build_matrix(["a"])
+    with RunExpressionCache() as cache:
+        builder = cache.get_builder(config)
+        builder.cache_species(["a"])
+        actual, actual_names = builder.build_matrix(["a"])
+    assert actual_names == names == [f"F{i}" for i in range(8)]
+    # Parallel reductions can differ in their final floating-point bits.
+    np.testing.assert_allclose(actual, direct, rtol=1e-12, atol=1e-14)
+    np.testing.assert_allclose(actual[0], values.sum(axis=0), rtol=1e-12, atol=1e-14)
+
+
 @pytest.mark.parametrize(
     "setting", ["tpm_path", "value_col", "absent_feature_fill", "max_pivot_cells"]
 )

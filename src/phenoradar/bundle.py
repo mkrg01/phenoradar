@@ -99,6 +99,8 @@ class LoadedBundle:
     abstention_enabled: bool = False
     abstention_threshold: float = 0.8
     abstention_top_features: int = 30
+    reference_expression: pl.DataFrame | None = None
+    orthogroup_annotations: pl.DataFrame | None = None
 
 
 @dataclass(frozen=True)
@@ -254,6 +256,8 @@ def export_model_bundle(
     config: AppConfig,
     final_refit_artifacts: FinalRefitArtifacts,
     thresholds: pl.DataFrame,
+    reference_expression: pl.DataFrame | None = None,
+    orthogroup_annotations: pl.DataFrame | None = None,
 ) -> BundleExportResult:
     """Export reusable model bundle from final-refit artifacts."""
     bundle_dir = run_dir / _BUNDLE_DIRNAME
@@ -365,10 +369,19 @@ def export_model_bundle(
     )
     shutil.copy2(resolved_config_path, resolved_copy_path)
 
+    optional_files: list[str] = []
+    for filename, table in [
+        ("reference_expression.parquet", reference_expression),
+        ("orthogroup_annotations.parquet", orthogroup_annotations),
+    ]:
+        if table is not None and table.height > 0:
+            table.write_parquet(bundle_dir / filename)
+            optional_files.append(filename)
+
     build = phenoradar_build_snapshot()
     environment = runtime_environment_snapshot()
     files_info: dict[str, dict[str, int | str]] = {}
-    for filename in _REQUIRED_FILES:
+    for filename in [*_REQUIRED_FILES, *optional_files]:
         if filename == "bundle_manifest.json":
             continue
         files_info[filename] = _file_info(bundle_dir / filename)
@@ -386,6 +399,7 @@ def export_model_bundle(
         "source_git_dirty": build["git_dirty"],
         "source_git_worktree_patch_sha256": build["git_worktree_patch_sha256"],
         "model_name": config.model.name,
+        "trait_name": config.data.trait_col,
         "calibration": _calibration_for_model(config.model.name),
         "ensemble_size": final_refit_artifacts.ensemble_size,
         "ensemble_probability_aggregation": config.ensemble.probability_aggregation,
@@ -673,6 +687,23 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
     source_run_id_raw = manifest.get("source_run_id")
     source_run_id = str(source_run_id_raw) if source_run_id_raw is not None else "unknown"
 
+    # Only consume inventoried, integrity-verified interpretation snapshots.
+    optional_tables: dict[str, pl.DataFrame | None] = {}
+    for name, required in [
+        ("reference_expression", {"species", "label", "feature", "tpm", "log2_tpm_plus1"}),
+        ("orthogroup_annotations", {"feature", "orthogroup_annotation"}),
+    ]:
+        filename = f"{name}.parquet"
+        table = None
+        if filename in manifest["files"]:
+            try:
+                table = pl.read_parquet(bundle_dir / filename)
+            except (OSError, pl.exceptions.PolarsError) as exc:
+                raise BundleError(f"Failed to read bundled {filename}: {exc}") from exc
+            if not required.issubset(table.columns):
+                raise BundleError(f"Invalid bundled {filename} schema")
+        optional_tables[name] = table
+
     return LoadedBundle(
         bundle_dir=bundle_dir,
         manifest=manifest,
@@ -693,6 +724,8 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
         abstention_enabled=abstention.enabled,
         abstention_threshold=abstention.threshold,
         abstention_top_features=top_features,
+        reference_expression=optional_tables["reference_expression"],
+        orthogroup_annotations=optional_tables["orthogroup_annotations"],
     )
 
 
@@ -754,12 +787,10 @@ def _predict_with_jobs(estimator: Any, x: np.ndarray, n_jobs: int) -> np.ndarray
             estimator.n_jobs = previous
 
 
-def predict_with_bundle(
-    config: AppConfig | PredictConfig, bundle: LoadedBundle
-) -> tuple[pl.DataFrame, list[str]]:
-    """Run deterministic inference using a loaded model bundle."""
-    species_list = _prediction_species(config)
-
+def prepare_bundle_input(
+    config: AppConfig | PredictConfig, bundle: LoadedBundle, species_list: list[str]
+) -> tuple[np.ndarray, np.ndarray, list[str], list[str]]:
+    """Align and transform raw inputs identically for prediction and interpretation."""
     try:
         matrix_builder = ExpressionMatrixBuilder(
             config, absent_feature_fill=bundle.absent_feature_fill
@@ -820,15 +851,31 @@ def predict_with_bundle(
             f"ignored {extra_count} features"
         )
 
+    return aligned_raw, transformed, alignment_features, warnings
+
+
+def bundle_preprocess_entries(bundle: LoadedBundle) -> list[ModelPreprocessEntry]:
+    if len(bundle.model_preprocess) == len(bundle.models):
+        return bundle.model_preprocess
+    if len(bundle.model_preprocess) == 1 and len(bundle.models) > 1:
+        return bundle.model_preprocess * len(bundle.models)
+    raise BundleError("Bundle model/preprocess count mismatch")
+
+
+def predict_with_bundle(
+    config: AppConfig | PredictConfig, bundle: LoadedBundle
+) -> tuple[pl.DataFrame, list[str]]:
+    """Run deterministic inference using a loaded model bundle."""
+    species_list = _prediction_species(config)
+
+    aligned_raw, transformed, alignment_features, warnings = prepare_bundle_input(
+        config, bundle, species_list
+    )
+
     schema_index = {feature: idx for idx, feature in enumerate(alignment_features)}
 
     model_probs: list[np.ndarray] = []
-    if len(bundle.model_preprocess) == len(bundle.models):
-        preprocess_entries = bundle.model_preprocess
-    elif len(bundle.model_preprocess) == 1 and len(bundle.models) > 1:
-        preprocess_entries = bundle.model_preprocess * len(bundle.models)
-    else:
-        raise BundleError("Bundle model/preprocess count mismatch")
+    preprocess_entries = bundle_preprocess_entries(bundle)
 
     for model, preprocess in zip(bundle.models, preprocess_entries, strict=True):
         selected_indices = np.array(

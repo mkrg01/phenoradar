@@ -9,13 +9,14 @@ from typing import Any
 from pydantic import Field, PositiveInt, ValidationError
 
 from .io import ConfigError, _deep_merge_dicts, _load_yaml_mapping
-from .schema import AppConfig, StrictModel, SummaryConfig
+from .schema import AppConfig, FiguresConfig, StrictModel, SummaryConfig
 
 
 class PredictDataConfig(StrictModel):
     tpm_path: str = ""
     metadata_path: str | None = None
     tree_path: str | None = None
+    orthogroup_annotation_path: str | None = None
     species_col: str = Field(default="species", min_length=1)
     feature_col: str = Field(default="orthogroup", min_length=1)
     value_col: str = Field(default="tpm", min_length=1)
@@ -39,6 +40,7 @@ class PredictConfig(StrictModel):
     preprocess: PredictPreprocessConfig = Field(default_factory=PredictPreprocessConfig)
     runtime: PredictRuntimeConfig = Field(default_factory=PredictRuntimeConfig)
     summary: SummaryConfig = Field(default_factory=SummaryConfig)
+    figures: FiguresConfig = Field(default_factory=FiguresConfig)
 
 
 def load_predict_config(
