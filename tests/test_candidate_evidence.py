@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import numpy as np
 import polars as pl
 import pytest
-from glum import GeneralizedLinearRegressor
 from sklearn.preprocessing import StandardScaler
 
 from phenoradar.candidate_evidence import build_candidate_evidence_artifacts
@@ -16,6 +15,7 @@ from phenoradar.figures import (
     write_candidate_evidence_figures,
     write_cv_species_evidence_figures,
 )
+from phenoradar.glmnet import GlmnetLogisticRegression
 
 
 def _write(path: Path, text: str) -> Path:
@@ -88,7 +88,7 @@ def test_build_candidate_evidence_uses_candidate_local_contribution(
     )
     train_transformed = np.log1p(np.array([[1.0, 10.0], [2.0, 8.0], [8.0, 2.0], [9.0, 1.0]]))
     scaler = StandardScaler().fit(train_transformed)
-    model = GeneralizedLinearRegressor(family="binomial")
+    model = GlmnetLogisticRegression()
     model.coef_ = np.array([1.5, -0.5], dtype=float)
     final_refit = SimpleNamespace(
         pred_inference=pl.DataFrame(
@@ -208,7 +208,7 @@ def test_build_cv_species_evidence_uses_held_out_fold_models_and_training_refere
         [[1.0, 10.0], [2.0, 8.0], [8.0, 2.0], [9.0, 1.0]], dtype=float
     )
     scaler = StandardScaler().fit(np.log1p(x_train_raw))
-    model = GeneralizedLinearRegressor(family="binomial")
+    model = GlmnetLogisticRegression()
     model.coef_ = np.array([1.5, -0.5], dtype=float)
 
     species, features, reference, warnings = _build_cv_species_evidence(

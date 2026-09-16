@@ -19,7 +19,6 @@ from typing import Any
 import numpy as np
 import optuna
 import polars as pl
-from glum import GeneralizedLinearRegressor
 from optuna.samplers import TPESampler
 from scipy.stats import rankdata
 from sklearn import get_config
@@ -40,6 +39,15 @@ from phenoradar.config import AppConfig
 from phenoradar.feature_stability import (
     FeatureStabilityError,
     build_feature_stability_tables,
+)
+from phenoradar.glmnet import (
+    DEFAULT_ALPHA,
+    DEFAULT_LAMBDA,
+    DEFAULT_MAXIT,
+    DEFAULT_THRESH,
+    GlmnetError,
+    GlmnetLogisticRegression,
+    fit_glmnet_path,
 )
 from phenoradar.interpret import (
     InterpretationError,
@@ -72,7 +80,7 @@ from phenoradar.model_selection import (
 from phenoradar.timing import TimingRecorder
 
 type FeatureScaler = StandardScaler | None
-type FittedEstimator = GeneralizedLinearRegressor | CalibratedClassifierCV | RandomForestClassifier
+type FittedEstimator = GlmnetLogisticRegression | CalibratedClassifierCV | RandomForestClassifier
 
 try:
     from threadpoolctl import (  # type: ignore[import-untyped]
@@ -696,7 +704,7 @@ def _coef_nonzero_count(coefficients: np.ndarray, *, tolerance: float) -> int:
 def _model_nonzero_count(
     model: FittedEstimator,
 ) -> tuple[int | None, str, str]:
-    if isinstance(model, GeneralizedLinearRegressor):
+    if isinstance(model, GlmnetLogisticRegression):
         count = _coef_nonzero_count(model.coef_, tolerance=_NONZERO_TOLERANCE)
         return count, "coef_abs_gt_tol", "ok"
 
@@ -2579,7 +2587,7 @@ def _fit_sample_weights(config: AppConfig, y: np.ndarray, groups: np.ndarray) ->
 
 def _validate_model_params(model_name: str, model_params: dict[str, Any]) -> None:
     allowed: dict[str, set[str]] = {
-        "logistic_elasticnet": {"alpha", "l1_ratio", "max_iter", "gradient_tol"},
+        "logistic_elasticnet": {"lambda", "alpha", "maxit", "thresh"},
         "linear_svm": {"C", "max_iter"},
         "random_forest": {"n_estimators", "max_depth", "min_samples_split", "min_samples_leaf"},
     }
@@ -2594,10 +2602,10 @@ def _validate_model_params(model_name: str, model_params: dict[str, Any]) -> Non
         return
 
     requirements = {
-        "alpha": "a finite number >= 0",
-        "l1_ratio": "a finite number in [0, 1]",
-        "gradient_tol": "a finite number > 0",
-        "max_iter": "a finite positive integer (booleans are not accepted)",
+        "lambda": "a finite number >= 0",
+        "alpha": "a finite number in [0, 1]",
+        "thresh": "a finite number > 0",
+        "maxit": "a finite positive integer (booleans are not accepted)",
     }
     for name, value in model_params.items():
         numeric = isinstance(value, Real) and not isinstance(value, (bool, np.bool_))
@@ -2606,11 +2614,11 @@ def _validate_model_params(model_name: str, model_params: dict[str, Any]) -> Non
         except (OverflowError, ValueError):
             number = float("nan")
         valid = bool(np.isfinite(number))
-        if name == "alpha":
+        if name == "lambda":
             valid = valid and number >= 0
-        elif name == "l1_ratio":
+        elif name == "alpha":
             valid = valid and 0 <= number <= 1
-        elif name == "gradient_tol":
+        elif name == "thresh":
             valid = valid and number > 0
         else:
             # Discrete float ranges can legitimately produce values such as 100.0.
@@ -2633,20 +2641,11 @@ def _build_estimator(
     _validate_model_params(config.model.name, params)
 
     if config.model.name == "logistic_elasticnet":
-        alpha = float(params.get("alpha", 0.01))
-        l1_ratio = float(params.get("l1_ratio", 0.5))
-        max_iter = int(params.get("max_iter", 100))
-        gradient_tol = float(params.get("gradient_tol", 1e-6))
-        return GeneralizedLinearRegressor(
-            family="binomial",
-            solver="irls-cd",
-            alpha=alpha,
-            l1_ratio=l1_ratio,
-            max_iter=max_iter,
-            gradient_tol=gradient_tol,
-            fit_intercept=True,
-            scale_predictors=False,
-            random_state=model_seed,
+        return GlmnetLogisticRegression(
+            lambda_=float(params.get("lambda", DEFAULT_LAMBDA)),
+            alpha=float(params.get("alpha", DEFAULT_ALPHA)),
+            thresh=float(params.get("thresh", DEFAULT_THRESH)),
+            maxit=int(params.get("maxit", DEFAULT_MAXIT)),
         )
 
     if config.model.name == "linear_svm":
@@ -2684,12 +2683,32 @@ def _build_estimator(
     )
 
 
+def _glmnet_fit_diagnostic(estimator: GlmnetLogisticRegression) -> EstimatorFitDiagnostic:
+    # glmnet reports passes for the complete path, not per-lambda iterations.
+    # Nonzero native error codes are rejected before a fitted model is returned.
+    return EstimatorFitDiagnostic(
+        estimator_class=type(estimator).__name__,
+        convergence_applicable=True,
+        converged=bool(estimator.converged_),
+        n_iter_values=(int(estimator.n_iter_),),
+        max_iter=int(estimator.maxit),
+        convergence_warning_count=0,
+        convergence_warning_messages=(),
+    )
+
+
 def _fit_estimator(
     estimator: FittedEstimator,
     x_train: np.ndarray,
     y_train: np.ndarray,
     sample_weight: np.ndarray | None,
 ) -> EstimatorFitDiagnostic:
+    if isinstance(estimator, GlmnetLogisticRegression):
+        try:
+            estimator.fit(x_train, y_train, sample_weight=sample_weight)
+        except GlmnetError as exc:
+            raise CVError(str(exc)) from exc
+        return _glmnet_fit_diagnostic(estimator)
     if sample_weight is None:
         estimator.fit(x_train, y_train)
     else:
@@ -2710,27 +2729,6 @@ def _fit_estimator(
             raise CVError(
                 f"{type(estimator).__name__}.fit failed while applying sample_weight: {exc}"
             ) from exc
-
-    if isinstance(estimator, GeneralizedLinearRegressor):
-        # IRLS may converge on its last allowed iteration, so n_iter_ alone
-        # cannot determine convergence. Read its final optimality residual.
-        diagnostics = estimator.diagnostics_
-        residual = float(diagnostics[-1]["convergence"])
-        tolerance = float(estimator.gradient_tol or 1e-4)
-        converged = bool(np.isfinite(residual) and residual < tolerance)
-        messages = () if converged else (
-            f"Binomial GLM did not reach gradient_tol={tolerance:g}; "
-            f"final convergence residual={residual:g}",
-        )
-        return EstimatorFitDiagnostic(
-            estimator_class=type(estimator).__name__,
-            convergence_applicable=True,
-            converged=converged,
-            n_iter_values=(int(estimator.n_iter_),),
-            max_iter=int(estimator.max_iter),
-            convergence_warning_count=0 if converged else 1,
-            convergence_warning_messages=messages,
-        )
 
     iterative_estimators: list[LinearSVC] = []
     if isinstance(estimator, CalibratedClassifierCV) and isinstance(
@@ -2824,11 +2822,6 @@ def _predict_positive_probability(
     estimator: FittedEstimator,
     x_valid: np.ndarray,
 ) -> np.ndarray:
-    if isinstance(estimator, GeneralizedLinearRegressor):
-        probability = np.asarray(estimator.predict(x_valid), dtype=float)
-        if probability.shape != (x_valid.shape[0],):
-            raise CVError("Binomial GLM predict returned unexpected shape")
-        return probability
     probabilities = np.asarray(estimator.predict_proba(x_valid), dtype=float)
     if probabilities.ndim != 2 or probabilities.shape[1] < 2:
         raise CVError("predict_proba returned unexpected shape")
@@ -2955,9 +2948,9 @@ def _numeric_candidate_param(candidate: Candidate, name: str, default: float) ->
 
 def _candidate_simplicity_sort_key(candidate: Candidate, model_name: str) -> tuple[float, ...]:
     if model_name == "logistic_elasticnet":
-        alpha = _numeric_candidate_param(candidate, "alpha", 0.01)
-        l1_ratio = _numeric_candidate_param(candidate, "l1_ratio", 0.5)
-        return (-alpha, -l1_ratio, float(candidate.candidate_index))
+        strength = _numeric_candidate_param(candidate, "lambda", DEFAULT_LAMBDA)
+        l1_fraction = _numeric_candidate_param(candidate, "alpha", DEFAULT_ALPHA)
+        return (-strength, -l1_fraction, float(candidate.candidate_index))
     if model_name == "linear_svm":
         c_value = _numeric_candidate_param(candidate, "C", np.inf)
         return (c_value, float(candidate.candidate_index))
@@ -3215,7 +3208,6 @@ def _score_candidate_inner_cv(
     preprocessed_folds: list[InnerCvPreprocessedFold],
     estimator_n_jobs: int | None = None,
     timing_recorder: TimingRecorder | None = None,
-    warm_start_estimators: dict[str, GeneralizedLinearRegressor] | None = None,
 ) -> tuple[float, list[dict[str, Any]]]:
     resolved_estimator_n_jobs = (
         _runtime_n_jobs(config) if estimator_n_jobs is None else int(estimator_n_jobs)
@@ -3233,36 +3225,13 @@ def _score_candidate_inner_cv(
                 f"{config.runtime.seed}|{training_scope_id}|source_{source_sample_set_id}|"
                 f"candidate_{candidate.candidate_index}|inner_{fold.inner_fold_id}"
             )
-            fresh_estimator = _build_estimator(
+            estimator = _build_estimator(
                 config,
                 seed,
                 fold.y_train,
                 model_params=candidate.params,
                 rf_n_jobs=resolved_estimator_n_jobs,
             )
-            estimator: FittedEstimator
-            # glum 3.4.1's warm-start centering squeezes one-feature means to a
-            # scalar and fails. Single-feature fits therefore start independently.
-            if warm_start_estimators is None or fold.x_train.shape[1] == 1:
-                estimator = fresh_estimator
-            else:
-                if not isinstance(fresh_estimator, GeneralizedLinearRegressor):
-                    raise CVError("Warm-start candidate path requires logistic regression")
-                cached_estimator = warm_start_estimators.get(fold.inner_fold_id)
-                if cached_estimator is None:
-                    fresh_estimator.set_params(warm_start=True)
-                    estimator = fresh_estimator
-                    warm_start_estimators[fold.inner_fold_id] = fresh_estimator
-                else:
-                    cached_estimator.set_params(
-                        alpha=fresh_estimator.alpha,
-                        l1_ratio=fresh_estimator.l1_ratio,
-                        max_iter=fresh_estimator.max_iter,
-                        gradient_tol=fresh_estimator.gradient_tol,
-                        random_state=fresh_estimator.random_state,
-                        warm_start=True,
-                    )
-                    estimator = cached_estimator
             fit_diagnostic = _fit_estimator(
                 estimator, fold.x_train, fold.y_train, fold.sample_weight
             )
@@ -3517,7 +3486,7 @@ def _prepare_source_selection_tpe(
     )
 
 
-def _score_parallel_warm_start_paths(
+def _score_glmnet_paths(
     *,
     config: AppConfig,
     training_scope_id: str,
@@ -3527,13 +3496,17 @@ def _score_parallel_warm_start_paths(
     progress_callback: Callable[[str, str | None], None] | None,
     timing_recorder: TimingRecorder | None,
 ) -> list[tuple[float, list[dict[str, Any]]]]:
-    """Score independent fold/parameter paths while keeping each alpha path sequential."""
-    paths: dict[str, list[Candidate]] = {}
+    """Fit one native lambda path per fold and combination of other parameters."""
+    paths: dict[tuple[float, float, int], list[Candidate]] = {}
     for candidate in sorted(
-        candidates, key=lambda item: -_numeric_candidate_param(item, "alpha", 0.01)
+        candidates, key=lambda item: -_numeric_candidate_param(item, "lambda", DEFAULT_LAMBDA)
     ):
-        path_params = {name: value for name, value in candidate.params.items() if name != "alpha"}
-        path_key = json.dumps(path_params, ensure_ascii=True, sort_keys=True)
+        _validate_model_params("logistic_elasticnet", candidate.params)
+        path_key = (
+            float(candidate.params.get("alpha", DEFAULT_ALPHA)),
+            float(candidate.params.get("thresh", DEFAULT_THRESH)),
+            int(candidate.params.get("maxit", DEFAULT_MAXIT)),
+        )
         paths.setdefault(path_key, []).append(candidate)
     tasks = [
         (fold_index, fold, path)
@@ -3548,21 +3521,42 @@ def _score_parallel_warm_start_paths(
     def score_path(
         fold: InnerCvPreprocessedFold, path: list[Candidate]
     ) -> list[tuple[int, float, list[dict[str, Any]]]]:
-        # Each task owns one fold's estimators; no fitted state crosses folds or paths.
-        cache: dict[str, GeneralizedLinearRegressor] = {}
-        results = []
-        for candidate in path:
-            score, rows = _score_candidate_inner_cv(
-                config=config,
-                training_scope_id=training_scope_id,
-                source_sample_set_id=source_sample_set_id,
-                candidate=candidate,
-                preprocessed_folds=[fold],
-                estimator_n_jobs=estimator_n_jobs,
-                timing_recorder=timing_recorder,
-                warm_start_estimators=cache,
+        # Each task has its own native call; no fitted state crosses folds or paths.
+        started = None if timing_recorder is None else timing_recorder.start()
+        params = path[0].params
+        try:
+            models = _with_native_thread_limit(
+                estimator_n_jobs,
+                fit_glmnet_path,
+                fold.x_train,
+                fold.y_train,
+                [float(candidate.params.get("lambda", DEFAULT_LAMBDA)) for candidate in path],
+                alpha=float(params.get("alpha", DEFAULT_ALPHA)),
+                thresh=float(params.get("thresh", DEFAULT_THRESH)),
+                maxit=int(params.get("maxit", DEFAULT_MAXIT)),
+                sample_weight=fold.sample_weight,
             )
+        except GlmnetError as exc:
+            raise CVError(f"Inner fold {fold.inner_fold_id}: {exc}") from exc
+        results = []
+        for candidate, model in zip(path, models, strict=True):
+            prob = _predict_positive_probability(model, fold.x_valid)
+            score = _selection_metric_from_probability(config, fold.y_valid, prob)
+            rows = [{
+                "candidate_index": candidate.candidate_index,
+                "inner_fold_id": fold.inner_fold_id,
+                "metric_name": config.model_selection.selection_metric,
+                "metric_value": score,
+                "params_json": json.dumps(candidate.params, ensure_ascii=True, sort_keys=True),
+                "fit_diagnostic": _glmnet_fit_diagnostic(model),
+            }]
             results.append((candidate.candidate_index, score, rows))
+        if timing_recorder is not None and started is not None:
+            scope, fold_id = _selection_timing_location(training_scope_id)
+            timing_recorder.record_since(
+                started, scope=scope, stage="candidate_score", fold_id=fold_id,
+                sample_set_id=source_sample_set_id,
+            )
         return results
 
     completed = 0
@@ -3710,16 +3704,11 @@ def _prepare_source_selection(
         )
 
     worker_count, estimator_n_jobs = _selection_parallel_plan(config, available)
-    use_warm_start = (
-        config.model.logistic_warm_start_path
-        and config.model.name == "logistic_elasticnet"
-        and config.model_selection.search_strategy == "grid"
-    )
     scored: list[SelectedCandidate] = []
     trial_rows: list[dict[str, Any]] = []
     scored_rows: list[tuple[float, list[dict[str, Any]]]]
-    if use_warm_start and worker_count > 1:
-        scored_rows = _score_parallel_warm_start_paths(
+    if config.model.name == "logistic_elasticnet":
+        scored_rows = _score_glmnet_paths(
             config=config,
             training_scope_id=training_scope_id,
             source_sample_set_id=source_sample_set_id,
@@ -3730,20 +3719,7 @@ def _prepare_source_selection(
         )
     elif worker_count == 1:
         scored_rows = []
-        warm_start_caches: dict[str, dict[str, GeneralizedLinearRegressor]] = {}
-        if use_warm_start:
-            candidates = sorted(
-                candidates,
-                key=lambda item: -_numeric_candidate_param(item, "alpha", 0.01),
-            )
         for candidate_progress, candidate in enumerate(candidates, start=1):
-            warm_start_estimators: dict[str, GeneralizedLinearRegressor] | None = None
-            if use_warm_start:
-                path_params = {
-                    name: value for name, value in candidate.params.items() if name != "alpha"
-                }
-                path_key = json.dumps(path_params, ensure_ascii=True, sort_keys=True)
-                warm_start_estimators = warm_start_caches.setdefault(path_key, {})
             mean_score, rows = _score_candidate_inner_cv(
                 config=config,
                 training_scope_id=training_scope_id,
@@ -3752,7 +3728,6 @@ def _prepare_source_selection(
                 preprocessed_folds=preprocessed_folds,
                 estimator_n_jobs=estimator_n_jobs,
                 timing_recorder=timing_recorder,
-                warm_start_estimators=warm_start_estimators,
             )
             scored_rows.append((mean_score, rows))
             if progress_callback is not None:

@@ -734,12 +734,20 @@ when individual folds are single-label.
   `fit_scope=selected_model` identifies models used for predictions.
 - `convergence_applicable=false` means the estimator has no iterative convergence contract
   (for example, Random Forest); it does not mean that fitting failed.
-- For iterative estimators, `converged=false` means scikit-learn emitted a
-  `ConvergenceWarning` during that fit. `n_iter_max` is the largest observed `n_iter_`, while
-  `n_iter_values_json` preserves all observed values, including calibrated SVM sub-estimators.
-- When any iterative fit is not converged, a compact summary is also stored in
-  `run_metadata.json` `warnings`. Use this table to locate the affected fold/candidate before
-  increasing `max_iter` or changing regularization.
+- For glmnet logistic models, successful native convergence is recorded as
+  `converged=true`. Native errors and incomplete lambda paths abort training;
+  unconverged logistic models are not scored or exported. `n_iter_max` and
+  `n_iter_values_json` contain the coordinate-descent passes for the **entire
+  originating path**. Candidates on the same path share this count. The generic
+  `max_iter` column records glmnet's configured `maxit` budget.
+- For calibrated SVMs, `converged=false` indicates that at least one sub-estimator
+  reached its iteration limit. `n_iter_values_json` preserves the counts of all
+  sub-estimators. A compact non-convergence summary is also stored in
+  `run_metadata.json` `warnings`.
+- Grid/random logistic timing rows with `stage=candidate_score` represent a whole
+  fold/lambda path and have an empty `candidate_index`. Path time is recorded
+  once, without duplicating it across candidates. TPE and non-logistic candidate
+  timing rows retain their candidate indices.
 
 #### `feature_importance.tsv`
 
@@ -978,8 +986,8 @@ when individual folds are single-label.
 - `cv/figures/model_selection_one_se_curve.svg` (candidate selection active)
   - Shows candidate mean score with SE, one-SE threshold, best mean candidate,
     one-SE-eligible candidates, and the selected candidate.
-  - Uses `log10(alpha)` for logistic elastic net when all candidates expose
-    positive `alpha`, or `log10(C)` for positive SVM `C` values;
+  - Uses `log10(lambda)` for logistic elastic net when all candidates expose
+    positive `lambda`, or `log10(C)` for positive SVM `C` values;
     otherwise falls back to `candidate_index`.
   - All folds are shown; per fold, only the first `sample_set_id` is plotted.
 - `model/figures/final_refit_feature_importance_top.svg` (`full_run`)

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from glum import GeneralizedLinearRegressor
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import LinearSVC
 
 import phenoradar.interpret as interpret_mod
+from phenoradar.glmnet import GlmnetLogisticRegression
 from phenoradar.interpret import (
     InterpretationError,
     ModelFeatureEntry,
@@ -15,7 +15,7 @@ from phenoradar.interpret import (
 )
 
 
-def _fit_linear_model() -> GeneralizedLinearRegressor:
+def _fit_linear_model() -> GlmnetLogisticRegression:
     x = np.array(
         [
             [0.0, 0.0],
@@ -26,15 +26,7 @@ def _fit_linear_model() -> GeneralizedLinearRegressor:
         dtype=float,
     )
     y = np.array([0, 1, 1, 0], dtype=int)
-    model = GeneralizedLinearRegressor(
-        family="binomial",
-        solver="irls-cd",
-        alpha=0.01,
-        l1_ratio=0.5,
-        fit_intercept=True,
-        scale_predictors=False,
-        gradient_tol=1e-6,
-    )
+    model = GlmnetLogisticRegression(lambda_=0.01, alpha=0.5)
     model.fit(x, y)
     return model
 
@@ -59,11 +51,11 @@ def test_build_interpretation_tables_for_linear_model_outputs_coefficients() -> 
 
 
 def test_build_interpretation_tables_summarizes_fold_level_means() -> None:
-    fold0_model_a = GeneralizedLinearRegressor(family="binomial")
+    fold0_model_a = GlmnetLogisticRegression()
     fold0_model_a.coef_ = np.array([1.0, 0.0], dtype=float)
-    fold0_model_b = GeneralizedLinearRegressor(family="binomial")
+    fold0_model_b = GlmnetLogisticRegression()
     fold0_model_b.coef_ = np.array([1.0, 0.0], dtype=float)
-    fold1_model = GeneralizedLinearRegressor(family="binomial")
+    fold1_model = GlmnetLogisticRegression()
     fold1_model.coef_ = np.array([0.0, 1.0], dtype=float)
 
     artifacts = build_interpretation_tables(

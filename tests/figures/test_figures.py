@@ -926,7 +926,7 @@ def test_write_run_figures_writes_model_selection_trials_when_summary_provided(
                 "sample_set_id": [0, 0, 0, 0],
                 "candidate_index": [0, 1, 0, 1],
                 "metric_name": ["mcc", "mcc", "mcc", "mcc"],
-                "params_json": ["{}", '{"alpha":1.0}', "{}", '{"alpha":1.0}'],
+                "params_json": ["{}", '{"lambda":1.0}', "{}", '{"lambda":1.0}'],
                 "n_inner_folds": [2, 2, 2, 2],
                 "n_valid_inner_folds": [2, 2, 2, 2],
                 "metric_value_mean": [0.40, 0.55, 0.38, 0.52],
@@ -938,7 +938,7 @@ def test_write_run_figures_writes_model_selection_trials_when_summary_provided(
     figures_dir = tmp_path / "run" / "cv" / "figures"
     svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
     assert (figures_dir / "model_selection_trials.svg").exists()
-    assert '1: {"alpha":1.0}' in svg_text
+    assert '1: {"lambda":1.0}' in svg_text
     assert warnings == []
 
 
@@ -959,7 +959,7 @@ def test_write_run_figures_uses_log_loss_axis_label_for_model_selection_trials(
                 "sample_set_id": [0, 0],
                 "candidate_index": [0, 1],
                 "metric_name": ["log_loss", "log_loss"],
-                "params_json": ["{}", '{"alpha":1.0}'],
+                "params_json": ["{}", '{"lambda":1.0}'],
                 "n_inner_folds": [2, 2],
                 "n_valid_inner_folds": [2, 2],
                 "metric_value_mean": [0.40, 0.55],
@@ -992,8 +992,8 @@ def test_write_run_figures_hides_fixed_params_in_model_selection_labels(
                 "candidate_index": [0, 1],
                 "metric_name": ["mcc", "mcc"],
                 "params_json": [
-                    '{"alpha":1.0,"l1_ratio":0.5}',
-                    '{"alpha":2.0,"l1_ratio":0.5}',
+                    '{"lambda":1.0,"alpha":0.5}',
+                    '{"lambda":2.0,"alpha":0.5}',
                 ],
                 "n_inner_folds": [2, 2],
                 "n_valid_inner_folds": [2, 2],
@@ -1005,9 +1005,9 @@ def test_write_run_figures_hides_fixed_params_in_model_selection_labels(
 
     figures_dir = tmp_path / "run" / "cv" / "figures"
     svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
-    assert '0: {"alpha":1.0}' in svg_text
-    assert '1: {"alpha":2.0}' in svg_text
-    assert "l1_ratio" not in svg_text
+    assert '0: {"lambda":1.0}' in svg_text
+    assert '1: {"lambda":2.0}' in svg_text
+    assert "alpha" not in svg_text
     assert warnings == []
 
 
@@ -1021,12 +1021,12 @@ def test_write_run_figures_writes_one_se_model_selection_figure(
             "candidate_index": [0, 1, 2, 0, 1, 2],
             "metric_name": ["log_loss"] * 6,
             "params_json": [
-                '{"alpha":1.0}',
-                '{"alpha":0.1}',
-                '{"alpha":0.01}',
-                '{"alpha":1.0}',
-                '{"alpha":0.1}',
-                '{"alpha":0.01}',
+                '{"lambda":1.0}',
+                '{"lambda":0.1}',
+                '{"lambda":0.01}',
+                '{"lambda":1.0}',
+                '{"lambda":0.1}',
+                '{"lambda":0.01}',
             ],
             "n_inner_folds": [2] * 6,
             "n_valid_inner_folds": [2] * 6,
@@ -1051,7 +1051,7 @@ def test_write_run_figures_writes_one_se_model_selection_figure(
             "n_scored_candidates": [3, 3, 3],
             "selected_candidate_count_requested": [1, 1, 1],
             "selected_candidate_count_effective": [1, 1, 1],
-            "params_json": ['{"alpha":0.1}', '{"alpha":0.1}', '{"alpha":0.1}'],
+            "params_json": ['{"lambda":0.1}', '{"lambda":0.1}', '{"lambda":0.1}'],
         }
     )
 
@@ -1071,7 +1071,7 @@ def test_write_run_figures_writes_one_se_model_selection_figure(
     one_se_svg = (figures_dir / "model_selection_one_se_curve.svg").read_text(encoding="utf-8")
     assert "one-SE threshold" in one_se_svg
     assert "Selected candidate" in one_se_svg
-    assert "log10(alpha)" in one_se_svg
+    assert "log10(lambda)" in one_se_svg
     assert "Log loss mean" in one_se_svg
     assert "Log Loss mean" not in one_se_svg
     assert not (figures_dir / "selected_hyperparameter_stability.svg").exists()

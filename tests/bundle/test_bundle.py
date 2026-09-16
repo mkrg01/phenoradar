@@ -11,7 +11,6 @@ import joblib
 import numpy as np
 import polars as pl
 import pytest
-from glum import GeneralizedLinearRegressor
 from scipy.special import expit
 
 import phenoradar.bundle as bundle_mod
@@ -25,6 +24,7 @@ from phenoradar.bundle import (
 )
 from phenoradar.config import AppConfig, load_and_resolve_config, write_resolved_config
 from phenoradar.cv import run_final_refit, run_outer_cv
+from phenoradar.glmnet import GlmnetLogisticRegression
 from phenoradar.split import build_split_artifacts
 
 
@@ -209,9 +209,10 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
     bundle = load_model_bundle(export_result.bundle_dir)
     assert bundle.models
     for original, loaded in zip(refit.models, bundle.models, strict=True):
-        assert isinstance(original, GeneralizedLinearRegressor)
-        assert isinstance(loaded, GeneralizedLinearRegressor)
-        assert loaded.family == "binomial"
+        assert isinstance(original, GlmnetLogisticRegression)
+        assert isinstance(loaded, GlmnetLogisticRegression)
+        assert loaded.lambda_ == original.lambda_
+        assert loaded.alpha == original.alpha
         assert loaded.coef_.ndim == 1
         assert np.ndim(loaded.intercept_) == 0
         np.testing.assert_array_equal(loaded.coef_, original.coef_)
@@ -277,7 +278,7 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
     assert manifest["library_versions"]["phenoradar"] == manifest[
         "source_phenoradar_version"
     ]
-    assert manifest["library_versions"]["glum"] == version("glum")
+    assert manifest["library_versions"]["python-glmnet"] == version("python-glmnet")
 
     assert pred_df.get_column("species").to_list() == refit_pred_df.get_column("species").to_list()
     np.testing.assert_allclose(

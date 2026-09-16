@@ -3966,7 +3966,7 @@ def _model_selection_one_se_curve(
             rows = panel_data.to_dicts()
             x_values = np.array([int(row["__candidate_index"]) for row in rows], dtype=float)
             x_label = "candidate_index"
-            for param_name in ("alpha", "C"):
+            for param_name in ("lambda", "C"):
                 param_values = [
                     _numeric_param_from_json(
                         None if row["__params_json"] is None else str(row["__params_json"]),

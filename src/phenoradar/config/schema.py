@@ -331,7 +331,6 @@ class ModelConfig(StrictModel):
     """Model family selection."""
 
     name: ModelName = "logistic_elasticnet"
-    logistic_warm_start_path: bool = True
 
 
 class SamplingConfig(StrictModel):
@@ -571,13 +570,13 @@ class AppConfig(StrictModel):
                     f"required={required_groups}"
                 )
         if self.model.name == "logistic_elasticnet":
-            supported = {"alpha", "l1_ratio", "max_iter", "gradient_tol"}
+            supported = {"lambda", "alpha", "maxit", "thresh"}
             unsupported = sorted(set(self.model_selection.search_space) - supported)
             if unsupported:
                 raise ValueError(
                     "Unsupported model_selection.search_space parameter(s) for "
                     f"logistic_elasticnet: {', '.join(unsupported)}. "
-                    "Use glum parameters alpha, l1_ratio, max_iter, gradient_tol; "
-                    "alpha controls regularization directly (larger means stronger)."
+                    "Use glmnet parameters lambda, alpha, maxit, thresh; "
+                    "lambda controls regularization directly (larger means stronger)."
                 )
         return self

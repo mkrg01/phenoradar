@@ -42,6 +42,8 @@ jobs:
           restore-keys: |
             uv-${{ runner.os }}-py${{ matrix.python-version }}-
             uv-${{ runner.os }}-
+      - name: Install Fortran compiler for glmnet source builds
+        run: sudo apt-get update && sudo apt-get install -y gfortran
       - name: Install dependencies
         run: uv sync --extra dev --frozen
       - name: Ruff

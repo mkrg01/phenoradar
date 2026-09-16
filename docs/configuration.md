@@ -154,7 +154,6 @@ preprocess:
     method: standard  # choices: none, standard
 model:
   name: logistic_elasticnet  # choices: logistic_elasticnet, linear_svm, random_forest
-  logistic_warm_start_path: true  # choices: true, false
 abstention:
   enabled: false  # choices: true, false
   threshold: 0.8
@@ -626,36 +625,24 @@ multivariable model.
   - type: `logistic_elasticnet | linear_svm | random_forest`
   - default: `logistic_elasticnet`
   - behavior:
-    - `logistic_elasticnet` uses glum's `GeneralizedLinearRegressor` with
-      `family="binomial"`, `solver="irls-cd"`, and an unpenalized intercept
-      (`fit_intercept=True`).
-    - `l1_ratio=0` gives L2, `l1_ratio=1` gives L1, and
-      `0 < l1_ratio < 1` gives elastic net.
-    - `scale_predictors=False`: feature scaling is controlled by
-      `preprocess.feature_scaling`, including observed-only scaling for neutral
-      missing-expression inputs.
+    - `logistic_elasticnet` uses the native glmnet binomial solver through
+      `python-glmnet`; no R installation or subprocess is needed.
+    - `alpha=0` gives L2, `alpha=1` gives L1, and `0 < alpha < 1` gives elastic net.
+    - `lambda` controls regularization strength; larger values shrink more.
+    - The intercept is unpenalized. Internal standardization is disabled:
+      feature scaling is controlled by `preprocess.feature_scaling`, including
+      observed-only scaling for neutral missing-expression inputs.
     - `linear_svm` and `random_forest` use scikit-learn.
-- `model.logistic_warm_start_path`
-  - type: `bool`
-  - default: `true`
-  - behavior:
-    - reuses fold-local glum coefficients between grid candidates that differ
-      only in `alpha`, fitting from largest to smallest `alpha` (strongest to
-      weakest regularization)
-    - applies to inner-CV model selection with `model.name=logistic_elasticnet`
-      and `model_selection.search_strategy=grid`; other models and search
-      strategies use independent fits
-    - parallelizes independent inner folds and parameter paths within
-      `runtime.n_jobs`; candidates on each alpha path are fitted sequentially
-    - set `false` to fit every candidate independently
-    - one-feature folds use independent fits to avoid a glum warm-start shape error
-    - finite optimization tolerances can produce small differences between
-      warm-start and independent fits
 
-The previous `model.logistic_solver` setting has been removed. Logistic models
-no longer accept scikit-learn's `C`; select a new grid using glum's native
-`alpha` scale. Configs using removed keys must be updated, and persisted
-scikit-learn logistic bundles must be regenerated.
+For grid and random searches, candidates with identical `alpha`, `thresh`, and
+`maxit` are fitted in a single descending lambda path per inner fold. Each fold
+has independent fitted state. Independent folds and paths are scheduled within
+`runtime.n_jobs`. TPE proposes candidates sequentially and uses individual fits.
+Path fitting is automatic; there is no solver or warm-start switch.
+
+The logistic search parameters are now `lambda`, `alpha`, `maxit`, and `thresh`.
+Configs using removed keys must be updated, and previously saved logistic model
+bundles must be regenerated. In particular, `alpha` now means the L1 fraction.
 
 ## `model_selection`
 
@@ -706,8 +693,8 @@ Compatibility rules:
 - `selected_candidate_count` and `selected_candidate_percent` are mutually exclusive.
 - `selected_candidate_count` or `selected_candidate_percent` requires `inner_cv_strategy`.
 - when selection is active, top-N selection is applied per sampled set and selected models are always distinct by hyperparameter set.
-- with `selection_rule=one_se`, "simpler" means larger `alpha` for logistic
-  elastic net (then larger `l1_ratio`), or smaller `C` for linear SVM.
+- with `selection_rule=one_se`, "simpler" means larger `lambda` for logistic
+  elastic net (then larger `alpha`), or smaller `C` for linear SVM.
   For random forest, shallower trees, larger split/leaf minima, and fewer trees
   are preferred in that order.
 - `candidate_source_policy=per_sample_set`: select candidates independently for each sampled set.
@@ -720,7 +707,7 @@ Compatibility rules:
 
 Each parameter value can be one of:
 
-- explicit list, e.g. `alpha: [0.0001, 0.001, 0.01]`
+- explicit list, e.g. `lambda: [0.0001, 0.001, 0.01]`
 - `range`
 - `int_range`
 - `log_range`
@@ -759,7 +746,7 @@ Example:
 
 ```yaml
 search_space:
-  alpha:
+  lambda:
     type: range
     start: 0.001
     end: 0.011
@@ -814,7 +801,7 @@ Example:
 
 ```yaml
 search_space:
-  alpha:
+  lambda:
     type: log_range
     base: 10
     start_exp: -5
@@ -841,13 +828,13 @@ model_selection:
   search_strategy: random
   trial_count: 30
   search_space:
-    alpha:
+    lambda:
       type: log_range
       base: 10
       start_exp: -5
       end_exp: -1
       step_exp: 1
-    l1_ratio:
+    alpha:
       type: continuous_range
       start: 0.0
       end: 1.0
@@ -860,14 +847,14 @@ model_selection:
   search_strategy: grid
   trial_count: null
   search_space:
-    alpha: [0.0001, 0.001, 0.01]
-    l1_ratio: [0.2, 0.5, 0.8]
-    max_iter: [200]
+    lambda: [0.0001, 0.001, 0.01]
+    alpha: [0.2, 0.5, 0.8]
+    maxit: [2000000]
 ```
 
 ### Allowed search-space parameter names by model
 
-- `logistic_elasticnet`: `alpha`, `l1_ratio`, `max_iter`, `gradient_tol`
+- `logistic_elasticnet`: `lambda`, `alpha`, `maxit`, `thresh`
 - `linear_svm`: `C`, `max_iter`
 - `random_forest`: `n_estimators`, `max_depth`, `min_samples_split`,
   `min_samples_leaf`
@@ -875,15 +862,20 @@ model_selection:
 Unknown logistic parameter names are rejected during config validation;
 unsupported parameters for other models are rejected at training time.
 
-For logistic elastic net, defaults are `alpha=0.01`, `l1_ratio=0.5`,
-`max_iter=100`, and `gradient_tol=1e-6`. `alpha >= 0` sets regularization
-strength directly: larger values shrink coefficients more. `l1_ratio` is in
-`[0, 1]`, `max_iter` is a positive integer, and `gradient_tol > 0` controls the
-optimization stopping tolerance.
+For logistic elastic net, defaults are `lambda=0.01`, `alpha=0.5`,
+`maxit=2000000`, and `thresh=1e-14`. `lambda >= 0` sets regularization
+strength directly: larger values shrink coefficients more. `alpha` is in
+`[0, 1]`. `maxit` is a positive integer limiting coordinate-descent passes across
+the entire lambda path; it is not an IRLS iteration count. `thresh > 0` controls
+glmnet's relative objective-improvement stopping criterion. The strict default
+was chosen to preserve prediction accuracy at weak regularization. If the native
+solver fails or returns an incomplete path, training fails with an error rather
+than scoring partially converged candidates. Increase `maxit` when its limit is
+reached. Native convergence does not imply a fixed gradient-residual tolerance.
 
 The optimized objective is the sample-weighted mean binary log loss plus
-`alpha * l1_ratio * sum(abs(beta))` and
-`0.5 * alpha * (1 - l1_ratio) * sum(beta ** 2)`. The intercept is unpenalized.
+`lambda * alpha * sum(abs(beta))` and
+`0.5 * lambda * (1 - alpha) * sum(beta ** 2)`. The intercept is unpenalized.
 Multiplying all sample weights by the same positive constant leaves this
 objective unchanged. There is no conversion from the previous `C` scale.
 
@@ -892,16 +884,16 @@ A starting grid for the working expression model is:
 ```yaml
 model_selection:
   search_space:
-    alpha:
+    lambda:
       type: log_range
       base: 10
       start_exp: -5
       end_exp: -1
       step_exp: 0.5
       inclusive_end: true
-    l1_ratio: [1]
-    max_iter: [100]
-    gradient_tol: [1.0e-6]
+    alpha: [1]
+    maxit: [2000000]
+    thresh: [1.0e-14]
 ```
 
 This evaluates nine regularization strengths. Re-tune this grid for the data;

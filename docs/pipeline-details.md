@@ -229,20 +229,27 @@ After all folds:
 
 ## Model selection behavior details
 
-Logistic elastic net uses glum's binomial GLM with the `irls-cd` solver,
-an unpenalized intercept, and no additional predictor scaling inside glum.
-The native `alpha` parameter penalizes the sample-weighted mean log loss;
-larger `alpha` means stronger regularization. SVM and random forest retain
-their scikit-learn implementations.
+Logistic elastic net calls glmnet's native binomial coordinate-descent solver
+through `python-glmnet`, with an unpenalized intercept and internal
+standardization disabled. The `lambda` parameter penalizes the sample-weighted
+mean log loss; larger `lambda` means stronger regularization. `alpha` is the L1
+fraction. SVM and random forest retain their scikit-learn implementations.
 
-The default grid path (`model.logistic_warm_start_path=true`) reuses
-coefficients within each inner fold, fitting descending `alpha` values for
-candidates with identical remaining parameters. Coefficients are never shared
-between folds. Independent inner folds and parameter paths can run in parallel;
-each alpha path is sequential. Set the option to `false` for independent
-candidate fits. Non-logistic models and random/TPE searches use independent
-fits regardless of this option. The one-SE rule prefers larger `alpha` and then larger
-`l1_ratio` among eligible logistic candidates.
+Grid and random searches fit one descending lambda path for each inner fold and
+combination of `alpha`, `thresh`, and `maxit`. The native solver reuses coefficients
+along that path; coefficients are never shared between folds. Fold preprocessing
+is reused across candidates. Independent folds and parameter paths are scheduled
+within `runtime.n_jobs`. TPE uses independent fits for sequentially proposed
+candidates. Candidate scores use the exact requested lambda, without interpolation
+or additional internal cross-validation. The one-SE rule prefers larger `lambda`
+and then larger `alpha` among eligible logistic candidates.
+
+The backend accepts dense and CSC sparse matrices, sample weights, and one-feature
+folds. An all-constant training matrix is fitted with the exact weighted intercept
+and zero coefficients. Native errors and incomplete paths stop training. Stored
+models contain ordinary coefficients and intercepts, and prediction uses the
+sigmoid directly. This does not change the current expression preprocessing
+pipeline into a sparse sequence-feature pipeline.
 
 Neutral logistic regression retains missing values throughout feature filtering
 and fits standardization only on training observations. Its persisted scaler

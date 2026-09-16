@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from threading import Lock
 from typing import Any
 
@@ -9,12 +8,13 @@ import pytest
 
 import phenoradar.cv as cv
 from phenoradar.config import AppConfig
+from phenoradar.glmnet import GlmnetLogisticRegression
 
 
 def _folds() -> list[cv.InnerCvPreprocessedFold]:
     rng = np.random.default_rng(817)
     folds = []
-    # Different feature schemas ensure warm-start state cannot cross inner folds.
+    # Different feature schemas ensure fitted state cannot cross inner folds.
     for fold_index, feature_count in enumerate((1, 4, 3)):
         y = np.tile([0, 1], 50)
         x = rng.normal(size=(100, feature_count))
@@ -32,19 +32,18 @@ def _folds() -> list[cv.InnerCvPreprocessedFold]:
     return folds
 
 
-def _config(*, warm: bool, n_jobs: int) -> AppConfig:
+def _config(*, n_jobs: int) -> AppConfig:
     return AppConfig.model_validate(
         {
-            "model": {"logistic_warm_start_path": warm},
             "runtime": {"n_jobs": n_jobs},
             "model_selection": {
                 "selected_candidate_count": 6,
                 "inner_cv_strategy": "logo",
                 "selection_rule": "one_se",
                 "search_space": {
-                    "alpha": [0.01, 0.1, 0.03],
-                    "l1_ratio": [0.4, 1.0],
-                    "gradient_tol": [1e-8],
+                    "lambda": [0.01, 0.1, 0.03],
+                    "alpha": [0.4, 1.0],
+                    "thresh": [1e-14],
                 },
             },
         }
@@ -66,15 +65,15 @@ def _select(config: AppConfig, progress: list[tuple[str, str | None]]) -> cv.Sou
     )
 
 
-def test_parallel_warm_paths_match_serial_warm_and_cold_selection(
+def test_parallel_paths_match_serial_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     folds = _folds()
     monkeypatch.setattr(cv, "_build_inner_cv_preprocessed_folds", lambda **_kwargs: folds)
     results = []
-    for warm, n_jobs in ((False, 1), (True, 1), (True, 4), (False, 4)):
+    for n_jobs in (1, 4):
         progress: list[tuple[str, str | None]] = []
-        result = _select(_config(warm=warm, n_jobs=n_jobs), progress)
+        result = _select(_config(n_jobs=n_jobs), progress)
         assert result.n_scored_candidates == 6
         assert len(result.trial_rows) == 18
         assert all(row["fit_diagnostic"].converged for row in result.trial_rows)
@@ -104,39 +103,35 @@ def test_parallel_warm_paths_match_serial_warm_and_cold_selection(
             assert selected.score_std_error == pytest.approx(expected.score_std_error, abs=1e-6)
 
 
-def test_parallel_warm_paths_keep_descending_alphas_and_isolate_fitted_state(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_native_paths_are_batched_by_fold_and_alpha(monkeypatch: pytest.MonkeyPatch) -> None:
     folds = _folds()
     monkeypatch.setattr(cv, "_build_inner_cv_preprocessed_folds", lambda **_kwargs: folds)
-    original_score = cv._score_candidate_inner_cv
-    histories: dict[int, list[tuple[str, float, float]]] = defaultdict(list)
-    retained_caches: list[dict[str, Any]] = []
+    original_fit = cv.fit_glmnet_path
+    calls: list[tuple[int, float, list[float]]] = []
     lock = Lock()
 
-    def tracked_score(**kwargs: Any) -> tuple[float, list[dict[str, Any]]]:
-        cache = kwargs["warm_start_estimators"]
-        candidate = kwargs["candidate"]
-        candidate_folds = kwargs["preprocessed_folds"]
-        assert len(candidate_folds) == 1
-        assert kwargs["estimator_n_jobs"] == 1
+    def tracked_fit(
+        x: np.ndarray, y: np.ndarray, lambdas: list[float], **kwargs: Any
+    ) -> list[GlmnetLogisticRegression]:
         with lock:
-            retained_caches.append(cache)
-            histories[id(cache)].append(
-                (
-                    candidate_folds[0].inner_fold_id,
-                    candidate.params["l1_ratio"],
-                    candidate.params["alpha"],
-                )
-            )
-        return original_score(**kwargs)
+            calls.append((id(x), kwargs["alpha"], lambdas))
+        return original_fit(x, y, lambdas, **kwargs)
 
-    monkeypatch.setattr(cv, "_score_candidate_inner_cv", tracked_score)
-    _select(_config(warm=True, n_jobs=4), [])
-    _select(_config(warm=True, n_jobs=4), [])
-
-    # Separate caches for each fold/ratio path, including across independent searches.
-    assert len(histories) == 12
-    for history in histories.values():
-        assert len({(fold_id, ratio) for fold_id, ratio, _ in history}) == 1
-        assert [alpha for _, _, alpha in history] == [0.1, 0.03, 0.01]
+    monkeypatch.setattr(cv, "fit_glmnet_path", tracked_fit)
+    config = _config(n_jobs=4)
+    result = _select(config, [])
+    assert len(calls) == 6  # Three folds times two alpha values, not 18 separate fits.
+    assert len({(fold, alpha) for fold, alpha, _ in calls}) == 6
+    assert all(lambdas == [0.1, 0.03, 0.01] for _, _, lambdas in calls)
+    # An independently fitted candidate must reproduce each path score.
+    for selected in result.selected_candidates:
+        score, rows = cv._score_candidate_inner_cv(
+            config=config,
+            training_scope_id="outer_fold_1",
+            source_sample_set_id=0,
+            candidate=selected.candidate,
+            preprocessed_folds=folds,
+            estimator_n_jobs=1,
+        )
+        assert score == pytest.approx(selected.score, abs=1e-6)
+        assert all(row["fit_diagnostic"].converged for row in rows)

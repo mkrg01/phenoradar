@@ -52,8 +52,8 @@ def test_generate_candidates_grid_expands_discrete_space_deterministically(tmp_p
         extra="""
   search_strategy: grid
   search_space:
-    l1_ratio: [0.0, 0.5, 0.5]
-    alpha:
+    alpha: [0.0, 0.5, 0.5]
+    lambda:
       type: log_range
       base: 10
       start_exp: -1
@@ -73,10 +73,10 @@ def test_generate_candidates_grid_expands_discrete_space_deterministically(tmp_p
     params = _params(candidates)
     assert len(params) == 6
     assert warnings == []
-    assert params[0]["alpha"] == pytest.approx(0.1)
-    assert params[0]["l1_ratio"] == pytest.approx(0.0)
-    assert params[-1]["alpha"] == pytest.approx(10.0)
-    assert params[-1]["l1_ratio"] == pytest.approx(0.5)
+    assert params[0]["lambda"] == pytest.approx(0.1)
+    assert params[0]["alpha"] == pytest.approx(0.0)
+    assert params[-1]["lambda"] == pytest.approx(10.0)
+    assert params[-1]["alpha"] == pytest.approx(0.5)
 
 
 def test_generate_candidates_random_caps_discrete_space_and_is_deterministic(
@@ -88,8 +88,8 @@ def test_generate_candidates_random_caps_discrete_space_and_is_deterministic(
   search_strategy: random
   trial_count: 10
   search_space:
-    alpha: [0.1, 1.0]
-    gradient_tol: [1.0e-6, 1.0e-8]
+    lambda: [0.1, 1.0]
+    thresh: [1.0e-6, 1.0e-8]
 """,
     )
     warnings_first: list[str] = []
@@ -124,8 +124,8 @@ def test_generate_candidates_random_with_continuous_space_is_deterministic(
   search_strategy: random
   trial_count: 5
   search_space:
-    alpha: [0.1, 1.0]
-    l1_ratio:
+    lambda: [0.1, 1.0]
+    alpha:
       type: continuous_range
       start: 0.0
       end: 1.0
@@ -153,8 +153,8 @@ def test_generate_candidates_random_with_continuous_space_is_deterministic(
     assert warnings_first == []
     assert warnings_second == []
     for params in first_params:
-        assert params["alpha"] in {0.1, 1.0}
-        assert 0.0 <= float(params["l1_ratio"]) <= 1.0
+        assert params["lambda"] in {0.1, 1.0}
+        assert 0.0 <= float(params["alpha"]) <= 1.0
 
 
 def test_generate_candidates_tpe_with_continuous_space_is_deterministic(tmp_path: Path) -> None:
@@ -164,12 +164,12 @@ def test_generate_candidates_tpe_with_continuous_space_is_deterministic(tmp_path
   search_strategy: tpe
   trial_count: 4
   search_space:
-    alpha:
+    lambda:
       type: continuous_log_range
       base: 10
       start_exp: -1
       end_exp: 1
-    l1_ratio:
+    alpha:
       type: continuous_range
       start: 0.0
       end: 1.0
@@ -196,10 +196,10 @@ def test_generate_candidates_tpe_with_continuous_space_is_deterministic(tmp_path
     assert warnings_first == []
     assert warnings_second == []
     for first_item, second_item in zip(first_params, second_params, strict=True):
+        assert first_item["lambda"] == pytest.approx(float(second_item["lambda"]))
         assert first_item["alpha"] == pytest.approx(float(second_item["alpha"]))
-        assert first_item["l1_ratio"] == pytest.approx(float(second_item["l1_ratio"]))
-        assert 0.1 <= float(first_item["alpha"]) <= 10.0
-        assert 0.0 <= float(first_item["l1_ratio"]) <= 1.0
+        assert 0.1 <= float(first_item["lambda"]) <= 10.0
+        assert 0.0 <= float(first_item["alpha"]) <= 1.0
 
 
 def test_generate_candidates_tpe_caps_discrete_space_and_warns(tmp_path: Path) -> None:
@@ -209,8 +209,8 @@ def test_generate_candidates_tpe_caps_discrete_space_and_warns(tmp_path: Path) -
   search_strategy: tpe
   trial_count: 10
   search_space:
-    alpha: [0.1, 1.0]
-    l1_ratio: [0.0, 0.5]
+    lambda: [0.1, 1.0]
+    alpha: [0.0, 0.5]
 """,
     )
     warnings: list[str] = []
@@ -233,7 +233,7 @@ def test_generate_candidates_uses_runtime_seed(tmp_path: Path) -> None:
   search_strategy: random
   trial_count: 3
   search_space:
-    alpha:
+    lambda:
       type: continuous_range
       start: 0.0
       end: 1.0
@@ -272,7 +272,7 @@ def test_generate_candidates_fails_when_discrete_range_expands_to_zero_values(
   search_strategy: random
   trial_count: 1
   search_space:
-    alpha:
+    lambda:
       type: range
       start: 1.0
       end: 1.0
@@ -297,15 +297,15 @@ def test_expanded_search_space_and_discrete_size_helpers(tmp_path: Path) -> None
   search_strategy: random
   trial_count: 2
   search_space:
-    alpha:
+    lambda:
       type: log_range
       base: 10
       start_exp: -1
       end_exp: 1
       step_exp: 1
       inclusive_end: true
-    l1_ratio: [0.0, 0.5]
-    gradient_tol:
+    alpha: [0.0, 0.5]
+    thresh:
       type: continuous_range
       start: 1.0e-8
       end: 1.0e-4
@@ -314,9 +314,9 @@ def test_expanded_search_space_and_discrete_size_helpers(tmp_path: Path) -> None
 
     discrete, continuous = expanded_search_space(config.model_selection.search_space)
 
-    assert sorted(discrete.keys()) == ["alpha", "l1_ratio"]
+    assert sorted(discrete.keys()) == ["alpha", "lambda"]
     assert discrete_candidate_space_size(discrete) == 6
-    assert list(continuous.keys()) == ["gradient_tol"]
+    assert list(continuous.keys()) == ["thresh"]
 
 
 def test_discrete_candidate_space_size_returns_one_for_empty_space() -> None:
@@ -332,7 +332,7 @@ def test_generate_candidates_random_requires_trial_count_when_mutated_to_none(
   search_strategy: random
   trial_count: 3
   search_space:
-    alpha: [0.1, 1.0]
+    lambda: [0.1, 1.0]
 """,
     )
     config_missing_trial_count = config.model_copy(
@@ -359,7 +359,7 @@ def test_generate_candidates_tpe_requires_trial_count_when_mutated_to_none(
   search_strategy: tpe
   trial_count: 3
   search_space:
-    alpha: [0.1, 1.0]
+    lambda: [0.1, 1.0]
 """,
     )
     config_missing_trial_count = config.model_copy(
@@ -385,13 +385,13 @@ def test_generate_candidates_rejects_empty_search_space_list_when_mutated(
         extra="""
   search_strategy: grid
   search_space:
-    alpha: [1.0]
+    lambda: [1.0]
 """,
     )
     config_with_empty_list = config.model_copy(
         update={
             "model_selection": config.model_selection.model_copy(
-                update={"search_space": {"alpha": []}}
+                update={"search_space": {"lambda": []}}
             ),
         }
     )
@@ -414,7 +414,7 @@ def test_generate_candidates_random_with_continuous_log_space_is_deterministic(
   search_strategy: random
   trial_count: 5
   search_space:
-    alpha:
+    lambda:
       type: continuous_log_range
       base: 10
       start_exp: -2
@@ -439,7 +439,7 @@ def test_generate_candidates_random_with_continuous_log_space_is_deterministic(
     assert first_params == second_params
     assert len(first_params) == 5
     for params in first_params:
-        assert 0.01 <= float(params["alpha"]) <= 1.0
+        assert 0.01 <= float(params["lambda"]) <= 1.0
 
 
 def test_generate_candidates_tpe_raises_when_trial_did_not_store_params(
@@ -468,7 +468,7 @@ def test_generate_candidates_tpe_raises_when_trial_did_not_store_params(
   search_strategy: tpe
   trial_count: 1
   search_space:
-    alpha: [0.1]
+    lambda: [0.1]
 """,
     )
 
