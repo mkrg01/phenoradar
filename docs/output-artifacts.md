@@ -753,8 +753,10 @@ when individual folds are single-label.
   `converged=true`. Native errors and incomplete lambda paths abort training;
   unconverged logistic models are not scored or exported. `n_iter_max` and
   `n_iter_values_json` contain the coordinate-descent passes for the **entire
-  originating path**. Candidates on the same path share this count. The generic
-  `max_iter` column records glmnet's configured `maxit` budget.
+  originating path**, including internal warm-start points between positive
+  candidate lambdas. Candidates on the same path share this count. The generic
+  `max_iter` column records glmnet's configured `maxit` budget for that entire
+  native path. Internal points do not create extra candidate or diagnostic rows.
 - For calibrated SVMs, `converged=false` indicates that at least one sub-estimator
   reached its iteration limit. `n_iter_values_json` preserves the counts of all
   sub-estimators. A compact non-convergence summary is also stored in

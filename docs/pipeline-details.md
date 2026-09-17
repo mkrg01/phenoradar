@@ -357,6 +357,15 @@ candidates. Candidate scores use the exact requested lambda, without interpolati
 or additional internal cross-validation. The one-SE rule prefers larger `lambda`
 and then larger `alpha` among eligible logistic candidates.
 
+Before fitting, gaps between positive candidate lambdas are bridged by internal
+warm-start points at no more than 0.05 decades per step. For example, a nine-point
+grid from 0.1 to 1e-5 with half-decade spacing uses 81 native fits, while only the
+original nine candidates are scored. This avoids difficult numerical trajectories
+from large lambda jumps and keeps native feature screening effective. Requested
+lambdas are retained exactly; coefficients are not interpolated. The same rule
+applies to dense and sparse matrices. Single-lambda fits stay single, and zero
+remains an exact endpoint without a logarithmic bridge to it.
+
 Selected logistic models in outer CV and final refit use the descending prefix
 of that source sample set's candidate lambdas, ending at the exact selected
 lambda. Only candidates with matching `alpha`, `thresh`, and `maxit` contribute
@@ -367,6 +376,10 @@ Each refit starts a new native path on its own preprocessed training samples and
 weights. Inner-fold coefficients and scalers are not reused. Intermediate models
 are discarded, and candidate selection, ensemble ordering, and the convergence
 threshold are preserved. Reported coordinate passes cover the entire refit path.
+This includes internal warm-start points and uses the same configured `maxit`
+budget. Fitted `path_length_` counts distinct requested lambdas;
+`native_path_length_` also counts the internal points, or is zero when a constant
+design is solved without native fitting. Only requested models are materialized.
 Changing the optimization path can produce small numerical differences in fitted
 coefficients and predictions, particularly with correlated Lasso features.
 

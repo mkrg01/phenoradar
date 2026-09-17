@@ -21,9 +21,34 @@ DEFAULT_ALPHA = 0.5
 DEFAULT_THRESH = 1e-14
 DEFAULT_MAXIT = 2_000_000
 
+# Nearby solutions keep warm starts and the native strong screening rule useful.
+# A half-decade candidate grid is expanded to ten intervals between candidates.
+_MAX_LOG_LAMBDA_STEP = 0.05 * np.log(10.0)
+
 
 class GlmnetError(ValueError):
     """Raised when glmnet cannot return the complete requested path."""
+
+
+def _native_lambda_path(targets: np.ndarray) -> np.ndarray:
+    """Bridge descending positive targets without rounding or inventing targets.
+
+    Zero stays an exact unregularized endpoint; no logarithmic bridge to zero
+    is defined. Single targets are also left alone.
+    """
+    values: list[float] = []
+    for high, low in zip(targets[:-1], targets[1:], strict=True):
+        values.append(float(high))
+        if low == 0:
+            continue
+        log_high, log_low = np.log(high), np.log(low)
+        # Avoid an extra interval caused solely by roundoff at an exact step.
+        intervals = max(1, int(np.ceil((log_high - log_low) / _MAX_LOG_LAMBDA_STEP - 1e-12)))
+        interior = np.exp(np.linspace(log_high, log_low, intervals + 1)[1:-1])
+        values.extend(float(value) for value in interior if low < value < high)
+    values.append(float(targets[-1]))
+    # Subnormal floats can round multiple interior points to the same value.
+    return np.unique(values)[::-1].copy()
 
 
 class GlmnetLogisticRegression(ClassifierMixin, BaseEstimator):  # type: ignore[misc]
@@ -31,7 +56,10 @@ class GlmnetLogisticRegression(ClassifierMixin, BaseEstimator):  # type: ignore[
 
     ``lambda_`` is regularization strength; ``alpha`` is the L1 fraction.
     Input features are already preprocessed: internal standardization is disabled.
-    ``n_iter_`` records coordinate passes for the entire originating path.
+    ``n_iter_`` records coordinate passes including internal warm-start points.
+    ``path_length_`` counts distinct requested lambdas; ``native_path_length_``
+    counts native fits, including those intermediate points (zero for a
+    constant design that needs no native fit).
     """
 
     def __init__(
@@ -92,6 +120,8 @@ def fit_glmnet_path(
     The low-level entry points avoid the Python wrapper's interpolation and
     first-lambda extrapolation, and preserve the native convergence status.
     Explicit lambdas disable automatic path truncation in the glmnet core.
+    Intermediate positive lambdas improve warm starts on coarse candidate grids;
+    only exact requested models are extracted, scored, or returned.
     """
     requested = np.asarray(lambdas, dtype=float)
     if (
@@ -142,13 +172,16 @@ def fit_glmnet_path(
         intercepts = np.full(len(path), np.log(prevalence / (1 - prevalence)))
         coefficients = np.zeros((p, len(path)))
         passes = 0
+        native_path_length = 0
     else:
+        native_path = _native_lambda_path(path)
+        native_path_length = len(native_path)
         response = np.array(np.column_stack((y, 1 - y)) * weights[:, None], order="F")
         offset = np.zeros((n, 2), order="F")
         excluded = np.array([0], dtype=np.int32)
         penalties = np.ones(p)
         bounds = np.array([np.full(p, -np.inf), np.full(p, np.inf)], order="F")
-        options = dict(ne=p + 1, nlam=len(path), isd=0, intr=1, maxit=int(maxit), kopt=0)
+        options = dict(ne=p + 1, nlam=native_path_length, isd=0, intr=1, maxit=int(maxit), kopt=0)
         if sparse.issparse(x):
             result = splognet(
                 alpha,
@@ -166,9 +199,9 @@ def fit_glmnet_path(
                 p + 1,
                 p,
                 1.0,
-                path,
+                native_path,
                 thresh,
-                nlam=len(path),
+                nlam=native_path_length,
                 isd=0,
                 intr=1,
                 maxit=int(maxit),
@@ -186,21 +219,26 @@ def fit_glmnet_path(
                 bounds,
                 p,
                 1.0,
-                path,
+                native_path,
                 thresh,
                 **options,
             )
         count, intercepts_raw, compressed, indices, sizes, _, _, returned, passes, error = result
-        if error != 0 or count != len(path):
+        if error != 0 or count != native_path_length:
             detail = "Increase maxit." if error < 0 else "Check the training data and weights."
             raise GlmnetError(
                 f"glmnet did not complete the requested lambda path "
-                f"({count}/{len(path)} models; error={error}). {detail}"
+                f"({count}/{native_path_length} native models, including warm-start points; "
+                f"error={error}). {detail}"
             )
-        if not np.allclose(returned[:count], path, rtol=1e-12, atol=0):
+        if not np.allclose(returned[:count], native_path, rtol=1e-12, atol=0):
             raise GlmnetError("glmnet returned unexpected lambda values")
-        coefficients = np.asarray(lsolns(p, compressed, indices, sizes)[:, 0, :])
-        intercepts = np.asarray(intercepts_raw[0])
+        target_indices = np.searchsorted(-native_path, -path)
+        # Discard auxiliary solutions before expanding compressed coefficients.
+        coefficients = np.asarray(
+            lsolns(p, compressed[:, :, target_indices], indices, sizes[target_indices])[:, 0, :]
+        )
+        intercepts = np.asarray(intercepts_raw[0, target_indices])
     if not np.isfinite(coefficients).all() or not np.isfinite(intercepts).all():
         raise GlmnetError("glmnet returned nonfinite coefficients")
 
@@ -216,6 +254,7 @@ def fit_glmnet_path(
         model.n_features_in_ = p
         model.n_iter_ = int(passes)
         model.path_length_ = len(path)
+        model.native_path_length_ = native_path_length
         model.converged_ = True
         residual = weights * (expit(x @ model.coef_ + model.intercept_) - y)
         gradient = np.asarray(x.T @ residual).reshape(-1) + strength * (1 - alpha) * model.coef_

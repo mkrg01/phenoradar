@@ -682,11 +682,18 @@ has independent fitted state. Independent folds and paths are scheduled within
 `runtime.n_jobs`. TPE proposes candidates sequentially and uses individual fits.
 Path fitting is automatic; there is no solver or warm-start switch.
 
+Positive lambda gaps are automatically filled with internal warm-start points,
+with at most 0.05 decades between successive values. These points aid convergence;
+they are not additional search candidates and receive no CV scores. Requested
+lambdas and convergence settings remain exact and unchanged. A single candidate
+stays a single fit, and lambda zero has no logarithmic bridge.
+
 Outer-CV and final-refit training also use the available stronger candidate lambdas
 with matching `alpha`, `thresh`, and `maxit` as a descending path to the selected
 lambda. Each refit uses its own training data and retains only the selected model.
-No extra candidate lambdas are generated; if no matching stronger candidate exists,
-the refit uses the selected lambda alone. This behavior requires no config change.
+Only the original candidate lambdas are eligible for selection; if no matching
+stronger candidate exists, the refit uses the selected lambda alone. This behavior
+requires no config change.
 
 The logistic search parameters are now `lambda`, `alpha`, `maxit`, and `thresh`.
 Configs using removed keys must be updated, and previously saved logistic model

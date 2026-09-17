@@ -201,6 +201,7 @@ def test_explicit_irregular_path_matches_independent_fits_without_mutating_input
     assert [model.lambda_ for model in models] == lambdas
     assert len({id(model) for model in models}) == len(lambdas)
     assert all(model.path_length_ == 3 for model in models)
+    assert all(model.native_path_length_ > model.path_length_ for model in models)
     assert len({model.n_iter_ for model in models}) == 1
     np.testing.assert_array_equal(matrix.toarray() if sparse_input else matrix, x)
     np.testing.assert_array_equal(weights, original_weights)
@@ -230,6 +231,7 @@ def test_all_constant_design_returns_weighted_intercept(sparse_input: bool) -> N
         np.testing.assert_array_equal(model.coef_, [0, 0])
         np.testing.assert_allclose(model.predict_proba(matrix)[:, 1], 2 / 3)
         assert model.n_iter_ == 0
+        assert model.native_path_length_ == 0
 
 
 def test_zero_weight_rows_are_excluded_from_native_fit() -> None:
