@@ -14,6 +14,11 @@
 
 ### Features
 
+* add optional nwkit ASR interpretation for unknown-species predictions in
+  `full_run` and `predict`, with explicit input/unit branch lengths, disagreement
+  candidate tables, annotated trees, probability comparison plots, and bundled
+  observed-trait references; keep model fitting and evaluation unchanged
+
 * build bundle prediction matrices directly in the required feature schema and
   reuse prediction inputs and member probabilities for candidate interpretation
 * compute candidate contributions in bounded row blocks with deterministic

@@ -34,6 +34,7 @@ from phenoradar.metrics import (
 )
 from phenoradar.missing_expression import NeutralStandardScaler
 from phenoradar.provenance import phenoradar_build_snapshot, runtime_environment_snapshot
+from phenoradar.trait_reference import read_observed_traits, validate_observed_traits
 
 BUNDLE_FORMAT_VERSION = "3"
 _LEGACY_BUNDLE_FORMAT_VERSION = "1"
@@ -101,6 +102,7 @@ class LoadedBundle:
     abstention_top_features: int = 30
     reference_expression: pl.DataFrame | None = None
     orthogroup_annotations: pl.DataFrame | None = None
+    observed_traits: pl.DataFrame | None = None
 
 
 @dataclass(frozen=True)
@@ -389,10 +391,18 @@ def export_model_bundle(
     )
     shutil.copy2(resolved_config_path, resolved_copy_path)
 
+    try:
+        observed_traits = read_observed_traits(
+            config.data.metadata_path, species_col=config.data.species_col,
+            trait_col=config.data.trait_col, exclude_col=config.split.exclude_col,
+        )
+    except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
+        raise BundleError(f"Failed to snapshot observed traits: {exc}") from exc
     optional_files: list[str] = []
     for filename, table in [
         ("reference_expression.parquet", reference_expression),
         ("orthogroup_annotations.parquet", orthogroup_annotations),
+        ("observed_traits.parquet", observed_traits),
     ]:
         if table is not None and table.height > 0:
             table.write_parquet(bundle_dir / filename)
@@ -712,6 +722,7 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
     for name, required in [
         ("reference_expression", {"species", "label", "feature", "tpm", "log2_tpm_plus1"}),
         ("orthogroup_annotations", {"feature", "orthogroup_annotation"}),
+        ("observed_traits", {"species", "label"}),
     ]:
         filename = f"{name}.parquet"
         table = None
@@ -722,6 +733,11 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
                 raise BundleError(f"Failed to read bundled {filename}: {exc}") from exc
             if not required.issubset(table.columns):
                 raise BundleError(f"Invalid bundled {filename} schema")
+            if name == "observed_traits":
+                try:
+                    table = validate_observed_traits(table)
+                except (ValueError, pl.exceptions.PolarsError) as exc:
+                    raise BundleError(f"Invalid bundled {filename}: {exc}") from exc
         optional_tables[name] = table
 
     return LoadedBundle(
@@ -746,6 +762,7 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
         abstention_top_features=top_features,
         reference_expression=optional_tables["reference_expression"],
         orthogroup_annotations=optional_tables["orthogroup_annotations"],
+        observed_traits=optional_tables["observed_traits"],
     )
 
 

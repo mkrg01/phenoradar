@@ -35,3 +35,5 @@ phenoradar run -c config.yml
 4. [docs/cli-reference.md](docs/cli-reference.md): all commands and options.
 5. [docs/output-artifacts.md](docs/output-artifacts.md): output files, column-level details, and interpretation guidance.
 6. [docs/pipeline-details.md](docs/pipeline-details.md): internal execution behavior.
+7. [docs/phylogenetic-imputation.md](docs/phylogenetic-imputation.md): optional
+   phylogenetic context and disagreement candidates for unknown-species predictions.

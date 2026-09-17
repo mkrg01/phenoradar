@@ -97,6 +97,7 @@ def _stub_resolved_config(
         report=SimpleNamespace(),
         summary=SimpleNamespace(group_col="family"),
         figures=SimpleNamespace(top_features=top_features),
+        phylogenetic_imputation=SimpleNamespace(enabled=False),
         model_selection=SimpleNamespace(),
         preprocess=SimpleNamespace(
             missing_expression=SimpleNamespace(method="none", zero_as_missing=False),
@@ -1740,6 +1741,7 @@ data:
         lambda *_args, **_kwargs: SimpleNamespace(
             models=[object()],
             abstention_top_features=30,
+            observed_traits=None,
             manifest_sha256="manifest-sha",
             source_run_id="source-run",
             manifest={},
@@ -2351,6 +2353,7 @@ def test_predict_fails_when_input_provenance_collection_raises(
         lambda *_args, **_kwargs: SimpleNamespace(
             models=[object()],
             abstention_top_features=30,
+            observed_traits=None,
             manifest_sha256="manifest-sha",
             source_run_id="source-run",
             manifest={},

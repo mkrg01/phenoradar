@@ -5408,6 +5408,13 @@ def _candidate_evidence_figure(
             color=_MUTED_TEXT_COLOR,
         )
 
+    if not is_cv_error and candidate.get("phylo_prob") is not None:
+        fig.text(
+            0.025, 0.87,
+            f"Phylogenetic P = {float(candidate['phylo_prob']):.3f}; "
+            f"expression minus phylogenetic = {float(candidate['prob_difference']):+.3f}",
+            ha="left", va="top", fontsize=6, color=_MUTED_TEXT_COLOR,
+        )
     if is_predict and candidate.get("information_coverage") is not None:
         fig.text(
             0.98, 0.87,

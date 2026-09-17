@@ -3,6 +3,10 @@
 This page describes run-time outputs, when they are written, and how to interpret
 them for `run` / `predict` / `report`.
 
+With `phylogenetic_imputation.enabled: true`, unknown-species predictions also
+receive [phylogenetic interpretation outputs](phylogenetic-imputation.md#outputs)
+under `inference/`. Existing prediction and evaluation tables are unchanged.
+
 ## Quick reading order
 
 For one `run` result directory, a practical order is:

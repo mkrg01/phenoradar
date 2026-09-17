@@ -498,6 +498,15 @@ class RuntimeConfig(StrictModel):
         return self
 
 
+class PhylogeneticImputationConfig(StrictModel):
+    """Optional interpretation of unknown-species predictions using observed traits."""
+
+    enabled: bool = False
+    branch_length_mode: Literal["input", "unit"] = "input"
+    model: Literal["ER", "ARD"] = "ER"
+    root_prior: Literal["equal", "empirical"] = "equal"
+
+
 class AppConfig(StrictModel):
     """Top-level application configuration."""
 
@@ -512,6 +521,9 @@ class AppConfig(StrictModel):
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     summary: SummaryConfig = Field(default_factory=SummaryConfig)
     figures: FiguresConfig = Field(default_factory=FiguresConfig)
+    phylogenetic_imputation: PhylogeneticImputationConfig = Field(
+        default_factory=PhylogeneticImputationConfig
+    )
     report: ReportConfig = Field(default_factory=ReportConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
 

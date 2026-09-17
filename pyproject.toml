@@ -30,6 +30,9 @@ phenoradar = "phenoradar.launcher:main"
 phrad = "phenoradar.launcher:main"
 
 [project.optional-dependencies]
+phylogeny = [
+  "ete4>=4.4.0,<5.0.0",  # tree IO; the nwkit asr executable is installed separately
+]
 dev = [
   "ruff>=0.6.9,<1.0.0",
   "mypy>=1.11.2,<2.0.0",

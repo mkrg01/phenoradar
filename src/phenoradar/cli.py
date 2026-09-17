@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 from math import sqrt
 from pathlib import Path
@@ -30,7 +31,6 @@ from phenoradar.bundle import (
 )
 from phenoradar.candidate_evidence import (
     CandidateEvidenceArtifacts,
-    CandidateEvidenceError,
     build_candidate_evidence_artifacts,
 )
 from phenoradar.config import (
@@ -73,6 +73,10 @@ from phenoradar.metrics import (
 from phenoradar.orthogroup_annotation import (
     OrthogroupAnnotationError,
     load_orthogroup_annotations,
+)
+from phenoradar.phylogenetic_imputation import (
+    add_phylogenetic_evidence,
+    interpret_unknown_predictions,
 )
 from phenoradar.predict_evidence import build_predict_evidence_artifacts
 from phenoradar.provenance import (
@@ -1239,6 +1243,10 @@ def _run_single(
                 null_value="NA",
             )
         try:
+            with timing_recorder.measure(scope="inference", stage="phylogenetic_imputation"):
+                phylogenetic_artifacts = interpret_unknown_predictions(
+                    resolved, predictions=final_refit_artifacts.pred_inference, run_dir=run_dir,
+                )
             candidate_evidence_artifacts = build_candidate_evidence_artifacts(
                 config=resolved,
                 split_manifest=split_artifacts.split_manifest,
@@ -1251,8 +1259,14 @@ def _run_single(
                 top_features=resolved.figures.top_features,
                 include_model_reference=True,
             )
-        except CandidateEvidenceError as exc:
+        except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
             raise typer.BadParameter(str(exc)) from exc
+        warnings.extend(phylogenetic_artifacts.warnings)
+        candidate_evidence_artifacts = replace(
+            candidate_evidence_artifacts, candidates=add_phylogenetic_evidence(
+                candidate_evidence_artifacts.candidates, phylogenetic_artifacts,
+            ),
+        )
         warnings.extend(candidate_evidence_artifacts.warnings)
         if candidate_evidence_artifacts.features.height > 0:
             candidate_evidence_artifacts.candidates.write_csv(
@@ -2451,6 +2465,17 @@ def predict(
         null_value="NA",
     )
     write_abstention_artifacts(pred_predict, inference_tables_dir)
+    try:
+        with timing_recorder.measure(scope="predict", stage="phylogenetic_imputation"):
+            phylogenetic_artifacts = interpret_unknown_predictions(
+                resolved, predictions=pred_predict, run_dir=run_dir,
+                bundled_traits=bundle.observed_traits,
+                trait_name=str(bundle.manifest.get("trait_name", resolved.data.trait_col)),
+            )
+    except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    predict_warnings.extend(phylogenetic_artifacts.warnings)
+    evidence.candidates = add_phylogenetic_evidence(evidence.candidates, phylogenetic_artifacts)
     if evidence.features.height > 0:
         for table, name in [
             (evidence.candidates, "candidate_evidence_candidates.tsv"),

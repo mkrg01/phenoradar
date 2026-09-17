@@ -94,6 +94,12 @@ evaluation:
 figures:
   top_features: 30
 
+phylogenetic_imputation:
+  enabled: false  # choices: true, false; unknown-species interpretation only
+  branch_length_mode: input  # choices: input, unit
+  model: ER  # choices: ER, ARD
+  root_prior: equal  # choices: equal, empirical
+
 summary:
   group_col: family
 

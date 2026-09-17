@@ -104,6 +104,10 @@ feature heatmaps instead of ID-only labels.
 
 ## Tree Newick
 
+For optional unknown-trait imputation, the tree must include both unknown targets
+and known-trait reference species. See [phylogenetic imputation](phylogenetic-imputation.md)
+for explicit input/unit branch-length modes and reference reuse through model bundles.
+
 Optional path/key:
 
 - `data.tree_path` (default: `null`)

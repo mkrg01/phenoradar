@@ -9,7 +9,13 @@ from typing import Any
 from pydantic import Field, PositiveInt, ValidationError
 
 from .io import ConfigError, _deep_merge_dicts, _load_yaml_mapping
-from .schema import AppConfig, FiguresConfig, StrictModel, SummaryConfig
+from .schema import (
+    AppConfig,
+    FiguresConfig,
+    PhylogeneticImputationConfig,
+    StrictModel,
+    SummaryConfig,
+)
 
 
 class PredictDataConfig(StrictModel):
@@ -41,6 +47,9 @@ class PredictConfig(StrictModel):
     runtime: PredictRuntimeConfig = Field(default_factory=PredictRuntimeConfig)
     summary: SummaryConfig = Field(default_factory=SummaryConfig)
     figures: FiguresConfig = Field(default_factory=FiguresConfig)
+    phylogenetic_imputation: PhylogeneticImputationConfig = Field(
+        default_factory=PhylogeneticImputationConfig
+    )
 
 
 def load_predict_config(

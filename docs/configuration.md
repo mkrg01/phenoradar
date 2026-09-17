@@ -1,5 +1,10 @@
 # Configuration
 
+Optional `phylogenetic_imputation` settings apply only to unknown-species
+interpretation in `full_run` and `predict`. See
+[phylogenetic imputation](phylogenetic-imputation.md) for installation, branch
+length modes, reference traits, and outputs.
+
 PhenoRadar config files are YAML mappings validated by Pydantic.
 
 This page is the canonical reference for config input behavior, defaults, and
@@ -55,6 +60,7 @@ Only these settings are used and saved in prediction `resolved_config.yml`:
 | `preprocess.max_pivot_cells` | `50000000`; memory guard |
 | `runtime.n_jobs` | `1`; positive prediction worker/thread count |
 | `summary.group_col` | `family`; grouped summaries when metadata supplies this column |
+| `phylogenetic_imputation` | Disabled by default; optional ASR context for unknown species, with the same settings as `run` |
 
 A metadata TSV needs only the species column. Missing trait and contrast-pair
 columns do not prevent prediction or tree output. Without metadata, no group
@@ -221,6 +227,11 @@ summary:
   group_col: family
 figures:
   top_features: 30
+phylogenetic_imputation:
+  enabled: false  # choices: true, false
+  branch_length_mode: input  # choices: input, unit
+  model: ER  # choices: ER, ARD
+  root_prior: equal  # choices: equal, empirical
 report: {}
 runtime:
   seed: 42
@@ -241,6 +252,7 @@ runtime:
 - `evaluation`
 - `summary`
 - `figures`
+- `phylogenetic_imputation`
 - `report`
 - `runtime`
 
@@ -1014,6 +1026,19 @@ derived deterministically from `runtime.seed`.
     - also limits the species-local features in each misclassified-OOF diagnostic under
       `cv/figures/species_evidence/**/*.pdf`; features are ranked separately for each
       species using only the models that produced its held-out-fold prediction.
+
+## `phylogenetic_imputation`
+
+- `enabled`: default `false`; interpret unknown-species predictions only in
+  `full_run` and `predict`. It does not execute in CV or external-test evaluation.
+- `branch_length_mode`: `input` (default) requires all non-root branch lengths;
+  `unit` assigns each non-root branch length 1 in an analysis copy.
+- `model`: `ER` (default) or `ARD`, with transition rates fitted by nwkit.
+- `root_prior`: `equal` (default) or `empirical` observed-state frequencies.
+
+References come from existing metadata and the model bundle; there is no extra
+reference-table setting. See [phylogenetic imputation](phylogenetic-imputation.md)
+for installation, input validation, and comparison outputs.
 
 ## `report`
 
