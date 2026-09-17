@@ -283,11 +283,13 @@ def test_build_cv_species_evidence_uses_held_out_fold_models_and_training_refere
     assert set(reference.get_column("target_species")) == {"held_out_species"}
 
 
+@pytest.mark.parametrize("decision_status", ["accepted", "abstained"])
 def test_write_cv_species_evidence_figures_writes_error_pdf_and_manifest(
-    tmp_path: Path,
+    tmp_path: Path, decision_status: str,
 ) -> None:
     species_evidence = pl.DataFrame(
         {
+            "decision_status": [decision_status],
             "fold_id": ["2"],
             "species": ["Held out species"],
             "group_id": ["g2"],
@@ -346,6 +348,7 @@ def test_write_cv_species_evidence_figures_writes_error_pdf_and_manifest(
     assert row["n_model_predictions"] == 2
     root = tmp_path / "cv" / "figures" / "species_evidence"
     pdf_path = root / str(row["figure_path"])
+    assert ("abstained/" in row["figure_path"]) == (decision_status == "abstained")
     assert pdf_path.exists()
     assert pdf_path.read_bytes().startswith(b"%PDF")
     assert (root / "species_manifest.tsv").exists()

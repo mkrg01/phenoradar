@@ -45,7 +45,17 @@ def prediction_figure_populations(
 
 
 def population_figure_path(path: Path, suffix: str) -> Path:
+    """Keep the same basename in a separate directory for selective figures."""
+    if suffix == "_accepted_only":
+        return path.parent / "accepted_only" / path.name
     return path.with_name(f"{path.stem}{suffix}{path.suffix}")
+
+
+def remove_legacy_population_figure(path: Path) -> None:
+    """Remove a flat duplicate only after its replacement was written successfully."""
+    if path.parent.name == "accepted_only":
+        legacy = path.parent.parent / f"{path.stem}_accepted_only{path.suffix}"
+        legacy.unlink(missing_ok=True)
 
 
 def write_population_message_svg(path: Path, message: str) -> None:
@@ -79,3 +89,4 @@ def write_population_message_svg(path: Path, message: str) -> None:
     text.text = message
     path.parent.mkdir(parents=True, exist_ok=True)
     ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
+    remove_legacy_population_figure(path)

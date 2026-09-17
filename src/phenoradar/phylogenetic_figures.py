@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -11,12 +12,15 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 from matplotlib.patches import Patch
 
-from phenoradar.figures import _save_svg_figure
+from phenoradar.figures import _legend_above, _save_svg_figure
 from phenoradar.phylogenetic_imputation import PhylogeneticImputationArtifacts
 
 
 def _comparison_scatter(artifacts: PhylogeneticImputationArtifacts, path: Path) -> None:
-    fig, ax = plt.subplots(figsize=(6.2, 5.4), layout="constrained")
+    fig, (ax, labels_ax) = plt.subplots(
+        1, 2, figsize=(7.2, 4.8), gridspec_kw={"width_ratios": [1.3, 1]},
+    )
+    labels_ax.set_axis_off()
     rows = [
         row
         for row in artifacts.comparison.iter_rows(named=True)
@@ -38,21 +42,25 @@ def _comparison_scatter(artifacts: PhylogeneticImputationArtifacts, path: Path) 
                 label=label,
                 zorder=2,
             )
-    for index, row in enumerate(rows[:10]):
-        horizontal = -5 if row["phylo_prob"] > 0.65 else 5
-        vertical = -(10 + (index % 3) * 9) if row["prob"] > 0.85 else 5 + (index % 3) * 9
-        ax.annotate(
-            row["species"],
-            (row["phylo_prob"], row["prob"]),
-            xytext=(horizontal, vertical),
-            textcoords="offset points",
-            ha="right" if horizontal < 0 else "left",
-            fontsize=7,
+    labelled = sorted(rows, key=lambda row: abs(row["prob_difference"]), reverse=True)[:10]
+    labelled.sort(key=lambda row: (-row["prob"], row["phylo_prob"], row["species"]))
+    for label_y, row in zip(np.linspace(0.95, 0.05, len(labelled)), labelled, strict=True):
+        labels_ax.text(
+            0.05, label_y, textwrap.fill(row["species"], width=32),
+            transform=labels_ax.transAxes, ha="left", va="center", fontsize=7,
         )
+        connector = ax.annotate(
+            "",
+            (row["phylo_prob"], row["prob"]),
+            xytext=(0.05, label_y), textcoords=labels_ax.transAxes,
+            ha="left", va="center", fontsize=7, annotation_clip=False,
+            arrowprops={"arrowstyle": "-", "color": "#999999", "lw": 0.5},
+        )
+        connector.set_in_layout(False)
     if not rows:
         ax.text(0.5, 0.5, "No comparable phylogenetic estimates", ha="center", va="center")
     else:
-        ax.legend(loc="lower right", fontsize=8)
+        _legend_above(ax, ncol=2)
     ax.set(
         xlim=(-0.03, 1.03),
         ylim=(-0.03, 1.03),
@@ -63,7 +71,7 @@ def _comparison_scatter(artifacts: PhylogeneticImputationArtifacts, path: Path) 
         ScalarMappable(norm=Normalize(-1, 1), cmap="RdBu_r"),
         ax=ax,
         label="Expression minus phylogenetic probability",
-        shrink=0.7,
+        location="bottom", use_gridspec=False, shrink=0.9,
     )
     _save_svg_figure(fig, path)
 

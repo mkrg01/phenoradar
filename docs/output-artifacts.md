@@ -75,23 +75,30 @@ and `decision_rate`. Their `n_pred_positive` excludes abstention and
 statistics and `top_species` still describe raw probabilities across all species.
 Candidate evidence is generated only for accepted positives. CV error-evidence
 PDFs remain diagnostics of raw fixed-0.5 errors and explicitly label abstained
-species.
+species; these PDFs are placed under `species_evidence/abstained/`.
 
 When prediction tables include abstention, prediction and evaluation SVGs are
 written for both populations:
 
 - `<name>.svg`: all species, including those whose decisions were withheld.
   Binary groups and metrics use the raw fixed-0.5 decision.
-- `<name>_accepted_only.svg`: only species with `decision_status=accepted`.
+- `accepted_only/<name>.svg`: only species with `decision_status=accepted`.
   Probabilities, counts, confusion groups, and metrics use this subset.
 
-The filename identifies the population. Figures retain their original canvas
-size and layout without added population titles, subtitles, or explanatory
-banners. Existing sample-count labels and metric annotations use the plotted
-population; original totals and abstention counts remain in the summary tables.
-Legends explain visual encodings rather than repeat population descriptions.
+The directory identifies the population: all-species figures remain directly in
+`<stage>/figures/`, and abstention-filtered figures share the same basenames under
+`<stage>/figures/accepted_only/`. Figures retain their intended canvas size
+without added population titles, subtitles, or explanatory banners. Labels, colorbars, and panel spacing are measured at export, with a
+consistent six-point outer gutter; legends occupy dedicated space outside the
+data panels. Long feature annotations wrap across lines without truncation.
+Existing sample-count labels and metric annotations use the plotted population; original totals and abstention counts remain in the summary tables.
+Legends explain visual encodings rather than repeat population descriptions. Supplementary
+configuration and numerical summaries belong in the output tables or manuscript
+captions, not as prose on the figure. Evidence PDFs identify the species and
+decision; family/fold/group metadata and coverage diagnostics remain in tables.
 The pairs are generated even when no species abstain. With abstention disabled,
-existing single-figure behavior is retained.
+existing single-figure behavior is retained. On regeneration, an old flat
+`<name>_accepted_only.svg` is removed only after its replacement is saved.
 
 Paired figures include the CV metric overview, ROC/PR curves, the external
 confusion matrix and CV/external metric comparison, trait/fold/group probability
@@ -925,15 +932,16 @@ when individual folds are single-label.
 - `cv/figures/group_bootstrap_metrics.svg`
   (`evaluation.group_bootstrap.enabled=true`)
   - Pooled OOF metric estimates with group-bootstrap percentile intervals.
-  - The annotation records the grouping column, group count, resample count,
-    and smallest valid-replicate count across plotted metrics.
+  - The axis label identifies the confidence level. Grouping and resampling
+    metadata remain in `group_bootstrap_metrics.tsv`, rather than appearing as
+    supplementary text on the figure.
 - `cv/figures/roc_curve_cv.svg`
   - Pooled OOF ROC curve.
   - Curve summarizes all folds together (not per-fold overlays).
 - `cv/figures/pr_curve_cv.svg`
   - Pooled OOF precision-recall curve.
   - Curve summarizes all folds together (not per-fold overlays).
-  - The title reports Average Precision, matching the implementation behind the
+  - The curve legend reports Average Precision, matching the implementation behind the
     compatibility metric key `pr_auc`.
 - `cv/figures/feature_importance_top.svg`
   - Top `figures.top_features` features by mean fold-level `importance_mean`.
@@ -945,8 +953,8 @@ when individual folds are single-label.
     `importance_mean`.
   - Each panel shows `log2(TPM + 1)` boxplots and species-level points in the
     OOF `TP`, `FN`, `TN`, and `FP` groups at the fixed probability threshold.
-  - Panel headings include the orthogroup annotation and ID, mean feature
-    importance, and signed linear coefficient when available.
+  - Panel headings identify the orthogroup annotation and ID; importance and
+    coefficients remain in the corresponding tables and dedicated feature figures.
   - Correct predictions use circles and errors use crosses.
 - `cv/figures/feature_importance_by_fold_heatmap.svg`
   - Top `figures.top_features` features by mean fold-level `importance_mean`.
@@ -978,7 +986,8 @@ when individual folds are single-label.
   - Useful for checking fold-to-fold drift or fold-specific overlap.
 - `cv/figures/species_evidence/` (linear outer-fold model and at least one OOF FP/FN)
   - contains one vector PDF per misclassified OOF species, grouped into
-    `false_positive/` and `false_negative/`
+    `false_positive/` and `false_negative/`; withheld decisions use
+    `abstained/false_positive/` and `abstained/false_negative/`
   - panel A shows the individual model probabilities from the actual held-out fold,
     the aggregate OOF probability, and the fixed threshold
   - panel B shows signed species-local contributions to the linear score, ranked by
@@ -1062,9 +1071,10 @@ when individual folds are single-label.
   - contains one publication-oriented PDF per inference species predicted as `1`
   - PDFs are grouped into `p_095_100`, `p_090_095`, `p_085_090`, `p_080_085`,
     and `p_050_080` subdirectories using the final-refit probability
-  - panel A shows the unlabeled distribution of probabilities obtained by applying
-    each outer-fold predictor to the same candidate, with the final-refit probability
-    as a diamond
+  - panel A shows the distribution of probabilities obtained by applying each
+    outer-fold predictor to the same candidate, with the final-refit probability
+    as a diamond; its legend identifies individual models, range, IQR, median,
+    final prediction, and decision threshold
   - panel B shows signed candidate-local linear contributions, ranked by mean absolute
     contribution across final models; absent model-local features contribute zero
   - panel C shows known label-0 and label-1 internal-CV expression values as
@@ -1152,7 +1162,8 @@ when individual folds are single-label.
   - one figure per accepted positive species with nonzero local linear evidence
   - fitted-model probabilities (with the bundled classification threshold),
     signed local contributions, and candidate versus known-trait expression
-  - information coverage and its acceptance threshold when available
+  - information coverage and its acceptance threshold are retained in the
+    prediction tables instead of supplementary figure text
   - unavailable references are explicitly marked; absent outer-CV models are
     never represented as a CV stability assessment
   - local feature count follows `figures.top_features`, defaulting to the bundle's

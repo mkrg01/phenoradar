@@ -511,8 +511,8 @@ def test_write_run_figures_writes_top_feature_expression_by_confusion(
     assert "beta carbonic anhydrase" in svg_text
     assert "photosynthetic annotation" in svg_text
     assert "(OG1)" in svg_text
-    assert "importance=0.7" in svg_text
-    assert "β=+0.2" in svg_text
+    assert "importance=" not in svg_text
+    assert "β=" not in svg_text
     assert "higher" not in svg_text
     assert "C4=1" not in svg_text
     for group in ["TP", "FN", "TN", "FP"]:
@@ -565,7 +565,9 @@ def test_write_run_figures_writes_group_bootstrap_confidence_intervals(
     assert figure_path.exists()
     svg_text = figure_path.read_text(encoding="utf-8")
     assert "OOF group-bootstrap confidence intervals" in svg_text
-    assert "family" in svg_text
+    assert "95% group-bootstrap CI" in svg_text
+    for metadata in ("group_col=", "groups=", "resamples=", "minimum valid"):
+        assert metadata not in svg_text
     assert warnings == []
 
 

@@ -14,6 +14,19 @@
 
 ### Features
 
+* omit supplementary configuration and numeric-summary text from bootstrap,
+  expression, and species-evidence figures; use legends for ROC/PR statistics
+  and the plotted probability-distribution encodings
+
+* group abstention-filtered SVGs under `figures/accepted_only/` with the same
+  basenames as all-species figures; separate abstained CV evidence PDFs under
+  `species_evidence/abstained/` and retain their paths in the manifest
+* measure figure decorations at export for consistent margins, panel spacing,
+  and colorbar placement; wrap long feature labels, move legends outside data,
+  and keep model-selection panels within a double-column page width
+* align tree annotations independently of branch lengths, reserve a legend
+  sidebar, and place phylogenetic disagreement labels in a separate callout column
+
 * add optional nwkit ASR interpretation for unknown-species predictions in
   `full_run` and `predict`, with explicit input/unit branch lengths, disagreement
   candidate tables, annotated trees, probability comparison plots, and bundled

@@ -123,8 +123,10 @@ The annotation and comparison tables include:
 
 The discrepancy tables retain abstained species for inspection, but the positive
 candidate subset uses the existing selective decision. Candidate evidence TSVs
-and PDFs also include phylogenetic probability and signed difference when
-available. Existing prediction TSVs and their `true_label` columns are unchanged.
+include phylogenetic probability and signed difference when available. These
+supplementary values are omitted from evidence PDFs; the dedicated phylogenetic
+comparison figures display them. Existing prediction TSVs and their `true_label`
+columns are unchanged.
 
 The tree includes observed references around unknown targets. Any display
 pruning happens after fitting, preserves branch lengths, and uses the original

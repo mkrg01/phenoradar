@@ -19,6 +19,7 @@ from typing import Any, cast
 import matplotlib
 import numpy as np
 import polars as pl
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.colors import LinearSegmentedColormap, to_rgba
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
@@ -36,6 +37,7 @@ from phenoradar.colors import CONFUSION_GROUP_COLORS, CONFUSION_GROUP_ORDER
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
+    remove_legacy_population_figure,
 )
 from phenoradar.figure_runtime import FigureWorkers
 from phenoradar.group_summary import GroupSummaryError, finite_group_probabilities
@@ -108,7 +110,7 @@ _CONFUSION_GROUP_ORDER = CONFUSION_GROUP_ORDER
 _CONFUSION_GROUP_COLORS = CONFUSION_GROUP_COLORS
 _FEATURE_IMPORTANCE_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
 _FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE = _LABEL_FONTSIZE
-_FEATURE_ANNOTATION_LABEL_PADDING_PX = 180
+_FEATURE_ANNOTATION_LABEL_PADDING_PX = 40
 _FEATURE_IMPORTANCE_HEATMAP_CMAP = LinearSegmentedColormap.from_list(
     "phenoradar_feature_importance_blues",
     ["#ffffff", "#deebf7", "#9ecae1", "#3182bd", "#08519c"],
@@ -219,7 +221,7 @@ def _label_text_width_px(labels: list[str], *, fontsize_px: int, padding: int = 
         (len(line) for label in labels for line in str(label).splitlines()),
         default=0,
     )
-    return max_chars * fontsize_px * 0.62 + padding
+    return max_chars * fontsize_px * (_FIG_DPI / 72) * 0.62 + padding
 
 
 def _label_left_margin(labels: list[str], *, width_px: int, fontsize_px: int) -> float:
@@ -229,7 +231,7 @@ def _label_left_margin(labels: list[str], *, width_px: int, fontsize_px: int) ->
 
 def _feature_label_row_height_px(labels: list[str]) -> int:
     max_lines = max((len(label.splitlines()) for label in labels), default=1)
-    return max(18, 10 + max_lines * 9)
+    return max(20, 10 + max_lines * 11)
 
 
 def _feature_label_axis_title(_labels: list[str]) -> str:
@@ -275,7 +277,7 @@ def _feature_axis_labels(
         if annotation is None:
             labels.append(feature)
             continue
-        labels.append(f"{' '.join(annotation.split())} ({feature})")
+        labels.append(textwrap.fill(f"{' '.join(annotation.split())} ({feature})", width=48))
     return labels
 
 
@@ -287,18 +289,13 @@ def _feature_axis_layout(
     base_right: float,
     fontsize_px: int,
 ) -> tuple[int, float, float]:
-    base_left_px = base_left * base_width_px
-    base_right_px = base_right * base_width_px
     label_width_px = _label_text_width_px(
         labels,
         fontsize_px=fontsize_px,
         padding=_FEATURE_ANNOTATION_LABEL_PADDING_PX,
     )
-    extra_left_px = max(0, int(np.ceil(label_width_px - base_left_px)))
-    width_px = base_width_px + extra_left_px
-    left = (base_left_px + extra_left_px) / width_px
-    right = (base_right_px + extra_left_px) / width_px
-    return width_px, left, right
+    left = max(base_left, min(0.52, label_width_px / base_width_px))
+    return base_width_px, left, base_right
 
 
 def _compact_bottom_margin(height_px: int) -> float:
@@ -306,16 +303,61 @@ def _compact_bottom_margin(height_px: int) -> float:
 
 
 def _save_svg_figure(fig: Figure, out_path: Path) -> None:
+    _publication_layout(fig)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(
         out_path,
         format="svg",
         dpi=_FIG_DPI,
         metadata={"Date": None},
     )
+    remove_legacy_population_figure(out_path)
     plt.close(fig)
 
 
+def _publication_layout(fig: Figure) -> None:
+    """Measure decorations before export, keeping a consistent six-point gutter.
+
+    Constrained layout accounts for tick labels, panel titles and colorbars without
+    cropping or changing the intended page size. Figure-level footers/legends get
+    their own band, outside the axes layout.
+    """
+    canvas = cast(Any, FigureCanvasAgg(fig))
+    renderer = canvas.get_renderer()
+    bottom, top = 0.0, 1.0
+    automatic_titles = [
+        getattr(fig, name, None) for name in ("_supxlabel", "_supylabel", "_suptitle")
+    ]
+    for artist in [*fig.legends, *fig.texts]:
+        if artist in automatic_titles:
+            continue
+        if not artist.get_visible():
+            continue
+        bounds = artist.get_window_extent(renderer).transformed(fig.transFigure.inverted())
+        if bounds.y1 < 0.25:
+            bottom = max(bottom, bounds.y1 + 6 / 72 / fig.get_figheight())
+        elif bounds.y0 > 0.75 or artist.get_gid() == "phenoradar-header":
+            top = min(top, bounds.y0 - 6 / 72 / fig.get_figheight())
+    if fig.get_layout_engine() is None:
+        fig.set_layout_engine(
+            "constrained", w_pad=6 / 72, h_pad=6 / 72,
+            wspace=0.04, hspace=0.04, rect=(0, bottom, 1, top - bottom),
+        )
+    canvas.draw()
+
+
+def _legend_above(ax: Any, *, handles: list[Any] | None = None, ncol: int = 3) -> None:
+    """Give legends a separate row, so they cannot obscure data."""
+    ax.legend(
+        handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.02),
+        ncol=ncol, frameon=False, borderaxespad=0.0,
+        columnspacing=1.2, handlelength=1.6,
+    )
+
+
 def _save_pdf_figure(fig: Figure, out_path: Path, *, title: str) -> None:
+    _publication_layout(fig)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(
         out_path,
         format="pdf",
@@ -755,7 +797,7 @@ def _cv_metrics_overview(metrics_cv: pl.DataFrame, out_path: Path) -> None:
     _place_x_axis_at_zero(ax)
     ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.legend(loc="upper right", frameon=False)
+    _legend_above(ax)
 
     fig.subplots_adjust(left=0.08, right=0.99, top=0.96, bottom=0.18)
     _save_svg_figure(fig, out_path)
@@ -871,23 +913,7 @@ def _group_bootstrap_metrics_figure(
     )
     ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    group_col = str(rows[0]["group_col"])
-    n_groups = int(rows[0]["n_groups"])
-    n_resamples = int(rows[0]["n_resamples"])
-    min_valid_resamples = min(int(row["n_valid_resamples"]) for row in rows)
     ax.set_title("OOF group-bootstrap confidence intervals", pad=8.0)
-    fig.text(
-        0.99,
-        0.01,
-        (
-            f"group_col={group_col}; groups={n_groups}; resamples={n_resamples}; "
-            f"minimum valid resamples={min_valid_resamples}"
-        ),
-        ha="right",
-        va="bottom",
-        fontsize=_ANNOTATION_FONTSIZE,
-        color=_MUTED_TEXT_COLOR,
-    )
     fig.subplots_adjust(left=0.31, right=0.985, top=0.89, bottom=0.16)
     _save_svg_figure(fig, out_path)
 
@@ -977,7 +1003,7 @@ def _cv_loss_by_split(loss_by_split_cv: pl.DataFrame, out_path: Path) -> None:
     ax.set_ylabel("Log loss", fontsize=_LABEL_FONTSIZE)
     ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.legend(loc="upper right", frameon=False)
+    _legend_above(ax)
 
     fig.subplots_adjust(left=0.09, right=0.99, top=0.96, bottom=0.16)
     _save_svg_figure(fig, out_path)
@@ -1396,7 +1422,7 @@ def _feature_importance_by_fold_heatmap(
                     fontfamily="monospace",
                 )
 
-    colorbar = fig.colorbar(image, ax=ax, fraction=0.025, pad=0.02)
+    colorbar = fig.colorbar(image, ax=ax, use_gridspec=False, fraction=0.025, pad=0.02)
     colorbar.set_label(
         "Mean feature importance per fold",
         rotation=90,
@@ -1710,24 +1736,6 @@ def _top_feature_expression_by_confusion(
     features = [str(value) for value in top.get_column("__feature").to_list()]
     if not features:
         raise FigureError(f"feature_importance.tsv is empty; cannot draw {figure_name}")
-    importance_lookup = {
-        str(row["__feature"]): float(row["__importance"]) for row in top.iter_rows(named=True)
-    }
-    coefficient_lookup = {
-        str(row["__feature"]): float(row["__coef"])
-        for row in coefficients.filter(pl.col("method") == "coef_signed")
-        .select(
-            pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("__feature"),
-            pl.col("coef_mean").cast(pl.Float64, strict=False).alias("__coef"),
-        )
-        .filter(
-            pl.col("__feature").is_not_null()
-            & (pl.col("__feature") != "")
-            & pl.col("__coef").is_not_null()
-            & pl.col("__coef").is_finite()
-        )
-        .iter_rows(named=True)
-    }
     annotation_lookup = _orthogroup_annotation_lookup(orthogroup_annotations)
     if "is_missing" in top_feature_expression.columns:
         top_feature_expression = top_feature_expression.filter(~pl.col("is_missing"))
@@ -1772,13 +1780,7 @@ def _top_feature_expression_by_confusion(
             if annotation is not None
             else []
         )
-        title_lines.extend([f"({feature})", f"importance={importance_lookup[feature]:.3g}"])
-        coefficient = coefficient_lookup.get(feature)
-        if coefficient is not None:
-            if np.isclose(coefficient, 0.0):
-                title_lines[-1] += " | β=0"
-            else:
-                title_lines[-1] += f" | β={coefficient:+.3g}"
+        title_lines.append(f"({feature})")
         title_lines_by_feature[feature] = title_lines
 
     n_columns = min(5, len(features))
@@ -1884,9 +1886,8 @@ def _top_feature_expression_by_confusion(
     fig.supxlabel(
         "OOF confusion group" if label_col == "label" else "External-test confusion group",
         fontsize=_LABEL_FONTSIZE,
-        y=10 / height_px,
     )
-    fig.supylabel("log2(TPM + 1)", fontsize=_LABEL_FONTSIZE, x=0.008)
+    fig.supylabel("log2(TPM + 1)", fontsize=_LABEL_FONTSIZE)
     fig.subplots_adjust(
         left=0.055,
         right=0.995,
@@ -1944,7 +1945,7 @@ def _predict_probability_distribution(
             label="Abstained",
         )
         bars[0].set_label("Accepted")
-        ax.legend(frameon=False, fontsize=_LABEL_FONTSIZE)
+        _legend_above(ax)
     max_count = int(counts.max()) if counts.size > 0 else 1
     if max_count < 1:
         max_count = 1
@@ -2773,8 +2774,11 @@ def _roc_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     )
     fig.patch.set_facecolor("white")
 
-    ax.plot([0.0, 1.0], [0.0, 1.0], color="#999999", linewidth=0.7, linestyle=(0, (4, 4)))
-    ax.plot(fpr, tpr, color=_COLOR_BLUE, linewidth=1.0)
+    ax.plot(
+        [0.0, 1.0], [0.0, 1.0], color="#999999", linewidth=0.7,
+        linestyle=(0, (4, 4)), label="Chance",
+    )
+    ax.plot(fpr, tpr, color=_COLOR_BLUE, linewidth=1.0, label=f"ROC AUC = {roc_auc:.3f}")
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.set_aspect("equal", adjustable="box")
@@ -2782,7 +2786,7 @@ def _roc_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     ax.set_ylabel("True Positive Rate", fontsize=_LABEL_FONTSIZE)
     ax.grid(color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.set_title(f"ROC AUC={roc_auc:.6f}", fontsize=_LABEL_FONTSIZE)
+    _legend_above(ax, ncol=1)
 
     fig.subplots_adjust(left=0.16, right=0.98, top=0.92, bottom=0.14)
     _save_svg_figure(fig, out_path)
@@ -2802,13 +2806,17 @@ def _pr_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     )
     fig.patch.set_facecolor("white")
 
-    ax.axhline(prevalence, color="#999999", linewidth=0.7, linestyle=(0, (4, 4)))
+    ax.axhline(
+        prevalence, color="#999999", linewidth=0.7, linestyle=(0, (4, 4)),
+        label=f"Positive rate = {prevalence:.3f}",
+    )
     ax.plot(
         recall_plot,
         precision_plot,
         color=_COLOR_ORANGE,
         linewidth=1.0,
         drawstyle="steps-post",
+        label=f"Average Precision={average_precision:.3f}",
     )
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
@@ -2817,10 +2825,7 @@ def _pr_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     ax.set_ylabel("Precision", fontsize=_LABEL_FONTSIZE)
     ax.grid(color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.set_title(
-        f"Average Precision={average_precision:.6f}, positive_rate={prevalence:.6f}",
-        fontsize=_LABEL_FONTSIZE,
-    )
+    _legend_above(ax, ncol=1)
 
     fig.subplots_adjust(left=0.16, right=0.98, top=0.92, bottom=0.14)
     _save_svg_figure(fig, out_path)
@@ -2843,13 +2848,16 @@ def _roc_curve_external(y_true: np.ndarray, prob: np.ndarray, out_path: Path) ->
     roc_auc = float(roc_auc_score(y_true, prob))
 
     fig, ax = plt.subplots(
-        figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 340),
+        figsize=_figure_size_inches(_CURVE_PANEL_SIZE_PX, _CURVE_PANEL_SIZE_PX),
         dpi=_FIG_DPI,
     )
     fig.patch.set_facecolor("white")
 
-    ax.plot([0.0, 1.0], [0.0, 1.0], color="#999999", linewidth=0.7, linestyle=(0, (4, 4)))
-    ax.plot(fpr, tpr, color=_COLOR_BLUE, linewidth=1.15)
+    ax.plot(
+        [0.0, 1.0], [0.0, 1.0], color="#999999", linewidth=0.7,
+        linestyle=(0, (4, 4)), label="Chance",
+    )
+    ax.plot(fpr, tpr, color=_COLOR_BLUE, linewidth=1.15, label=f"ROC AUC = {roc_auc:.3f}")
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.set_aspect("equal", adjustable="box")
@@ -2857,21 +2865,7 @@ def _roc_curve_external(y_true: np.ndarray, prob: np.ndarray, out_path: Path) ->
     ax.set_ylabel("True positive rate", fontsize=_LABEL_FONTSIZE)
     ax.grid(color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.text(
-        0.97,
-        0.05,
-        f"ROC AUC = {roc_auc:.3f}",
-        transform=ax.transAxes,
-        ha="right",
-        va="bottom",
-        fontsize=_ANNOTATION_FONTSIZE,
-        bbox={
-            "boxstyle": "square,pad=0.22",
-            "facecolor": "white",
-            "edgecolor": "#dddddd",
-            "linewidth": 0.5,
-        },
-    )
+    _legend_above(ax, ncol=1)
 
     fig.subplots_adjust(left=0.13, right=0.98, top=0.98, bottom=0.14)
     _save_svg_figure(fig, out_path)
@@ -2883,18 +2877,22 @@ def _pr_curve_external(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> 
     prevalence = float(np.mean(y_true))
 
     fig, ax = plt.subplots(
-        figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 340),
+        figsize=_figure_size_inches(_CURVE_PANEL_SIZE_PX, _CURVE_PANEL_SIZE_PX),
         dpi=_FIG_DPI,
     )
     fig.patch.set_facecolor("white")
 
-    ax.axhline(prevalence, color="#999999", linewidth=0.7, linestyle=(0, (4, 4)))
+    ax.axhline(
+        prevalence, color="#999999", linewidth=0.7, linestyle=(0, (4, 4)),
+        label=f"Positive rate = {prevalence:.3f}",
+    )
     ax.plot(
         np.asarray(recall, dtype=float),
         np.asarray(precision, dtype=float),
         color=_COLOR_ORANGE,
         linewidth=1.15,
         drawstyle="steps-post",
+        label=f"Average Precision={average_precision:.3f}",
     )
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
@@ -2903,21 +2901,7 @@ def _pr_curve_external(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> 
     ax.set_ylabel("Precision", fontsize=_LABEL_FONTSIZE)
     ax.grid(color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.text(
-        0.03,
-        0.05,
-        f"AP = {average_precision:.3f}\nPositive rate = {prevalence:.3f}",
-        transform=ax.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=_ANNOTATION_FONTSIZE,
-        bbox={
-            "boxstyle": "square,pad=0.22",
-            "facecolor": "white",
-            "edgecolor": "#dddddd",
-            "linewidth": 0.5,
-        },
-    )
+    _legend_above(ax, ncol=1)
 
     fig.subplots_adjust(left=0.13, right=0.98, top=0.98, bottom=0.14)
     _save_svg_figure(fig, out_path)
@@ -3069,7 +3053,7 @@ def _external_confusion_matrix(pred_external_test: pl.DataFrame, out_path: Path)
                 color=text_color,
             )
 
-    colorbar = fig.colorbar(image, ax=ax, fraction=0.045, pad=0.04)
+    colorbar = fig.colorbar(image, ax=ax, use_gridspec=False, fraction=0.045, pad=0.04)
     colorbar.set_label("Count", rotation=90, fontsize=_LABEL_FONTSIZE)
     colorbar.ax.tick_params(labelsize=_TICK_FONTSIZE)
 
@@ -3587,6 +3571,11 @@ def _compact_params_label(
             parsed = {key: value for key, value in sorted(parsed.items()) if key in include_keys}
         if not parsed:
             return "{}"
+        # Keep the exact values in the tables; axes need only readable precision.
+        parsed = {
+            key: float(f"{value:.4g}") if isinstance(value, float) else value
+            for key, value in parsed.items()
+        }
         return json.dumps(parsed, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     if parsed is None:
         return "null"
@@ -3752,7 +3741,7 @@ def _model_selection_trials_summary_panels(
             _compact_params_label(value, include_keys=varying_keys) for value in params_json_values
         ]
         y_labels = [
-            _ellipsize_label(f"{candidate}: {params_label}", max_chars=72)
+            textwrap.fill(f"{candidate}: {params_label}", width=32)
             for candidate, params_label in zip(candidates, params_labels, strict=True)
         ]
 
@@ -3778,7 +3767,7 @@ def _model_selection_trials_summary_panels(
     x_min, x_max = _padded_domain(x_values, include_zero=True)
 
     n_panels = len(panels)
-    max_cols = min(5, n_panels)
+    max_cols = min(2, n_panels)
     n_cols = min(
         range(1, max_cols + 1),
         key=lambda cols: (
@@ -3789,12 +3778,12 @@ def _model_selection_trials_summary_panels(
     )
     n_rows = int(np.ceil(n_panels / n_cols))
 
-    panel_width_px = 340
     left_label_px = min(640, max(190, 40 + int(max_label_length * 4)))
     right_pad_px = 24
-    fig_width_px = left_label_px + panel_width_px * n_cols + right_pad_px
+    fig_width_px = _NATURE_DOUBLE_COLUMN_WIDTH_PX
 
-    panel_height_px = max(210, 86 + max_candidates * 18)
+    label_lines = max(len(label.splitlines()) for panel in panels for label in panel["y_labels"])
+    panel_height_px = max(230, 86 + max_candidates * max(20, label_lines * 11))
     header_px = 26
     footer_px = 38
     fig_height_px = header_px + panel_height_px * n_rows + footer_px
@@ -3836,7 +3825,7 @@ def _model_selection_trials_summary_panels(
         ax.axvline(0.0, color=_MUTED_TEXT_COLOR, linewidth=0.8)
         ax.set_title(str(panel["fold_id"]), fontsize=_LABEL_FONTSIZE, pad=5.0)
         if col_index == 0:
-            ax.set_ylabel("candidate_index:params", fontsize=_LABEL_FONTSIZE)
+            ax.set_ylabel("Candidate: parameters", fontsize=_LABEL_FONTSIZE)
         ax.set_xlabel(metric_axis_label, fontsize=_LABEL_FONTSIZE, labelpad=3.0)
 
     for panel_index in range(n_panels, n_rows * n_cols):
@@ -4373,7 +4362,7 @@ def _feature_filter_funnel(
             label="min-max",
         ),
     ]
-    ax.legend(handles=legend_handles, loc="best", frameon=False)
+    _legend_above(ax, handles=legend_handles)
     fig.subplots_adjust(left=0.08, right=0.99, top=0.96, bottom=0.16)
     _save_svg_figure(fig, out_path)
 
@@ -4626,7 +4615,7 @@ def _feature_stability_top(
         Patch(facecolor=_COLOR_PURPLE, label="Non-zero; tied coefficient sign"),
         Patch(facecolor=_COLOR_BLUE, label="Non-zero; sign unavailable"),
     ]
-    ax.legend(handles=legend_handles, loc="lower right", frameon=False, fontsize=_TICK_FONTSIZE)
+    _legend_above(ax, handles=legend_handles, ncol=2)
     fig.subplots_adjust(
         left=left_margin,
         right=right_margin,
@@ -4729,7 +4718,7 @@ def _feature_set_jaccard_heatmap(
                     color=color,
                     fontfamily="monospace",
                 )
-    colorbar = fig.colorbar(image, ax=ax, fraction=0.035, pad=0.03)
+    colorbar = fig.colorbar(image, ax=ax, use_gridspec=False, fraction=0.035, pad=0.03)
     colorbar.set_label("Jaccard similarity", fontsize=_LABEL_FONTSIZE)
     colorbar.ax.tick_params(labelsize=_TICK_FONTSIZE)
     fig.subplots_adjust(left=0.12, right=0.92, top=0.98, bottom=0.16)
@@ -5331,20 +5320,14 @@ def _candidate_evidence_figure(
     species = str(candidate["species"])
     probability = float(candidate["prob"])
     if is_cv_error:
-        group_id = str(candidate.get("group_id") or "unassigned")
-        fold_id = str(candidate.get("fold_id") or "NA")
         label = int(candidate["label"])
         pred_label = int(candidate["pred_label"])
         confusion_group = str(candidate["confusion_group"])
-        metadata_text = f"Fold: {fold_id} | Group: {group_id}"
-    else:
-        metadata_text = f"Family: {candidate['family']}"
 
     feature_count = len(features)
     row_height = 0.39
-    if is_predict:
-        row_height = max(row_height, 0.14 * max(len(label.splitlines()) for label in labels) + 0.12)
-    figure_height = max(4.8, 1.85 + row_height * feature_count)
+    row_height = max(row_height, 0.14 * max(len(label.splitlines()) for label in labels) + 0.12)
+    figure_height = max(5.8, 2.8 + row_height * feature_count)
     fig = plt.figure(
         figsize=(_NATURE_DOUBLE_COLUMN_WIDTH_PX / _FIG_DPI, figure_height),
         dpi=_FIG_DPI,
@@ -5355,73 +5338,30 @@ def _candidate_evidence_figure(
         ncols=2,
         height_ratios=[0.75, max(2.4, 0.32 * feature_count)],
         width_ratios=[0.43, 0.57],
-        left=0.285,
-        right=0.98,
-        top=0.81,
-        bottom=max(0.08, 0.36 / figure_height),
-        hspace=0.54,
-        wspace=0.22,
     )
     ax_stability = fig.add_subplot(grid[0, :])
     ax_contribution = fig.add_subplot(grid[1, 0])
     ax_expression = fig.add_subplot(grid[1, 1], sharey=ax_contribution)
 
-    fig.text(
-        0.025,
-        0.955,
-        species,
-        ha="left",
-        va="top",
-        fontsize=10,
-        fontstyle="italic",
-        color=_AXIS_COLOR,
-    )
-    fig.text(
-        0.025,
-        0.905,
-        metadata_text,
-        ha="left",
-        va="top",
-        fontsize=7,
-        color=_MUTED_TEXT_COLOR,
-    )
-    fig.text(
-        0.98,
-        0.947,
-        f"P({trait_name} = 1) = {probability:.3f}",
-        ha="right",
-        va="top",
-        fontsize=9,
-        color=_AXIS_COLOR,
-    )
+    header_rows = [
+        (species, 10, "italic"),
+        (f"P({trait_name} = 1) = {probability:.3f}", 9, "normal"),
+    ]
     if is_cv_error:
         decision_text = f"True = {label} | Predicted = {pred_label} | {confusion_group}"
         if candidate.get("decision_status") == "abstained":
             decision_text = f"True = {label} | Abstained (raw prediction = {pred_label})"
-        fig.text(
-            0.98,
-            0.905,
-            decision_text,
-            ha="right",
-            va="top",
-            fontsize=7,
-            color=_MUTED_TEXT_COLOR,
+        header_rows.append((decision_text, 7, "normal"))
+    renderer = cast(Any, FigureCanvasAgg(fig)).get_renderer()
+    header_y = 1 - 8 / 72 / figure_height
+    for label_text, size, fontstyle in header_rows:
+        header = fig.text(
+            8 / 72 / fig.get_figwidth(), header_y,
+            textwrap.fill(label_text, width=int(80 * 9 / size)),
+            ha="left", va="top", fontsize=size, fontstyle=fontstyle,
+            color=_AXIS_COLOR, gid="phenoradar-header",
         )
-
-    if not is_cv_error and candidate.get("phylo_prob") is not None:
-        fig.text(
-            0.025, 0.87,
-            f"Phylogenetic P = {float(candidate['phylo_prob']):.3f}; "
-            f"expression minus phylogenetic = {float(candidate['prob_difference']):+.3f}",
-            ha="left", va="top", fontsize=6, color=_MUTED_TEXT_COLOR,
-        )
-    if is_predict and candidate.get("information_coverage") is not None:
-        fig.text(
-            0.98, 0.87,
-            f"Information coverage {float(candidate['information_coverage']):.1%} "
-            f"(required {float(candidate['abstention_threshold']):.0%})",
-            ha="right", va="top", fontsize=6, color=_MUTED_TEXT_COLOR,
-        )
+        header_y -= (header.get_window_extent(renderer).height / fig.dpi + 6 / 72) / figure_height
     stability_title = (
         "A   OOF prediction across fold ensemble models" if is_cv_error
         else "A   Prediction stability across outer-CV models"
@@ -5453,6 +5393,7 @@ def _candidate_evidence_figure(
             color="#7a7a7a",
             linewidth=0.9,
             zorder=1,
+            label="Model range",
         )
         ax_stability.hlines(
             0.0,
@@ -5461,6 +5402,7 @@ def _candidate_evidence_figure(
             color="#4d4d4d",
             linewidth=4.0,
             zorder=2,
+            label="Model IQR",
         )
         jitter = np.linspace(-0.045, 0.045, fold_values.size)
         ax_stability.scatter(
@@ -5471,6 +5413,7 @@ def _candidate_evidence_figure(
             alpha=0.72,
             linewidths=0,
             zorder=3,
+            label="Individual model",
         )
         ax_stability.scatter(
             [float(median)],
@@ -5480,21 +5423,7 @@ def _candidate_evidence_figure(
             edgecolors="white",
             linewidths=0.5,
             zorder=4,
-        )
-        summary_label = "Ensemble" if (is_cv_error or is_predict) else "Outer-CV"
-        summary_text = (
-            f"{summary_label} median {float(median):.3f} "
-            f"(range {float(np.min(fold_values)):.3f}–{float(np.max(fold_values)):.3f})"
-        )
-        ax_stability.text(
-            0.995,
-            0.96,
-            summary_text,
-            transform=ax_stability.transAxes,
-            ha="right",
-            va="top",
-            fontsize=6,
-            color=_MUTED_TEXT_COLOR,
+            label="Model median",
         )
     ax_stability.scatter(
         [probability],
@@ -5521,10 +5450,14 @@ def _candidate_evidence_figure(
         linewidth=0.8,
         linestyle=(0, (4, 4)),
         zorder=0,
+        label="Decision threshold",
     )
     ax_stability.grid(axis="x", alpha=0.7)
     ax_stability.spines["left"].set_visible(False)
-    ax_stability.legend(loc="upper left", frameon=False, fontsize=6, handletextpad=0.3)
+    ax_stability.legend(
+        loc="upper left", bbox_to_anchor=(0, -0.55), ncol=3,
+        frameon=False, fontsize=6, handletextpad=0.3, borderaxespad=0,
+    )
 
     y_positions = np.arange(feature_count, dtype=float)
     bar_colors = np.where(
@@ -5669,10 +5602,10 @@ def _candidate_evidence_figure(
         legend_handles = legend_handles[-1:]
     ax_expression.legend(
         handles=legend_handles,
-        loc="lower right",
-        bbox_to_anchor=(1.0, 1.10),
+        loc="upper left",
+        bbox_to_anchor=(0.0, -0.13),
         frameon=False,
-        ncol=3,
+        ncol=1,
         fontsize=5.8,
         handlelength=1.5,
         columnspacing=0.9,
@@ -5890,6 +5823,8 @@ def write_cv_species_evidence_figures(
                 f"{confusion_group}"
             )
         directory = "false_negative" if confusion_group == "FN" else "false_positive"
+        if target.get("decision_status") == "abstained":
+            directory = f"abstained/{directory}"
         used_names = used_names_by_group.setdefault(directory, set())
         filename = _candidate_filename(species, used_names=used_names)
         relative_path = Path(directory) / filename
