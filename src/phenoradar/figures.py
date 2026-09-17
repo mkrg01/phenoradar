@@ -3483,7 +3483,7 @@ def _summarize_model_selection_trials_for_figure(
     }
     if not required.issubset(model_selection_trials.columns):
         raise FigureError(
-            "model_selection_trials.tsv schema is invalid for model_selection_trials.svg"
+            "model_selection_trials.tsv schema is invalid for the model-selection figure"
         )
 
     scored = model_selection_trials
@@ -3530,56 +3530,6 @@ def _params_dict(params_json: str | None) -> dict[str, Any] | None:
     if not isinstance(parsed, dict):
         return None
     return parsed
-
-
-def _varying_param_keys(params_json_values: list[str | None]) -> set[str]:
-    dicts = [_params_dict(value) for value in params_json_values]
-    all_keys = sorted({key for item in dicts if item is not None for key in item})
-    varying: set[str] = set()
-    for key in all_keys:
-        observed: set[str] = set()
-        for item in dicts:
-            if item is None or key not in item:
-                observed.add("__MISSING__")
-                continue
-            value = item[key]
-            observed.add(
-                json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-            )
-        if len(observed) > 1:
-            varying.add(key)
-    return varying
-
-
-def _compact_params_label(
-    params_json: str | None,
-    *,
-    include_keys: set[str] | None = None,
-) -> str:
-    if params_json is None:
-        return "{}"
-    raw = params_json.strip()
-    if raw == "":
-        return "{}"
-
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return raw
-    if isinstance(parsed, dict):
-        if include_keys is not None:
-            parsed = {key: value for key, value in sorted(parsed.items()) if key in include_keys}
-        if not parsed:
-            return "{}"
-        # Keep the exact values in the tables; axes need only readable precision.
-        parsed = {
-            key: float(f"{value:.4g}") if isinstance(value, float) else value
-            for key, value in parsed.items()
-        }
-        return json.dumps(parsed, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    if parsed is None:
-        return "null"
-    return json.dumps(parsed, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
 def _model_selection_metric_axis_label(metric_names: Sequence[str]) -> str:
@@ -3634,228 +3584,38 @@ def _model_selection_summary_with_se(
     return summary
 
 
-def _model_selection_trials_summary_panels(
-    model_selection_trials_summary: pl.DataFrame,
-    out_path: Path,
-    *,
-    max_sample_sets_per_fold: int,
-) -> None:
-    required = {
-        "fold_id",
-        "sample_set_id",
-        "candidate_index",
-        "metric_name",
-        "metric_value_mean",
-        "metric_value_std",
-    }
-    if not required.issubset(model_selection_trials_summary.columns):
-        raise FigureError(
-            "model_selection_trials_summary.tsv schema is invalid for model_selection_trials.svg"
-        )
-
-    summary = _model_selection_summary_with_se(model_selection_trials_summary)
-
-    data = (
-        summary.select(
-            pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
-            pl.col("sample_set_id").cast(pl.Int64, strict=False).alias("__sample_set_id"),
-            pl.col("candidate_index").cast(pl.Int64, strict=False).alias("__candidate_index"),
-            pl.col("metric_name").cast(pl.String, strict=False).alias("__metric_name"),
-            pl.col("metric_value_mean").cast(pl.Float64, strict=False).alias("__mean"),
-            pl.col("metric_value_std").cast(pl.Float64, strict=False).alias("__std"),
-            pl.col("metric_value_se").cast(pl.Float64, strict=False).alias("__se"),
-            pl.col("params_json").cast(pl.String, strict=False).alias("__params_json"),
-        )
-        .with_columns(
-            pl.when(pl.col("__se").is_null() | pl.col("__se").is_nan() | (pl.col("__se") < 0.0))
-            .then(0.0)
-            .otherwise(pl.col("__se"))
-            .alias("__se_plot")
-        )
-        .filter(
-            pl.col("__fold_id").is_not_null()
-            & (pl.col("__fold_id") != "")
-            & pl.col("__sample_set_id").is_not_null()
-            & pl.col("__candidate_index").is_not_null()
-            & pl.col("__metric_name").is_not_null()
-            & (pl.col("__metric_name") != "")
-            & pl.col("__mean").is_not_null()
-            & pl.col("__mean").is_finite()
-        )
+def _model_selection_figure_rule(
+    selected: pl.DataFrame | None, *, selection_scope: str,
+) -> str:
+    """Use the recorded rule for this stage; legacy tables default to best."""
+    if selected is None or selected.height == 0 or "selection_rule" not in selected.columns:
+        return "best"
+    if "selection_scope" not in selected.columns:
+        raise FigureError("model_selection_selected.tsv is missing selection_scope")
+    rules = (
+        selected.filter(pl.col("selection_scope") == selection_scope)
+        .get_column("selection_rule").drop_nulls().unique().to_list()
     )
-    if data.height == 0:
-        return
-
-    if max_sample_sets_per_fold < 1:
-        raise FigureError("max_sample_sets_per_fold must be >= 1")
-
-    fold_ids = [str(v) for v in data.select("__fold_id").unique().to_series().to_list()]
-    fold_ids = sorted(
-        fold_ids,
-        key=lambda value: (0, int(value)) if value.isdigit() else (1, value),
-    )
-
-    sample_sets_by_fold: dict[str, list[int]] = {}
-    per_fold_total: dict[str, int] = {}
-    n_rows = 0
-    for fold_id in fold_ids:
-        sample_set_ids = sorted(
-            int(v)
-            for v in data.filter(pl.col("__fold_id") == fold_id)
-            .select("__sample_set_id")
-            .unique()
-            .to_series()
-            .to_list()
-        )
-        per_fold_total[fold_id] = len(sample_set_ids)
-        selected_sample_set_ids = sample_set_ids[:max_sample_sets_per_fold]
-        sample_sets_by_fold[fold_id] = selected_sample_set_ids
-        n_rows = max(n_rows, len(selected_sample_set_ids))
-    if n_rows == 0:
-        return
-
-    panels: list[dict[str, Any]] = []
-    x_values: list[float] = []
-    max_candidates = 1
-    max_label_length = 1
-    for fold_id in fold_ids:
-        selected_sample_set_ids = sample_sets_by_fold[fold_id]
-        if not selected_sample_set_ids:
-            continue
-        sample_set_id = selected_sample_set_ids[0]
-        panel_data = data.filter(
-            (pl.col("__fold_id") == fold_id) & (pl.col("__sample_set_id") == sample_set_id)
-        ).sort("__candidate_index")
-        if panel_data.height == 0:
-            continue
-
-        candidates = [int(v) for v in panel_data.select("__candidate_index").to_series().to_list()]
-        means = np.array(panel_data.select("__mean").to_series().to_list(), dtype=float)
-        ses = np.array(panel_data.select("__se_plot").to_series().to_list(), dtype=float)
-        params_json_values = [
-            None if value is None else str(value)
-            for value in panel_data.select("__params_json").to_series().to_list()
-        ]
-        varying_keys = _varying_param_keys(params_json_values)
-        params_labels = [
-            _compact_params_label(value, include_keys=varying_keys) for value in params_json_values
-        ]
-        y_labels = [
-            textwrap.fill(f"{candidate}: {params_label}", width=32)
-            for candidate, params_label in zip(candidates, params_labels, strict=True)
-        ]
-
-        max_candidates = max(max_candidates, len(candidates))
-        max_label_length = max(max_label_length, max(len(label) for label in y_labels))
-        for mean_value, se_value in zip(means.tolist(), ses.tolist(), strict=True):
-            x_values.extend([mean_value - se_value, mean_value + se_value])
-
-        panels.append(
-            {
-                "fold_id": fold_id,
-                "sample_set_id": sample_set_id,
-                "candidates": candidates,
-                "means": means,
-                "ses": ses,
-                "y_labels": y_labels,
-            }
-        )
-
-    if not panels:
-        return
-
-    x_min, x_max = _padded_domain(x_values, include_zero=True)
-
-    n_panels = len(panels)
-    max_cols = min(2, n_panels)
-    n_cols = min(
-        range(1, max_cols + 1),
-        key=lambda cols: (
-            abs((cols / int(np.ceil(n_panels / cols))) - 1.6)
-            + (int(np.ceil(n_panels / cols)) * cols - n_panels) * 0.15,
-            int(np.ceil(n_panels / cols)) * cols - n_panels,
-        ),
-    )
-    n_rows = int(np.ceil(n_panels / n_cols))
-
-    left_label_px = min(640, max(190, 40 + int(max_label_length * 4)))
-    right_pad_px = 24
-    fig_width_px = _NATURE_DOUBLE_COLUMN_WIDTH_PX
-
-    label_lines = max(len(label.splitlines()) for panel in panels for label in panel["y_labels"])
-    panel_height_px = max(230, 86 + max_candidates * max(20, label_lines * 11))
-    header_px = 26
-    footer_px = 38
-    fig_height_px = header_px + panel_height_px * n_rows + footer_px
-
-    fig, axes = plt.subplots(
-        n_rows,
-        n_cols,
-        figsize=_figure_size_inches(fig_width_px, fig_height_px),
-        dpi=_FIG_DPI,
-        squeeze=False,
-    )
-    fig.patch.set_facecolor("white")
-
-    metric_names = [str(v) for v in data.select("__metric_name").unique().to_series().to_list()]
-    metric_axis_label = f"{_model_selection_metric_axis_label(metric_names)} mean +/- SE"
-    for panel_index, panel in enumerate(panels):
-        row_index, col_index = divmod(panel_index, n_cols)
-        ax = axes[row_index][col_index]
-        y_pos = np.arange(len(panel["candidates"]), dtype=float)
-        ax.errorbar(
-            panel["means"],
-            y_pos,
-            xerr=panel["ses"],
-            fmt="o",
-            color=_COLOR_BLUE,
-            ecolor=_COLOR_SKY,
-            elinewidth=0.8,
-            capsize=2.5,
-            markersize=3.0,
-            markeredgecolor=_COLOR_BLUE,
-        )
-        ax.set_xlim(x_min, x_max)
-        ax.set_yticks(y_pos)
-        ax.set_yticklabels(panel["y_labels"], fontsize=6, fontfamily="monospace")
-        ax.tick_params(axis="y", pad=1.5)
-        ax.invert_yaxis()
-        ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
-        ax.set_axisbelow(True)
-        ax.axvline(0.0, color=_MUTED_TEXT_COLOR, linewidth=0.8)
-        ax.set_title(str(panel["fold_id"]), fontsize=_LABEL_FONTSIZE, pad=5.0)
-        if col_index == 0:
-            ax.set_ylabel("Candidate: parameters", fontsize=_LABEL_FONTSIZE)
-        ax.set_xlabel(metric_axis_label, fontsize=_LABEL_FONTSIZE, labelpad=3.0)
-
-    for panel_index in range(n_panels, n_rows * n_cols):
-        row_index, col_index = divmod(panel_index, n_cols)
-        axes[row_index][col_index].axis("off")
-
-    left_margin = left_label_px / fig_width_px
-    right_margin = 1.0 - (right_pad_px / fig_width_px)
-    top_margin = min(0.98, 1.0 - (header_px / fig_height_px) + 0.01)
-    bottom_margin = footer_px / fig_height_px
-    fig.subplots_adjust(
-        left=left_margin,
-        right=right_margin,
-        top=top_margin,
-        bottom=bottom_margin,
-        wspace=0.32,
-        hspace=0.55,
-    )
-    _save_svg_figure(fig, out_path)
+    if not rules:
+        return "best"
+    if len(rules) != 1 or rules[0] not in {"best", "one_se"}:
+        raise FigureError(f"Invalid or mixed model-selection rules for {selection_scope}: {rules}")
+    return str(rules[0])
 
 
-def _model_selection_one_se_curve(
+def _model_selection_curve(
     model_selection_trials_summary: pl.DataFrame,
     model_selection_selected: pl.DataFrame | None,
     out_path: Path,
     *,
     max_sample_sets_per_fold: int,
+    selection_rule: str = "best",
     selection_scope: str = "outer_fold",
     panel_scope_label: str = "fold",
 ) -> None:
+    if selection_rule not in {"best", "one_se"}:
+        raise FigureError(f"Invalid model-selection rule: {selection_rule}")
+    show_one_se = selection_rule == "one_se"
     required = {
         "fold_id",
         "sample_set_id",
@@ -3866,7 +3626,7 @@ def _model_selection_one_se_curve(
     if not required.issubset(model_selection_trials_summary.columns):
         raise FigureError(
             "model_selection_trials_summary.tsv schema is invalid for "
-            "model_selection_one_se_curve.svg"
+            f"{out_path.name}"
         )
 
     summary = _model_selection_summary_with_se(model_selection_trials_summary)
@@ -3915,7 +3675,7 @@ def _model_selection_one_se_curve(
         if not selected_required.issubset(model_selection_selected.columns):
             raise FigureError(
                 "model_selection_selected.tsv schema is invalid for "
-                "model_selection_one_se_curve.svg"
+                f"{out_path.name}"
             )
         selected_rows = (
             model_selection_selected.select(
@@ -3976,7 +3736,19 @@ def _model_selection_one_se_curve(
                     )
                     for row in rows
                 ]
-                if all(value is not None and value > 0.0 for value in param_values):
+                other_params = [
+                    {
+                        key: value
+                        for key, value in (_params_dict(row["__params_json"]) or {}).items()
+                        if key != param_name
+                    }
+                    for row in rows
+                ]
+                if (
+                    all(value is not None and value > 0.0 for value in param_values)
+                    and len(set(param_values)) == len(rows)
+                    and all(params == other_params[0] for params in other_params)
+                ):
                     x_values = np.log10(
                         np.array(
                             [value for value in param_values if value is not None], dtype=float
@@ -3993,8 +3765,11 @@ def _model_selection_one_se_curve(
             best_offset = int(np.argmax(means) if higher_is_better else np.argmin(means))
             best_mean = float(means[best_offset])
             best_se = float(ses[best_offset])
-            threshold = best_mean - best_se if higher_is_better else best_mean + best_se
-            eligible = means >= threshold if higher_is_better else means <= threshold
+            threshold = None
+            eligible = np.zeros(means.size, dtype=bool)
+            if show_one_se:
+                threshold = best_mean - best_se if higher_is_better else best_mean + best_se
+                eligible = means >= threshold if higher_is_better else means <= threshold
             selected_candidate = selected_by_key.get((fold_id, sample_set_id))
 
             order = np.argsort(x_values)
@@ -4018,13 +3793,25 @@ def _model_selection_one_se_curve(
             all_x.extend(x_values.tolist())
             for mean, se in zip(means.tolist(), ses.tolist(), strict=True):
                 all_y.extend([mean - se, mean + se])
-            all_y.append(threshold)
+            if threshold is not None:
+                all_y.append(threshold)
             x_labels.append(x_label)
 
     if not panels:
         return
 
     x_label = x_labels[0] if len(set(x_labels)) == 1 else "candidate_index"
+    if len(set(x_labels)) > 1:
+        # A shared axis label must describe the coordinates in every panel.
+        all_x = []
+        for panel in panels:
+            indices = np.asarray(panel["candidate_indices"], dtype=int)
+            order = np.argsort(indices)
+            panel["x"] = indices[order].astype(float)
+            panel["candidate_indices"] = indices[order].tolist()
+            for key in ("means", "ses", "eligible"):
+                panel[key] = panel[key][order]
+            all_x.extend(panel["x"].tolist())
     metric_axis_label = _model_selection_metric_axis_label(
         [panel["metric_name"] for panel in panels]
     )
@@ -4044,7 +3831,10 @@ def _model_selection_one_se_curve(
         ),
     )
     n_rows = int(np.ceil(n_panels / n_cols))
-    fig_width_px = max(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 230 * n_cols + 80)
+    fig_width_px = min(
+        _NATURE_DOUBLE_COLUMN_WIDTH_PX,
+        max(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 230 * n_cols + 80),
+    )
     fig_height_px = max(250, 200 * n_rows + 66)
     fig, axes = plt.subplots(
         n_rows,
@@ -4084,23 +3874,24 @@ def _model_selection_one_se_curve(
             zorder=2,
             label="Candidate",
         )
-        ax.scatter(
-            x_values[eligible],
-            means[eligible],
-            s=24,
-            color=_COLOR_GREEN,
-            edgecolor="white",
-            linewidth=0.4,
-            zorder=3,
-            label="Within one-SE",
-        )
-        ax.axhline(
-            float(panel["threshold"]),
-            color=_COLOR_ORANGE,
-            linewidth=0.9,
-            linestyle="--",
-            label="one-SE threshold",
-        )
+        if show_one_se:
+            ax.scatter(
+                x_values[eligible],
+                means[eligible],
+                s=24,
+                color=_COLOR_GREEN,
+                edgecolor="white",
+                linewidth=0.4,
+                zorder=3,
+                label="Within one-SE",
+            )
+            ax.axhline(
+                float(panel["threshold"]),
+                color=_COLOR_ORANGE,
+                linewidth=0.9,
+                linestyle="--",
+                label="one-SE threshold",
+            )
 
         best_candidate = int(panel["best_candidate"])
         if best_candidate in candidate_indices:
@@ -4151,14 +3942,9 @@ def _model_selection_one_se_curve(
 
     legend_handles = [
         Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="none",
-            markerfacecolor=_COLOR_GREEN,
-            label="Within one-SE",
+            [0], [0], marker="o", color=_COLOR_BLUE, linewidth=0.8,
+            markerfacecolor=_COLOR_BLUE, label="Candidate mean ± SE",
         ),
-        Line2D([0], [0], color=_COLOR_ORANGE, linestyle="--", label="one-SE threshold"),
         Line2D(
             [0],
             [0],
@@ -4177,15 +3963,31 @@ def _model_selection_one_se_curve(
             label="Selected candidate",
         ),
     ]
+    if not any(panel["selected_candidate"] is not None for panel in panels):
+        legend_handles.pop()
+    if show_one_se:
+        legend_handles[1:1] = [
+            Line2D(
+                [0], [0], marker="o", color="none", markerfacecolor=_COLOR_GREEN,
+                label="Within one-SE",
+            ),
+            Line2D([0], [0], color=_COLOR_ORANGE, linestyle="--", label="one-SE threshold"),
+        ]
     fig.legend(
         handles=legend_handles,
         loc="lower center",
-        ncol=min(4, len(legend_handles)),
+        ncol=min(3, len(legend_handles)),
         frameon=False,
         bbox_to_anchor=(0.5, 0.01),
     )
     fig.subplots_adjust(left=0.10, right=0.995, top=0.93, bottom=0.18, wspace=0.30, hspace=0.48)
     _save_svg_figure(fig, out_path)
+    # Re-rendering must not leave the retired plot or the other rule's plot beside it.
+    prefix = "final_refit_" if selection_scope == "final_refit" else ""
+    for stem in ("model_selection_trials", "model_selection_one_se_curve", "model_selection"):
+        obsolete = out_path.with_name(f"{prefix}{stem}.svg")
+        if obsolete != out_path:
+            obsolete.unlink(missing_ok=True)
 
 
 def _feature_filter_funnel(
@@ -5008,21 +4810,13 @@ def write_run_figures(
     if selection_summary is None and model_selection_trials is not None:
         selection_summary = _summarize_model_selection_trials_for_figure(model_selection_trials)
     if selection_summary is not None:
+        rule = _model_selection_figure_rule(model_selection_selected, selection_scope="outer_fold")
+        name = "model_selection_one_se_curve" if rule == "one_se" else "model_selection"
         add_job(
-            "model_selection_trials",
-            _model_selection_trials_summary_panels,
-            (selection_summary, cv_dir / "model_selection_trials.svg"),
-            {"max_sample_sets_per_fold": _MODEL_SELECTION_SAMPLE_SET_LIMIT},
-        )
-        add_job(
-            "model_selection_one_se_curve",
-            _model_selection_one_se_curve,
-            (
-                selection_summary,
-                model_selection_selected,
-                cv_dir / "model_selection_one_se_curve.svg",
-            ),
-            {"max_sample_sets_per_fold": _MODEL_SELECTION_SAMPLE_SET_LIMIT},
+            name,
+            _model_selection_curve,
+            (selection_summary, model_selection_selected, cv_dir / f"{name}.svg"),
+            {"max_sample_sets_per_fold": _MODEL_SELECTION_SAMPLE_SET_LIMIT, "selection_rule": rule},
         )
     if final_refit_model_selection_trials_summary is not None:
         final_selection_summary = final_refit_model_selection_trials_summary.with_columns(
@@ -5042,25 +4836,18 @@ def write_run_figures(
                 .otherwise(pl.col("fold_id").cast(pl.String, strict=False))
                 .alias("fold_id")
             )
-        add_job(
-            "final_refit_model_selection_trials",
-            _model_selection_trials_summary_panels,
-            (
-                final_selection_summary,
-                model_dir / "final_refit_model_selection_trials.svg",
-            ),
-            {"max_sample_sets_per_fold": _MODEL_SELECTION_SAMPLE_SET_LIMIT},
+        rule = _model_selection_figure_rule(final_selection_selected, selection_scope="final_refit")
+        name = (
+            "final_refit_model_selection_one_se_curve" if rule == "one_se"
+            else "final_refit_model_selection"
         )
         add_job(
-            "final_refit_model_selection_one_se_curve",
-            _model_selection_one_se_curve,
-            (
-                final_selection_summary,
-                final_selection_selected,
-                model_dir / "final_refit_model_selection_one_se_curve.svg",
-            ),
+            name,
+            _model_selection_curve,
+            (final_selection_summary, final_selection_selected, model_dir / f"{name}.svg"),
             {
                 "max_sample_sets_per_fold": _MODEL_SELECTION_SAMPLE_SET_LIMIT,
+                "selection_rule": rule,
                 "selection_scope": "final_refit",
                 "panel_scope_label": "scope",
             },

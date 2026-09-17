@@ -1236,11 +1236,13 @@ model_selection:
     assert trials_summary_path.exists()
     assert final_trials_path.exists()
     assert final_trials_summary_path.exists()
-    assert (run_dirs[0] / "cv" / "figures" / "model_selection_trials.svg").exists()
-    assert (run_dirs[0] / "cv" / "figures" / "model_selection_one_se_curve.svg").exists()
-    assert (run_dirs[0] / "model" / "figures" / "final_refit_model_selection_trials.svg").exists()
+    assert not (run_dirs[0] / "cv" / "figures" / "model_selection_trials.svg").exists()
+    assert (run_dirs[0] / "cv" / "figures" / "model_selection.svg").exists()
+    assert not (
+        run_dirs[0] / "model" / "figures" / "final_refit_model_selection_trials.svg"
+    ).exists()
     assert (
-        run_dirs[0] / "model" / "figures" / "final_refit_model_selection_one_se_curve.svg"
+        run_dirs[0] / "model" / "figures" / "final_refit_model_selection.svg"
     ).exists()
     assert not (run_dirs[0] / "cv" / "figures" / "selected_hyperparameter_stability.svg").exists()
 

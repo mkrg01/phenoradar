@@ -371,15 +371,15 @@ Always written:
     - `cv/figures/feature_filter_funnel.svg`
     - `cv/figures/non_zero_feature_count_by_fold.svg`
     - `cv/figures/probability_by_<group>.svg` (attempted when `summary.group_col` is present in metadata)
-    - `cv/figures/model_selection_trials.svg` (candidate selection active)
-    - `cv/figures/model_selection_one_se_curve.svg` (candidate selection active)
+    - `cv/figures/model_selection.svg` (`selection_rule=best`)
+    - `cv/figures/model_selection_one_se_curve.svg` (`selection_rule=one_se`)
     - `cv/figures/roc_curve_cv.svg` (may be skipped with warning for degenerate folds)
     - `cv/figures/pr_curve_cv.svg` (may be skipped with warning for degenerate folds)
     - `model/figures/final_refit_feature_importance_top.svg` (`full_run`)
     - `model/figures/final_refit_coefficients_signed_top.svg` (`full_run`; linear model)
     - `model/figures/final_refit_feature_filter_funnel.svg` (`full_run`)
-    - `model/figures/final_refit_model_selection_trials.svg` (candidate selection active in `full_run`)
-    - `model/figures/final_refit_model_selection_one_se_curve.svg` (candidate selection active in `full_run`)
+    - `model/figures/final_refit_model_selection.svg` (`full_run`, `selection_rule=best`)
+    - `model/figures/final_refit_model_selection_one_se_curve.svg` (`full_run`, `selection_rule=one_se`)
     - `external_test/figures/final_refit_loss_by_split.svg` (attempted in `full_run`)
     - `external_test/figures/top_feature_expression_by_confusion.svg` (attempted in `full_run` when external test rows exist)
     - `external_test/figures/external_species_probability_by_trait.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
@@ -1007,19 +1007,20 @@ when individual folds are single-label.
 - `cv/figures/non_zero_feature_count_by_fold.svg`
   - Fold-wise distribution of `n_nonzero_features` from `model_sparsity.tsv`.
   - Boxplots are shown when a fold has multiple models; points show individual models.
-- `cv/figures/model_selection_trials.svg` (candidate selection active)
-  - Panels are laid out automatically in a compact grid.
-  - Candidate scores are shown as `metric_value_mean ± metric_value_se`.
+- `cv/figures/model_selection.svg` (`selection_rule=best`) or
+  `cv/figures/model_selection_one_se_curve.svg` (`selection_rule=one_se`)
+  - One curve figure is written per selection stage. The separate trials SVG is retired;
+    candidate details remain in `model_selection_trials*.tsv`.
+  - Both rules show candidate mean scores and standard-error bars, the best mean,
+    and the selected candidate when selection records are available.
+  - Only `one_se` shows the one-SE threshold and eligible-candidate highlighting.
+  - Uses `log10(lambda)` or `log10(C)` when the parameter is positive, unique per
+    candidate, and other parameters are fixed. Otherwise uses `candidate_index`.
   - All folds are shown; per fold, only the first `sample_set_id` is plotted.
-  - Y-axis labels include `candidate_index` and parameter JSON
-    (keys fixed across candidates in the panel are omitted).
-- `cv/figures/model_selection_one_se_curve.svg` (candidate selection active)
-  - Shows candidate mean score with SE, one-SE threshold, best mean candidate,
-    one-SE-eligible candidates, and the selected candidate.
-  - Uses `log10(lambda)` for logistic elastic net when all candidates expose
-    positive `lambda`, or `log10(C)` for positive SVM `C` values;
-    otherwise falls back to `candidate_index`.
-  - All folds are shown; per fold, only the first `sample_set_id` is plotted.
+  - The rule is read from the stage's `model_selection_selected.tsv` records;
+    legacy inputs without a recorded rule use the `best` presentation.
+  - Regeneration removes the retired trials SVG and the opposite-rule SVG only
+    after the replacement figure is saved successfully.
 - `model/figures/final_refit_feature_importance_top.svg` (`full_run`)
   - Top features of the fitted final ensemble.
   - Boxplots and points show variation across final ensemble members, not CV folds.
@@ -1029,11 +1030,10 @@ when individual folds are single-label.
 - `model/figures/final_refit_feature_filter_funnel.svg` (`full_run`)
   - Final-refit feature-count trend through the enabled `preprocess.*_filter` steps.
   - Uses the full training/validation pool and does not depend on external-test rows.
-- `model/figures/final_refit_model_selection_trials.svg` /
-  `model/figures/final_refit_model_selection_one_se_curve.svg`
-  (candidate selection active in `full_run`)
-  - Candidate scores, standard errors, one-SE boundary, and selected candidate from
-    the inner CV performed specifically for final refit.
+- `model/figures/final_refit_model_selection.svg` (`selection_rule=best`) or
+  `model/figures/final_refit_model_selection_one_se_curve.svg` (`selection_rule=one_se`)
+  - The same rule-dependent presentation for the inner CV performed specifically
+    for final refit in `full_run`.
 - `external_test/figures/external_species_probability_by_trait.svg` (`full_run` with external samples)
   - External-test species probabilities grouped by `true_label`.
   - Boxplot with per-species points and trait-wise mean markers.

@@ -14,6 +14,10 @@
 
 ### Features
 
+* retire model-selection trials SVGs and emit one curve per stage: `model_selection.svg`
+  for `best`, or `model_selection_one_se_curve.svg` for `one_se`; show one-SE
+  thresholds and eligibility only for the corresponding rule, including final refit
+
 * omit supplementary configuration and numeric-summary text from bootstrap,
   expression, and species-evidence figures; use legends for ROC/PR statistics
   and the plotted probability-distribution encodings

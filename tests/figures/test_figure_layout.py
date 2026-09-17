@@ -47,8 +47,9 @@ def assert_text_inside_canvas(fig: Figure) -> None:
         assert canvas.contains(box.x1, box.y1), artist.get_text()
 
 
+@pytest.mark.parametrize("selection_rule", ["best", "one_se"])
 def test_model_selection_panels_have_separate_label_space(
-    tmp_path: Path, rendered: list[Figure],
+    tmp_path: Path, rendered: list[Figure], selection_rule: str,
 ) -> None:
     summary = pl.DataFrame([
         {"fold_id": str(fold), "sample_set_id": 0, "candidate_index": candidate,
@@ -57,8 +58,9 @@ def test_model_selection_panels_have_separate_label_space(
          "params_json": '{"C":' + str(10 ** (candidate / 2 - 3)) + '}'}
         for fold in range(5) for candidate in range(4)
     ])
-    figures._model_selection_trials_summary_panels(
-        summary, tmp_path / "trials.svg", max_sample_sets_per_fold=1,
+    figures._model_selection_curve(
+        summary, None, tmp_path / "model_selection.svg", max_sample_sets_per_fold=1,
+        selection_rule=selection_rule,
     )
     fig = rendered[-1]
     assert_text_inside_canvas(fig)
@@ -67,6 +69,40 @@ def test_model_selection_panels_have_separate_label_space(
     for first, second in combinations(boxes, 2):
         assert not first.overlaps(second)
     assert fig.get_figwidth() <= 7.2
+    # Rule-specific artists, not just their legend text, must be absent for best.
+    for ax in fig.axes:
+        if ax.axison:
+            assert any(line.get_label() == "one-SE threshold" for line in ax.lines) == (
+                selection_rule == "one_se"
+            )
+            assert any(mark.get_label() == "Within one-SE" for mark in ax.collections) == (
+                selection_rule == "one_se"
+            )
+            assert any(len(mark.get_segments()) > 0 for mark in ax.collections
+                       if hasattr(mark, "get_segments"))
+
+
+
+@pytest.mark.parametrize("parameter_rows", [
+    ['{"lambda":1}', '{"lambda":10}', '{"C":1}', '{"C":10}'],
+    ['{"lambda":1,"alpha":0.1}', '{"lambda":1,"alpha":0.9}'] * 2,
+])
+def test_selection_curve_uses_candidate_coordinates_for_mixed_parameter_axes(
+    tmp_path: Path, rendered: list[Figure], parameter_rows: list[str],
+) -> None:
+    summary = pl.DataFrame({
+        "fold_id": ["0", "0", "1", "1"], "sample_set_id": [0] * 4,
+        "candidate_index": [2, 4, 2, 4], "metric_name": ["mcc"] * 4,
+        "metric_value_mean": [0.3, 0.5, 0.4, 0.6], "metric_value_se": [0.02] * 4,
+        "params_json": parameter_rows,
+    })
+    figures._model_selection_curve(
+        summary, None, tmp_path / "model_selection.svg", max_sample_sets_per_fold=1,
+    )
+    for ax in rendered[-1].axes:
+        if ax.axison:
+            assert ax.get_xlabel() == "candidate_index"
+            assert ax.lines[0].get_xdata().tolist() == [2.0, 4.0]
 
 
 def test_long_feature_labels_and_colorbar_fit_on_page(
