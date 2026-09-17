@@ -14,6 +14,12 @@
 
 ### Features
 
+* build bundle prediction matrices directly in the required feature schema and
+  reuse prediction inputs and member probabilities for candidate interpretation
+* compute candidate contributions in bounded row blocks with deterministic
+  top-feature selection, avoiding model-by-species-by-feature cubes
+* reuse figure workers across run stages and record figure-category/job timings;
+  write a timing trace for prediction and interpretation
 * generate per-species local contribution and expression-reference PDFs from
   `predict`, with fitted-member probability tables, coverage labels, and honest
   unavailable-reference markers; preserve training reference/annotation snapshots

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -109,6 +109,26 @@ class ModelPreprocessEntry:
 
     feature_names: list[str]
     scaler: FeatureScaler
+
+
+@dataclass
+class BundlePredictionContext:
+    """Own reusable prediction inputs until interpretation finishes."""
+
+    bundle: LoadedBundle | None = None
+    species: list[str] = field(default_factory=list)
+    feature_names: list[str] = field(default_factory=list)
+    raw: np.ndarray | None = None
+    transformed: np.ndarray | None = None
+    model_probabilities: list[np.ndarray] = field(default_factory=list)
+
+    def clear(self) -> None:
+        self.bundle = None
+        self.species = []
+        self.feature_names = []
+        self.raw = None
+        self.transformed = None
+        self.model_probabilities = []
 
 
 def _sha256_file(path: Path) -> str:
@@ -791,41 +811,37 @@ def prepare_bundle_input(
     config: AppConfig | PredictConfig, bundle: LoadedBundle, species_list: list[str]
 ) -> tuple[np.ndarray, np.ndarray, list[str], list[str]]:
     """Align and transform raw inputs identically for prediction and interpretation."""
+    alignment_features = (
+        bundle.transform_feature_names
+        if bundle.expression_transform in _CONTEXTUAL_EXPRESSION_TRANSFORMS
+        else bundle.feature_names
+    )
+    matrix_builder = None
     try:
         matrix_builder = ExpressionMatrixBuilder(
             config, absent_feature_fill=bundle.absent_feature_fill
         )
-        x_raw, input_features = matrix_builder.build_matrix(species_list)
+        # Validate all consumed rows once, including columns outside the bundle.
+        # Rank transforms retain their saved training schema before ranking.
+        matrix_builder.cache_species(species_list)
+        input_features = matrix_builder.feature_names_for_species(species_list)
+        input_feature_set = set(input_features)
+        if not input_feature_set.intersection(bundle.feature_names) and (
+            bundle.missing_expression_method != "neutral"
+        ):
+            raise BundleError(
+                "No bundle features were available in prediction input after alignment"
+            )
+        aligned_raw, _ = matrix_builder.build_matrix(
+            species_list, feature_order=alignment_features
+        )
     except CVError as exc:
         raise BundleError(str(exc)) from exc
-    input_index = {feature: idx for idx, feature in enumerate(input_features)}
-    bundle_features = bundle.feature_names
-    input_feature_set = set(input_features)
-    model_overlap_count = len(input_feature_set.intersection(bundle_features))
-    if model_overlap_count == 0 and bundle.missing_expression_method != "neutral":
-        raise BundleError("No bundle features were available in prediction input after alignment")
-
-    if bundle.expression_transform in _CONTEXTUAL_EXPRESSION_TRANSFORMS:
-        alignment_features = bundle.transform_feature_names
-    else:
-        # Feature-wise transforms commute with feature selection, so aligning only
-        # the model-feature union avoids materializing unused input columns.
-        alignment_features = bundle_features
+    finally:
+        if matrix_builder is not None:
+            matrix_builder.close()
     alignment_feature_set = set(alignment_features)
-
-    absent_feature_fill_value = 0.0 if bundle.absent_feature_fill == 0 else float("nan")
-    aligned_raw = np.full(
-        (len(species_list), len(alignment_features)),
-        absent_feature_fill_value,
-        dtype=float,
-    )
-    alignment_overlap_count = 0
-    for feature_idx, feature_name in enumerate(alignment_features):
-        input_idx = input_index.get(feature_name)
-        if input_idx is None:
-            continue
-        aligned_raw[:, feature_idx] = x_raw[:, input_idx]
-        alignment_overlap_count += 1
+    alignment_overlap_count = len(input_feature_set.intersection(alignment_feature_set))
 
     try:
         transformed = apply_expression_transform(
@@ -863,9 +879,12 @@ def bundle_preprocess_entries(bundle: LoadedBundle) -> list[ModelPreprocessEntry
 
 
 def predict_with_bundle(
-    config: AppConfig | PredictConfig, bundle: LoadedBundle
+    config: AppConfig | PredictConfig, bundle: LoadedBundle,
+    *, context: BundlePredictionContext | None = None,
 ) -> tuple[pl.DataFrame, list[str]]:
     """Run deterministic inference using a loaded model bundle."""
+    if context is not None:
+        context.clear()
     species_list = _prediction_species(config)
 
     aligned_raw, transformed, alignment_features, warnings = prepare_bundle_input(
@@ -919,4 +938,11 @@ def predict_with_bundle(
             threshold=bundle.abstention_threshold,
             top_features=bundle.abstention_top_features,
         )
+    if context is not None:
+        context.bundle = bundle
+        context.species = species_list
+        context.feature_names = alignment_features
+        context.raw = aligned_raw
+        context.transformed = transformed
+        context.model_probabilities = model_probs
     return pred_df, warnings

@@ -7,11 +7,13 @@ import re
 import textwrap
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import nullcontext
 from functools import wraps
 from hashlib import sha256
 from inspect import signature
 from multiprocessing import get_context
 from pathlib import Path
+from time import perf_counter
 from typing import Any, cast
 
 import matplotlib
@@ -35,6 +37,7 @@ from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
 )
+from phenoradar.figure_runtime import FigureWorkers
 from phenoradar.group_summary import GroupSummaryError, finite_group_probabilities
 from phenoradar.metrics import (
     FIXED_PROBABILITY_THRESHOLD_NAME,
@@ -44,6 +47,7 @@ from phenoradar.metrics import (
     metric_direction,
     metric_higher_is_better,
 )
+from phenoradar.timing import TimingRecorder
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
@@ -435,37 +439,44 @@ def _execute_figure_job(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
     catch_figure_error: bool,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], float, float]:
+    started = perf_counter()
     try:
         func(*args, **kwargs)
     except FigureError as exc:
         if catch_figure_error:
-            return name, [str(exc)]
+            return name, [str(exc)], started, perf_counter()
         raise
-    return name, []
+    return name, [], started, perf_counter()
 
 
-def _run_figure_jobs(jobs: list[_FigureJob], *, parallel_workers: int) -> list[str]:
+def _run_figure_jobs(
+    jobs: list[_FigureJob], *, parallel_workers: int,
+    timing_recorder: TimingRecorder | None = None,
+    workers: FigureWorkers | None = None,
+) -> list[str]:
     if not jobs:
         return []
     worker_count = max(1, min(int(parallel_workers), len(jobs)))
     if worker_count == 1:
         sequential_warnings: list[str] = []
         for name, func, args, kwargs, catch_figure_error in jobs:
-            _job_name, job_warnings = _execute_figure_job(
+            _job_name, job_warnings, started, ended = _execute_figure_job(
                 name,
                 func,
                 args,
                 kwargs,
                 catch_figure_error,
             )
+            if timing_recorder is not None:
+                timing_recorder.record_interval(started, ended, scope="figure_job", stage=name)
             sequential_warnings.extend(job_warnings)
         return sequential_warnings
 
     warnings_by_index: dict[int, list[str]] = {}
-    with ProcessPoolExecutor(
-        max_workers=worker_count,
-        mp_context=get_context("spawn"),
+    with (
+        nullcontext(workers.executor()) if workers is not None
+        else ProcessPoolExecutor(max_workers=worker_count, mp_context=get_context("spawn"))
     ) as executor:
         future_to_index = {
             executor.submit(
@@ -480,7 +491,9 @@ def _run_figure_jobs(jobs: list[_FigureJob], *, parallel_workers: int) -> list[s
         }
         for future in as_completed(future_to_index):
             index = future_to_index[future]
-            _job_name, job_warnings = future.result()
+            _job_name, job_warnings, started, ended = future.result()
+            if timing_recorder is not None:
+                timing_recorder.record_interval(started, ended, scope="figure_job", stage=_job_name)
             warnings_by_index[index] = job_warnings
 
     ordered_warnings: list[str] = []
@@ -4758,6 +4771,8 @@ def write_run_figures(
     top_features: int = _DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
     parallel_workers: int = 1,
+    timing_recorder: TimingRecorder | None = None,
+    workers: FigureWorkers | None = None,
     group_bootstrap_metrics: pl.DataFrame | None = None,
 ) -> list[str]:
     """Write run-level SVG figures under <run_dir>/<stage>/figures."""
@@ -5164,7 +5179,9 @@ def write_run_figures(
             },
             catch_figure_error=True,
         )
-    return _run_figure_jobs(jobs, parallel_workers=parallel_workers)
+    return _run_figure_jobs(
+        jobs, parallel_workers=parallel_workers, timing_recorder=timing_recorder, workers=workers
+    )
 
 
 _CANDIDATE_MANIFEST_SCHEMA = {
@@ -5671,6 +5688,8 @@ def write_candidate_evidence_figures(
     trait_name: str,
     orthogroup_annotations: pl.DataFrame | None = None,
     parallel_workers: int = 1,
+    timing_recorder: TimingRecorder | None = None,
+    workers: FigureWorkers | None = None,
     evidence_context: str = "candidate",
     probability_threshold: float = FIXED_PROBABILITY_THRESHOLD_VALUE,
 ) -> tuple[pl.DataFrame, list[str]]:
@@ -5756,7 +5775,9 @@ def write_candidate_evidence_figures(
             }
         )
 
-    warnings = _run_figure_jobs(jobs, parallel_workers=parallel_workers)
+    warnings = _run_figure_jobs(
+        jobs, parallel_workers=parallel_workers, timing_recorder=timing_recorder, workers=workers
+    )
     manifest = pl.DataFrame(manifest_rows, schema=_CANDIDATE_MANIFEST_SCHEMA).sort(
         ["prob", "species"], descending=[True, False]
     )
@@ -5784,6 +5805,8 @@ def write_cv_species_evidence_figures(
     trait_name: str,
     orthogroup_annotations: pl.DataFrame | None = None,
     parallel_workers: int = 1,
+    timing_recorder: TimingRecorder | None = None,
+    workers: FigureWorkers | None = None,
 ) -> tuple[pl.DataFrame, list[str]]:
     """Write one candidate-evidence-style PDF per misclassified OOF species."""
     if species_evidence.height == 0 or features.height == 0:
@@ -5940,7 +5963,9 @@ def write_cv_species_evidence_figures(
             }
         )
 
-    warnings = _run_figure_jobs(jobs, parallel_workers=parallel_workers)
+    warnings = _run_figure_jobs(
+        jobs, parallel_workers=parallel_workers, timing_recorder=timing_recorder, workers=workers
+    )
     manifest = pl.DataFrame(
         manifest_rows, schema=_CV_SPECIES_EVIDENCE_MANIFEST_SCHEMA
     ).sort(

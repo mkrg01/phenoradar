@@ -225,6 +225,7 @@ Outputs:
 - `inference/tables/candidate_feature_evidence.tsv`
 - `inference/tables/candidate_reference_expression.tsv`
 - `inference/tables/candidate_model_probabilities.tsv`
+- `runtime/tables/timing.tsv` (prediction, evidence preparation, and figure timings)
 
 Candidate PDFs show signed local contributions, candidate expression against
 known-trait references when available, the probabilities from fitted bundle

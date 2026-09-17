@@ -12,6 +12,7 @@ import yaml
 
 from phenoradar.abstention import ABSTENTION_COLUMNS
 from phenoradar.bundle import (
+    BundlePredictionContext,
     LoadedBundle,
     _predict_with_jobs,
     bundle_preprocess_entries,
@@ -25,6 +26,7 @@ from phenoradar.candidate_evidence import (
 from phenoradar.config import PredictConfig
 from phenoradar.cv import apply_feature_scaling
 from phenoradar.interpret import _linear_coefficients
+from phenoradar.local_evidence import iter_top_contributions
 from phenoradar.orthogroup_annotation import load_orthogroup_annotations
 
 
@@ -113,6 +115,7 @@ def build_predict_evidence_artifacts(
     config: PredictConfig,
     bundle: LoadedBundle,
     predictions: pl.DataFrame,
+    context: BundlePredictionContext | None = None,
 ) -> PredictEvidenceArtifacts:
     """Explain accepted positive candidates using exactly the bundled transforms."""
     artifacts = PredictEvidenceArtifacts()
@@ -127,61 +130,63 @@ def build_predict_evidence_artifacts(
         )
         return artifacts
     species = [str(value) for value in positive["species"].to_list()]
-    raw, transformed, alignment, _ = prepare_bundle_input(config, bundle, species)
+    if context is None:
+        raw, transformed, alignment, _ = prepare_bundle_input(config, bundle, species)
+        selected_rows = np.arange(len(species))
+    else:
+        if context.bundle is not bundle or context.raw is None or context.transformed is None:
+            raise ValueError("Prediction context does not contain inputs for this bundle")
+        raw, transformed, alignment = context.raw, context.transformed, context.feature_names
+        species_index = {name: i for i, name in enumerate(context.species)}
+        if any(name not in species_index for name in species):
+            raise ValueError("Prediction context is missing candidate species")
+        selected_rows = np.array([species_index[name] for name in species], dtype=int)
+        if len(context.model_probabilities) != len(bundle.models):
+            raise ValueError("Prediction context model probabilities do not match the bundle")
     index = {name: i for i, name in enumerate(alignment)}
-    model_index = {name: i for i, name in enumerate(bundle.feature_names)}
     entries = bundle_preprocess_entries(bundle)
-    cube = np.zeros((len(bundle.models), len(species), len(bundle.feature_names)))
     probability_rows: list[dict[str, Any]] = []
+    resolved_coefficients: list[np.ndarray] = []
     for number, (model, entry, coef) in enumerate(
-        zip(
-            bundle.models,
-            entries,
-            coefficients,
-            strict=True,
-        )
+        zip(bundle.models, entries, coefficients, strict=True)
     ):
         assert coef is not None
         if coef.shape != (len(entry.feature_names),):
             raise ValueError("Bundle coefficient width does not match its feature schema")
-        selected = transformed[:, [index[name] for name in entry.feature_names]]
-        scaled = apply_feature_scaling(selected, entry.scaler, bundle.feature_scaling)
-        cube[number][:, [model_index[name] for name in entry.feature_names]] = scaled * coef
-        probabilities = _predict_with_jobs(model, scaled, config.runtime.n_jobs)
+        resolved_coefficients.append(coef)
+        if context is None:
+            selected = transformed[:, [index[name] for name in entry.feature_names]]
+            scaled = apply_feature_scaling(selected, entry.scaler, bundle.feature_scaling)
+            probabilities = _predict_with_jobs(model, scaled, config.runtime.n_jobs)
+        else:
+            probabilities = context.model_probabilities[number][selected_rows]
         probability_rows.extend(
             {"species": name, "model_index": number, "prob": float(probability)}
             for name, probability in zip(species, probabilities, strict=True)
         )
-    means, magnitudes = cube.mean(axis=0), np.abs(cube).mean(axis=0)
-    minima, maxima = cube.min(axis=0), cube.max(axis=0)
     rows: list[dict[str, Any]] = []
-    for row, name in enumerate(species):
-        order = sorted(
-            range(len(bundle.feature_names)),
-            key=lambda i: (
-                -float(magnitudes[row, i]),
-                bundle.feature_names[i],
-            ),
-        )
-        selected_features = [i for i in order if magnitudes[row, i] > 1e-12][
-            : config.figures.top_features
-        ]
-        if not selected_features:
+    for row, contributions in iter_top_contributions(
+        transformed, alignment, rows=selected_rows,
+        model_features=[entry.feature_names for entry in entries],
+        scalers=[entry.scaler for entry in entries], coefficients=resolved_coefficients,
+        scaling_method=bundle.feature_scaling, top_features=config.figures.top_features,
+    ):
+        name = species[row]
+        if not contributions:
             artifacts.warnings.append(
                 f"Skipped candidate evidence figure for {name}: all local contributions are zero"
             )
-        for rank, i in enumerate(selected_features, 1):
-            feature = bundle.feature_names[i]
-            tpm = float(raw[row, index[feature]])
+        for rank, contribution in enumerate(contributions, 1):
+            tpm = float(raw[selected_rows[row], index[contribution.feature]])
             rows.append(
                 {
                     "species": name,
-                    "feature": feature,
+                    "feature": contribution.feature,
                     "local_rank": rank,
-                    "contribution_mean": float(means[row, i]),
-                    "contribution_mean_abs": float(magnitudes[row, i]),
-                    "contribution_min": float(minima[row, i]),
-                    "contribution_max": float(maxima[row, i]),
+                    "contribution_mean": contribution.mean,
+                    "contribution_mean_abs": contribution.mean_abs,
+                    "contribution_min": contribution.minimum,
+                    "contribution_max": contribution.maximum,
                     "candidate_tpm": tpm,
                     "candidate_log2_tpm_plus1": float(np.log2(tpm + 1)),
                     "n_models": len(bundle.models),

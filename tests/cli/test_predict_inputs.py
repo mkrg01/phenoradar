@@ -97,6 +97,11 @@ def test_predict_all_tpm_species_without_metadata_or_training(
     assert "model" not in resolved and "split" not in resolved
     assert resolved["preprocess"] == {"max_pivot_cells": 50_000_000}
     provenance = json.loads((run / "run_metadata.json").read_text())
+    assert provenance["timing"]["artifact_path"] == "runtime/tables/timing.tsv"
+    timing = pl.read_csv(run / "runtime/tables/timing.tsv", separator="\t", null_values="NA")
+    stages = set(timing.filter(pl.col("scope") == "predict")["stage"])
+    assert {"prediction", "evidence_preparation", "figure_generation", "total"} <= stages
+    assert (timing["duration_sec"] >= 0).all()
     assert not any("metadata.tsv" in str(item) for item in provenance["input_files"])
     assert not any("group summary" in message for message in provenance["warnings"])
 

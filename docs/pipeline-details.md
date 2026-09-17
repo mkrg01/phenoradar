@@ -269,6 +269,16 @@ After all folds:
 
 ### 5) Timing instrumentation
 
+- Figure generation records annotation loading, regular run figures, CV species
+  evidence, candidate evidence, and trees under `scope=figures`. Individual
+  rendering jobs use `scope=figure_job` or `tree_figure_job`. Category intervals
+  include preparation, data transfer, and waiting; job intervals measure the
+  rendering function in its worker and can cover multiple population variants.
+  The run reuses one lazily started process pool across these categories. The
+  overall figure timer also includes its final shutdown.
+- Successful `predict` commands also write `runtime/tables/timing.tsv`, with
+  `scope=predict` rows for prediction, evidence preparation, figure generation,
+  and total, plus candidate figure jobs when applicable.
 - `runtime/tables/timing.tsv` uses one `time.perf_counter` origin for the whole
   successful `run` command.
 - Top-level rows cover config, provenance, split construction, outer CV,
@@ -303,6 +313,32 @@ After all folds:
   top-level wall-clock duration.
 - `run_metadata.json.timing.stage_duration_sec` stores the `scope=run` summary;
   the TSV remains the detailed source of truth.
+
+### Prediction and local evidence workspaces
+
+Bundle prediction validates and normalizes all selected input rows into one
+temporary cache, then builds the raw matrix directly in the bundle's required
+feature order. `none` and `log1p` need only the model-feature union; rank
+transforms retain the saved transform schema. Extra columns are still validated
+and reported, and the bundled absent-feature policy is unchanged. The cache is
+removed after matrix construction, including when input preparation fails.
+
+The CLI shares aligned raw values, transformed values, species order, and
+member probabilities with candidate interpretation. It releases these arrays
+before writing figures. Python callers can opt into this reuse with a
+`BundlePredictionContext` passed to `predict_with_bundle` and
+`build_predict_evidence_artifacts`, then call `clear()` when finished. Existing
+callers without a context retain the same return types and standalone behavior.
+
+Candidate contributions in both `run` and `predict` are accumulated one model
+and one species block at a time. Means, absolute means, minima, and maxima
+include zero contributions from models that do not contain a feature. Only top
+features are retained per species, ordered by absolute mean then feature name,
+including ties at the selection boundary. Each fitted scaler still receives
+its complete ordered feature schema. Work arrays target 262,144 cells per
+block; a single row wider than this needs memory proportional to that width.
+The full model-by-species-by-feature cube is not allocated. Model coefficients,
+the raw/transformed input matrices, and output tables still consume memory.
 
 ## Model selection behavior details
 

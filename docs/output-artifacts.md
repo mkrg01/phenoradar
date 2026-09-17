@@ -513,6 +513,13 @@ when individual folds are single-label.
 
 ### Timing semantics (`runtime/tables/timing.tsv`)
 
+- `scope=figures` separates annotation loading, run figures, CV species evidence,
+  candidate evidence, and tree figures. `figure_job` and `tree_figure_job` record
+  individual worker intervals; their `stage` identifies the rendering job.
+  A job may write both all-species and accepted-only population variants.
+- Prediction also writes this file, using `scope=predict` for prediction,
+  evidence preparation, figure generation, and total. Candidate figure jobs
+  appear under `scope=figure_job`.
 - `scope=run` contains the major command stages such as split construction,
   outer CV, optional group bootstrap, final refit, artifact writing, and figure
   generation.

@@ -16,9 +16,9 @@ from phenoradar.cv import (
     ExpressionMatrixBuilder,
     FinalRefitArtifacts,
     apply_expression_transform,
-    apply_feature_scaling,
 )
 from phenoradar.interpret import _linear_coefficients
+from phenoradar.local_evidence import iter_top_contributions
 from phenoradar.missing_expression import mark_expression_observations
 
 
@@ -313,6 +313,10 @@ def build_candidate_evidence_artifacts(
             + ", ".join(missing_model_features[:10])
         )
 
+    if config.preprocess.expression_transform.method in {"none", "log1p"}:
+        transform_features = model_features
+        transform_index = {feature: idx for idx, feature in enumerate(transform_features)}
+
     try:
         matrix_builder = ExpressionMatrixBuilder(config)
         matrix_builder.cache_species([*known_species, *candidate_species])
@@ -328,56 +332,23 @@ def build_candidate_evidence_artifacts(
     except CVError as exc:
         raise CandidateEvidenceError(str(exc)) from exc
 
-    feature_union_index = {feature: idx for idx, feature in enumerate(model_features)}
-    contribution_cube = np.zeros(
-        (len(entries), len(candidate_species), len(model_features)), dtype=float
-    )
-    for model_idx, (entry, coef) in enumerate(zip(entries, coefficients, strict=True)):
-        transform_indices = np.array(
-            [transform_index[feature] for feature in entry.feature_names], dtype=int
-        )
-        selected = candidate_transformed[:, transform_indices]
-        try:
-            scaled = apply_feature_scaling(
-                selected,
-                entry.scaler,
-                config.preprocess.feature_scaling.method,
-            )
-        except CVError as exc:
-            raise CandidateEvidenceError(str(exc)) from exc
-        model_contributions = scaled * coef[np.newaxis, :]
-        union_indices = np.array(
-            [feature_union_index[feature] for feature in entry.feature_names], dtype=int
-        )
-        contribution_cube[model_idx][:, union_indices] = model_contributions
-
-    contribution_mean = np.mean(contribution_cube, axis=0)
-    contribution_mean_abs = np.mean(np.abs(contribution_cube), axis=0)
-    contribution_min = np.min(contribution_cube, axis=0)
-    contribution_max = np.max(contribution_cube, axis=0)
     feature_rows: list[dict[str, Any]] = []
     selected_features: set[str] = set()
-    for candidate_idx, species in enumerate(candidate_species):
-        order = sorted(
-            range(len(model_features)),
-            key=lambda idx: (
-                -float(contribution_mean_abs[candidate_idx, idx]),
-                model_features[idx],
-            ),
-        )
-        nonzero_order = [
-            idx
-            for idx in order
-            if float(contribution_mean_abs[candidate_idx, idx]) > _NONZERO_TOLERANCE
-        ][:top_features]
-        if not nonzero_order:
+    for candidate_idx, contributions in iter_top_contributions(
+        candidate_transformed, transform_features, rows=np.arange(len(candidate_species)),
+        model_features=[entry.feature_names for entry in entries],
+        scalers=[entry.scaler for entry in entries], coefficients=coefficients,
+        scaling_method=config.preprocess.feature_scaling.method, top_features=top_features,
+    ):
+        species = candidate_species[candidate_idx]
+        if not contributions:
             warnings.append(
                 f"Skipped candidate evidence figure for {species}: "
                 "all final-model local contributions are zero"
             )
             continue
-        for local_rank, feature_idx in enumerate(nonzero_order, start=1):
-            feature = model_features[feature_idx]
+        for local_rank, contribution in enumerate(contributions, start=1):
+            feature = contribution.feature
             raw_value = float(candidate_raw[candidate_idx, transform_index[feature]])
             selected_features.add(feature)
             feature_rows.append(
@@ -385,12 +356,10 @@ def build_candidate_evidence_artifacts(
                     "species": species,
                     "feature": feature,
                     "local_rank": local_rank,
-                    "contribution_mean": float(contribution_mean[candidate_idx, feature_idx]),
-                    "contribution_mean_abs": float(
-                        contribution_mean_abs[candidate_idx, feature_idx]
-                    ),
-                    "contribution_min": float(contribution_min[candidate_idx, feature_idx]),
-                    "contribution_max": float(contribution_max[candidate_idx, feature_idx]),
+                    "contribution_mean": contribution.mean,
+                    "contribution_mean_abs": contribution.mean_abs,
+                    "contribution_min": contribution.minimum,
+                    "contribution_max": contribution.maximum,
                     "candidate_tpm": raw_value,
                     "candidate_log2_tpm_plus1": float(np.log2(raw_value + 1.0)),
                     "n_models": len(entries),

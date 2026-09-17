@@ -6,10 +6,11 @@ import importlib
 import math
 from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from functools import wraps
 from multiprocessing import get_context
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -28,10 +29,12 @@ from phenoradar.figure_population import (
     prediction_figure_populations,
     write_population_message_svg,
 )
+from phenoradar.figure_runtime import FigureWorkers
 from phenoradar.metrics import (
     FIXED_PROBABILITY_THRESHOLD_NAME,
     FIXED_PROBABILITY_THRESHOLD_VALUE,
 )
+from phenoradar.timing import TimingRecorder
 
 
 class TreePredictionError(ValueError):
@@ -91,25 +94,36 @@ def _execute_tree_svg_job(
     name: str,
     func: Callable[..., list[str]],
     kwargs: dict[str, Any],
-) -> tuple[str, list[str]]:
-    return name, func(**kwargs)
+) -> tuple[str, list[str], float, float]:
+    started = perf_counter()
+    warnings = func(**kwargs)
+    return name, warnings, started, perf_counter()
 
 
 def _run_tree_svg_jobs(
     jobs: list[_TreeSvgJob],
     *,
     parallel_workers: int,
+    timing_recorder: TimingRecorder | None = None,
+    workers: FigureWorkers | None = None,
 ) -> list[list[str]]:
     if not jobs:
         return []
     worker_count = max(1, min(int(parallel_workers), len(jobs)))
     if worker_count == 1:
-        return [_execute_tree_svg_job(name, func, kwargs)[1] for name, func, kwargs in jobs]
+        results = []
+        for name, func, kwargs in jobs:
+            _, warnings, started, ended = _execute_tree_svg_job(name, func, kwargs)
+            if timing_recorder is not None:
+                timing_recorder.record_interval(started, ended, scope="tree_figure_job", stage=name)
+            results.append(warnings)
+        return results
 
     warnings_by_index: dict[int, list[str]] = {}
-    with ProcessPoolExecutor(
-        max_workers=worker_count,
-        mp_context=get_context("spawn"),
+    with (
+        nullcontext(workers.executor())
+        if workers is not None
+        else ProcessPoolExecutor(max_workers=worker_count, mp_context=get_context("spawn"))
     ) as executor:
         future_to_index = {
             executor.submit(_execute_tree_svg_job, name, func, kwargs): index
@@ -117,7 +131,11 @@ def _run_tree_svg_jobs(
         }
         for future in as_completed(future_to_index):
             index = future_to_index[future]
-            _job_name, job_warnings = future.result()
+            _job_name, job_warnings, started, ended = future.result()
+            if timing_recorder is not None:
+                timing_recorder.record_interval(
+                    started, ended, scope="tree_figure_job", stage=_job_name
+                )
             warnings_by_index[index] = job_warnings
     return [warnings_by_index.get(index, []) for index in range(len(jobs))]
 
@@ -142,6 +160,8 @@ def write_run_tree_prediction_artifacts(
     feature_limit: int = _FEATURE_HEATMAP_LIMIT,
     orthogroup_annotations: pl.DataFrame | None = None,
     parallel_workers: int = 1,
+    timing_recorder: TimingRecorder | None = None,
+    workers: FigureWorkers | None = None,
     preserve_missing: bool = False,
     zero_as_missing: bool = False,
 ) -> list[str]:
@@ -319,7 +339,12 @@ def write_run_tree_prediction_artifacts(
                 ],
             },
         )
-    svg_warnings = _run_tree_svg_jobs(svg_jobs, parallel_workers=parallel_workers)
+    svg_warnings = _run_tree_svg_jobs(
+        svg_jobs,
+        parallel_workers=parallel_workers,
+        timing_recorder=timing_recorder,
+        workers=workers,
+    )
     warnings: list[str] = []
     for step_type, index in ordered_steps:
         if step_type == "warning":
