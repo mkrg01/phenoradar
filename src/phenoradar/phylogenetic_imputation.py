@@ -357,7 +357,9 @@ def write_phylogenetic_imputation(
     tables = run_dir / "inference" / "tables"
     tables.mkdir(parents=True, exist_ok=True)
     positive = artifacts.comparison.filter(
-        (prediction_label_expr(artifacts.comparison) == 1) & (pl.col("prob_difference") > 0)
+        (prediction_label_expr(artifacts.comparison) == 1)
+        & (pl.col("phylo_prob") < 0.5)
+        & (pl.col("prob_difference") > 0)
     ).sort(["prob_difference", "species"], descending=[True, False])
     for frame, filename in [
         (artifacts.annotation, "phylogenetic_imputation.tsv"),

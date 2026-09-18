@@ -88,7 +88,7 @@ All outputs are confined to `inference/`:
 | --- | --- |
 | `tables/phylogenetic_imputation.tsv` | Prediction targets and reference species, with observed traits and ASR probabilities |
 | `tables/phylogenetic_comparison.tsv` | Unknown prediction targets, sorted by descending absolute probability difference |
-| `tables/phylogenetic_positive_candidates.tsv` | Accepted expression-positive unknown targets with a positive difference, sorted by descending signed difference |
+| `tables/phylogenetic_positive_candidates.tsv` | Accepted expression-positive unknown targets with `phylo_prob < 0.5` and a positive difference, sorted by descending signed difference |
 | `figures/tree_phylogenetic_imputation.svg` | Tree, ancestral probabilities, observed traits, expression probabilities, phylogenetic probabilities, differences, and statuses |
 | `figures/phylogenetic_comparison.svg` | Unknown-species probability comparison, with up to ten largest-disagreement species labeled |
 | `phylogenetic_imputation/reference_traits.tsv` | Snapshot of all supplied known traits |
@@ -122,7 +122,10 @@ The annotation and comparison tables include:
 - Available expression decision and abstention columns.
 
 The discrepancy tables retain abstained species for inspection, but the positive
-candidate subset uses the existing selective decision. Candidate evidence TSVs
+candidate subset requires an expression-positive selective decision, a
+phylogenetic probability strictly below 0.5, and a positive signed difference.
+Species with phylogenetic probability equal to 0.5 or unavailable are excluded.
+Candidate evidence TSVs
 include phylogenetic probability and signed difference when available. These
 supplementary values are omitted from evidence PDFs; the dedicated phylogenetic
 comparison figures display them. Existing prediction TSVs and their `true_label`
