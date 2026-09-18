@@ -112,14 +112,15 @@ Notes:
   - `cv/figures/feature_filter_funnel.svg`
   - `cv/figures/non_zero_feature_count_by_fold.svg`
   - `cv/figures/probability_by_<group>.svg` (when `summary.group_col` is present in metadata)
-  - `cv/figures/model_selection_trials.svg` (model selection enabled)
+  - `cv/figures/model_selection.svg` (`selection_rule=best`) or
+    `cv/figures/model_selection_one_se_curve.svg` (`selection_rule=one_se`)
   - `cv/figures/roc_curve_cv.svg` (may be skipped when degenerate)
   - `cv/figures/pr_curve_cv.svg` (may be skipped when degenerate)
   - `model/figures/final_refit_feature_importance_top.svg` (`full_run`)
   - `model/figures/final_refit_coefficients_signed_top.svg` (`full_run`, linear model)
   - `model/figures/final_refit_feature_filter_funnel.svg` (`full_run`)
-  - `model/figures/final_refit_model_selection_trials.svg` (model selection enabled)
-  - `model/figures/final_refit_model_selection_one_se_curve.svg` (model selection enabled)
+  - `model/figures/final_refit_model_selection.svg` (`selection_rule=best`)
+  - `model/figures/final_refit_model_selection_one_se_curve.svg` (`selection_rule=one_se`)
   - `external_test/figures/final_refit_loss_by_split.svg` (`full_run`)
   - `external_test/figures/top_feature_expression_by_confusion.svg` (`full_run` when external test rows exist)
   - `external_test/figures/external_species_probability_by_trait.svg` (`full_run` when external test rows exist)
@@ -151,13 +152,16 @@ Conditionally written:
 - `model/tables/final_refit_model_selection_trials.tsv` /
   `model/tables/final_refit_model_selection_trials_summary.tsv`
   (candidate selection enabled in `full_run`)
-- `cv/figures/model_selection_one_se_curve.svg` (candidate selection enabled)
+- `cv/figures/model_selection.svg` (`selection_rule=best`) or
+  `cv/figures/model_selection_one_se_curve.svg` (`selection_rule=one_se`); only one is
+  generated, and one-SE annotations appear only for the one-SE rule.
 
 ## `config`
 
 Resolve and validate config without running the pipeline. The output includes
-every setting with defaults filled in, plus comments listing available choices
-and nullable value types.
+every user-facing setting with defaults filled in, plus comments listing
+available choices and nullable value types. Internal repeat indices are omitted;
+set `sampling.group_subsample_repeats` to control repeated group subsampling.
 
 ```bash
 phenoradar config [-c config.yml] [--out config.yml]
@@ -172,18 +176,42 @@ Options:
 
 ## `predict`
 
-Predict from an exported bundle (no retraining).
+Predict from an exported bundle (no retraining). Config and metadata are optional.
 
 ```bash
+phenoradar predict --model-bundle runs/<run_id>/model_bundle --tpm-path data/tpm.tsv --n-jobs 4
 phenoradar predict --model-bundle runs/<run_id>/model_bundle -c predict_config.yml
 ```
 
 Options:
 
 - `--model-bundle` (required): bundle directory
-- `--config`, `-c` (required): prediction config (exactly once)
+- `--tpm-path`: expression TSV; required unless `data.tpm_path` is in the config
+- `--metadata-path`: optional species subset and annotation TSV; defaults to
+  `data.metadata_path` in the config, or no metadata
+- `--n-jobs`: positive worker/thread count; defaults to `runtime.n_jobs` in the
+  config, or `1`
+- `--config`, `-c`: optional prediction config (at most once)
 - `--verbose`, `-v`: detailed stage-level logs
 - `--quiet`, `-q`: suppress progress logs
+
+Explicit CLI values override config values before validation. Without metadata,
+all distinct species in the TPM file are predicted; empty species names are an
+error. With metadata, its species column selects the targets, as in earlier
+versions. Additional columns can supply group summaries. Omitting metadata skips
+these summaries without a missing-metadata warning. Trees can still be plotted
+when `data.tree_path` is supplied.
+
+`--n-jobs` sets Polars' process pool before import (overriding any inherited
+`POLARS_MAX_THREADS` for `predict`) and controls supported estimator workers and
+native BLAS/OpenMP threads during inference. Bundled estimators' saved worker
+counts are overridden temporarily; models are evaluated sequentially.
+
+Existing training configs remain accepted, but training-only settings are
+ignored. Prediction validates and records only the input, memory, execution, figure, and
+summary settings described in [configuration.md](configuration.md#prediction-settings).
+The model, transformations, fitted scaling, absent-feature policy, ensemble
+aggregation, threshold, and abstention policy come from the bundle.
 
 Outputs:
 
@@ -193,6 +221,29 @@ Outputs:
 - `inference/figures/`
   - `predict_probability_distribution.svg`
   - optional `predict_uncertainty.svg` (bundle ensemble size > 1)
+  - `candidate_evidence/<probability_bin>/<species>.pdf` for each accepted positive
+    candidate when the bundle supports local linear contributions
+- `inference/figures/candidate_evidence/candidate_manifest.tsv`
+- `inference/tables/candidate_evidence_candidates.tsv`
+- `inference/tables/candidate_feature_evidence.tsv`
+- `inference/tables/candidate_reference_expression.tsv`
+- `inference/tables/candidate_model_probabilities.tsv`
+- `runtime/tables/timing.tsv` (prediction, evidence preparation, and figure timings)
+
+Candidate PDFs show signed local contributions, candidate expression against
+known-trait references when available, the probabilities from fitted bundle
+members, and information coverage when abstention is enabled. Bundle members
+are not outer-CV models. Abstained candidates are excluded, matching `full_run`.
+Nonlinear models without local linear coefficients retain the standard prediction
+outputs and report that candidate contribution figures are unavailable.
+
+`figures.top_features` controls the number of local features per species. If the
+prediction config omits `figures`, the training-time value saved in the bundle is
+used. `data.orthogroup_annotation_path` can optionally supply annotation labels.
+New `full_run` bundles contain reference-expression and annotation snapshots;
+older bundles can reuse the original run's reference TSV when available. Missing
+reference features are explicitly marked in the figure, and prediction remains
+available when the source run has been moved or deleted.
 
 Prediction-time feature alignment policy:
 

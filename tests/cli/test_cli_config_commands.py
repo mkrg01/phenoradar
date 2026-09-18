@@ -16,7 +16,7 @@ import phenoradar.cli as cli_mod
 from phenoradar import __version__
 from phenoradar.bundle import BundleError
 from phenoradar.cli import app
-from phenoradar.config import AppConfig, ConfigConditionSet, ConfigError
+from phenoradar.config import AppConfig, ConfigConditionSet, ConfigError, PredictConfig
 from phenoradar.cv import CVError
 from phenoradar.figures import FigureError
 from phenoradar.provenance import ProvenanceError
@@ -85,7 +85,7 @@ def _stub_resolved_config(
     tree_path: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        runtime=SimpleNamespace(execution_stage=execution_stage, seed=42),
+        runtime=SimpleNamespace(execution_stage=execution_stage, seed=42, n_jobs=1),
         split=SimpleNamespace(group_col="contrast_pair_id"),
         evaluation=SimpleNamespace(
             group_bootstrap=SimpleNamespace(
@@ -97,6 +97,7 @@ def _stub_resolved_config(
         report=SimpleNamespace(),
         summary=SimpleNamespace(group_col="family"),
         figures=SimpleNamespace(top_features=top_features),
+        phylogenetic_imputation=SimpleNamespace(enabled=False),
         model_selection=SimpleNamespace(),
         preprocess=SimpleNamespace(
             missing_expression=SimpleNamespace(method="none", zero_as_missing=False),
@@ -164,6 +165,9 @@ def _stub_fingerprint_metadata() -> dict[str, object]:
 
 
 def _stub_run_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "phenoradar.cli.RunExpressionCache.prepare", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr("phenoradar.cli.collect_input_files", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         "phenoradar.cli._build_run_fingerprint_metadata",
@@ -428,6 +432,7 @@ sampling:
     assert payload["runtime"]["seed"] == 123
     assert "search_seed" not in payload["model_selection"]
     assert payload["sampling"]["weighting"] == "group_label_inverse"
+    assert "group_subsample_repeat_index" not in payload["sampling"]
 
 
 def test_config_without_config_writes_default_yaml(
@@ -458,7 +463,9 @@ def test_config_without_config_writes_default_yaml(
         is None
     )
     assert payload["figures"]["top_features"] == 30
-    assert payload == AppConfig().model_dump(mode="python")
+    assert payload == AppConfig().model_dump(
+        mode="python", exclude={"sampling": {"group_subsample_repeat_index"}}
+    )
 
 
 def test_run_passes_top_features_to_run_and_tree_figures(
@@ -1190,7 +1197,7 @@ split:
 model_selection:
   search_strategy: grid
   search_space:
-    alpha: [0.5, 1.0]
+    lambda: [0.5, 1.0]
   selected_candidate_count: 1
   inner_cv_strategy: logo
 """.strip()
@@ -1209,6 +1216,14 @@ model_selection:
 
     run_dirs = sorted((tmp_path / "runs").glob("*_run_*"))
     assert len(run_dirs) == 1
+    timing = pl.read_csv(run_dirs[0] / "runtime/tables/timing.tsv", separator="\t")
+    preparation = timing.filter(
+        (pl.col("scope") == "run") & (pl.col("stage") == "expression_preparation")
+    )
+    outer_cv = timing.filter((pl.col("scope") == "run") & (pl.col("stage") == "outer_cv"))
+    assert preparation.height == outer_cv.height == 1
+    assert preparation["ended_at_sec"].item() <= outer_cv["started_at_sec"].item()
+    assert timing.filter(pl.col("stage") == "input_normalize_cache").height == 1
     selected_path = run_dirs[0] / "model" / "tables" / "model_selection_selected.tsv"
     trials_path = run_dirs[0] / "cv" / "tables" / "model_selection_trials.tsv"
     trials_summary_path = run_dirs[0] / "cv" / "tables" / "model_selection_trials_summary.tsv"
@@ -1221,11 +1236,13 @@ model_selection:
     assert trials_summary_path.exists()
     assert final_trials_path.exists()
     assert final_trials_summary_path.exists()
-    assert (run_dirs[0] / "cv" / "figures" / "model_selection_trials.svg").exists()
-    assert (run_dirs[0] / "cv" / "figures" / "model_selection_one_se_curve.svg").exists()
-    assert (run_dirs[0] / "model" / "figures" / "final_refit_model_selection_trials.svg").exists()
+    assert not (run_dirs[0] / "cv" / "figures" / "model_selection_trials.svg").exists()
+    assert (run_dirs[0] / "cv" / "figures" / "model_selection.svg").exists()
+    assert not (
+        run_dirs[0] / "model" / "figures" / "final_refit_model_selection_trials.svg"
+    ).exists()
     assert (
-        run_dirs[0] / "model" / "figures" / "final_refit_model_selection_one_se_curve.svg"
+        run_dirs[0] / "model" / "figures" / "final_refit_model_selection.svg"
     ).exists()
     assert not (run_dirs[0] / "cv" / "figures" / "selected_hyperparameter_stability.svg").exists()
 
@@ -1725,6 +1742,8 @@ data:
         "phenoradar.cli.load_model_bundle",
         lambda *_args, **_kwargs: SimpleNamespace(
             models=[object()],
+            abstention_top_features=30,
+            observed_traits=None,
             manifest_sha256="manifest-sha",
             source_run_id="source-run",
             manifest={},
@@ -1791,19 +1810,17 @@ def test_run_fails_when_config_resolution_raises(
     assert "config failure" in result.output
 
 
-def test_run_expands_group_subsample_repeat_count_into_study(
+def test_generated_config_can_increase_group_subsample_repeats_and_run_study(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = CliRunner()
-    config = _write(
-        tmp_path / "config.yml",
-        """
-sampling:
-  training_group_count: 5
-  group_subsample_repeats: 3
-""".lstrip(),
-    )
+    config = tmp_path / "config.yml"
+    result = runner.invoke(app, ["config", "--out", str(config)])
+    assert result.exit_code == 0, result.output
+    payload = yaml.safe_load(config.read_text(encoding="utf-8"))
+    payload["sampling"].update(training_group_count=5, group_subsample_repeats=3)
+    config.write_text(yaml.safe_dump(payload), encoding="utf-8")
     captured_indices: list[int] = []
 
     def _study(**kwargs: object) -> Path:
@@ -1997,6 +2014,33 @@ def test_run_fails_when_final_refit_raises(tmp_path: Path, monkeypatch: pytest.M
 
     assert result.exit_code != 0
     assert "final refit failure" in result.output
+
+
+def test_run_fails_before_cv_when_expression_preparation_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = _write(tmp_path / "config.yml", "{}\n")
+    _stub_run_provenance(monkeypatch)
+    monkeypatch.setattr(
+        "phenoradar.cli.load_and_resolve_config",
+        lambda *_args, **_kwargs: _stub_resolved_config(execution_stage="full_run"),
+    )
+    monkeypatch.setattr(
+        "phenoradar.cli.build_split_artifacts",
+        lambda *_args, **_kwargs: _stub_split_artifacts(),
+    )
+    monkeypatch.setattr(
+        "phenoradar.cli.RunExpressionCache.prepare",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(CVError("expression preparation failure")),
+    )
+    monkeypatch.setattr(
+        "phenoradar.cli.run_outer_cv",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("CV must not start")),
+    )
+    result = CliRunner().invoke(app, ["run", "-c", str(config)])
+    assert result.exit_code != 0
+    assert "expression preparation failure" in result.output
 
 
 def test_run_fails_when_bundle_export_raises(
@@ -2255,7 +2299,7 @@ def test_predict_fails_when_config_resolution_raises(
     bundle_dir.mkdir()
 
     monkeypatch.setattr(
-        "phenoradar.cli.load_and_resolve_config",
+        "phenoradar.cli.load_predict_config",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ConfigError("predict config failure")),
     )
 
@@ -2275,8 +2319,10 @@ def test_predict_fails_when_bundle_loading_raises(
     bundle_dir.mkdir()
 
     monkeypatch.setattr(
-        "phenoradar.cli.load_and_resolve_config",
-        lambda *_args, **_kwargs: _stub_resolved_config(execution_stage="cv_only"),
+        "phenoradar.cli.load_predict_config",
+        lambda *_args, **_kwargs: PredictConfig.model_validate(
+            {"data": {"metadata_path": "metadata.tsv", "tpm_path": "tpm.tsv"}}
+        ),
     )
     monkeypatch.setattr(
         "phenoradar.cli.load_model_bundle",
@@ -2299,13 +2345,17 @@ def test_predict_fails_when_input_provenance_collection_raises(
     bundle_dir.mkdir()
 
     monkeypatch.setattr(
-        "phenoradar.cli.load_and_resolve_config",
-        lambda *_args, **_kwargs: _stub_resolved_config(execution_stage="cv_only"),
+        "phenoradar.cli.load_predict_config",
+        lambda *_args, **_kwargs: PredictConfig.model_validate(
+            {"data": {"metadata_path": "metadata.tsv", "tpm_path": "tpm.tsv"}}
+        ),
     )
     monkeypatch.setattr(
         "phenoradar.cli.load_model_bundle",
         lambda *_args, **_kwargs: SimpleNamespace(
             models=[object()],
+            abstention_top_features=30,
+            observed_traits=None,
             manifest_sha256="manifest-sha",
             source_run_id="source-run",
             manifest={},

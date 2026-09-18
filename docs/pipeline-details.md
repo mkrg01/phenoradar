@@ -106,8 +106,8 @@ Outer folds can execute in parallel (up to `runtime.n_jobs`) with per-fold CPU b
 
 Before fold execution:
 
-- scan and normalize the long TPM rows for all outer-CV train/validation
-  species once into a temporary Parquet cache;
+- scan and normalize the long TPM rows for the required species once into a
+  temporary Parquet cache;
 - build one shared species x feature matrix by mapping the cached long rows to
   integer coordinates; absent coordinates are initialized according to
   `preprocess.absent_feature_fill` (`0` by default, optionally `nan` for
@@ -116,6 +116,47 @@ Before fold execution:
   tree heatmaps do not rescan the full TPM input when species coverage matches;
 - retain `preprocess.max_pivot_cells` as the dense-cell limit used to split
   oversized matrices into feature chunks.
+
+The CLI keeps one normalized-expression cache through outer CV and final refit.
+For `full_run`, its species set includes train/validation, discovery inference,
+and external test, so refit reuses the validated raw rows without parsing and
+aggregating the TSV again. CV feature names still come only from train/validation
+species; refit preserves its existing feature schema and target-matrix pruning
+rules. Feature selection, transforms, scaling, and model fitting retain their
+existing training scopes. This sharing does not retain CV's dense matrices for
+refit. For `cv_only`, the cache contains only train/validation species.
+
+Cache construction expresses missing-feature normalization and invalid-row
+diagnostics as row-wise operations followed by scalar sum/min/max aggregates.
+This lets the Parquet sink stream these operations without first materializing
+all normalized input rows. Duplicate species/feature coordinates are still
+summed, and validation retains invalid-row counts, source-line examples, and
+checks for overflow after summation. The aggregation still needs state for the
+distinct coordinates, so its memory usage can grow with the input size. This
+optimization applies even when every feature is retained for modeling.
+
+The cache is local to one run (including one condition in a study), and is
+removed after these stages or on an exception. It is not a persistent cache
+between runs. Because `full_run` prepares the complete raw species set before
+CV, invalid external/inference input can now fail at that preparation step.
+No such extra validation is performed for `cv_only`. Python callers can opt
+into the same lifecycle with a `RunExpressionCache` context passed via
+`expression_cache` to `run_outer_cv` and `run_final_refit`.
+
+For `none` and `log1p` transforms, outer CV initially builds only the raw
+train/validation matrix. After all folds finish fitting and validation, it
+builds one inference matrix from the union of their retained features, in the
+original feature order. Each sampled set applies its own selected columns,
+transform, and fitted scaler, then predicts with its fitted models in the
+original ensemble order. Abstention and inference-species figure data reuse
+this narrow raw matrix. Model selection and training never use inference rows.
+Only fitted models, scalers, and feature schemas are retained for this second
+phase; sample-set training arrays are not retained for inference.
+
+`sample_rank` and `sample_percentile_rank` keep the existing full-row inference
+path because their results depend on features outside the retained union.
+When most features survive filtering, the union may still be wide. The raw
+input cache also continues to validate all consumed expression values.
 
 For each outer fold:
 
@@ -161,6 +202,29 @@ For each outer fold:
 6. Aggregate model probabilities (`mean` or `median`).
 7. Compute fold metrics.
 
+Feature filtering screens sparse columns immediately after the complete expression
+transform, before computing neutral missing-expression eligibility statistics.
+The sparsity fractions use bounded column blocks; only surviving columns need
+neutral variance, label-observation, and contrast-pair calculations. Neutral
+eligibility statistics also use bounded column blocks to limit temporary memory
+when most features survive sparsity. Rank and percentile-rank transforms still
+see all features before screening. The recorded
+`n_features_after_sparse_feature_filter` includes both neutral eligibility and
+sparsity, preserving its existing meaning and the ranking candidate population.
+Pair-aware and unpaired statistics gather only the required rows and columns,
+preserving the prior reduction layout. Inner CV computes the same rankings and
+warnings but omits unused per-feature diagnostic rows; outer and final-refit
+diagnostic tables remain available.
+
+Inner CV shares the complete transformed source matrix across its splits and
+passes integer row indices to feature filtering. Sparsity and neutral statistics
+read bounded column blocks from training rows; supervised and correlation filters
+also use only those rows. Full-width training and validation copies are avoided.
+Once feature selection is complete, only the selected rows and columns are
+gathered for scaling. Scaling is fitted on training rows, and the resulting
+per-fold matrices remain cached for candidate evaluation. Row order and reduction
+layout are preserved, including when the source matrix uses Fortran layout.
+
 After all folds:
 
 - write macro/micro aggregate metrics.
@@ -205,10 +269,33 @@ After all folds:
 
 ### 5) Timing instrumentation
 
+- Figure generation records annotation loading, regular run figures, CV species
+  evidence, candidate evidence, and trees under `scope=figures`. Individual
+  rendering jobs use `scope=figure_job` or `tree_figure_job`. Category intervals
+  include preparation, data transfer, and waiting; job intervals measure the
+  rendering function in its worker and can cover multiple population variants.
+  The run reuses one lazily started process pool across these categories. The
+  overall figure timer also includes its final shutdown.
+- Successful `predict` commands also write `runtime/tables/timing.tsv`, with
+  `scope=predict` rows for prediction, evidence preparation, figure generation,
+  and total, plus candidate figure jobs when applicable.
 - `runtime/tables/timing.tsv` uses one `time.perf_counter` origin for the whole
   successful `run` command.
 - Top-level rows cover config, provenance, split construction, outer CV,
   optional group bootstrap/final refit, artifact writing, and figures.
+- Full runs record shared input preparation as the independent run stage
+  `expression_preparation`, before the outer-CV timer. Its `expression_input`
+  rows include `input_normalize_cache` (TSV scan, normalization, aggregation,
+  and Parquet write) and `input_validation_read`.
+- Builders also record `input_schema_read`, `input_matrix_read`, and
+  `input_dense_assembly` under the current stage's scope. The latter includes
+  frame validation, coordinate mapping, allocation, filling, and chunk copying.
+  Chunked matrices emit multiple rows; sum the same scope/stage for their cost.
+- Deferred inference records outer-CV `inference_matrix_build` and
+  `inference_execution`, and per-fold `deferred_inference` with preprocessing,
+  prediction, and abstention details. Fold `total` and `fold_execution` cover
+  fitting/validation in this path; the outer-CV total also includes deferred
+  inference. Nested timings must not be added to their enclosing durations.
 - Nested rows cover outer-CV matrix construction, individual folds,
   sample-set preprocessing, inner-CV preprocessing, selected-model
   fitting/prediction, and inner-CV candidate scoring. Final refit uses the same
@@ -227,19 +314,81 @@ After all folds:
 - `run_metadata.json.timing.stage_duration_sec` stores the `scope=run` summary;
   the TSV remains the detailed source of truth.
 
+### Prediction and local evidence workspaces
+
+Bundle prediction validates and normalizes all selected input rows into one
+temporary cache, then builds the raw matrix directly in the bundle's required
+feature order. `none` and `log1p` need only the model-feature union; rank
+transforms retain the saved transform schema. Extra columns are still validated
+and reported, and the bundled absent-feature policy is unchanged. The cache is
+removed after matrix construction, including when input preparation fails.
+
+The CLI shares aligned raw values, transformed values, species order, and
+member probabilities with candidate interpretation. It releases these arrays
+before writing figures. Python callers can opt into this reuse with a
+`BundlePredictionContext` passed to `predict_with_bundle` and
+`build_predict_evidence_artifacts`, then call `clear()` when finished. Existing
+callers without a context retain the same return types and standalone behavior.
+
+Candidate contributions in both `run` and `predict` are accumulated one model
+and one species block at a time. Means, absolute means, minima, and maxima
+include zero contributions from models that do not contain a feature. Only top
+features are retained per species, ordered by absolute mean then feature name,
+including ties at the selection boundary. Each fitted scaler still receives
+its complete ordered feature schema. Work arrays target 262,144 cells per
+block; a single row wider than this needs memory proportional to that width.
+The full model-by-species-by-feature cube is not allocated. Model coefficients,
+the raw/transformed input matrices, and output tables still consume memory.
+
 ## Model selection behavior details
 
-Logistic elastic net uses glum's binomial GLM with the `irls-cd` solver,
-an unpenalized intercept, and no additional predictor scaling inside glum.
-The native `alpha` parameter penalizes the sample-weighted mean log loss;
-larger `alpha` means stronger regularization. SVM and random forest retain
-their scikit-learn implementations.
+Logistic elastic net calls glmnet's native binomial coordinate-descent solver
+through `python-glmnet`, with an unpenalized intercept and internal
+standardization disabled. The `lambda` parameter penalizes the sample-weighted
+mean log loss; larger `lambda` means stronger regularization. `alpha` is the L1
+fraction. SVM and random forest retain their scikit-learn implementations.
 
-An optional serial grid path (`model.logistic_warm_start_path=true`) reuses
-coefficients within each inner fold, fitting descending `alpha` values for
-candidates with identical remaining parameters. Coefficients are never shared
-between folds. The one-SE rule prefers larger `alpha` and then larger
-`l1_ratio` among eligible logistic candidates.
+Grid and random searches fit one descending lambda path for each inner fold and
+combination of `alpha`, `thresh`, and `maxit`. The native solver reuses coefficients
+along that path; coefficients are never shared between folds. Fold preprocessing
+is reused across candidates. Independent folds and parameter paths are scheduled
+within `runtime.n_jobs`. TPE uses independent fits for sequentially proposed
+candidates. Candidate scores use the exact requested lambda, without interpolation
+or additional internal cross-validation. The one-SE rule prefers larger `lambda`
+and then larger `alpha` among eligible logistic candidates.
+
+Before fitting, gaps between positive candidate lambdas are bridged by internal
+warm-start points at no more than 0.05 decades per step. For example, a nine-point
+grid from 0.1 to 1e-5 with half-decade spacing uses 81 native fits, while only the
+original nine candidates are scored. This avoids difficult numerical trajectories
+from large lambda jumps and keeps native feature screening effective. Requested
+lambdas are retained exactly; coefficients are not interpolated. The same rule
+applies to dense and sparse matrices. Single-lambda fits stay single, and zero
+remains an exact endpoint without a logarithmic bridge to it.
+
+Selected logistic models in outer CV and final refit use the descending prefix
+of that source sample set's candidate lambdas, ending at the exact selected
+lambda. Only candidates with matching `alpha`, `thresh`, and `maxit` contribute
+to the prefix. Evaluated candidates are available for grid, random, and TPE
+selection; without inner CV, the configured ensemble candidates supply the path.
+If no matching stronger lambda is available, the model uses a single-lambda fit.
+Each refit starts a new native path on its own preprocessed training samples and
+weights. Inner-fold coefficients and scalers are not reused. Intermediate models
+are discarded, and candidate selection, ensemble ordering, and the convergence
+threshold are preserved. Reported coordinate passes cover the entire refit path.
+This includes internal warm-start points and uses the same configured `maxit`
+budget. Fitted `path_length_` counts distinct requested lambdas;
+`native_path_length_` also counts the internal points, or is zero when a constant
+design is solved without native fitting. Only requested models are materialized.
+Changing the optimization path can produce small numerical differences in fitted
+coefficients and predictions, particularly with correlated Lasso features.
+
+The backend accepts dense and CSC sparse matrices, sample weights, and one-feature
+folds. An all-constant training matrix is fitted with the exact weighted intercept
+and zero coefficients. Native errors and incomplete paths stop training. Stored
+models contain ordinary coefficients and intercepts, and prediction uses the
+sigmoid directly. This does not change the current expression preprocessing
+pipeline into a sparse sequence-feature pipeline.
 
 Neutral logistic regression retains missing values throughout feature filtering
 and fits standardization only on training observations. Its persisted scaler
@@ -253,6 +402,22 @@ When enabled, abstention applies the same configured fixed threshold in every
 fold and in final prediction. It adds no learning or threshold-selection step.
 All-species probability metrics remain available; separate abstention tables
 report selective performance and the number of accepted/rejected species.
+
+Abstention validates all supplied expression values in bounded blocks, including
+columns that do not contribute to the model. It preserves per-model absolute
+coefficient normalization and the averaging denominator for intercept-only
+models. Coverage and missing-feature evidence then use only columns with positive
+combined coefficient weight. Observation masks are computed directly from finite
+values and the configured zero-as-missing policy in row blocks; no full-width
+NaN-filled expression copy is needed. The existing threshold and inclusive
+`1e-12` comparison tolerance are unchanged. Floating-point summation can differ
+at the last few bits when zero-weight columns are omitted.
+
+Timing records distinguish outer-fold `inference_preprocessing`,
+`inference_prediction`, `validation_abstention`, and `inference_abstention`.
+Final refit records `external_test_abstention` and `inference_abstention`.
+These are nested measurements included in the existing enclosing stages, so
+their durations must not be added to those enclosing stages.
 
 Candidate generation strategy:
 

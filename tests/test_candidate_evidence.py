@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import numpy as np
 import polars as pl
 import pytest
-from glum import GeneralizedLinearRegressor
 from sklearn.preprocessing import StandardScaler
 
 from phenoradar.candidate_evidence import build_candidate_evidence_artifacts
@@ -16,6 +15,7 @@ from phenoradar.figures import (
     write_candidate_evidence_figures,
     write_cv_species_evidence_figures,
 )
+from phenoradar.glmnet import GlmnetLogisticRegression
 
 
 def _write(path: Path, text: str) -> Path:
@@ -73,8 +73,9 @@ preprocess:
 
 
 @pytest.mark.parametrize("group_col", ["family", "order"])
+@pytest.mark.parametrize("include_model_reference", [False, True])
 def test_build_candidate_evidence_uses_candidate_local_contribution(
-    tmp_path: Path, group_col: str
+    tmp_path: Path, group_col: str, include_model_reference: bool
 ) -> None:
     _metadata, _tpm, config_path = _candidate_fixture(tmp_path)
     config = load_and_resolve_config([config_path])
@@ -88,7 +89,7 @@ def test_build_candidate_evidence_uses_candidate_local_contribution(
     )
     train_transformed = np.log1p(np.array([[1.0, 10.0], [2.0, 8.0], [8.0, 2.0], [9.0, 1.0]]))
     scaler = StandardScaler().fit(train_transformed)
-    model = GeneralizedLinearRegressor(family="binomial")
+    model = GlmnetLogisticRegression()
     model.coef_ = np.array([1.5, -0.5], dtype=float)
     final_refit = SimpleNamespace(
         pred_inference=pl.DataFrame(
@@ -121,6 +122,7 @@ def test_build_candidate_evidence_uses_candidate_local_contribution(
         final_refit=final_refit,  # type: ignore[arg-type]
         cross_fold_predictions=cross_fold,
         top_features=1,
+        include_model_reference=include_model_reference,
     )
 
     assert artifacts.candidates.row(0, named=True)["family"] == "Family three"
@@ -128,8 +130,33 @@ def test_build_candidate_evidence_uses_candidate_local_contribution(
     assert artifacts.features.height == 1
     assert artifacts.features.row(0, named=True)["feature"] == "OG1"
     assert artifacts.features.row(0, named=True)["local_rank"] == 1
-    assert artifacts.reference_expression.height == 4
+    assert artifacts.reference_expression.height == (8 if include_model_reference else 4)
     assert artifacts.cross_fold_predictions.height == 2
+
+
+def test_reference_snapshot_is_available_without_positive_inference(tmp_path: Path) -> None:
+    _, _, path = _candidate_fixture(tmp_path)
+    config = load_and_resolve_config([path])
+    split = pl.DataFrame({
+        "species": ["known_0a", "known_0b", "known_1a", "known_1b", "candidate_a"],
+        "pool": ["train", "validation", "train", "validation", "discovery_inference"],
+        "label": [0, 0, 1, 1, None],
+    })
+    model = GlmnetLogisticRegression()
+    model.coef_ = np.array([1.0, -1.0])
+    refit = SimpleNamespace(
+        pred_inference=pl.DataFrame({
+            "species": ["candidate_a"], "prob": [0.1], "pred_label_fixed_threshold": [0],
+        }),
+        model_entries=[FinalModelEntry(feature_names=["OG1", "OG2"], scaler=None, model=model)],
+    )
+    evidence = build_candidate_evidence_artifacts(
+        config=config, split_manifest=split, final_refit=refit,
+        cross_fold_predictions=None, top_features=1, include_model_reference=True,
+    )
+    assert evidence.features.is_empty()
+    assert evidence.reference_expression.height == 8
+    assert "candidate_a" not in evidence.reference_expression["species"].to_list()
 
 
 def test_write_candidate_evidence_figures_writes_probability_bin_pdf_and_manifest(
@@ -208,7 +235,7 @@ def test_build_cv_species_evidence_uses_held_out_fold_models_and_training_refere
         [[1.0, 10.0], [2.0, 8.0], [8.0, 2.0], [9.0, 1.0]], dtype=float
     )
     scaler = StandardScaler().fit(np.log1p(x_train_raw))
-    model = GeneralizedLinearRegressor(family="binomial")
+    model = GlmnetLogisticRegression()
     model.coef_ = np.array([1.5, -0.5], dtype=float)
 
     species, features, reference, warnings = _build_cv_species_evidence(
@@ -256,11 +283,13 @@ def test_build_cv_species_evidence_uses_held_out_fold_models_and_training_refere
     assert set(reference.get_column("target_species")) == {"held_out_species"}
 
 
+@pytest.mark.parametrize("decision_status", ["accepted", "abstained"])
 def test_write_cv_species_evidence_figures_writes_error_pdf_and_manifest(
-    tmp_path: Path,
+    tmp_path: Path, decision_status: str,
 ) -> None:
     species_evidence = pl.DataFrame(
         {
+            "decision_status": [decision_status],
             "fold_id": ["2"],
             "species": ["Held out species"],
             "group_id": ["g2"],
@@ -319,6 +348,7 @@ def test_write_cv_species_evidence_figures_writes_error_pdf_and_manifest(
     assert row["n_model_predictions"] == 2
     root = tmp_path / "cv" / "figures" / "species_evidence"
     pdf_path = root / str(row["figure_path"])
+    assert ("abstained/" in row["figure_path"]) == (decision_status == "abstained")
     assert pdf_path.exists()
     assert pdf_path.read_bytes().startswith(b"%PDF")
     assert (root / "species_manifest.tsv").exists()

@@ -14,6 +14,71 @@
 
 ### Features
 
+* retire model-selection trials SVGs and emit one curve per stage: `model_selection.svg`
+  for `best`, or `model_selection_one_se_curve.svg` for `one_se`; show one-SE
+  thresholds and eligibility only for the corresponding rule, including final refit
+
+* omit supplementary configuration and numeric-summary text from bootstrap,
+  expression, and species-evidence figures; use legends for ROC/PR statistics
+  and the plotted probability-distribution encodings
+
+* group abstention-filtered SVGs under `figures/accepted_only/` with the same
+  basenames as all-species figures; separate abstained CV evidence PDFs under
+  `species_evidence/abstained/` and retain their paths in the manifest
+* measure figure decorations at export for consistent margins, panel spacing,
+  and colorbar placement; wrap long feature labels, move legends outside data,
+  and keep model-selection panels within a double-column page width
+* align tree annotations independently of branch lengths, reserve a legend
+  sidebar, and place phylogenetic disagreement labels in a separate callout column
+
+* add optional nwkit ASR interpretation for unknown-species predictions in
+  `full_run` and `predict`, with explicit input/unit branch lengths, disagreement
+  candidate tables, annotated trees, probability comparison plots, and bundled
+  observed-trait references; keep model fitting and evaluation unchanged
+
+* build bundle prediction matrices directly in the required feature schema and
+  reuse prediction inputs and member probabilities for candidate interpretation
+* compute candidate contributions in bounded row blocks with deterministic
+  top-feature selection, avoiding model-by-species-by-feature cubes
+* reuse figure workers across run stages and record figure-category/job timings;
+  write a timing trace for prediction and interpretation
+* generate per-species local contribution and expression-reference PDFs from
+  `predict`, with fitted-member probability tables, coverage labels, and honest
+  unavailable-reference markers; preserve training reference/annotation snapshots
+  in new model bundles and support original-run references for legacy bundles
+
+* stream expression-cache normalization and duplicate aggregation without
+  whole-input materialization for missing-feature handling or invalid-row
+  diagnostics, preserving input validation and coordinate sums
+* predict directly from a model bundle and TPM without metadata or config;
+  add `--tpm-path`, optional `--metadata-path`, and `--n-jobs` overrides with
+  prediction-only resolved settings, legacy config compatibility, optional
+  species-subset annotations, and inference worker/native thread controls
+
+* defer outer-CV inference for none/log1p transforms until all folds are fitted,
+  build its matrix from the retained-feature union, and reuse the narrow raw
+  matrix for abstention and figure data while preserving rank-transform behavior
+* time shared input preparation separately from CV and expose normalization,
+  validation, schema reads, expression reads, and dense matrix assembly timings
+* reuse one run-scoped normalized expression cache across outer CV and final
+  refit, preserving stage-local feature schemas and cleaning up on success or
+  failure without caching external/inference rows for `cv_only`
+* compute abstention coverage and missing-feature evidence only from features
+  with positive coefficient weight, with bounded observation masks and full-input
+  validation; record inference preprocessing, prediction, and abstention timings
+* preprocess inner CV from shared transformed matrices and fold row indices,
+  gathering training and validation matrices only for selected features while
+  preserving fold-local statistics, numerical results, and candidate caches
+* screen sparse features before neutral eligibility statistics, bound filtering
+  workspaces in column blocks, avoid full-width row copies in supervised feature
+  filters, and skip unused inner-CV diagnostic rows while preserving
+  feature-selection criteria and reported counts
+* reuse stronger candidate lambdas as native paths for selected logistic models
+  in outer CV and final refit, preserving the exact selected lambda and fitting
+  each path on that refit's own training data
+* enable logistic grid-search warm starts by default, configurable with
+  `model.logistic_warm_start_path`; parallelize independent fold/parameter
+  paths while fitting each alpha path from strongest to weakest regularization
 * add optional `split.require_both_labels_per_group` filtering before CV,
   routing single-label groups to external test and keeping them out of CV
   and final-refit training; support family-level eligibility from existing
@@ -53,6 +118,8 @@
 
 ### Bug Fixes
 
+* omit the internal group-subsampling repeat index from config templates so
+  increasing `group_subsample_repeats` works without removing internal fields
 * preserve the complete pre-transform feature schema in model bundles so sample-rank predictions
   are invariant to unrelated input features
 

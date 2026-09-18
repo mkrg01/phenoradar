@@ -1,5 +1,10 @@
 # Configuration
 
+Optional `phylogenetic_imputation` settings apply only to unknown-species
+interpretation in `full_run` and `predict`. See
+[phylogenetic imputation](phylogenetic-imputation.md) for installation, branch
+length modes, reference traits, and outputs.
+
 PhenoRadar config files are YAML mappings validated by Pydantic.
 
 This page is the canonical reference for config input behavior, defaults, and
@@ -12,16 +17,18 @@ For runtime execution flow tied to config keys, see
 CLI config input is one YAML file:
 
 - `run`: required (`-c config.yml`)
-- `predict`: required (`-c config.yml`)
+- `predict`: optional (`-c predict_config.yml`); see [prediction settings](#prediction-settings)
 - `config`: optional (`-c config.yml`), omitted means built-in defaults only
 
 Resolution and override rules:
 
-- CLI accepts one `-c` file (`run`/`predict` required, `config` optional).
+- CLI accepts one `-c` file (`run` required, `predict`/`config` optional).
 - Unspecified keys are filled by built-in defaults.
-- Generated YAML explicitly includes every setting, including inactive fields,
+- Generated YAML explicitly includes every user-facing setting, including inactive fields,
   `null` values, and empty sections. Comments list enum and boolean choices;
   nullable fields also show `null` or their accepted types.
+- Internal group-subsampling repeat indices are generated automatically and
+  recorded in each run's `resolved_config.yml` for reproducibility.
 - Unknown keys are rejected.
 - `runtime.execution_stage` can be overridden from CLI
   (`phenoradar run -c config.yml --execution-stage ...`).
@@ -31,6 +38,49 @@ Use `config` to inspect resolved output:
 ```bash
 phenoradar config [--out resolved.yml]
 ```
+
+### Prediction settings
+
+`predict` requires a model bundle and an explicit TPM path, supplied through
+`--tpm-path` or `data.tpm_path`. It never falls back to the bundled example data.
+`--tpm-path`, `--metadata-path`, and `--n-jobs` override corresponding config
+values; otherwise prediction-specific defaults apply.
+
+Only these settings are used and saved in prediction `resolved_config.yml`:
+
+| Setting | Default / meaning |
+| --- | --- |
+| `data.tpm_path` | Required input expression TSV |
+| `data.metadata_path` | `null`; all TPM species, or the supplied metadata's species subset |
+| `data.species_col`, `data.feature_col`, `data.value_col` | `species`, `orthogroup`, `tpm` |
+| `data.tree_path` | `null`; optional prediction tree |
+| `data.orthogroup_annotation_path` | `null`; optional labels overriding bundled annotations |
+| `figures.top_features` | Bundle's training-time value when `figures` is omitted; otherwise `30` unless specified |
+| `data.trait_col`, `data.contrast_pair_col` | `C4`, `contrast_pair_id`; optional tree annotations |
+| `preprocess.max_pivot_cells` | `50000000`; memory guard |
+| `runtime.n_jobs` | `1`; positive prediction worker/thread count |
+| `summary.group_col` | `family`; grouped summaries when metadata supplies this column |
+| `phylogenetic_imputation` | Disabled by default; optional ASR context for unknown species, with the same settings as `run` |
+
+A metadata TSV needs only the species column. Missing trait and contrast-pair
+columns do not prevent prediction or tree output. Without metadata, no group
+summary is attempted. Use metadata with a grouping column for grouped summaries.
+
+Legacy run configs remain accepted. Recognized training sections and training-only
+keys in the sections above are ignored, without running training validation;
+for example, `model`, `split`, `sampling`, `model_selection`, and learned
+preprocessing choices cannot alter predictions. Unknown prediction-setting keys
+are rejected. Bundle state supplies all learned preprocessing and decision
+policies. Its source and hashes are saved in `run_metadata.json`, together with
+the effective worker count and hashes of the input files actually supplied.
+Prediction is deterministic from the fitted bundle and does not use `runtime.seed`.
+
+For `predict`, the launcher sets `POLARS_MAX_THREADS` from the effective worker
+count before importing Polars, replacing any inherited value. The inference
+calls also cap native BLAS/OpenMP threads and temporarily set the loaded
+estimator's worker count when supported. This does not change saved bundle files.
+
+The remaining sections describe the training/config-generation schema.
 
 ### Ordered multi-condition runs
 
@@ -123,7 +173,6 @@ sampling:
   sampled_set_count: 10
   training_group_count: null  # type: integer or null
   group_subsample_repeats: 1
-  group_subsample_repeat_index: 1
   weighting: none  # choices: none, group_label_inverse
 preprocess:
   max_pivot_cells: 50000000
@@ -153,7 +202,6 @@ preprocess:
     method: standard  # choices: none, standard
 model:
   name: logistic_elasticnet  # choices: logistic_elasticnet, linear_svm, random_forest
-  logistic_warm_start_path: false  # choices: true, false
 abstention:
   enabled: false  # choices: true, false
   threshold: 0.8
@@ -179,6 +227,11 @@ summary:
   group_col: family
 figures:
   top_features: 30
+phylogenetic_imputation:
+  enabled: false  # choices: true, false
+  branch_length_mode: input  # choices: input, unit
+  model: ER  # choices: ER, ARD
+  root_prior: equal  # choices: equal, empirical
 report: {}
 runtime:
   seed: 42
@@ -199,6 +252,7 @@ runtime:
 - `evaluation`
 - `summary`
 - `figures`
+- `phylogenetic_imputation`
 - `report`
 - `runtime`
 
@@ -625,33 +679,37 @@ multivariable model.
   - type: `logistic_elasticnet | linear_svm | random_forest`
   - default: `logistic_elasticnet`
   - behavior:
-    - `logistic_elasticnet` uses glum's `GeneralizedLinearRegressor` with
-      `family="binomial"`, `solver="irls-cd"`, and an unpenalized intercept
-      (`fit_intercept=True`).
-    - `l1_ratio=0` gives L2, `l1_ratio=1` gives L1, and
-      `0 < l1_ratio < 1` gives elastic net.
-    - `scale_predictors=False`: feature scaling is controlled by
-      `preprocess.feature_scaling`, including observed-only scaling for neutral
-      missing-expression inputs.
+    - `logistic_elasticnet` uses the native glmnet binomial solver through
+      `python-glmnet`; no R installation or subprocess is needed.
+    - `alpha=0` gives L2, `alpha=1` gives L1, and `0 < alpha < 1` gives elastic net.
+    - `lambda` controls regularization strength; larger values shrink more.
+    - The intercept is unpenalized. Internal standardization is disabled:
+      feature scaling is controlled by `preprocess.feature_scaling`, including
+      observed-only scaling for neutral missing-expression inputs.
     - `linear_svm` and `random_forest` use scikit-learn.
-- `model.logistic_warm_start_path`
-  - type: `bool`
-  - default: `false`
-  - behavior:
-    - reuses fold-local glum coefficients between grid candidates that differ
-      only in `alpha`, fitting from largest to smallest `alpha` (strongest to
-      weakest regularization)
-    - requires `model.name=logistic_elasticnet` and
-      `model_selection.search_strategy=grid`
-    - applies when candidate scoring is serial; parallel candidate scoring falls back to
-      independent fits and records a warning
-    - finite optimization tolerances can produce small differences between
-      warm-start and independent fits
 
-The previous `model.logistic_solver` setting has been removed. Logistic models
-no longer accept scikit-learn's `C`; select a new grid using glum's native
-`alpha` scale. Configs using removed keys must be updated, and persisted
-scikit-learn logistic bundles must be regenerated.
+For grid and random searches, candidates with identical `alpha`, `thresh`, and
+`maxit` are fitted in a single descending lambda path per inner fold. Each fold
+has independent fitted state. Independent folds and paths are scheduled within
+`runtime.n_jobs`. TPE proposes candidates sequentially and uses individual fits.
+Path fitting is automatic; there is no solver or warm-start switch.
+
+Positive lambda gaps are automatically filled with internal warm-start points,
+with at most 0.05 decades between successive values. These points aid convergence;
+they are not additional search candidates and receive no CV scores. Requested
+lambdas and convergence settings remain exact and unchanged. A single candidate
+stays a single fit, and lambda zero has no logarithmic bridge.
+
+Outer-CV and final-refit training also use the available stronger candidate lambdas
+with matching `alpha`, `thresh`, and `maxit` as a descending path to the selected
+lambda. Each refit uses its own training data and retains only the selected model.
+Only the original candidate lambdas are eligible for selection; if no matching
+stronger candidate exists, the refit uses the selected lambda alone. This behavior
+requires no config change.
+
+The logistic search parameters are now `lambda`, `alpha`, `maxit`, and `thresh`.
+Configs using removed keys must be updated, and previously saved logistic model
+bundles must be regenerated. In particular, `alpha` now means the L1 fraction.
 
 ## `model_selection`
 
@@ -702,8 +760,8 @@ Compatibility rules:
 - `selected_candidate_count` and `selected_candidate_percent` are mutually exclusive.
 - `selected_candidate_count` or `selected_candidate_percent` requires `inner_cv_strategy`.
 - when selection is active, top-N selection is applied per sampled set and selected models are always distinct by hyperparameter set.
-- with `selection_rule=one_se`, "simpler" means larger `alpha` for logistic
-  elastic net (then larger `l1_ratio`), or smaller `C` for linear SVM.
+- with `selection_rule=one_se`, "simpler" means larger `lambda` for logistic
+  elastic net (then larger `alpha`), or smaller `C` for linear SVM.
   For random forest, shallower trees, larger split/leaf minima, and fewer trees
   are preferred in that order.
 - `candidate_source_policy=per_sample_set`: select candidates independently for each sampled set.
@@ -716,7 +774,7 @@ Compatibility rules:
 
 Each parameter value can be one of:
 
-- explicit list, e.g. `alpha: [0.0001, 0.001, 0.01]`
+- explicit list, e.g. `lambda: [0.0001, 0.001, 0.01]`
 - `range`
 - `int_range`
 - `log_range`
@@ -755,7 +813,7 @@ Example:
 
 ```yaml
 search_space:
-  alpha:
+  lambda:
     type: range
     start: 0.001
     end: 0.011
@@ -810,7 +868,7 @@ Example:
 
 ```yaml
 search_space:
-  alpha:
+  lambda:
     type: log_range
     base: 10
     start_exp: -5
@@ -837,13 +895,13 @@ model_selection:
   search_strategy: random
   trial_count: 30
   search_space:
-    alpha:
+    lambda:
       type: log_range
       base: 10
       start_exp: -5
       end_exp: -1
       step_exp: 1
-    l1_ratio:
+    alpha:
       type: continuous_range
       start: 0.0
       end: 1.0
@@ -856,14 +914,14 @@ model_selection:
   search_strategy: grid
   trial_count: null
   search_space:
-    alpha: [0.0001, 0.001, 0.01]
-    l1_ratio: [0.2, 0.5, 0.8]
-    max_iter: [200]
+    lambda: [0.0001, 0.001, 0.01]
+    alpha: [0.2, 0.5, 0.8]
+    maxit: [2000000]
 ```
 
 ### Allowed search-space parameter names by model
 
-- `logistic_elasticnet`: `alpha`, `l1_ratio`, `max_iter`, `gradient_tol`
+- `logistic_elasticnet`: `lambda`, `alpha`, `maxit`, `thresh`
 - `linear_svm`: `C`, `max_iter`
 - `random_forest`: `n_estimators`, `max_depth`, `min_samples_split`,
   `min_samples_leaf`
@@ -871,15 +929,20 @@ model_selection:
 Unknown logistic parameter names are rejected during config validation;
 unsupported parameters for other models are rejected at training time.
 
-For logistic elastic net, defaults are `alpha=0.01`, `l1_ratio=0.5`,
-`max_iter=100`, and `gradient_tol=1e-6`. `alpha >= 0` sets regularization
-strength directly: larger values shrink coefficients more. `l1_ratio` is in
-`[0, 1]`, `max_iter` is a positive integer, and `gradient_tol > 0` controls the
-optimization stopping tolerance.
+For logistic elastic net, defaults are `lambda=0.01`, `alpha=0.5`,
+`maxit=2000000`, and `thresh=1e-14`. `lambda >= 0` sets regularization
+strength directly: larger values shrink coefficients more. `alpha` is in
+`[0, 1]`. `maxit` is a positive integer limiting coordinate-descent passes across
+the entire lambda path; it is not an IRLS iteration count. `thresh > 0` controls
+glmnet's relative objective-improvement stopping criterion. The strict default
+was chosen to preserve prediction accuracy at weak regularization. If the native
+solver fails or returns an incomplete path, training fails with an error rather
+than scoring partially converged candidates. Increase `maxit` when its limit is
+reached. Native convergence does not imply a fixed gradient-residual tolerance.
 
 The optimized objective is the sample-weighted mean binary log loss plus
-`alpha * l1_ratio * sum(abs(beta))` and
-`0.5 * alpha * (1 - l1_ratio) * sum(beta ** 2)`. The intercept is unpenalized.
+`lambda * alpha * sum(abs(beta))` and
+`0.5 * lambda * (1 - alpha) * sum(beta ** 2)`. The intercept is unpenalized.
 Multiplying all sample weights by the same positive constant leaves this
 objective unchanged. There is no conversion from the previous `C` scale.
 
@@ -888,16 +951,16 @@ A starting grid for the working expression model is:
 ```yaml
 model_selection:
   search_space:
-    alpha:
+    lambda:
       type: log_range
       base: 10
       start_exp: -5
       end_exp: -1
       step_exp: 0.5
       inclusive_end: true
-    l1_ratio: [1]
-    max_iter: [100]
-    gradient_tol: [1.0e-6]
+    alpha: [1]
+    maxit: [2000000]
+    thresh: [1.0e-14]
 ```
 
 This evaluates nine regularization strengths. Re-tune this grid for the data;
@@ -963,6 +1026,19 @@ derived deterministically from `runtime.seed`.
     - also limits the species-local features in each misclassified-OOF diagnostic under
       `cv/figures/species_evidence/**/*.pdf`; features are ranked separately for each
       species using only the models that produced its held-out-fold prediction.
+
+## `phylogenetic_imputation`
+
+- `enabled`: default `false`; interpret unknown-species predictions only in
+  `full_run` and `predict`. It does not execute in CV or external-test evaluation.
+- `branch_length_mode`: `input` (default) requires all non-root branch lengths;
+  `unit` assigns each non-root branch length 1 in an analysis copy.
+- `model`: `ER` (default) or `ARD`, with transition rates fitted by nwkit.
+- `root_prior`: `equal` (default) or `empirical` observed-state frequencies.
+
+References come from existing metadata and the model bundle; there is no extra
+reference-table setting. See [phylogenetic imputation](phylogenetic-imputation.md)
+for installation, input validation, and comparison outputs.
 
 ## `report`
 

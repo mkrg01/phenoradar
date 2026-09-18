@@ -6,10 +6,11 @@ import importlib
 import math
 from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from functools import wraps
 from multiprocessing import get_context
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -26,12 +27,15 @@ from phenoradar.colors import (
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
+    remove_legacy_population_figure,
     write_population_message_svg,
 )
+from phenoradar.figure_runtime import FigureWorkers
 from phenoradar.metrics import (
     FIXED_PROBABILITY_THRESHOLD_NAME,
     FIXED_PROBABILITY_THRESHOLD_VALUE,
 )
+from phenoradar.timing import TimingRecorder
 
 
 class TreePredictionError(ValueError):
@@ -91,25 +95,36 @@ def _execute_tree_svg_job(
     name: str,
     func: Callable[..., list[str]],
     kwargs: dict[str, Any],
-) -> tuple[str, list[str]]:
-    return name, func(**kwargs)
+) -> tuple[str, list[str], float, float]:
+    started = perf_counter()
+    warnings = func(**kwargs)
+    return name, warnings, started, perf_counter()
 
 
 def _run_tree_svg_jobs(
     jobs: list[_TreeSvgJob],
     *,
     parallel_workers: int,
+    timing_recorder: TimingRecorder | None = None,
+    workers: FigureWorkers | None = None,
 ) -> list[list[str]]:
     if not jobs:
         return []
     worker_count = max(1, min(int(parallel_workers), len(jobs)))
     if worker_count == 1:
-        return [_execute_tree_svg_job(name, func, kwargs)[1] for name, func, kwargs in jobs]
+        results = []
+        for name, func, kwargs in jobs:
+            _, warnings, started, ended = _execute_tree_svg_job(name, func, kwargs)
+            if timing_recorder is not None:
+                timing_recorder.record_interval(started, ended, scope="tree_figure_job", stage=name)
+            results.append(warnings)
+        return results
 
     warnings_by_index: dict[int, list[str]] = {}
-    with ProcessPoolExecutor(
-        max_workers=worker_count,
-        mp_context=get_context("spawn"),
+    with (
+        nullcontext(workers.executor())
+        if workers is not None
+        else ProcessPoolExecutor(max_workers=worker_count, mp_context=get_context("spawn"))
     ) as executor:
         future_to_index = {
             executor.submit(_execute_tree_svg_job, name, func, kwargs): index
@@ -117,7 +132,11 @@ def _run_tree_svg_jobs(
         }
         for future in as_completed(future_to_index):
             index = future_to_index[future]
-            _job_name, job_warnings = future.result()
+            _job_name, job_warnings, started, ended = future.result()
+            if timing_recorder is not None:
+                timing_recorder.record_interval(
+                    started, ended, scope="tree_figure_job", stage=_job_name
+                )
             warnings_by_index[index] = job_warnings
     return [warnings_by_index.get(index, []) for index in range(len(jobs))]
 
@@ -142,6 +161,8 @@ def write_run_tree_prediction_artifacts(
     feature_limit: int = _FEATURE_HEATMAP_LIMIT,
     orthogroup_annotations: pl.DataFrame | None = None,
     parallel_workers: int = 1,
+    timing_recorder: TimingRecorder | None = None,
+    workers: FigureWorkers | None = None,
     preserve_missing: bool = False,
     zero_as_missing: bool = False,
 ) -> list[str]:
@@ -319,7 +340,12 @@ def write_run_tree_prediction_artifacts(
                 ],
             },
         )
-    svg_warnings = _run_tree_svg_jobs(svg_jobs, parallel_workers=parallel_workers)
+    svg_warnings = _run_tree_svg_jobs(
+        svg_jobs,
+        parallel_workers=parallel_workers,
+        timing_recorder=timing_recorder,
+        workers=workers,
+    )
     warnings: list[str] = []
     for step_type, index in ordered_steps:
         if step_type == "warning":
@@ -333,7 +359,7 @@ def write_predict_tree_prediction_artifacts(
     *,
     run_dir: Path,
     tree_path: Path | None,
-    metadata_path: Path,
+    metadata_path: Path | None,
     species_col: str,
     trait_col: str,
     group_col: str,
@@ -343,13 +369,19 @@ def write_predict_tree_prediction_artifacts(
     if tree_path is None:
         return []
     _require_tree(tree_path)
-    metadata = _load_metadata(
-        metadata_path,
-        species_col=species_col,
-        trait_col=trait_col,
-        group_col=group_col,
-        require_trait=False,
-    )
+    if metadata_path is None:
+        metadata = pred_predict.select("species").with_columns(
+            pl.lit(None, dtype=pl.Int8).alias("true_label"),
+            pl.lit(None, dtype=pl.String).alias(group_col),
+        )
+    else:
+        metadata = _load_metadata(
+            metadata_path,
+            species_col=species_col,
+            trait_col=trait_col,
+            group_col=group_col,
+            require_trait=False,
+        )
     annotation = build_predict_tree_prediction_annotation(
         metadata=metadata,
         pred_predict=pred_predict,
@@ -733,10 +765,12 @@ def _load_metadata(
     except Exception as exc:
         raise TreePredictionError(f"Failed to read metadata TSV: {path}") from exc
 
-    required = {species_col, group_col}
+    required = {species_col}
     if require_trait:
-        required.add(trait_col)
+        required.update({trait_col, group_col})
     _require_columns(metadata, required, "metadata TSV")
+    if group_col not in metadata.columns:
+        metadata = metadata.with_columns(pl.lit(None, dtype=pl.String).alias(group_col))
     normalized = metadata.with_columns(
         pl.col(species_col).cast(pl.String, strict=False).str.strip_chars().alias("species"),
         pl.col(group_col).cast(pl.String, strict=False).str.strip_chars().alias(group_col),
@@ -1162,6 +1196,35 @@ def _write_tree_feature_heatmap_svg(
     return warnings
 
 
+def _tree_table_canvas(
+    tree: Any, *, table_width: int, header_height: int, sidebar_width: int = 0,
+) -> tuple[Any, Any, Any, int]:
+    """Use separate, aligned tree and table axes with dimensions in pixels.
+
+    Branch lengths must not control the space available to text or legends.
+    The right-hand sidebar is reserved exclusively for heatmap legends.
+    """
+    toyplot = importlib.import_module("toyplot")
+    width = 260 + table_width + sidebar_width
+    height = max(280 if sidebar_width else 0, header_height + 18 * tree.ntips + 24)
+    canvas = toyplot.Canvas(width=width, height=height, style={"background-color": "white"})
+    tree_axes = canvas.cartesian(bounds=(12, 236, header_height, height - 16), padding=0)
+    tree.draw(axes=tree_axes, layout="r", tip_labels=False, node_sizes=0, scale_bar=False)
+    tree_axes.show = False
+    tree_axes.y.domain.min = -0.5
+    tree_axes.y.domain.max = tree.ntips - 0.5
+    axes = canvas.cartesian(
+        bounds=(248, 248 + table_width, header_height, height - 16),
+        padding=0, xmin=0, xmax=table_width, ymin=-0.5, ymax=tree.ntips - 0.5,
+        show=False,
+    )
+    headers = canvas.cartesian(
+        bounds=(248, 248 + table_width, 12, header_height - 8),
+        padding=0, xmin=0, xmax=table_width, ymin=0, ymax=1, show=False,
+    )
+    return canvas, axes, headers, width
+
+
 def _draw_toytree_heatmap(
     *,
     tree: Any,
@@ -1172,7 +1235,6 @@ def _draw_toytree_heatmap(
     toytree_module: Any,
 ) -> None:
     tip_labels = [str(v) for v in tree.get_tip_labels()]
-    track_count = len(tracks)
     by_species = {str(row["species"]): row for row in annotation.iter_rows(named=True)}
     cell_text_by_track: dict[str, list[str]] = {}
     for track in tracks:
@@ -1188,25 +1250,17 @@ def _draw_toytree_heatmap(
     ]
     annotation_width = sum(track_widths)
     species_label_width = _text_column_width_px(tip_labels, min_width=120, padding=28)
-    height = max(360, 34 + 18 * len(tip_labels))
-    width = max(900, 560 + annotation_width + species_label_width)
-    canvas, axes, _mark = tree.draw(
-        width=width,
-        height=height,
-        layout="r",
-        tip_labels=False,
-        node_sizes=0,
-        scale_bar=False,
+    header_height = max(64, 16 + 6 * max(len(_track_label(track)) for track in tracks))
+    canvas, axes, headers, _width = _tree_table_canvas(
+        tree, table_width=annotation_width + species_label_width + 40,
+        header_height=header_height,
     )
-    axes.show = False
-    axes.x.domain.max = max(track_count + 2.8, (annotation_width + species_label_width) / 68.0)
 
     column_start_px = 18
-    column_scale_px = 88.0
     column_cursor_px = column_start_px
     for track_index, track in enumerate(tracks):
         track_width = track_widths[track_index]
-        x = (column_cursor_px + track_width / 2.0) / column_scale_px
+        x = column_cursor_px + track_width / 2.0
         titles: list[str] = []
         values = cell_text_by_track[track]
         for species in tip_labels:
@@ -1219,18 +1273,18 @@ def _draw_toytree_heatmap(
             values,
             color=_TEXT_COLOR,
             title=titles,
-            style={"font-size": "8px", "text-anchor": "middle"},
+            style={"font-size": "9px", "text-anchor": "middle"},
         )
-        axes.text(
+        headers.text(
             x,
-            len(tip_labels) + 0.35,
+            0,
             _track_label(track),
             angle=90,
             color=_TEXT_COLOR,
             style={"font-size": "9px", "text-anchor": "start"},
         )
         column_cursor_px += track_width
-    species_x = (column_cursor_px + 16) / column_scale_px
+    species_x = column_cursor_px + 16
     axes.text(
         [species_x] * len(tip_labels),
         list(range(len(tip_labels))),
@@ -1240,9 +1294,9 @@ def _draw_toytree_heatmap(
         style={"font-size": "9px", "text-anchor": "start"},
     )
     if title:
-        axes.text(
-            -0.05,
-            len(tip_labels) + 1.1,
+        headers.text(
+            0,
+            1,
             title,
             color=_TEXT_COLOR,
             style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
@@ -1269,7 +1323,7 @@ def _feature_label_depth_px(labels: list[str]) -> int:
         (len(line) for label in labels for line in label.splitlines()),
         default=0,
     )
-    return max(0, 7 * longest_line + 10)
+    return max(0, math.ceil(5.5 * longest_line) + 10)
 
 
 def _draw_toytree_feature_heatmap(
@@ -1304,29 +1358,22 @@ def _draw_toytree_feature_heatmap(
     else:
         feature_labels = features
         feature_titles = features
-    feature_step = 0.48
-    trait_x = 0.45
-    prob_x = trait_x + feature_step
-    feature_start_x = prob_x + feature_step
+    feature_step = 26.0
+    trait_x = 20.0
+    prob_x = 58.0
+    feature_start_x = 96.0
     feature_xs = [
         feature_start_x + feature_index * feature_step
         for feature_index in range(len(feature_labels))
     ]
     heatmap_end_x = feature_xs[-1] + feature_step / 2.0
-    species_x = heatmap_end_x + 0.28
+    species_x = heatmap_end_x + 12
     feature_label_depth_px = _feature_label_depth_px(feature_labels)
-    height = max(420, 88 + feature_label_depth_px + 18 * len(tip_labels))
-    width = max(1040, 620 + 28 * len(feature_labels))
-    canvas, axes, _mark = tree.draw(
-        width=width,
-        height=height,
-        layout="r",
-        tip_labels=False,
-        node_sizes=0,
-        scale_bar=False,
+    species_width = _text_column_width_px(tip_labels, min_width=120, padding=60)
+    canvas, axes, headers, width = _tree_table_canvas(
+        tree, table_width=int(species_x) + species_width,
+        header_height=max(64, feature_label_depth_px + 16), sidebar_width=285,
     )
-    axes.show = False
-    axes.x.domain.max = max(len(feature_labels) + 3.0, 4.0)
 
     value_lookup: dict[tuple[str, str], object] = {}
     trait_lookup: dict[str, object] = {}
@@ -1357,15 +1404,15 @@ def _draw_toytree_feature_heatmap(
         title=[
             f"{species} trait={_format_value(trait_lookup.get(species))}" for species in tip_labels
         ],
-        style={"font-size": "8px", "text-anchor": "middle"},
+        style={"font-size": "9px", "text-anchor": "middle"},
     )
-    axes.text(
+    headers.text(
         trait_x,
-        len(tip_labels) + 0.35,
+        0,
         "trait",
         angle=90,
         color=_TEXT_COLOR,
-        style={"font-size": "7px", "text-anchor": "start"},
+        style={"font-size": "9px", "text-anchor": "start"},
     )
     prob_values = [_format_heatmap_prob_value(prob_lookup.get(species)) for species in tip_labels]
     axes.text(
@@ -1376,15 +1423,15 @@ def _draw_toytree_feature_heatmap(
         title=[
             f"{species} prob={_format_value(prob_lookup.get(species))}" for species in tip_labels
         ],
-        style={"font-size": "8px", "text-anchor": "middle"},
+        style={"font-size": "9px", "text-anchor": "middle"},
     )
-    axes.text(
+    headers.text(
         prob_x,
-        len(tip_labels) + 0.35,
+        0,
         "prob",
         angle=90,
         color=_TEXT_COLOR,
-        style={"font-size": "7px", "text-anchor": "start"},
+        style={"font-size": "9px", "text-anchor": "start"},
     )
     for x, feature, feature_label, feature_title in zip(
         feature_xs,
@@ -1407,13 +1454,13 @@ def _draw_toytree_feature_heatmap(
             color=colors,
             title=titles,
         )
-        axes.text(
+        headers.text(
             x,
-            len(tip_labels) + 0.35,
+            0,
             feature_label,
             angle=90,
             color=_TEXT_COLOR,
-            style={"font-size": "7px", "text-anchor": "start"},
+            style={"font-size": "9px", "text-anchor": "start"},
         )
     axes.text(
         [species_x] * len(tip_labels),
@@ -1442,9 +1489,9 @@ def _draw_toytree_feature_heatmap(
     )
     _draw_confusion_group_legend(canvas=canvas, width=width)
     if title:
-        axes.text(
-            -0.05,
-            len(tip_labels) + 1.45,
+        headers.text(
+            0,
+            1,
             title,
             color=_TEXT_COLOR,
             style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
@@ -1456,6 +1503,7 @@ def _save_toytree_svg(*, canvas: Any, out_path: Path, toytree_module: Any) -> No
     out_path.parent.mkdir(parents=True, exist_ok=True)
     toytree_module.save(canvas, str(out_path))
     _ensure_svg_white_background(out_path)
+    remove_legacy_population_figure(out_path)
 
 
 def _ensure_svg_white_background(svg_path: Path) -> None:
@@ -1555,7 +1603,7 @@ def _draw_heatmap_legend(
         0.5,
         "NA",
         color=_TEXT_COLOR,
-        style={"font-size": "7px", "text-anchor": "start"},
+        style={"font-size": "9px", "text-anchor": "start"},
     )
 
 
@@ -1574,7 +1622,7 @@ def _draw_confusion_group_legend(*, canvas: Any, width: int) -> None:
         0.92,
         "OOF confusion group",
         color=_TEXT_COLOR,
-        style={"font-size": "8px", "font-weight": "bold", "text-anchor": "start"},
+        style={"font-size": "9px", "font-weight": "bold", "text-anchor": "start"},
     )
     y_positions = [0.70, 0.51, 0.32, 0.13]
     for group, y in zip(CONFUSION_GROUP_ORDER, y_positions, strict=True):
@@ -1593,7 +1641,7 @@ def _draw_confusion_group_legend(*, canvas: Any, width: int) -> None:
             y,
             f"{group}: {CONFUSION_GROUP_LABELS[group]}",
             color=color,
-            style={"font-size": "7px", "text-anchor": "start"},
+            style={"font-size": "9px", "text-anchor": "start"},
         )
 
 

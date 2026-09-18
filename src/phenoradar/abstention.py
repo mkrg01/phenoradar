@@ -11,7 +11,6 @@ import numpy as np
 import polars as pl
 
 from phenoradar.metrics import binary_probability_metrics
-from phenoradar.missing_expression import mask_expression
 
 ABSTENTION_COLUMNS = [
     "information_coverage",
@@ -21,6 +20,18 @@ ABSTENTION_COLUMNS = [
     "abstention_reason",
     "missing_features_json",
 ]
+
+_ABSTENTION_BLOCK_CELLS = 1_000_000
+
+
+def _validate_abstention_values(values: np.ndarray) -> None:
+    """Validate all input columns with bounded, memory-order-aware temporaries."""
+    scan = values.T if abs(values.strides[0]) < abs(values.strides[1]) else values
+    block_rows = max(1, _ABSTENTION_BLOCK_CELLS // max(1, scan.shape[1]))
+    for start in range(0, scan.shape[0], block_rows):
+        block = np.asarray(scan[start:start + block_rows], dtype=float)
+        if np.isinf(block).any() or np.any(block < 0):
+            raise ValueError("Abstention requires nonnegative raw TPM or missing values")
 
 
 def prediction_label_expr(frame: pl.DataFrame) -> pl.Expr:
@@ -49,15 +60,14 @@ def annotate_abstention(
     weights. This is exactly mean model coverage, even for disjoint feature sets
     and opposite signs. Intercept-only models contribute zero coverage.
     """
-    values = mask_expression(matrix, zero_as_missing=zero_as_missing)
+    values = np.asarray(matrix)
     if values.shape != (len(species), len(feature_names)):
         raise ValueError("Abstention matrix does not match species/feature schema")
     if len(set(species)) != len(species) or len(set(feature_names)) != len(feature_names):
         raise ValueError("Abstention schema contains duplicate identifiers")
     if not 0 < threshold <= 1 or not model_coefficients:
         raise ValueError("Abstention requires models and a threshold in (0, 1]")
-    if np.isinf(values).any() or np.any(values < 0):
-        raise ValueError("Abstention requires nonnegative raw TPM or missing values")
+    _validate_abstention_values(values)
     index = {name: i for i, name in enumerate(feature_names)}
     weights = np.zeros(len(feature_names), dtype=float)
     for names, coefficients in model_coefficients:
@@ -72,27 +82,43 @@ def annotate_abstention(
         normalized /= normalized.sum()
         indices = [index[name] for name in names]
         weights[indices] += normalized / len(model_coefficients)
-    observed = np.isfinite(values)
-    coverage = np.clip(observed @ weights, 0.0, 1.0)
-    has_coefficients = bool(np.any(weights > 0))
-    # Include numerical equality at the boundary without using rounded output.
-    accepted = (coverage >= threshold) | np.isclose(coverage, threshold, rtol=0.0, atol=1e-12)
-    accepted &= has_coefficients
+    active = np.flatnonzero(weights > 0)
+    active_weights = weights[active]
+    active_names = [feature_names[int(j)] for j in active]
+    has_coefficients = bool(active.size)
     order = sorted(
-        np.flatnonzero(weights > 0).tolist(), key=lambda j: (-weights[j], feature_names[j])
+        range(active.size), key=lambda j: (-active_weights[j], active_names[j])
     )
-    missing_details = []
-    for row in range(len(species)):
-        details = (
-            [
-                {"feature": feature_names[j], "coefficient_fraction": float(weights[j])}
-                for j in order
-                if not observed[row, j]
-            ][:top_features]
-            if not accepted[row]
-            else []
+    coverage = np.empty(len(species), dtype=float)
+    accepted = np.empty(len(species), dtype=bool)
+    missing_details: list[str] = []
+    block_rows = max(1, _ABSTENTION_BLOCK_CELLS // max(1, active.size))
+    for start in range(0, len(species), block_rows):
+        stop = min(start + block_rows, len(species))
+        selected_values = np.asarray(values[start:stop, active], dtype=float)
+        observed = np.isfinite(selected_values)
+        if zero_as_missing:
+            observed &= selected_values != 0.0
+        del selected_values
+        block_coverage = np.clip(observed @ active_weights, 0.0, 1.0)
+        # Include numerical equality at the boundary without using rounded output.
+        block_accepted = has_coefficients & (
+            (block_coverage >= threshold)
+            | np.isclose(block_coverage, threshold, rtol=0.0, atol=1e-12)
         )
-        missing_details.append(json.dumps(details, ensure_ascii=False, separators=(",", ":")))
+        coverage[start:stop] = block_coverage
+        accepted[start:stop] = block_accepted
+        for row in range(stop - start):
+            details = (
+                [
+                    {"feature": active_names[j], "coefficient_fraction": float(active_weights[j])}
+                    for j in order
+                    if not observed[row, j]
+                ][:top_features]
+                if not block_accepted[row]
+                else []
+            )
+            missing_details.append(json.dumps(details, ensure_ascii=False, separators=(",", ":")))
     annotations = pl.DataFrame(
         {
             "species": pl.Series(species, dtype=pl.String),

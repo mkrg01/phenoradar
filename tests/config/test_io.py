@@ -25,23 +25,25 @@ def test_annotated_config_round_trips_all_fields_and_quoted_values() -> None:
                 "metadata_path": "data/種: # metadata.tsv",
                 "tree_path": "data/first line\nsecond line.nwk",
                 "species_col": "null",
-            }
+            },
+            "sampling": {"training_group_count": 5, "group_subsample_repeat_index": 3},
         }
     )
 
     rendered = serialize_resolved_config(config)
 
     assert yaml.safe_load(rendered) == config.model_dump(mode="python")
+    assert AppConfig.model_validate(yaml.safe_load(rendered)) == config
     assert serialize_resolved_config(config) == rendered
     assert "require_both_labels_per_group: false  # choices: true, false" in rendered
     assert "logistic_solver" not in rendered
-    assert "logistic_warm_start_path: false  # choices: true, false" in rendered
+    assert "logistic_warm_start_path" not in rendered
     assert "higher_in_trait: null  # choices: 0, 1, null" in rendered
     assert (
         "inner_cv_strategy: null  # choices: logo, group_kfold, stratified_group_kfold, null"
     ) in rendered
     assert "tree_path:" in rendered and "# type: string or null" in rendered
-    assert "group_subsample_repeat_index: 1" in rendered
+    assert "group_subsample_repeat_index: 3" in rendered
     assert "report: {}" in rendered
 
 
@@ -63,7 +65,7 @@ def test_annotated_search_space_preserves_values_and_lists_range_types(
             "model_selection": {
                 "search_strategy": "tpe",
                 "trial_count": 3,
-                "search_space": {"alpha": spec, "l1_ratio": [0.0, 1.0]},
+                "search_space": {"lambda": spec, "alpha": [0.0, 1.0]},
             }
         }
     )
@@ -79,11 +81,13 @@ def test_annotated_search_space_preserves_values_and_lists_range_types(
         assert "inclusive_end: false  # choices: true, false" in rendered
 
 
-def test_checked_in_config_explicitly_contains_all_resolved_fields() -> None:
+def test_checked_in_config_explicitly_contains_all_user_fields() -> None:
     path = Path(__file__).resolve().parents[2] / "config.yml"
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
 
-    assert payload == load_and_resolve_config([path]).model_dump(mode="python")
+    assert payload == load_and_resolve_config([path]).model_dump(
+        mode="python", exclude={"sampling": {"group_subsample_repeat_index"}}
+    )
 
 
 def test_deep_merge_and_seed_default(tmp_path: Path) -> None:
@@ -96,7 +100,7 @@ sampling:
   weighting: none
 model_selection:
   search_space:
-    alpha: [0.1, 1.0]
+    lambda: [0.1, 1.0]
 """.strip()
         + "\n",
     )
@@ -107,7 +111,7 @@ sampling:
   weighting: group_label_inverse
 model_selection:
   search_space:
-    alpha: [10.0]
+    lambda: [10.0]
 """.strip()
         + "\n",
     )
@@ -116,7 +120,7 @@ model_selection:
 
     assert resolved.runtime.seed == 99
     assert resolved.sampling.weighting == "group_label_inverse"
-    assert resolved.model_selection.search_space["alpha"] == [10.0]
+    assert resolved.model_selection.search_space["lambda"] == [10.0]
 
 
 def test_missing_config_file_is_rejected(tmp_path: Path) -> None:
@@ -139,7 +143,6 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.sampling.group_subsample_repeats == 1
     assert resolved.sampling.group_subsample_repeat_index == 1
     assert resolved.sampling.weighting == "none"
-    assert resolved.model.logistic_warm_start_path is False
     assert resolved.model_selection.selection_metric == "log_loss"
     assert resolved.model_selection.selection_rule == "best"
     assert resolved.model_selection.candidate_source_policy == "per_sample_set"
@@ -356,7 +359,7 @@ def test_grid_rejects_continuous_search_space(tmp_path: Path) -> None:
 model_selection:
   search_strategy: grid
   search_space:
-    alpha:
+    lambda:
       type: continuous_range
       start: 0.1
       end: 1.0
@@ -376,14 +379,14 @@ model_selection:
   search_strategy: random
   trial_count: 2
   search_space:
-    alpha:
+    lambda:
       type: log_range
       base: 10
       start_exp: -1
       stop_exp: 1
       step_exp: 1
       inclusive_stop: true
-    l1_ratio:
+    alpha:
       type: continuous_range
       start: 0.0
       stop: 1.0
@@ -942,7 +945,7 @@ def test_log_range_rejects_end_exp_less_than_start_exp(tmp_path: Path) -> None:
         """
 model_selection:
   search_space:
-    alpha:
+    lambda:
       type: log_range
       base: 10
       start_exp: 1.0
@@ -964,7 +967,7 @@ model_selection:
   search_strategy: random
   trial_count: 10
   search_space:
-    alpha:
+    lambda:
       type: continuous_log_range
       base: 10
       start_exp: 1.0
@@ -983,7 +986,7 @@ def test_model_selection_search_space_rejects_empty_list(tmp_path: Path) -> None
         """
 model_selection:
   search_space:
-    alpha: []
+    lambda: []
 """.strip()
         + "\n",
     )
@@ -1015,35 +1018,37 @@ def test_legacy_logistic_solver_is_rejected(tmp_path: Path, solver: str) -> None
         load_and_resolve_config([cfg])
 
 
-def test_glum_search_space_accepts_full_elastic_net_range(tmp_path: Path) -> None:
+def test_glmnet_search_space_accepts_full_elastic_net_range(
+    tmp_path: Path
+) -> None:
     cfg = _write(
-        tmp_path / "glum.yml",
+        tmp_path / "glmnet.yml",
         """
 model:
   name: logistic_elasticnet
-  logistic_warm_start_path: true
 model_selection:
   search_space:
-    alpha: [0.0001, 0.01, 0.1]
-    l1_ratio: [0, 0.5, 1]
-    max_iter: [100]
-    gradient_tol: [1.0e-6]
+    lambda: [0.0001, 0.01, 0.1]
+    alpha: [0, 0.5, 1]
+    maxit: [100]
+    thresh: [1.0e-14]
 """.lstrip(),
     )
 
     resolved = load_and_resolve_config([cfg])
 
-    assert resolved.model.logistic_warm_start_path is True
     assert resolved.model_selection.search_space == {
-        "alpha": [0.0001, 0.01, 0.1],
-        "l1_ratio": [0, 0.5, 1],
-        "max_iter": [100],
-        "gradient_tol": [1.0e-6],
+        "lambda": [0.0001, 0.01, 0.1],
+        "alpha": [0, 0.5, 1],
+        "maxit": [100],
+        "thresh": [1.0e-14],
     }
 
 
-@pytest.mark.parametrize("parameter", ["C", "tol", "penalty"])
-def test_logistic_search_space_rejects_sklearn_parameters(
+@pytest.mark.parametrize(
+    "parameter", ["C", "tol", "penalty", "l1_ratio", "max_iter", "gradient_tol"]
+)
+def test_logistic_search_space_rejects_removed_parameters(
     tmp_path: Path, parameter: str
 ) -> None:
     cfg = _write(
@@ -1051,7 +1056,7 @@ def test_logistic_search_space_rejects_sklearn_parameters(
         f"model_selection:\n  search_space:\n    {parameter}: [1.0]\n",
     )
 
-    with pytest.raises(ConfigError, match="Use glum parameters alpha"):
+    with pytest.raises(ConfigError, match="Use glmnet parameters lambda"):
         load_and_resolve_config([cfg])
 
 
@@ -1068,38 +1073,27 @@ def test_linear_svm_retains_c_search_parameter(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "extra, message",
+    "model_name, strategy",
     [
-        (
-            """
-model:
-  name: random_forest
-  logistic_warm_start_path: true
-""",
-            "only valid when model.name=logistic_elasticnet",
-        ),
-        (
-            """
-model:
-  name: logistic_elasticnet
-  logistic_warm_start_path: true
-model_selection:
-  search_strategy: random
-  trial_count: 2
-""",
-            "currently requires model_selection.search_strategy=grid",
-        ),
+        ("random_forest", "grid"),
+        ("linear_svm", "grid"),
+        ("logistic_elasticnet", "random"),
+        ("logistic_elasticnet", "tpe"),
     ],
 )
-def test_logistic_warm_start_path_rejects_incompatible_config(
+def test_other_models_and_search_strategies_resolve(
     tmp_path: Path,
-    extra: str,
-    message: str,
+    model_name: str,
+    strategy: str,
 ) -> None:
-    cfg = _write(tmp_path / "invalid_warm_start.yml", extra.strip() + "\n")
+    cfg = _write(
+        tmp_path / "model_strategy.yml",
+        f"model:\n  name: {model_name}\n"
+        f"model_selection:\n  search_strategy: {strategy}\n"
+        + ("  trial_count: 2\n" if strategy != "grid" else ""),
+    )
 
-    with pytest.raises(ConfigError, match=message):
-        load_and_resolve_config([cfg])
+    assert load_and_resolve_config([cfg]).model.name == model_name
 
 
 def test_tpe_strategy_requires_trial_count(tmp_path: Path) -> None:
@@ -1122,7 +1116,7 @@ def test_range_requires_stop_greater_or_equal_start(tmp_path: Path) -> None:
         """
 model_selection:
   search_space:
-    alpha:
+    lambda:
       type: range
       start: 1.0
       end: 0.1
@@ -1141,7 +1135,7 @@ def test_int_range_requires_stop_greater_or_equal_start(tmp_path: Path) -> None:
         """
 model_selection:
   search_space:
-    max_iter:
+    maxit:
       type: int_range
       start: 10
       end: 1
@@ -1160,7 +1154,7 @@ def test_log_range_requires_valid_base(tmp_path: Path) -> None:
         """
 model_selection:
   search_space:
-    alpha:
+    lambda:
       type: log_range
       base: 1
       start_exp: -1
@@ -1182,7 +1176,7 @@ model_selection:
   search_strategy: random
   trial_count: 2
   search_space:
-    alpha:
+    lambda:
       type: continuous_log_range
       base: 1
       start_exp: -1
@@ -1203,7 +1197,7 @@ model_selection:
   search_strategy: random
   trial_count: 2
   search_space:
-    l1_ratio:
+    alpha:
       type: continuous_range
       start: 1.0
       end: 0.0
@@ -1257,3 +1251,9 @@ runtime:
     resolved = load_and_resolve_config([cfg], execution_stage_override="full_run")
 
     assert resolved.runtime.execution_stage == "full_run"
+
+
+def test_removed_warm_start_switch_is_rejected(tmp_path: Path) -> None:
+    cfg = _write(tmp_path / "removed.yml", "model:\n  logistic_warm_start_path: true\n")
+    with pytest.raises(ConfigError, match="logistic_warm_start_path"):
+        load_and_resolve_config([cfg])

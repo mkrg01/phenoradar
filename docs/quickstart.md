@@ -213,21 +213,31 @@ phenoradar run -c config.yml --execution-stage full_run
 
 ## 6) Predict with a model bundle
 
-Create `predict_config.yml`:
-
-```yaml
-data:
-  metadata_path: data/species_metadata_predict.tsv
-  tpm_path: data/tpm_predict.tsv
-```
-
-Run prediction:
+Predict every species in a TPM file without creating metadata or a config:
 
 ```bash
 phenoradar predict \
   --model-bundle runs/<run_id>/model_bundle \
-  -c predict_config.yml
+  --tpm-path data/tpm_predict.tsv \
+  --n-jobs 4
 ```
+
+Optionally pass `--metadata-path data/species_metadata_predict.tsv` to select
+species and supply annotations such as `family`. Only the `species` column is
+required; phenotype labels and contrast pairs are unnecessary.
+
+For repeated use, an optional `predict_config.yml` can contain:
+
+```yaml
+data:
+  tpm_path: data/tpm_predict.tsv
+runtime:
+  n_jobs: 4
+```
+
+Then run `phenoradar predict --model-bundle runs/<run_id>/model_bundle -c predict_config.yml`.
+CLI options override the config. Learned preprocessing and decision policies
+always come from the bundle.
 
 This writes:
 
@@ -238,8 +248,17 @@ runs/<timestamp>_predict_<id>/
 With:
 
 - `inference/tables/prediction_inference.tsv`
+- `resolved_config.yml` (effective prediction settings)
 - `run_metadata.json`
 - `inference/figures/`
+- `inference/figures/candidate_evidence/` (one PDF per accepted positive species
+  for linear bundles), plus the underlying contribution, reference-expression,
+  and model-probability TSVs
+
+The species PDFs explain which features supported or opposed the prediction and
+compare expression with known-trait species when reference data are available.
+Optional `figures.top_features` in the prediction config controls the number of
+features; otherwise the bundle's training-time figure setting is used.
 
 ## 7) Aggregate multiple runs
 

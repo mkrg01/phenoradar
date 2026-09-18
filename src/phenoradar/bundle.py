@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -12,18 +12,18 @@ from typing import Any
 import joblib
 import numpy as np
 import polars as pl
-from glum import GeneralizedLinearRegressor
 from pydantic import ValidationError
 from sklearn.preprocessing import StandardScaler
 
 from phenoradar.abstention import annotate_abstention
-from phenoradar.config import AppConfig
+from phenoradar.config import AppConfig, PredictConfig
 from phenoradar.config.schema import AbstentionConfig, MissingExpressionConfig
 from phenoradar.cv import (
     CVError,
     ExpressionMatrixBuilder,
     FeatureScaler,
     FinalRefitArtifacts,
+    _with_native_thread_limit,
     apply_expression_transform,
     apply_feature_scaling,
 )
@@ -34,6 +34,7 @@ from phenoradar.metrics import (
 )
 from phenoradar.missing_expression import NeutralStandardScaler
 from phenoradar.provenance import phenoradar_build_snapshot, runtime_environment_snapshot
+from phenoradar.trait_reference import read_observed_traits, validate_observed_traits
 
 BUNDLE_FORMAT_VERSION = "3"
 _LEGACY_BUNDLE_FORMAT_VERSION = "1"
@@ -99,6 +100,9 @@ class LoadedBundle:
     abstention_enabled: bool = False
     abstention_threshold: float = 0.8
     abstention_top_features: int = 30
+    reference_expression: pl.DataFrame | None = None
+    orthogroup_annotations: pl.DataFrame | None = None
+    observed_traits: pl.DataFrame | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +111,26 @@ class ModelPreprocessEntry:
 
     feature_names: list[str]
     scaler: FeatureScaler
+
+
+@dataclass
+class BundlePredictionContext:
+    """Own reusable prediction inputs until interpretation finishes."""
+
+    bundle: LoadedBundle | None = None
+    species: list[str] = field(default_factory=list)
+    feature_names: list[str] = field(default_factory=list)
+    raw: np.ndarray | None = None
+    transformed: np.ndarray | None = None
+    model_probabilities: list[np.ndarray] = field(default_factory=list)
+
+    def clear(self) -> None:
+        self.bundle = None
+        self.species = []
+        self.feature_names = []
+        self.raw = None
+        self.transformed = None
+        self.model_probabilities = []
 
 
 def _sha256_file(path: Path) -> str:
@@ -254,6 +278,8 @@ def export_model_bundle(
     config: AppConfig,
     final_refit_artifacts: FinalRefitArtifacts,
     thresholds: pl.DataFrame,
+    reference_expression: pl.DataFrame | None = None,
+    orthogroup_annotations: pl.DataFrame | None = None,
 ) -> BundleExportResult:
     """Export reusable model bundle from final-refit artifacts."""
     bundle_dir = run_dir / _BUNDLE_DIRNAME
@@ -365,10 +391,27 @@ def export_model_bundle(
     )
     shutil.copy2(resolved_config_path, resolved_copy_path)
 
+    try:
+        observed_traits = read_observed_traits(
+            config.data.metadata_path, species_col=config.data.species_col,
+            trait_col=config.data.trait_col, exclude_col=config.split.exclude_col,
+        )
+    except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
+        raise BundleError(f"Failed to snapshot observed traits: {exc}") from exc
+    optional_files: list[str] = []
+    for filename, table in [
+        ("reference_expression.parquet", reference_expression),
+        ("orthogroup_annotations.parquet", orthogroup_annotations),
+        ("observed_traits.parquet", observed_traits),
+    ]:
+        if table is not None and table.height > 0:
+            table.write_parquet(bundle_dir / filename)
+            optional_files.append(filename)
+
     build = phenoradar_build_snapshot()
     environment = runtime_environment_snapshot()
     files_info: dict[str, dict[str, int | str]] = {}
-    for filename in _REQUIRED_FILES:
+    for filename in [*_REQUIRED_FILES, *optional_files]:
         if filename == "bundle_manifest.json":
             continue
         files_info[filename] = _file_info(bundle_dir / filename)
@@ -386,6 +429,7 @@ def export_model_bundle(
         "source_git_dirty": build["git_dirty"],
         "source_git_worktree_patch_sha256": build["git_worktree_patch_sha256"],
         "model_name": config.model.name,
+        "trait_name": config.data.trait_col,
         "calibration": _calibration_for_model(config.model.name),
         "ensemble_size": final_refit_artifacts.ensemble_size,
         "ensemble_probability_aggregation": config.ensemble.probability_aggregation,
@@ -673,6 +717,29 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
     source_run_id_raw = manifest.get("source_run_id")
     source_run_id = str(source_run_id_raw) if source_run_id_raw is not None else "unknown"
 
+    # Only consume inventoried, integrity-verified interpretation snapshots.
+    optional_tables: dict[str, pl.DataFrame | None] = {}
+    for name, required in [
+        ("reference_expression", {"species", "label", "feature", "tpm", "log2_tpm_plus1"}),
+        ("orthogroup_annotations", {"feature", "orthogroup_annotation"}),
+        ("observed_traits", {"species", "label"}),
+    ]:
+        filename = f"{name}.parquet"
+        table = None
+        if filename in manifest["files"]:
+            try:
+                table = pl.read_parquet(bundle_dir / filename)
+            except (OSError, pl.exceptions.PolarsError) as exc:
+                raise BundleError(f"Failed to read bundled {filename}: {exc}") from exc
+            if not required.issubset(table.columns):
+                raise BundleError(f"Invalid bundled {filename} schema")
+            if name == "observed_traits":
+                try:
+                    table = validate_observed_traits(table)
+                except (ValueError, pl.exceptions.PolarsError) as exc:
+                    raise BundleError(f"Invalid bundled {filename}: {exc}") from exc
+        optional_tables[name] = table
+
     return LoadedBundle(
         bundle_dir=bundle_dir,
         manifest=manifest,
@@ -693,15 +760,13 @@ def load_model_bundle(bundle_dir: Path) -> LoadedBundle:
         abstention_enabled=abstention.enabled,
         abstention_threshold=abstention.threshold,
         abstention_top_features=top_features,
+        reference_expression=optional_tables["reference_expression"],
+        orthogroup_annotations=optional_tables["orthogroup_annotations"],
+        observed_traits=optional_tables["observed_traits"],
     )
 
 
 def _predict_probability(estimator: Any, x: np.ndarray) -> np.ndarray:
-    if isinstance(estimator, GeneralizedLinearRegressor):
-        probability = np.asarray(estimator.predict(x), dtype=float)
-        if probability.shape != (x.shape[0],):
-            raise BundleError("Loaded binomial GLM returned invalid probability shape")
-        return probability
     probabilities = np.asarray(estimator.predict_proba(x), dtype=float)
     if probabilities.ndim != 2 or probabilities.shape[1] < 2:
         raise BundleError("Loaded model returned invalid probability shape")
@@ -717,74 +782,83 @@ def _aggregate_probabilities(probs: list[np.ndarray], aggregation: str) -> np.nd
     raise BundleError(f"Unsupported probability aggregation: {aggregation}")
 
 
-def predict_with_bundle(
-    config: AppConfig, bundle: LoadedBundle
-) -> tuple[pl.DataFrame, list[str]]:
-    """Run deterministic inference using a loaded model bundle."""
-    metadata = pl.read_csv(config.data.metadata_path, separator="\t")
-    if config.data.species_col not in metadata.columns:
-        raise BundleError(f"Metadata is missing species column: {config.data.species_col}")
-
-    species = (
-        metadata.select(
-            pl.col(config.data.species_col)
-            .cast(pl.String, strict=False)
-            .str.strip_chars()
-            .alias("species")
-        )
-        .filter(pl.col("species").is_not_null() & (pl.col("species") != ""))
-        .unique()
-        .sort("species")
-        .select("species")
-        .to_series()
-        .to_list()
-    )
-    species_list = [str(v) for v in species]
-    if not species_list:
-        raise BundleError("Predict metadata produced zero valid species")
-
+def _prediction_species(config: AppConfig | PredictConfig) -> list[str]:
+    metadata_path = config.data.metadata_path
+    path = metadata_path if metadata_path is not None else config.data.tpm_path
+    source = "Metadata" if metadata_path is not None else "TPM"
     try:
-        matrix_config = config.model_copy(
-            update={
-                "preprocess": config.preprocess.model_copy(
-                    update={"absent_feature_fill": bundle.absent_feature_fill}
-                )
-            }
+        frame = pl.scan_csv(path, separator="\t")
+        if config.data.species_col not in frame.collect_schema().names():
+            raise BundleError(f"{source} is missing species column: {config.data.species_col}")
+        species = (
+            frame.select(
+                pl.col(config.data.species_col)
+                .cast(pl.String, strict=False)
+                .str.strip_chars()
+                .alias("species")
+            )
+            .unique()
+            .collect()
         )
-        matrix_builder = ExpressionMatrixBuilder(matrix_config)
-        x_raw, input_features = matrix_builder.build_matrix(species_list)
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise BundleError(f"Failed to read prediction {source} file: {path}: {exc}") from exc
+    invalid_species = pl.col("species").is_null() | (pl.col("species") == "")
+    if metadata_path is None and species.filter(invalid_species).height:
+        raise BundleError("Prediction TPM contains empty species names")
+    species_list = species.filter(~invalid_species).unique().sort("species").to_series().to_list()
+    if not species_list:
+        raise BundleError(f"Predict {source.lower()} produced zero valid species")
+    return [str(value) for value in species_list]
+
+
+def _predict_with_jobs(estimator: Any, x: np.ndarray, n_jobs: int) -> np.ndarray:
+    """Temporarily override a loaded estimator's worker count without refitting."""
+    has_n_jobs = hasattr(estimator, "n_jobs")
+    previous = getattr(estimator, "n_jobs", None)
+    try:
+        if has_n_jobs:
+            estimator.n_jobs = n_jobs
+        return _with_native_thread_limit(n_jobs, _predict_probability, estimator, x)
+    finally:
+        if has_n_jobs:
+            estimator.n_jobs = previous
+
+
+def prepare_bundle_input(
+    config: AppConfig | PredictConfig, bundle: LoadedBundle, species_list: list[str]
+) -> tuple[np.ndarray, np.ndarray, list[str], list[str]]:
+    """Align and transform raw inputs identically for prediction and interpretation."""
+    alignment_features = (
+        bundle.transform_feature_names
+        if bundle.expression_transform in _CONTEXTUAL_EXPRESSION_TRANSFORMS
+        else bundle.feature_names
+    )
+    matrix_builder = None
+    try:
+        matrix_builder = ExpressionMatrixBuilder(
+            config, absent_feature_fill=bundle.absent_feature_fill
+        )
+        # Validate all consumed rows once, including columns outside the bundle.
+        # Rank transforms retain their saved training schema before ranking.
+        matrix_builder.cache_species(species_list)
+        input_features = matrix_builder.feature_names_for_species(species_list)
+        input_feature_set = set(input_features)
+        if not input_feature_set.intersection(bundle.feature_names) and (
+            bundle.missing_expression_method != "neutral"
+        ):
+            raise BundleError(
+                "No bundle features were available in prediction input after alignment"
+            )
+        aligned_raw, _ = matrix_builder.build_matrix(
+            species_list, feature_order=alignment_features
+        )
     except CVError as exc:
         raise BundleError(str(exc)) from exc
-    input_index = {feature: idx for idx, feature in enumerate(input_features)}
-    bundle_features = bundle.feature_names
-    input_feature_set = set(input_features)
-    model_overlap_count = len(input_feature_set.intersection(bundle_features))
-    if model_overlap_count == 0 and bundle.missing_expression_method != "neutral":
-        raise BundleError("No bundle features were available in prediction input after alignment")
-
-    if bundle.expression_transform in _CONTEXTUAL_EXPRESSION_TRANSFORMS:
-        alignment_features = bundle.transform_feature_names
-    else:
-        # Feature-wise transforms commute with feature selection, so aligning only
-        # the model-feature union avoids materializing unused input columns.
-        alignment_features = bundle_features
+    finally:
+        if matrix_builder is not None:
+            matrix_builder.close()
     alignment_feature_set = set(alignment_features)
-
-    absent_feature_fill_value = (
-        0.0 if bundle.absent_feature_fill == 0 else float("nan")
-    )
-    aligned_raw = np.full(
-        (len(species_list), len(alignment_features)),
-        absent_feature_fill_value,
-        dtype=float,
-    )
-    alignment_overlap_count = 0
-    for feature_idx, feature_name in enumerate(alignment_features):
-        input_idx = input_index.get(feature_name)
-        if input_idx is None:
-            continue
-        aligned_raw[:, feature_idx] = x_raw[:, input_idx]
-        alignment_overlap_count += 1
+    alignment_overlap_count = len(input_feature_set.intersection(alignment_feature_set))
 
     try:
         transformed = apply_expression_transform(
@@ -810,15 +884,34 @@ def predict_with_bundle(
             f"ignored {extra_count} features"
         )
 
+    return aligned_raw, transformed, alignment_features, warnings
+
+
+def bundle_preprocess_entries(bundle: LoadedBundle) -> list[ModelPreprocessEntry]:
+    if len(bundle.model_preprocess) == len(bundle.models):
+        return bundle.model_preprocess
+    if len(bundle.model_preprocess) == 1 and len(bundle.models) > 1:
+        return bundle.model_preprocess * len(bundle.models)
+    raise BundleError("Bundle model/preprocess count mismatch")
+
+
+def predict_with_bundle(
+    config: AppConfig | PredictConfig, bundle: LoadedBundle,
+    *, context: BundlePredictionContext | None = None,
+) -> tuple[pl.DataFrame, list[str]]:
+    """Run deterministic inference using a loaded model bundle."""
+    if context is not None:
+        context.clear()
+    species_list = _prediction_species(config)
+
+    aligned_raw, transformed, alignment_features, warnings = prepare_bundle_input(
+        config, bundle, species_list
+    )
+
     schema_index = {feature: idx for idx, feature in enumerate(alignment_features)}
 
     model_probs: list[np.ndarray] = []
-    if len(bundle.model_preprocess) == len(bundle.models):
-        preprocess_entries = bundle.model_preprocess
-    elif len(bundle.model_preprocess) == 1 and len(bundle.models) > 1:
-        preprocess_entries = bundle.model_preprocess * len(bundle.models)
-    else:
-        raise BundleError("Bundle model/preprocess count mismatch")
+    preprocess_entries = bundle_preprocess_entries(bundle)
 
     for model, preprocess in zip(bundle.models, preprocess_entries, strict=True):
         selected_indices = np.array(
@@ -833,7 +926,7 @@ def predict_with_bundle(
             )
         except CVError as exc:
             raise BundleError(str(exc)) from exc
-        model_probs.append(_predict_probability(model, x_model_scaled))
+        model_probs.append(_predict_with_jobs(model, x_model_scaled, config.runtime.n_jobs))
 
     prob = _aggregate_probabilities(model_probs, bundle.probability_aggregation)
     uncertainty_std = np.std(np.vstack(model_probs), axis=0) if len(model_probs) > 1 else None
@@ -862,4 +955,11 @@ def predict_with_bundle(
             threshold=bundle.abstention_threshold,
             top_features=bundle.abstention_top_features,
         )
+    if context is not None:
+        context.bundle = bundle
+        context.species = species_list
+        context.feature_names = alignment_features
+        context.raw = aligned_raw
+        context.transformed = transformed
+        context.model_probabilities = model_probs
     return pred_df, warnings

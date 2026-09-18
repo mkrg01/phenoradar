@@ -15,7 +15,7 @@ dependencies = [
   "typer>=0.12.5,<1.0.0",
   "polars>=1.9.0,<2.0.0",
   "scikit-learn>=1.8.0,<2.0.0",
-  "glum>=3.4.1,<4.0.0",
+  "python-glmnet>=2.6.1,<2.7.0",
   "matplotlib>=3.9.2,<4.0.0",
   "optuna>=4.0.0,<5.0.0",
   "PyYAML>=6.0.2,<7.0.0",
@@ -30,6 +30,9 @@ phenoradar = "phenoradar.launcher:main"
 phrad = "phenoradar.launcher:main"
 
 [project.optional-dependencies]
+phylogeny = [
+  "ete4>=4.4.0,<5.0.0",  # tree IO; the nwkit asr executable is installed separately
+]
 dev = [
   "ruff>=0.6.9,<1.0.0",
   "mypy>=1.11.2,<2.0.0",
@@ -68,7 +71,7 @@ module = ["sklearn", "sklearn.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["glum", "glum.*"]
+module = ["glmnet", "glmnet.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

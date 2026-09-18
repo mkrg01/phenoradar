@@ -511,8 +511,8 @@ def test_write_run_figures_writes_top_feature_expression_by_confusion(
     assert "beta carbonic anhydrase" in svg_text
     assert "photosynthetic annotation" in svg_text
     assert "(OG1)" in svg_text
-    assert "importance=0.7" in svg_text
-    assert "β=+0.2" in svg_text
+    assert "importance=" not in svg_text
+    assert "β=" not in svg_text
     assert "higher" not in svg_text
     assert "C4=1" not in svg_text
     for group in ["TP", "FN", "TN", "FP"]:
@@ -565,7 +565,9 @@ def test_write_run_figures_writes_group_bootstrap_confidence_intervals(
     assert figure_path.exists()
     svg_text = figure_path.read_text(encoding="utf-8")
     assert "OOF group-bootstrap confidence intervals" in svg_text
-    assert "family" in svg_text
+    assert "95% group-bootstrap CI" in svg_text
+    for metadata in ("group_col=", "groups=", "resamples=", "minimum valid"):
+        assert metadata not in svg_text
     assert warnings == []
 
 
@@ -905,11 +907,11 @@ def test_write_run_figures_ignores_empty_model_selection_trials_when_provided(
     )
 
     figures_dir = tmp_path / "run" / "cv" / "figures"
-    assert not (figures_dir / "model_selection_trials.svg").exists()
+    assert not (figures_dir / "model_selection.svg").exists()
     assert warnings == []
 
 
-def test_write_run_figures_writes_model_selection_trials_when_summary_provided(
+def test_write_run_figures_writes_model_selection_curve_when_summary_provided(
     tmp_path: Path,
 ) -> None:
     warnings = write_run_figures(
@@ -926,7 +928,7 @@ def test_write_run_figures_writes_model_selection_trials_when_summary_provided(
                 "sample_set_id": [0, 0, 0, 0],
                 "candidate_index": [0, 1, 0, 1],
                 "metric_name": ["mcc", "mcc", "mcc", "mcc"],
-                "params_json": ["{}", '{"alpha":1.0}', "{}", '{"alpha":1.0}'],
+                "params_json": ["{}", '{"lambda":1.0}', "{}", '{"lambda":1.0}'],
                 "n_inner_folds": [2, 2, 2, 2],
                 "n_valid_inner_folds": [2, 2, 2, 2],
                 "metric_value_mean": [0.40, 0.55, 0.38, 0.52],
@@ -936,13 +938,15 @@ def test_write_run_figures_writes_model_selection_trials_when_summary_provided(
     )
 
     figures_dir = tmp_path / "run" / "cv" / "figures"
-    svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
-    assert (figures_dir / "model_selection_trials.svg").exists()
-    assert '1: {"alpha":1.0}' in svg_text
+    svg_text = (figures_dir / "model_selection.svg").read_text(encoding="utf-8")
+    assert (figures_dir / "model_selection.svg").exists()
+    assert "candidate_index" in svg_text
+    assert "one-SE" not in svg_text
+    assert not (figures_dir / "model_selection_trials.svg").exists()
     assert warnings == []
 
 
-def test_write_run_figures_uses_log_loss_axis_label_for_model_selection_trials(
+def test_write_run_figures_uses_log_loss_axis_label_for_model_selection_curve(
     tmp_path: Path,
 ) -> None:
     warnings = write_run_figures(
@@ -959,7 +963,7 @@ def test_write_run_figures_uses_log_loss_axis_label_for_model_selection_trials(
                 "sample_set_id": [0, 0],
                 "candidate_index": [0, 1],
                 "metric_name": ["log_loss", "log_loss"],
-                "params_json": ["{}", '{"alpha":1.0}'],
+                "params_json": ["{}", '{"lambda":1.0}'],
                 "n_inner_folds": [2, 2],
                 "n_valid_inner_folds": [2, 2],
                 "metric_value_mean": [0.40, 0.55],
@@ -969,8 +973,8 @@ def test_write_run_figures_uses_log_loss_axis_label_for_model_selection_trials(
     )
 
     figures_dir = tmp_path / "run" / "cv" / "figures"
-    svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
-    assert "Log Loss" in svg_text
+    svg_text = (figures_dir / "model_selection.svg").read_text(encoding="utf-8")
+    assert "Log loss" in svg_text
     assert warnings == []
 
 
@@ -992,8 +996,8 @@ def test_write_run_figures_hides_fixed_params_in_model_selection_labels(
                 "candidate_index": [0, 1],
                 "metric_name": ["mcc", "mcc"],
                 "params_json": [
-                    '{"alpha":1.0,"l1_ratio":0.5}',
-                    '{"alpha":2.0,"l1_ratio":0.5}',
+                    '{"lambda":1.0,"alpha":0.5}',
+                    '{"lambda":2.0,"alpha":0.5}',
                 ],
                 "n_inner_folds": [2, 2],
                 "n_valid_inner_folds": [2, 2],
@@ -1004,15 +1008,16 @@ def test_write_run_figures_hides_fixed_params_in_model_selection_labels(
     )
 
     figures_dir = tmp_path / "run" / "cv" / "figures"
-    svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
-    assert '0: {"alpha":1.0}' in svg_text
-    assert '1: {"alpha":2.0}' in svg_text
-    assert "l1_ratio" not in svg_text
+    svg_text = (figures_dir / "model_selection.svg").read_text(encoding="utf-8")
+    assert "log10(lambda)" in svg_text
+    assert "alpha" not in svg_text
     assert warnings == []
 
 
-def test_write_run_figures_writes_one_se_model_selection_figure(
-    tmp_path: Path,
+@pytest.mark.parametrize("selection_rule", ["best", "one_se"])
+@pytest.mark.parametrize("final_rule", ["best", "one_se"])
+def test_write_run_figures_writes_model_selection_figure_for_recorded_rule(
+    tmp_path: Path, selection_rule: str, final_rule: str,
 ) -> None:
     summary = pl.DataFrame(
         {
@@ -1021,12 +1026,12 @@ def test_write_run_figures_writes_one_se_model_selection_figure(
             "candidate_index": [0, 1, 2, 0, 1, 2],
             "metric_name": ["log_loss"] * 6,
             "params_json": [
-                '{"alpha":1.0}',
-                '{"alpha":0.1}',
-                '{"alpha":0.01}',
-                '{"alpha":1.0}',
-                '{"alpha":0.1}',
-                '{"alpha":0.01}',
+                '{"lambda":1.0}',
+                '{"lambda":0.1}',
+                '{"lambda":0.01}',
+                '{"lambda":1.0}',
+                '{"lambda":0.1}',
+                '{"lambda":0.01}',
             ],
             "n_inner_folds": [2] * 6,
             "n_valid_inner_folds": [2] * 6,
@@ -1046,15 +1051,24 @@ def test_write_run_figures_writes_one_se_model_selection_figure(
             "metric_name": ["log_loss", "log_loss", "log_loss"],
             "metric_value": [0.23, 0.24, 0.22],
             "metric_value_se": [0.007, 0.007, 0.006],
-            "selection_rule": ["one_se", "one_se", "one_se"],
+            "selection_rule": [selection_rule, selection_rule, final_rule],
             "n_available_candidates": [3, 3, 3],
             "n_scored_candidates": [3, 3, 3],
             "selected_candidate_count_requested": [1, 1, 1],
             "selected_candidate_count_effective": [1, 1, 1],
-            "params_json": ['{"alpha":0.1}', '{"alpha":0.1}', '{"alpha":0.1}'],
+            "params_json": ['{"lambda":0.1}', '{"lambda":0.1}', '{"lambda":0.1}'],
         }
     )
 
+    # Ensure regenerating a run also removes both retired and opposite-rule figures.
+    for stage, prefix in (("cv", ""), ("model", "final_refit_")):
+        directory = tmp_path / "run" / stage / "figures"
+        directory.mkdir(parents=True)
+        for stem in ("model_selection_trials", "model_selection", "model_selection_one_se_curve"):
+            (directory / f"{prefix}{stem}.svg").write_text("obsolete")
+    final_summary = summary.filter(pl.col("fold_id") == "0").with_columns(
+        pl.lit("NA").alias("fold_id")
+    )
     warnings = write_run_figures(
         run_dir=tmp_path / "run",
         metrics_cv=_minimal_metrics_cv(),
@@ -1065,16 +1079,23 @@ def test_write_run_figures_writes_one_se_model_selection_figure(
         model_selection_trials=None,
         model_selection_trials_summary=summary,
         model_selection_selected=selected,
+        final_refit_model_selection_trials_summary=final_summary,
     )
 
-    figures_dir = tmp_path / "run" / "cv" / "figures"
-    one_se_svg = (figures_dir / "model_selection_one_se_curve.svg").read_text(encoding="utf-8")
-    assert "one-SE threshold" in one_se_svg
-    assert "Selected candidate" in one_se_svg
-    assert "log10(alpha)" in one_se_svg
-    assert "Log loss mean" in one_se_svg
-    assert "Log Loss mean" not in one_se_svg
-    assert not (figures_dir / "selected_hyperparameter_stability.svg").exists()
+    for stage, prefix, rule in (
+        ("cv", "", selection_rule), ("model", "final_refit_", final_rule),
+    ):
+        stem = "model_selection_one_se_curve" if rule == "one_se" else "model_selection"
+        directory = tmp_path / "run" / stage / "figures"
+        figure = directory / f"{prefix}{stem}.svg"
+        svg = figure.read_text(encoding="utf-8")
+        assert ("one-SE threshold" in svg) == (rule == "one_se")
+        assert ("Within one-SE" in svg) == (rule == "one_se")
+        assert "Selected candidate" in svg
+        assert "Candidate mean ± SE" in svg
+        assert "log10(lambda)" in svg
+        assert "Log loss mean" in svg
+        assert sorted(directory.glob(f"{prefix}model_selection*.svg")) == [figure]
     assert warnings == []
 
 
@@ -1111,10 +1132,9 @@ def test_write_run_figures_limits_model_selection_sample_sets_per_fold(
     )
 
     figures_dir = tmp_path / "run" / "cv" / "figures"
-    svg_text = (figures_dir / "model_selection_trials.svg").read_text(encoding="utf-8")
-    assert "fold=0" not in svg_text
-    assert '0: {"panel_param":0}' in svg_text
-    assert '"panel_param":10' not in svg_text
+    svg_text = (figures_dir / "model_selection.svg").read_text(encoding="utf-8")
+    assert "fold=0" in svg_text
+    assert "sample_set=" not in svg_text
     assert warnings == []
 
 
@@ -1334,7 +1354,7 @@ def test_write_run_figures_ignores_model_selection_trials_with_all_null_metrics(
     )
 
     figures_dir = tmp_path / "run" / "cv" / "figures"
-    assert not (figures_dir / "model_selection_trials.svg").exists()
+    assert not (figures_dir / "model_selection.svg").exists()
     assert warnings == []
 
 

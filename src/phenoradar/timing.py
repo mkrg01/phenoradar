@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from threading import Lock
 from time import perf_counter
 
@@ -48,11 +50,40 @@ class TimingRecorder:
         candidate_index: int | None = None,
     ) -> None:
         """Record a completed interval using the monotonic clock."""
+        self.record_interval(
+            started_at,
+            perf_counter(),
+            scope=scope,
+            stage=stage,
+            fold_id=fold_id,
+            sample_set_id=sample_set_id,
+            candidate_index=candidate_index,
+        )
+
+    @contextmanager
+    def measure(self, *, scope: str, stage: str) -> Iterator[None]:
+        started = self.start()
+        try:
+            yield
+        finally:
+            self.record_since(started, scope=scope, stage=stage)
+
+    def record_interval(
+        self,
+        started_at: float,
+        ended_at: float,
+        *,
+        scope: str,
+        stage: str,
+        fold_id: str | None = None,
+        sample_set_id: int | None = None,
+        candidate_index: int | None = None,
+    ) -> None:
+        """Record a monotonic interval, including one returned by a local worker."""
         if not scope.strip():
             raise ValueError("timing scope must be non-empty")
         if not stage.strip():
             raise ValueError("timing stage must be non-empty")
-        ended_at = perf_counter()
         duration = max(0.0, ended_at - started_at)
         row: dict[str, str | int | float | None] = {
             "scope": scope,

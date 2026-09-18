@@ -24,7 +24,6 @@ sampling:
   sampled_set_count: 1
   training_group_count: null  # type: integer or null
   group_subsample_repeats: 1
-  group_subsample_repeat_index: 1
   weighting: group_label_inverse  # choices: none, group_label_inverse
 
 preprocess:
@@ -56,7 +55,6 @@ preprocess:
 
 model:
   name: logistic_elasticnet  # choices: logistic_elasticnet, linear_svm, random_forest
-  logistic_warm_start_path: false  # choices: true, false
 
 model_selection:
   selected_candidate_count: 1  # type: integer or null
@@ -65,16 +63,16 @@ model_selection:
   search_strategy: grid  # choices: grid, random, tpe
   trial_count: null  # type: integer or null
   search_space:
-    alpha:
+    lambda:
       type: log_range  # choices: range, int_range, log_range, continuous_range, continuous_log_range
       base: 10
       start_exp: -5
       end_exp: -1
       step_exp: 0.5
       inclusive_end: true  # choices: true, false
-    l1_ratio: [1]
-    max_iter: [100]
-    gradient_tol: [1.0e-6]
+    alpha: [1]
+    maxit: [2000000]
+    thresh: [1.0e-14]
   inner_cv_strategy: stratified_group_kfold  # choices: logo, group_kfold, stratified_group_kfold, null
   inner_cv_n_splits: 5  # type: integer or null
   selection_metric: log_loss  # choices: mcc, balanced_accuracy, log_loss
@@ -95,6 +93,12 @@ evaluation:
 
 figures:
   top_features: 30
+
+phylogenetic_imputation:
+  enabled: false  # choices: true, false; unknown-species interpretation only
+  branch_length_mode: input  # choices: input, unit
+  model: ER  # choices: ER, ARD
+  root_prior: equal  # choices: equal, empirical
 
 summary:
   group_col: family

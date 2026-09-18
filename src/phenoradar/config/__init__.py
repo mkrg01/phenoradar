@@ -13,6 +13,7 @@ from .io import (
     serialize_resolved_config,
     write_resolved_config,
 )
+from .predict import PredictConfig, load_predict_config
 from .schema import AppConfig, ExecutionStage
 
 __all__ = [
@@ -22,6 +23,8 @@ __all__ = [
     "ConfigConditionSet",
     "ConfigError",
     "ExecutionStage",
+    "PredictConfig",
+    "load_predict_config",
     "load_and_resolve_config",
     "has_condition_dimensions",
     "load_config_conditions",

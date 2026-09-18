@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 from math import sqrt
 from pathlib import Path
@@ -23,13 +24,13 @@ from phenoradar.abstention import (
 )
 from phenoradar.bundle import (
     BundleError,
+    BundlePredictionContext,
     export_model_bundle,
     load_model_bundle,
     predict_with_bundle,
 )
 from phenoradar.candidate_evidence import (
     CandidateEvidenceArtifacts,
-    CandidateEvidenceError,
     build_candidate_evidence_artifacts,
 )
 from phenoradar.config import (
@@ -37,12 +38,15 @@ from phenoradar.config import (
     ConfigConditionSet,
     ConfigError,
     ExecutionStage,
+    PredictConfig,
     has_condition_dimensions,
     load_and_resolve_config,
     load_config_conditions,
+    load_predict_config,
     write_resolved_config,
 )
-from phenoradar.cv import CVError, run_final_refit, run_outer_cv
+from phenoradar.cv import CVError, RunExpressionCache, run_final_refit, run_outer_cv
+from phenoradar.figure_runtime import FigureWorkers
 from phenoradar.figures import (
     FigureError,
     figure_annotation_features,
@@ -70,6 +74,11 @@ from phenoradar.orthogroup_annotation import (
     OrthogroupAnnotationError,
     load_orthogroup_annotations,
 )
+from phenoradar.phylogenetic_imputation import (
+    add_phylogenetic_evidence,
+    interpret_unknown_predictions,
+)
+from phenoradar.predict_evidence import build_predict_evidence_artifacts
 from phenoradar.provenance import (
     FINGERPRINT_SCHEMA_VERSION,
     ProvenanceError,
@@ -164,7 +173,7 @@ def _build_run_fingerprint_metadata(
     }
 
 
-def _artifact_parallel_workers(config: AppConfig) -> int:
+def _artifact_parallel_workers(config: AppConfig | PredictConfig) -> int:
     runtime_n_jobs = int(getattr(config.runtime, "n_jobs", 1))
     return max(1, min(runtime_n_jobs, _ARTIFACT_PARALLEL_WORKER_CAP))
 
@@ -249,8 +258,10 @@ def _write_group_summary_artifacts(
     stage: str,
     predictions: pl.DataFrame,
     source_table_name: str,
-    config: AppConfig,
+    config: AppConfig | PredictConfig,
 ) -> list[str]:
+    if config.data.metadata_path is None:
+        return []
     try:
         artifacts = build_group_summary_artifacts(
             predictions=predictions,
@@ -954,92 +965,107 @@ def _run_single(
         stage="fingerprint_generation",
     )
 
-    _log("Run outer cross-validation.")
-
-    def _outer_cv_progress(message: str) -> None:
-        _log(message, detail=message.startswith("Outer CV fold stage"))
-
-    outer_cv_started = timing_recorder.start()
-    try:
-        cv_artifacts = run_outer_cv(
-            resolved,
-            split_artifacts.split_manifest,
-            progress_callback=_outer_cv_progress,
-            timing_recorder=timing_recorder,
-        )
-    except CVError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    timing_recorder.record_since(
-        outer_cv_started,
-        scope="run",
-        stage="outer_cv",
-    )
-    _log("Outer cross-validation completed.")
-
-    _emit_run_metric_summary(
-        cv_artifacts.metrics_cv,
-        start_time=start_time,
-        log_verbosity=log_verbosity,
-    )
-
-    warnings = list(cv_artifacts.warnings)
-    group_bootstrap_artifacts: GroupBootstrapArtifacts | None = None
-    group_bootstrap_config = resolved.evaluation.group_bootstrap
-    if group_bootstrap_config.enabled:
-        _log(
-            "Run OOF group bootstrap "
-            f"(group_col={resolved.split.group_col}, "
-            f"n_resamples={group_bootstrap_config.n_resamples})."
-        )
-        group_bootstrap_started = timing_recorder.start()
-        try:
-            group_bootstrap_artifacts = run_oof_group_bootstrap(
-                oof_predictions=cv_artifacts.oof_predictions,
-                split_manifest=split_artifacts.split_manifest,
-                group_col=resolved.split.group_col,
-                n_resamples=int(group_bootstrap_config.n_resamples),
-                confidence_level=float(group_bootstrap_config.confidence_level),
-                runtime_seed=int(resolved.runtime.seed),
+    with RunExpressionCache() as expression_cache:
+        if resolved.runtime.execution_stage == "full_run":
+            _log("Prepare shared expression input for CV and final refit.")
+            input_started = timing_recorder.start()
+            try:
+                expression_cache.prepare(
+                    resolved, split_artifacts.split_manifest, timing_recorder
+                )
+            except CVError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+            timing_recorder.record_since(
+                input_started, scope="run", stage="expression_preparation"
             )
-        except GroupBootstrapError as exc:
-            raise typer.BadParameter(str(exc)) from exc
-        timing_recorder.record_since(
-            group_bootstrap_started,
-            scope="run",
-            stage="group_bootstrap",
-        )
-        warnings.extend(group_bootstrap_artifacts.warnings)
-        _log(
-            "OOF group bootstrap completed "
-            f"(n_groups={group_bootstrap_artifacts.n_groups}, "
-            f"seed={group_bootstrap_artifacts.seed})."
-        )
-    else:
-        _log("Skip OOF group bootstrap (evaluation.group_bootstrap.enabled=false).")
+        _log("Run outer cross-validation.")
 
-    status = "cv_completed"
-    final_refit_artifacts = None
-    if resolved.runtime.execution_stage == "full_run":
-        _log("Run final refit stage.")
-        final_refit_started = timing_recorder.start()
+        def _outer_cv_progress(message: str) -> None:
+            _log(message, detail=message.startswith("Outer CV fold stage"))
+
+        outer_cv_started = timing_recorder.start()
         try:
-            final_refit_artifacts = run_final_refit(
-                config=resolved,
-                split_manifest=split_artifacts.split_manifest,
+            cv_artifacts = run_outer_cv(
+                resolved,
+                split_artifacts.split_manifest,
+                progress_callback=_outer_cv_progress,
                 timing_recorder=timing_recorder,
+                expression_cache=expression_cache,
             )
         except CVError as exc:
             raise typer.BadParameter(str(exc)) from exc
         timing_recorder.record_since(
-            final_refit_started,
+            outer_cv_started,
             scope="run",
-            stage="final_refit",
+            stage="outer_cv",
         )
-        warnings.extend(final_refit_artifacts.warnings)
-        status = "full_run_completed"
-        _log("Final refit completed.")
-    else:
-        _log("Skip final refit stage (execution_stage=cv_only).")
+        _log("Outer cross-validation completed.")
+
+        _emit_run_metric_summary(
+            cv_artifacts.metrics_cv,
+            start_time=start_time,
+            log_verbosity=log_verbosity,
+        )
+
+        warnings = list(cv_artifacts.warnings)
+        group_bootstrap_artifacts: GroupBootstrapArtifacts | None = None
+        group_bootstrap_config = resolved.evaluation.group_bootstrap
+        if group_bootstrap_config.enabled:
+            _log(
+                "Run OOF group bootstrap "
+                f"(group_col={resolved.split.group_col}, "
+                f"n_resamples={group_bootstrap_config.n_resamples})."
+            )
+            group_bootstrap_started = timing_recorder.start()
+            try:
+                group_bootstrap_artifacts = run_oof_group_bootstrap(
+                    oof_predictions=cv_artifacts.oof_predictions,
+                    split_manifest=split_artifacts.split_manifest,
+                    group_col=resolved.split.group_col,
+                    n_resamples=int(group_bootstrap_config.n_resamples),
+                    confidence_level=float(group_bootstrap_config.confidence_level),
+                    runtime_seed=int(resolved.runtime.seed),
+                )
+            except GroupBootstrapError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+            timing_recorder.record_since(
+                group_bootstrap_started,
+                scope="run",
+                stage="group_bootstrap",
+            )
+            warnings.extend(group_bootstrap_artifacts.warnings)
+            _log(
+                "OOF group bootstrap completed "
+                f"(n_groups={group_bootstrap_artifacts.n_groups}, "
+                f"seed={group_bootstrap_artifacts.seed})."
+            )
+        else:
+            _log("Skip OOF group bootstrap (evaluation.group_bootstrap.enabled=false).")
+
+        status = "cv_completed"
+        final_refit_artifacts = None
+        if resolved.runtime.execution_stage == "full_run":
+            _log("Run final refit stage.")
+            final_refit_started = timing_recorder.start()
+            try:
+                final_refit_artifacts = run_final_refit(
+                    config=resolved,
+                    split_manifest=split_artifacts.split_manifest,
+                    timing_recorder=timing_recorder,
+                    expression_cache=expression_cache,
+                )
+            except CVError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+            timing_recorder.record_since(
+                final_refit_started,
+                scope="run",
+                stage="final_refit",
+            )
+            warnings.extend(final_refit_artifacts.warnings)
+            status = "full_run_completed"
+            _log("Final refit completed.")
+        else:
+            _log("Skip final refit stage (execution_stage=cv_only).")
 
     _log("Create run directory and write core tabular artifacts.")
     artifact_writing_started = timing_recorder.start()
@@ -1217,6 +1243,10 @@ def _run_single(
                 null_value="NA",
             )
         try:
+            with timing_recorder.measure(scope="inference", stage="phylogenetic_imputation"):
+                phylogenetic_artifacts = interpret_unknown_predictions(
+                    resolved, predictions=final_refit_artifacts.pred_inference, run_dir=run_dir,
+                )
             candidate_evidence_artifacts = build_candidate_evidence_artifacts(
                 config=resolved,
                 split_manifest=split_artifacts.split_manifest,
@@ -1227,9 +1257,16 @@ def _run_single(
                     else None
                 ),
                 top_features=resolved.figures.top_features,
+                include_model_reference=True,
             )
-        except CandidateEvidenceError as exc:
+        except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
             raise typer.BadParameter(str(exc)) from exc
+        warnings.extend(phylogenetic_artifacts.warnings)
+        candidate_evidence_artifacts = replace(
+            candidate_evidence_artifacts, candidates=add_phylogenetic_evidence(
+                candidate_evidence_artifacts.candidates, phylogenetic_artifacts,
+            ),
+        )
         warnings.extend(candidate_evidence_artifacts.warnings)
         if candidate_evidence_artifacts.features.height > 0:
             candidate_evidence_artifacts.candidates.write_csv(
@@ -1244,6 +1281,7 @@ def _run_single(
                 float_precision=8,
                 null_value="NA",
             )
+        if candidate_evidence_artifacts.reference_expression.height > 0:
             candidate_evidence_artifacts.reference_expression.write_csv(
                 inference_tables_dir / "candidate_reference_expression.tsv",
                 separator="\t",
@@ -1286,8 +1324,14 @@ def _run_single(
                 config=resolved,
                 final_refit_artifacts=final_refit_artifacts,
                 thresholds=cv_artifacts.thresholds,
+                reference_expression=candidate_evidence_artifacts.reference_expression,
+                orthogroup_annotations=load_orthogroup_annotations(
+                    None if orthogroup_annotation_path is None
+                    else Path(orthogroup_annotation_path),
+                    feature_names=candidate_evidence_artifacts.reference_expression["feature"],
+                ),
             )
-        except BundleError as exc:
+        except (BundleError, OrthogroupAnnotationError) as exc:
             raise typer.BadParameter(str(exc)) from exc
         _log(f"Model bundle exported: {bundle_export_result.bundle_dir}.")
     model_selection_selected_table: pl.DataFrame | None = None
@@ -1569,223 +1613,253 @@ def _run_single(
     )
 
     figure_generation_started = timing_recorder.start()
-    figure_warnings: list[str] = []
-    try:
-        annotation_features = figure_annotation_features(
-            feature_importance=cv_artifacts.feature_importance,
-            coefficients=cv_artifacts.coefficients,
-            top_features=resolved.figures.top_features,
-        )
-        final_refit_feature_importance = (
-            None
-            if final_refit_artifacts is None
-            else getattr(final_refit_artifacts, "feature_importance", None)
-        )
-        final_refit_coefficients = (
-            None
-            if final_refit_artifacts is None
-            else getattr(final_refit_artifacts, "coefficients", None)
-        )
-        if isinstance(final_refit_feature_importance, pl.DataFrame) and isinstance(
-            final_refit_coefficients, pl.DataFrame
-        ):
-            annotation_features = sorted(
-                {
-                    *annotation_features,
-                    *figure_annotation_features(
-                        feature_importance=final_refit_feature_importance,
-                        coefficients=final_refit_coefficients,
-                        top_features=resolved.figures.top_features,
-                    ),
-                }
-            )
-        if (
-            candidate_evidence_artifacts is not None
-            and candidate_evidence_artifacts.features.height > 0
-        ):
-            annotation_features = sorted(
-                {
-                    *annotation_features,
-                    *[
-                        str(value)
-                        for value in candidate_evidence_artifacts.features.get_column(
-                            "feature"
-                        ).unique()
-                    ],
-                }
-            )
-        if (
-            isinstance(cv_species_feature_evidence, pl.DataFrame)
-            and cv_species_feature_evidence.height > 0
-        ):
-            annotation_features = sorted(
-                {
-                    *annotation_features,
-                    *[
-                        str(value)
-                        for value in cv_species_feature_evidence.get_column(
-                            "feature"
-                        ).unique()
-                    ],
-                }
-            )
-        orthogroup_annotations = load_orthogroup_annotations(
-            None if orthogroup_annotation_path is None else Path(orthogroup_annotation_path),
-            feature_names=annotation_features,
-        )
-    except OrthogroupAnnotationError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    _log("Generate run figures.")
-    try:
-        figure_warnings = write_run_figures(
-            run_dir=run_dir,
-            metrics_cv=cv_artifacts.metrics_cv,
-            oof_predictions=cv_artifacts.oof_predictions,
-            feature_importance=cv_artifacts.feature_importance,
-            coefficients=cv_artifacts.coefficients,
-            feature_importance_by_fold=cv_artifacts.feature_importance_by_fold,
-            coefficients_by_fold=cv_artifacts.coefficients_by_fold,
-            feature_stability_by_feature=cv_artifacts.feature_stability_by_feature,
-            feature_stability_by_fold_pair=cv_artifacts.feature_stability_by_fold_pair,
-            ensemble_model_probs=cv_artifacts.ensemble_model_probs,
-            model_selection_trials=cv_artifacts.model_selection_trials,
-            model_selection_trials_summary=cv_artifacts.model_selection_trials_summary,
-            model_selection_selected=model_selection_selected_table,
-            loss_by_split_cv=cv_artifacts.loss_by_split_cv,
-            loss_by_split_final_refit=(
-                None
-                if final_refit_artifacts is None
-                else final_refit_artifacts.loss_by_split_final_refit
-            ),
-            pred_external_test=(
-                None if final_refit_artifacts is None else final_refit_artifacts.pred_external_test
-            ),
-            pred_inference=(
-                None if final_refit_artifacts is None else final_refit_artifacts.pred_inference
-            ),
-            classification_summary=classification_summary,
-            trait_name=resolved.data.trait_col,
-            feature_filter_counts_summary=feature_filter_counts_summary_table,
-            feature_filter_funnel_stage_order=_feature_filter_funnel_stage_order(resolved),
-            model_sparsity=model_sparsity_table,
-            model_sparsity_summary=model_sparsity_summary_table,
-            top_feature_expression=cv_artifacts.top_feature_expression,
-            final_refit_feature_importance=(
-                None
-                if final_refit_artifacts is None
-                else getattr(final_refit_artifacts, "feature_importance", None)
-            ),
-            final_refit_coefficients=(
-                None
-                if final_refit_artifacts is None
-                else getattr(final_refit_artifacts, "coefficients", None)
-            ),
-            final_refit_feature_importance_by_model=(
-                None
-                if final_refit_artifacts is None
-                else getattr(final_refit_artifacts, "feature_importance_by_model", None)
-            ),
-            final_refit_coefficients_by_model=(
-                None
-                if final_refit_artifacts is None
-                else getattr(final_refit_artifacts, "coefficients_by_model", None)
-            ),
-            final_refit_model_selection_trials_summary=(
-                None
-                if final_refit_artifacts is None
-                else getattr(final_refit_artifacts, "model_selection_trials_summary", None)
-            ),
-            final_refit_top_feature_expression_external=(
-                None
-                if final_refit_artifacts is None
-                else getattr(final_refit_artifacts, "top_feature_expression_external", None)
-            ),
-            top_features=resolved.figures.top_features,
-            orthogroup_annotations=orthogroup_annotations,
-            parallel_workers=_artifact_parallel_workers(resolved),
-            group_bootstrap_metrics=(
-                None if group_bootstrap_artifacts is None else group_bootstrap_artifacts.summary
-            ),
-        )
-    except FigureError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    if (
-        isinstance(cv_species_evidence, pl.DataFrame)
-        and isinstance(cv_species_feature_evidence, pl.DataFrame)
-        and isinstance(cv_species_reference_expression, pl.DataFrame)
-        and cv_species_feature_evidence.height > 0
-    ):
-        try:
-            _cv_species_manifest, cv_species_figure_warnings = (
-                write_cv_species_evidence_figures(
-                    run_dir=run_dir,
-                    species_evidence=cv_species_evidence,
-                    features=cv_species_feature_evidence,
-                    reference_expression=cv_species_reference_expression,
-                    ensemble_model_probs=cv_artifacts.ensemble_model_probs,
-                    trait_name=resolved.data.trait_col,
-                    orthogroup_annotations=orthogroup_annotations,
-                    parallel_workers=_artifact_parallel_workers(resolved),
+    with FigureWorkers(_artifact_parallel_workers(resolved)) as figure_workers:
+        figure_warnings: list[str] = []
+        with timing_recorder.measure(scope="figures", stage="annotation_load"):
+            try:
+                annotation_features = figure_annotation_features(
+                    feature_importance=cv_artifacts.feature_importance,
+                    coefficients=cv_artifacts.coefficients,
+                    top_features=resolved.figures.top_features,
                 )
-            )
-        except FigureError as exc:
-            raise typer.BadParameter(str(exc)) from exc
-        figure_warnings.extend(cv_species_figure_warnings)
-    if (
-        candidate_evidence_artifacts is not None
-        and candidate_evidence_artifacts.features.height > 0
-    ):
-        try:
-            _candidate_manifest, candidate_figure_warnings = write_candidate_evidence_figures(
-                run_dir=run_dir,
-                candidates=candidate_evidence_artifacts.candidates,
-                features=candidate_evidence_artifacts.features,
-                reference_expression=(candidate_evidence_artifacts.reference_expression),
-                cross_fold_predictions=(candidate_evidence_artifacts.cross_fold_predictions),
-                trait_name=resolved.data.trait_col,
-                orthogroup_annotations=orthogroup_annotations,
-                parallel_workers=_artifact_parallel_workers(resolved),
-            )
-        except FigureError as exc:
-            raise typer.BadParameter(str(exc)) from exc
-        figure_warnings.extend(candidate_figure_warnings)
-    contrast_pair_col = resolved.data.contrast_pair_col
-    if tree_path is not None and contrast_pair_col is not None:
-        try:
-            tree_warnings = write_run_tree_prediction_artifacts(
-                preserve_missing=resolved.preprocess.missing_expression.method == "neutral",
-                zero_as_missing=resolved.preprocess.missing_expression.zero_as_missing,
-                run_dir=run_dir,
-                tree_path=Path(tree_path),
-                metadata_path=Path(resolved.data.metadata_path),
-                tpm_path=Path(resolved.data.tpm_path),
-                species_col=resolved.data.species_col,
-                feature_col=resolved.data.feature_col,
-                value_col=resolved.data.value_col,
-                trait_col=resolved.data.trait_col,
-                group_col=contrast_pair_col,
-                oof_predictions=cv_artifacts.oof_predictions,
-                thresholds=cv_artifacts.thresholds,
-                feature_importance=cv_artifacts.feature_importance,
-                coefficients=cv_artifacts.coefficients,
-                pred_external_test=(
+                final_refit_feature_importance = (
                     None
                     if final_refit_artifacts is None
-                    else final_refit_artifacts.pred_external_test
-                ),
-                top_feature_expression=getattr(cv_artifacts, "top_feature_expression", None),
-                feature_limit=resolved.figures.top_features,
-                orthogroup_annotations=orthogroup_annotations,
-                parallel_workers=_artifact_parallel_workers(resolved),
-            )
-        except TreePredictionError as exc:
-            raise typer.BadParameter(str(exc)) from exc
-        figure_warnings.extend(tree_warnings)
-    elif tree_path is not None:
-        figure_warnings.append(
-            "Skipped tree prediction artifacts because data.contrast_pair_col is null."
-        )
-    warnings.extend(figure_warnings)
+                    else getattr(final_refit_artifacts, "feature_importance", None)
+                )
+                final_refit_coefficients = (
+                    None
+                    if final_refit_artifacts is None
+                    else getattr(final_refit_artifacts, "coefficients", None)
+                )
+                if isinstance(final_refit_feature_importance, pl.DataFrame) and isinstance(
+                    final_refit_coefficients, pl.DataFrame
+                ):
+                    annotation_features = sorted(
+                        {
+                            *annotation_features,
+                            *figure_annotation_features(
+                                feature_importance=final_refit_feature_importance,
+                                coefficients=final_refit_coefficients,
+                                top_features=resolved.figures.top_features,
+                            ),
+                        }
+                    )
+                if (
+                    candidate_evidence_artifacts is not None
+                    and candidate_evidence_artifacts.features.height > 0
+                ):
+                    annotation_features = sorted(
+                        {
+                            *annotation_features,
+                            *[
+                                str(value)
+                                for value in candidate_evidence_artifacts.features.get_column(
+                                    "feature"
+                                ).unique()
+                            ],
+                        }
+                    )
+                if (
+                    isinstance(cv_species_feature_evidence, pl.DataFrame)
+                    and cv_species_feature_evidence.height > 0
+                ):
+                    annotation_features = sorted(
+                        {
+                            *annotation_features,
+                            *[
+                                str(value)
+                                for value in cv_species_feature_evidence.get_column(
+                                    "feature"
+                                ).unique()
+                            ],
+                        }
+                    )
+                orthogroup_annotations = load_orthogroup_annotations(
+                    None
+                    if orthogroup_annotation_path is None
+                    else Path(orthogroup_annotation_path),
+                    feature_names=annotation_features,
+                )
+            except OrthogroupAnnotationError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+        _log("Generate run figures.")
+        with timing_recorder.measure(scope="figures", stage="run_figures"):
+            try:
+                figure_warnings = write_run_figures(
+                    run_dir=run_dir,
+                    metrics_cv=cv_artifacts.metrics_cv,
+                    oof_predictions=cv_artifacts.oof_predictions,
+                    feature_importance=cv_artifacts.feature_importance,
+                    coefficients=cv_artifacts.coefficients,
+                    feature_importance_by_fold=cv_artifacts.feature_importance_by_fold,
+                    coefficients_by_fold=cv_artifacts.coefficients_by_fold,
+                    feature_stability_by_feature=cv_artifacts.feature_stability_by_feature,
+                    feature_stability_by_fold_pair=cv_artifacts.feature_stability_by_fold_pair,
+                    ensemble_model_probs=cv_artifacts.ensemble_model_probs,
+                    model_selection_trials=cv_artifacts.model_selection_trials,
+                    model_selection_trials_summary=cv_artifacts.model_selection_trials_summary,
+                    model_selection_selected=model_selection_selected_table,
+                    loss_by_split_cv=cv_artifacts.loss_by_split_cv,
+                    loss_by_split_final_refit=(
+                        None
+                        if final_refit_artifacts is None
+                        else final_refit_artifacts.loss_by_split_final_refit
+                    ),
+                    pred_external_test=(
+                        None
+                        if final_refit_artifacts is None
+                        else final_refit_artifacts.pred_external_test
+                    ),
+                    pred_inference=(
+                        None
+                        if final_refit_artifacts is None
+                        else final_refit_artifacts.pred_inference
+                    ),
+                    classification_summary=classification_summary,
+                    trait_name=resolved.data.trait_col,
+                    feature_filter_counts_summary=feature_filter_counts_summary_table,
+                    feature_filter_funnel_stage_order=_feature_filter_funnel_stage_order(resolved),
+                    model_sparsity=model_sparsity_table,
+                    model_sparsity_summary=model_sparsity_summary_table,
+                    top_feature_expression=cv_artifacts.top_feature_expression,
+                    final_refit_feature_importance=(
+                        None
+                        if final_refit_artifacts is None
+                        else getattr(final_refit_artifacts, "feature_importance", None)
+                    ),
+                    final_refit_coefficients=(
+                        None
+                        if final_refit_artifacts is None
+                        else getattr(final_refit_artifacts, "coefficients", None)
+                    ),
+                    final_refit_feature_importance_by_model=(
+                        None
+                        if final_refit_artifacts is None
+                        else getattr(final_refit_artifacts, "feature_importance_by_model", None)
+                    ),
+                    final_refit_coefficients_by_model=(
+                        None
+                        if final_refit_artifacts is None
+                        else getattr(final_refit_artifacts, "coefficients_by_model", None)
+                    ),
+                    final_refit_model_selection_trials_summary=(
+                        None
+                        if final_refit_artifacts is None
+                        else getattr(final_refit_artifacts, "model_selection_trials_summary", None)
+                    ),
+                    final_refit_top_feature_expression_external=(
+                        None
+                        if final_refit_artifacts is None
+                        else getattr(final_refit_artifacts, "top_feature_expression_external", None)
+                    ),
+                    top_features=resolved.figures.top_features,
+                    orthogroup_annotations=orthogroup_annotations,
+                    parallel_workers=_artifact_parallel_workers(resolved),
+                    timing_recorder=timing_recorder,
+                    workers=figure_workers,
+                    group_bootstrap_metrics=(
+                        None
+                        if group_bootstrap_artifacts is None
+                        else group_bootstrap_artifacts.summary
+                    ),
+                )
+            except FigureError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+        with timing_recorder.measure(scope="figures", stage="cv_species_evidence"):
+            if (
+                isinstance(cv_species_evidence, pl.DataFrame)
+                and isinstance(cv_species_feature_evidence, pl.DataFrame)
+                and isinstance(cv_species_reference_expression, pl.DataFrame)
+                and cv_species_feature_evidence.height > 0
+            ):
+                try:
+                    _cv_species_manifest, cv_species_figure_warnings = (
+                        write_cv_species_evidence_figures(
+                            run_dir=run_dir,
+                            species_evidence=cv_species_evidence,
+                            features=cv_species_feature_evidence,
+                            reference_expression=cv_species_reference_expression,
+                            ensemble_model_probs=cv_artifacts.ensemble_model_probs,
+                            trait_name=resolved.data.trait_col,
+                            orthogroup_annotations=orthogroup_annotations,
+                            parallel_workers=_artifact_parallel_workers(resolved),
+                            timing_recorder=timing_recorder,
+                            workers=figure_workers,
+                        )
+                    )
+                except FigureError as exc:
+                    raise typer.BadParameter(str(exc)) from exc
+                figure_warnings.extend(cv_species_figure_warnings)
+        with timing_recorder.measure(scope="figures", stage="candidate_evidence"):
+            if (
+                candidate_evidence_artifacts is not None
+                and candidate_evidence_artifacts.features.height > 0
+            ):
+                try:
+                    _candidate_manifest, candidate_figure_warnings = (
+                        write_candidate_evidence_figures(
+                            run_dir=run_dir,
+                            candidates=candidate_evidence_artifacts.candidates,
+                            features=candidate_evidence_artifacts.features,
+                            reference_expression=(
+                                candidate_evidence_artifacts.reference_expression
+                            ),
+                            cross_fold_predictions=(
+                                candidate_evidence_artifacts.cross_fold_predictions
+                            ),
+                            trait_name=resolved.data.trait_col,
+                            orthogroup_annotations=orthogroup_annotations,
+                            parallel_workers=_artifact_parallel_workers(resolved),
+                            timing_recorder=timing_recorder,
+                            workers=figure_workers,
+                        )
+                    )
+                except FigureError as exc:
+                    raise typer.BadParameter(str(exc)) from exc
+                figure_warnings.extend(candidate_figure_warnings)
+        with timing_recorder.measure(scope="figures", stage="tree_figures"):
+            contrast_pair_col = resolved.data.contrast_pair_col
+            if tree_path is not None and contrast_pair_col is not None:
+                try:
+                    tree_warnings = write_run_tree_prediction_artifacts(
+                        preserve_missing=resolved.preprocess.missing_expression.method == "neutral",
+                        zero_as_missing=resolved.preprocess.missing_expression.zero_as_missing,
+                        run_dir=run_dir,
+                        tree_path=Path(tree_path),
+                        metadata_path=Path(resolved.data.metadata_path),
+                        tpm_path=Path(resolved.data.tpm_path),
+                        species_col=resolved.data.species_col,
+                        feature_col=resolved.data.feature_col,
+                        value_col=resolved.data.value_col,
+                        trait_col=resolved.data.trait_col,
+                        group_col=contrast_pair_col,
+                        oof_predictions=cv_artifacts.oof_predictions,
+                        thresholds=cv_artifacts.thresholds,
+                        feature_importance=cv_artifacts.feature_importance,
+                        coefficients=cv_artifacts.coefficients,
+                        pred_external_test=(
+                            None
+                            if final_refit_artifacts is None
+                            else final_refit_artifacts.pred_external_test
+                        ),
+                        top_feature_expression=getattr(
+                            cv_artifacts, "top_feature_expression", None
+                        ),
+                        feature_limit=resolved.figures.top_features,
+                        orthogroup_annotations=orthogroup_annotations,
+                        parallel_workers=_artifact_parallel_workers(resolved),
+                        timing_recorder=timing_recorder,
+                        workers=figure_workers,
+                    )
+                except TreePredictionError as exc:
+                    raise typer.BadParameter(str(exc)) from exc
+                figure_warnings.extend(tree_warnings)
+            elif tree_path is not None:
+                figure_warnings.append(
+                    "Skipped tree prediction artifacts because data.contrast_pair_col is null."
+                )
+        warnings.extend(figure_warnings)
     timing_recorder.record_since(
         figure_generation_started,
         scope="run",
@@ -2199,7 +2273,7 @@ def config_command(
         start_time=start_time,
         log_verbosity=log_verbosity,
     )
-    write_resolved_config(resolved, out)
+    write_resolved_config(resolved, out, include_internal=False)
     typer.echo(f"Wrote resolved config: {out}")
     _progress_log(
         "config",
@@ -2274,11 +2348,41 @@ def dataset(
 @app.command()
 def predict(
     model_bundle: ModelBundleArg,
-    config: ConfigPathsArg,
+    config: OptionalConfigPathsArg = None,
+    tpm_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--tpm-path",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="TPM TSV. Defaults to data.tpm_path in the optional config.",
+        ),
+    ] = None,
+    metadata_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--metadata-path",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="Optional species subset and annotations; otherwise predict all TPM species.",
+        ),
+    ] = None,
+    n_jobs: Annotated[
+        int | None,
+        typer.Option(
+            "--n-jobs",
+            min=1,
+            help="Prediction workers and native thread limit (default: config or 1).",
+        ),
+    ] = None,
     verbose: VerboseArg = False,
     quiet: QuietArg = False,
 ) -> None:
-    """Predict using an exported model bundle."""
+    """Predict from a model bundle and TPM; config and metadata are optional."""
+    timing_recorder = TimingRecorder()
+    predict_started = timing_recorder.start()
     start_time = datetime.now(UTC)
     log_verbosity = _resolve_log_verbosity(verbose=verbose, quiet=quiet)
 
@@ -2292,23 +2396,33 @@ def predict(
         )
 
     config_paths = _normalize_config_paths(config)
-    if not config_paths:
-        raise typer.BadParameter("`--config` / `-c` is required.")
-    config_path = config_paths[0]
+    overrides: dict[str, Any] = {"data": {}}
+    if tpm_path is not None:
+        overrides["data"]["tpm_path"] = str(tpm_path)
+    if metadata_path is not None:
+        overrides["data"]["metadata_path"] = str(metadata_path)
+    if n_jobs is not None:
+        overrides["runtime"] = {"n_jobs": n_jobs}
 
     _log("Start prediction pipeline.")
     _log("Load and resolve configuration.")
     try:
-        resolved = load_and_resolve_config([config_path])
+        resolved = load_predict_config(config_paths, overrides=overrides)
     except ConfigError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
+    prediction_context = BundlePredictionContext()
     _log("Load model bundle and run predictions.")
-    try:
-        bundle = load_model_bundle(model_bundle)
-        pred_predict, predict_warnings = predict_with_bundle(resolved, bundle)
-    except BundleError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+    with timing_recorder.measure(scope="predict", stage="prediction"):
+        try:
+            bundle = load_model_bundle(model_bundle)
+            if "figures" not in resolved.model_fields_set:
+                resolved.figures.top_features = bundle.abstention_top_features
+            pred_predict, predict_warnings = predict_with_bundle(
+                resolved, bundle, context=prediction_context
+            )
+        except BundleError as exc:
+            raise typer.BadParameter(str(exc)) from exc
     if "true_label" not in pred_predict.columns:
         pred_predict = pred_predict.with_columns(pl.lit(None, dtype=pl.Int64).alias("true_label"))
     pred_predict = pred_predict.select(
@@ -2327,6 +2441,19 @@ def predict(
     )
     _emit_predict_summary(pred_predict, start_time=start_time, log_verbosity=log_verbosity)
 
+    _log("Build candidate interpretation tables.")
+    with timing_recorder.measure(scope="predict", stage="evidence_preparation"):
+        try:
+            evidence = build_predict_evidence_artifacts(
+                config=resolved, bundle=bundle, predictions=pred_predict,
+                context=prediction_context,
+            )
+        except (BundleError, CVError, ValueError, OSError, pl.exceptions.PolarsError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        finally:
+            prediction_context.clear()
+    predict_warnings.extend(evidence.warnings)
+
     _log("Write prediction artifacts.")
     run_dir = _build_run_dir("predict")
     inference_tables_dir = _stage_tables_dir(run_dir, "inference")
@@ -2338,6 +2465,26 @@ def predict(
         null_value="NA",
     )
     write_abstention_artifacts(pred_predict, inference_tables_dir)
+    try:
+        with timing_recorder.measure(scope="predict", stage="phylogenetic_imputation"):
+            phylogenetic_artifacts = interpret_unknown_predictions(
+                resolved, predictions=pred_predict, run_dir=run_dir,
+                bundled_traits=bundle.observed_traits,
+                trait_name=str(bundle.manifest.get("trait_name", resolved.data.trait_col)),
+            )
+    except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    predict_warnings.extend(phylogenetic_artifacts.warnings)
+    evidence.candidates = add_phylogenetic_evidence(evidence.candidates, phylogenetic_artifacts)
+    if evidence.features.height > 0:
+        for table, name in [
+            (evidence.candidates, "candidate_evidence_candidates.tsv"),
+            (evidence.features, "candidate_feature_evidence.tsv"),
+            (evidence.reference_expression, "candidate_reference_expression.tsv"),
+            (evidence.model_predictions, "candidate_model_probabilities.tsv"),
+        ]:
+            table.write_csv(inference_tables_dir / name, separator="\t",
+                            float_precision=8, null_value="NA")
     if pred_predict.height > 0:
         predict_warnings.extend(
             _write_group_summary_artifacts(
@@ -2350,6 +2497,7 @@ def predict(
         )
     _log("Generate prediction figures.")
     tree_path = getattr(resolved.data, "tree_path", None)
+    figures_started = timing_recorder.start()
     try:
         write_predict_figures(
             run_dir=run_dir,
@@ -2358,13 +2506,31 @@ def predict(
         )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    if evidence.features.height > 0:
+        try:
+            _, evidence_warnings = write_candidate_evidence_figures(
+                run_dir=run_dir, candidates=evidence.candidates, features=evidence.features,
+                reference_expression=evidence.reference_expression,
+                cross_fold_predictions=evidence.model_predictions,
+                trait_name=evidence.trait_name, orthogroup_annotations=evidence.annotations,
+                parallel_workers=_artifact_parallel_workers(resolved),
+                timing_recorder=timing_recorder, evidence_context="predict",
+                probability_threshold=bundle.threshold_fixed,
+            )
+        except FigureError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        predict_warnings.extend(evidence_warnings)
     contrast_pair_col = resolved.data.contrast_pair_col
     if tree_path is not None and contrast_pair_col is not None:
         try:
             tree_warnings = write_predict_tree_prediction_artifacts(
                 run_dir=run_dir,
                 tree_path=Path(tree_path),
-                metadata_path=Path(resolved.data.metadata_path),
+                metadata_path=(
+                    Path(resolved.data.metadata_path)
+                    if resolved.data.metadata_path is not None
+                    else None
+                ),
                 species_col=resolved.data.species_col,
                 trait_col=resolved.data.trait_col,
                 group_col=contrast_pair_col,
@@ -2377,13 +2543,18 @@ def predict(
         predict_warnings.append(
             "Skipped tree prediction artifacts because data.contrast_pair_col is null."
         )
-    end_time = datetime.now(UTC)
+    timing_recorder.record_since(figures_started, scope="predict", stage="figure_generation")
     _log("Collect provenance metadata.")
     try:
         input_files = collect_input_files(
             [
-                config_path,
-                Path(resolved.data.metadata_path),
+                *config_paths,
+                *evidence.input_paths,
+                *(
+                    []
+                    if resolved.data.metadata_path is None
+                    else [Path(resolved.data.metadata_path)]
+                ),
                 Path(resolved.data.tpm_path),
                 *([] if tree_path is None else [Path(tree_path)]),
                 model_bundle / "bundle_manifest.json",
@@ -2394,6 +2565,12 @@ def predict(
         raise typer.BadParameter(str(exc)) from exc
     build_meta = phenoradar_build_snapshot()
     environment = runtime_environment_snapshot()
+    timing_recorder.record_since(predict_started, scope="predict", stage="total")
+    runtime_tables_dir = _stage_tables_dir(run_dir, "runtime")
+    timing_recorder.to_frame().write_csv(
+        runtime_tables_dir / "timing.tsv", separator="\t", float_precision=8, null_value="NA"
+    )
+    end_time = datetime.now(UTC)
     metadata_path = run_dir / "run_metadata.json"
     _write_metadata(
         run_dir,
@@ -2404,8 +2581,12 @@ def predict(
             "start_time": start_time.isoformat(),
             "end_time": end_time.isoformat(),
             "duration_sec": (end_time - start_time).total_seconds(),
-            "seed_policy": {
-                "runtime_seed": resolved.runtime.seed,
+            "seed_policy": {"prediction": "deterministic_from_bundle"},
+            "runtime_n_jobs": resolved.runtime.n_jobs,
+            "timing": {
+                "artifact_path": "runtime/tables/timing.tsv",
+                "clock": "time.perf_counter",
+                "parallel_intervals_may_overlap": True,
             },
             "model_bundle_path": str(model_bundle),
             "model_bundle_manifest_sha256": bundle.manifest_sha256,

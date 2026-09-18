@@ -331,7 +331,6 @@ class ModelConfig(StrictModel):
     """Model family selection."""
 
     name: ModelName = "logistic_elasticnet"
-    logistic_warm_start_path: bool = False
 
 
 class SamplingConfig(StrictModel):
@@ -499,6 +498,15 @@ class RuntimeConfig(StrictModel):
         return self
 
 
+class PhylogeneticImputationConfig(StrictModel):
+    """Optional interpretation of unknown-species predictions using observed traits."""
+
+    enabled: bool = False
+    branch_length_mode: Literal["input", "unit"] = "input"
+    model: Literal["ER", "ARD"] = "ER"
+    root_prior: Literal["equal", "empirical"] = "equal"
+
+
 class AppConfig(StrictModel):
     """Top-level application configuration."""
 
@@ -513,6 +521,9 @@ class AppConfig(StrictModel):
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     summary: SummaryConfig = Field(default_factory=SummaryConfig)
     figures: FiguresConfig = Field(default_factory=FiguresConfig)
+    phylogenetic_imputation: PhylogeneticImputationConfig = Field(
+        default_factory=PhylogeneticImputationConfig
+    )
     report: ReportConfig = Field(default_factory=ReportConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
 
@@ -571,24 +582,13 @@ class AppConfig(StrictModel):
                     f"required={required_groups}"
                 )
         if self.model.name == "logistic_elasticnet":
-            supported = {"alpha", "l1_ratio", "max_iter", "gradient_tol"}
+            supported = {"lambda", "alpha", "maxit", "thresh"}
             unsupported = sorted(set(self.model_selection.search_space) - supported)
             if unsupported:
                 raise ValueError(
                     "Unsupported model_selection.search_space parameter(s) for "
                     f"logistic_elasticnet: {', '.join(unsupported)}. "
-                    "Use glum parameters alpha, l1_ratio, max_iter, gradient_tol; "
-                    "alpha controls regularization directly (larger means stronger)."
-                )
-        if self.model.logistic_warm_start_path:
-            if self.model.name != "logistic_elasticnet":
-                raise ValueError(
-                    "model.logistic_warm_start_path=true is only valid when "
-                    "model.name=logistic_elasticnet"
-                )
-            if self.model_selection.search_strategy != "grid":
-                raise ValueError(
-                    "model.logistic_warm_start_path=true currently requires "
-                    "model_selection.search_strategy=grid"
+                    "Use glmnet parameters lambda, alpha, maxit, thresh; "
+                    "lambda controls regularization directly (larger means stronger)."
                 )
         return self

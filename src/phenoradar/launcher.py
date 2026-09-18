@@ -11,6 +11,7 @@ from phenoradar.config import (
     has_condition_dimensions,
     load_and_resolve_config,
     load_config_conditions,
+    load_predict_config,
 )
 
 _COMMANDS_WITH_CONFIG = {"run", "predict", "config"}
@@ -49,15 +50,44 @@ def _extract_config_paths(argv: list[str]) -> list[Path]:
 
 
 def _maybe_set_polars_max_threads(argv: list[str]) -> None:
-    if os.environ.get("POLARS_MAX_THREADS") is not None:
-        return
-
     command = _infer_command(argv)
     if command not in _COMMANDS_WITH_CONFIG:
         return
 
     config_paths = _extract_config_paths(argv)
     if len(config_paths) > 1:
+        return
+    if command == "predict":
+        # This must happen before importing Polars. CLI values override config
+        # and an inherited pool size for this prediction process.
+        option_fields = {
+            "--n-jobs": ("runtime", "n_jobs"),
+            "--tpm-path": ("data", "tpm_path"),
+            "--metadata-path": ("data", "metadata_path"),
+        }
+        overrides: dict[str, dict[str, str]] = {}
+        for index, token in enumerate(argv):
+            option, separator, value = token.partition("=")
+            if option not in option_fields:
+                continue
+            if not separator:
+                if index + 1 >= len(argv):
+                    continue
+                value = argv[index + 1]
+            section, field = option_fields[option]
+            overrides.setdefault(section, {})[field] = value
+        try:
+            prediction = load_predict_config(
+                config_paths,
+                overrides=overrides,
+                require_tpm=False,
+            )
+        except (ConfigError, OSError, ValueError):
+            return
+        os.environ["POLARS_MAX_THREADS"] = str(prediction.runtime.n_jobs)
+        return
+
+    if os.environ.get("POLARS_MAX_THREADS") is not None:
         return
     allow_empty = command in {"config"}
     try:

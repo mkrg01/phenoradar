@@ -209,7 +209,7 @@ def test_cv_refit_bundle_with_real_missingness(tmp_path: Path, prune: bool) -> N
             "selected_candidate_count": 1,
             "inner_cv_strategy": "group_kfold",
             "inner_cv_n_splits": 2,
-            "search_space": {"alpha": [0.01, 0.1]},
+            "search_space": {"lambda": [0.01, 0.1]},
         },
     )
     config.preprocess.sparse_feature_filter.enabled = prune
@@ -220,9 +220,16 @@ def test_cv_refit_bundle_with_real_missingness(tmp_path: Path, prune: bool) -> N
     assert cv.oof_predictions["information_coverage"].is_not_null().all()
     assert cv.inference_predictions_by_fold is not None
     assert cv.inference_predictions_by_fold["decision_status"].unique().to_list() == ["abstained"]
+    assert {
+        "validation_abstention", "inference_abstention",
+        "inference_preprocessing", "inference_prediction",
+    }.issubset(set(cv.timing["stage"]))
     refit = run_final_refit(config, split.split_manifest)
     assert refit.pred_inference["information_coverage"].item() == 0
     assert refit.pred_inference["pred_label_selective"].item() is None
+    assert {"external_test_abstention", "inference_abstention"}.issubset(
+        set(refit.timing["stage"])
+    )
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     write_resolved_config(config, run_dir / "resolved_config.yml")
@@ -302,12 +309,12 @@ def test_cli_run_and_predict_preserve_abstention_and_missing_evidence(
     assert result.exit_code == 0, (result.output, result.exception)
     run_dir = next((tmp_path / "runs").glob("*_run_*"))
     for relative in (
-        "cv/figures/cv_metrics_overview_accepted_only.svg",
-        "cv/figures/roc_curve_cv_accepted_only.svg",
-        "external_test/figures/external_confusion_matrix_accepted_only.svg",
-        "external_test/figures/cv_external_metric_comparison_accepted_only.svg",
-        "external_test/figures/tree_prediction_external_accepted_only.svg",
-        "inference/figures/inference_probability_distribution_accepted_only.svg",
+        "cv/figures/accepted_only/cv_metrics_overview.svg",
+        "cv/figures/accepted_only/roc_curve_cv.svg",
+        "external_test/figures/accepted_only/external_confusion_matrix.svg",
+        "external_test/figures/accepted_only/cv_external_metric_comparison.svg",
+        "external_test/figures/accepted_only/tree_prediction_external.svg",
+        "inference/figures/accepted_only/inference_probability_distribution.svg",
     ):
         assert (run_dir / relative).exists(), relative
     heatmap = pl.read_csv(
@@ -352,7 +359,7 @@ def test_cli_run_and_predict_preserve_abstention_and_missing_evidence(
     assert result.exit_code == 0, (result.output, result.exception)
     predict_dir = next((tmp_path / "runs").glob("*_predict_*"))
     assert (
-        predict_dir / "inference/figures/predict_probability_distribution_accepted_only.svg"
+        predict_dir / "inference/figures/accepted_only/predict_probability_distribution.svg"
     ).exists()
     predictions = pl.read_csv(
         predict_dir / "inference" / "tables" / "prediction_inference.tsv",

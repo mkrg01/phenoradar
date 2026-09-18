@@ -42,8 +42,16 @@ jobs:
           restore-keys: |
             uv-${{ runner.os }}-py${{ matrix.python-version }}-
             uv-${{ runner.os }}-
+      - name: Install Fortran compiler for glmnet source builds
+        run: sudo apt-get update && sudo apt-get install -y gfortran
       - name: Install dependencies
-        run: uv sync --extra dev --frozen
+        run: uv sync --extra dev --extra phylogeny --frozen
+      - name: Install isolated nwkit for ASR integration tests
+        if: matrix.python-version == '3.12'
+        run: |
+          uv venv --python 3.12 "${RUNNER_TEMP}/nwkit-asr"
+          uv pip install --python "${RUNNER_TEMP}/nwkit-asr/bin/python" "nwkit @ git+https://github.com/kfuku52/nwkit.git@76b7a1725072cb51a58c8ad43182fd5529d1b39f"
+          echo "PHENORADAR_TEST_NWKIT=${RUNNER_TEMP}/nwkit-asr/bin/nwkit" >> "$GITHUB_ENV"
       - name: Ruff
         run: uv run ruff check .
       - name: Mypy

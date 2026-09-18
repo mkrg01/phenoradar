@@ -16,9 +16,9 @@ from phenoradar.cv import (
     ExpressionMatrixBuilder,
     FinalRefitArtifacts,
     apply_expression_transform,
-    apply_feature_scaling,
 )
 from phenoradar.interpret import _linear_coefficients
+from phenoradar.local_evidence import iter_top_contributions
 from phenoradar.missing_expression import mark_expression_observations
 
 
@@ -69,11 +69,16 @@ _CROSS_FOLD_SCHEMA = {
 _NONZERO_TOLERANCE = 1e-12
 
 
-def _empty_artifacts(*, warnings: list[str]) -> CandidateEvidenceArtifacts:
+def _empty_artifacts(
+    *, warnings: list[str], reference_expression: pl.DataFrame | None = None
+) -> CandidateEvidenceArtifacts:
     return CandidateEvidenceArtifacts(
         candidates=pl.DataFrame(schema=_CANDIDATE_SCHEMA),
         features=pl.DataFrame(schema=_FEATURE_SCHEMA),
-        reference_expression=pl.DataFrame(schema=_REFERENCE_SCHEMA),
+        reference_expression=(
+            pl.DataFrame(schema=_REFERENCE_SCHEMA)
+            if reference_expression is None else reference_expression
+        ),
         cross_fold_predictions=pl.DataFrame(schema=_CROSS_FOLD_SCHEMA),
         warnings=warnings,
     )
@@ -208,6 +213,33 @@ def _normalized_cross_fold_predictions(
     )
 
 
+def _reference_expression(
+    config: AppConfig,
+    matrix_builder: ExpressionMatrixBuilder,
+    known: pl.DataFrame,
+    features: list[str],
+) -> pl.DataFrame:
+    if not features or known.height == 0:
+        return pl.DataFrame(schema=_REFERENCE_SCHEMA)
+    species = [str(value) for value in known["species"].to_list()]
+    try:
+        raw, _ = matrix_builder.build_matrix(species, feature_order=features)
+    except CVError as exc:
+        raise CandidateEvidenceError(str(exc)) from exc
+    table = pl.DataFrame({
+        "species": np.repeat(species, len(features)),
+        "label": np.repeat(known["label"].to_numpy(), len(features)),
+        "feature": np.tile(features, len(species)),
+        "tpm": raw.reshape(-1),
+        "log2_tpm_plus1": np.log2(raw.reshape(-1) + 1.0),
+    }, schema=_REFERENCE_SCHEMA).sort(["feature", "label", "species"])
+    if config.preprocess.missing_expression.method == "neutral":
+        table = mark_expression_observations(
+            table, zero_as_missing=config.preprocess.missing_expression.zero_as_missing
+        )
+    return table
+
+
 def build_candidate_evidence_artifacts(
     *,
     config: AppConfig,
@@ -215,6 +247,7 @@ def build_candidate_evidence_artifacts(
     final_refit: FinalRefitArtifacts,
     cross_fold_predictions: pl.DataFrame | None,
     top_features: int,
+    include_model_reference: bool = False,
 ) -> CandidateEvidenceArtifacts:
     """Build candidate-local contributions and known-trait expression references."""
     if top_features < 1:
@@ -222,7 +255,7 @@ def build_candidate_evidence_artifacts(
 
     warnings: list[str] = []
     positive = _positive_candidates(final_refit.pred_inference)
-    if positive.height == 0:
+    if positive.height == 0 and not include_model_reference:
         warnings.append("Skipped candidate evidence figures: no inference species predicted as 1")
         return _empty_artifacts(warnings=warnings)
 
@@ -245,6 +278,23 @@ def build_candidate_evidence_artifacts(
             )
         coefficients.append(np.asarray(coef, dtype=float))
 
+    active_features = sorted({
+        feature for entry, coef in zip(entries, coefficients, strict=True)
+        for feature, value in zip(entry.feature_names, coef, strict=True) if value != 0.0
+    })
+    if positive.height == 0:
+        try:
+            reference = _reference_expression(
+                config, ExpressionMatrixBuilder(config), _known_species(split_manifest),
+                active_features,
+            )
+        except CVError as exc:
+            raise CandidateEvidenceError(str(exc)) from exc
+        return _empty_artifacts(
+            warnings=["Skipped candidate evidence figures: no inference species predicted as 1"],
+            reference_expression=reference,
+        )
+
     candidate_species = [str(value) for value in positive.get_column("species").to_list()]
     known = _known_species(split_manifest)
     known_species = [str(value) for value in known.get_column("species").to_list()]
@@ -263,6 +313,10 @@ def build_candidate_evidence_artifacts(
             + ", ".join(missing_model_features[:10])
         )
 
+    if config.preprocess.expression_transform.method in {"none", "log1p"}:
+        transform_features = model_features
+        transform_index = {feature: idx for idx, feature in enumerate(transform_features)}
+
     try:
         matrix_builder = ExpressionMatrixBuilder(config)
         matrix_builder.cache_species([*known_species, *candidate_species])
@@ -278,56 +332,23 @@ def build_candidate_evidence_artifacts(
     except CVError as exc:
         raise CandidateEvidenceError(str(exc)) from exc
 
-    feature_union_index = {feature: idx for idx, feature in enumerate(model_features)}
-    contribution_cube = np.zeros(
-        (len(entries), len(candidate_species), len(model_features)), dtype=float
-    )
-    for model_idx, (entry, coef) in enumerate(zip(entries, coefficients, strict=True)):
-        transform_indices = np.array(
-            [transform_index[feature] for feature in entry.feature_names], dtype=int
-        )
-        selected = candidate_transformed[:, transform_indices]
-        try:
-            scaled = apply_feature_scaling(
-                selected,
-                entry.scaler,
-                config.preprocess.feature_scaling.method,
-            )
-        except CVError as exc:
-            raise CandidateEvidenceError(str(exc)) from exc
-        model_contributions = scaled * coef[np.newaxis, :]
-        union_indices = np.array(
-            [feature_union_index[feature] for feature in entry.feature_names], dtype=int
-        )
-        contribution_cube[model_idx][:, union_indices] = model_contributions
-
-    contribution_mean = np.mean(contribution_cube, axis=0)
-    contribution_mean_abs = np.mean(np.abs(contribution_cube), axis=0)
-    contribution_min = np.min(contribution_cube, axis=0)
-    contribution_max = np.max(contribution_cube, axis=0)
     feature_rows: list[dict[str, Any]] = []
     selected_features: set[str] = set()
-    for candidate_idx, species in enumerate(candidate_species):
-        order = sorted(
-            range(len(model_features)),
-            key=lambda idx: (
-                -float(contribution_mean_abs[candidate_idx, idx]),
-                model_features[idx],
-            ),
-        )
-        nonzero_order = [
-            idx
-            for idx in order
-            if float(contribution_mean_abs[candidate_idx, idx]) > _NONZERO_TOLERANCE
-        ][:top_features]
-        if not nonzero_order:
+    for candidate_idx, contributions in iter_top_contributions(
+        candidate_transformed, transform_features, rows=np.arange(len(candidate_species)),
+        model_features=[entry.feature_names for entry in entries],
+        scalers=[entry.scaler for entry in entries], coefficients=coefficients,
+        scaling_method=config.preprocess.feature_scaling.method, top_features=top_features,
+    ):
+        species = candidate_species[candidate_idx]
+        if not contributions:
             warnings.append(
                 f"Skipped candidate evidence figure for {species}: "
                 "all final-model local contributions are zero"
             )
             continue
-        for local_rank, feature_idx in enumerate(nonzero_order, start=1):
-            feature = model_features[feature_idx]
+        for local_rank, contribution in enumerate(contributions, start=1):
+            feature = contribution.feature
             raw_value = float(candidate_raw[candidate_idx, transform_index[feature]])
             selected_features.add(feature)
             feature_rows.append(
@@ -335,12 +356,10 @@ def build_candidate_evidence_artifacts(
                     "species": species,
                     "feature": feature,
                     "local_rank": local_rank,
-                    "contribution_mean": float(contribution_mean[candidate_idx, feature_idx]),
-                    "contribution_mean_abs": float(
-                        contribution_mean_abs[candidate_idx, feature_idx]
-                    ),
-                    "contribution_min": float(contribution_min[candidate_idx, feature_idx]),
-                    "contribution_max": float(contribution_max[candidate_idx, feature_idx]),
+                    "contribution_mean": contribution.mean,
+                    "contribution_mean_abs": contribution.mean_abs,
+                    "contribution_min": contribution.minimum,
+                    "contribution_max": contribution.maximum,
                     "candidate_tpm": raw_value,
                     "candidate_log2_tpm_plus1": float(np.log2(raw_value + 1.0)),
                     "n_models": len(entries),
@@ -358,36 +377,8 @@ def build_candidate_evidence_artifacts(
     )
     warnings.extend(metadata_warnings)
 
-    reference_features = sorted(selected_features)
-    try:
-        reference_raw, _ = matrix_builder.build_matrix(
-            known_species,
-            feature_order=reference_features,
-        )
-    except CVError as exc:
-        raise CandidateEvidenceError(str(exc)) from exc
-    known_labels = [int(value) for value in known.get_column("label").to_list()]
-    reference_rows: list[dict[str, Any]] = []
-    for species_idx, (species, label) in enumerate(zip(known_species, known_labels, strict=True)):
-        for feature_idx, feature in enumerate(reference_features):
-            raw_value = float(reference_raw[species_idx, feature_idx])
-            reference_rows.append(
-                {
-                    "species": species,
-                    "label": label,
-                    "feature": feature,
-                    "tpm": raw_value,
-                    "log2_tpm_plus1": float(np.log2(raw_value + 1.0)),
-                }
-            )
-    reference_expression = pl.DataFrame(reference_rows, schema=_REFERENCE_SCHEMA).sort(
-        ["feature", "label", "species"]
-    )
-    if config.preprocess.missing_expression.method == "neutral":
-        reference_expression = mark_expression_observations(
-            reference_expression,
-            zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
-        )
+    reference_features = active_features if include_model_reference else sorted(selected_features)
+    reference_expression = _reference_expression(config, matrix_builder, known, reference_features)
     normalized_cross_fold = _normalized_cross_fold_predictions(
         cross_fold_predictions,
         candidate_species=[str(value) for value in retained_candidate_species],

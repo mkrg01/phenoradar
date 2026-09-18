@@ -12,11 +12,17 @@ Default path/key:
 
 - `data.metadata_path` (default: `testdata/c4_tiny/species_metadata.tsv`)
 
-Required columns (default names):
+Required columns for training with `run` (default names):
 
 - `species` (`data.species_col`)
 - `C4` (`data.trait_col`)
 - `contrast_pair_id` (`split.group_col`; also `data.contrast_pair_col` by default)
+
+For `predict`, metadata is optional. Without it, the distinct species in the TPM
+file define all prediction targets. If provided, only `species` (or
+`data.species_col`) is required; the metadata selects a subset and can supply
+annotations. Trait and contrast-pair columns are not required, including for
+prediction trees. Empty species names in a TPM-only prediction input are errors.
 
 Optional annotation columns:
 
@@ -97,6 +103,10 @@ PhenoRadar uses annotation labels in feature interpretation figures and tree
 feature heatmaps instead of ID-only labels.
 
 ## Tree Newick
+
+For optional unknown-trait imputation, the tree must include both unknown targets
+and known-trait reference species. See [phylogenetic imputation](phylogenetic-imputation.md)
+for explicit input/unit branch-length modes and reference reuse through model bundles.
 
 Optional path/key:
 

@@ -7,16 +7,19 @@ import re
 import textwrap
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import nullcontext
 from functools import wraps
 from hashlib import sha256
 from inspect import signature
 from multiprocessing import get_context
 from pathlib import Path
+from time import perf_counter
 from typing import Any, cast
 
 import matplotlib
 import numpy as np
 import polars as pl
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.colors import LinearSegmentedColormap, to_rgba
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
@@ -34,7 +37,9 @@ from phenoradar.colors import CONFUSION_GROUP_COLORS, CONFUSION_GROUP_ORDER
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
+    remove_legacy_population_figure,
 )
+from phenoradar.figure_runtime import FigureWorkers
 from phenoradar.group_summary import GroupSummaryError, finite_group_probabilities
 from phenoradar.metrics import (
     FIXED_PROBABILITY_THRESHOLD_NAME,
@@ -44,6 +49,7 @@ from phenoradar.metrics import (
     metric_direction,
     metric_higher_is_better,
 )
+from phenoradar.timing import TimingRecorder
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
@@ -104,7 +110,7 @@ _CONFUSION_GROUP_ORDER = CONFUSION_GROUP_ORDER
 _CONFUSION_GROUP_COLORS = CONFUSION_GROUP_COLORS
 _FEATURE_IMPORTANCE_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
 _FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE = _LABEL_FONTSIZE
-_FEATURE_ANNOTATION_LABEL_PADDING_PX = 180
+_FEATURE_ANNOTATION_LABEL_PADDING_PX = 40
 _FEATURE_IMPORTANCE_HEATMAP_CMAP = LinearSegmentedColormap.from_list(
     "phenoradar_feature_importance_blues",
     ["#ffffff", "#deebf7", "#9ecae1", "#3182bd", "#08519c"],
@@ -215,7 +221,7 @@ def _label_text_width_px(labels: list[str], *, fontsize_px: int, padding: int = 
         (len(line) for label in labels for line in str(label).splitlines()),
         default=0,
     )
-    return max_chars * fontsize_px * 0.62 + padding
+    return max_chars * fontsize_px * (_FIG_DPI / 72) * 0.62 + padding
 
 
 def _label_left_margin(labels: list[str], *, width_px: int, fontsize_px: int) -> float:
@@ -225,7 +231,7 @@ def _label_left_margin(labels: list[str], *, width_px: int, fontsize_px: int) ->
 
 def _feature_label_row_height_px(labels: list[str]) -> int:
     max_lines = max((len(label.splitlines()) for label in labels), default=1)
-    return max(18, 10 + max_lines * 9)
+    return max(20, 10 + max_lines * 11)
 
 
 def _feature_label_axis_title(_labels: list[str]) -> str:
@@ -271,7 +277,7 @@ def _feature_axis_labels(
         if annotation is None:
             labels.append(feature)
             continue
-        labels.append(f"{' '.join(annotation.split())} ({feature})")
+        labels.append(textwrap.fill(f"{' '.join(annotation.split())} ({feature})", width=48))
     return labels
 
 
@@ -283,18 +289,13 @@ def _feature_axis_layout(
     base_right: float,
     fontsize_px: int,
 ) -> tuple[int, float, float]:
-    base_left_px = base_left * base_width_px
-    base_right_px = base_right * base_width_px
     label_width_px = _label_text_width_px(
         labels,
         fontsize_px=fontsize_px,
         padding=_FEATURE_ANNOTATION_LABEL_PADDING_PX,
     )
-    extra_left_px = max(0, int(np.ceil(label_width_px - base_left_px)))
-    width_px = base_width_px + extra_left_px
-    left = (base_left_px + extra_left_px) / width_px
-    right = (base_right_px + extra_left_px) / width_px
-    return width_px, left, right
+    left = max(base_left, min(0.52, label_width_px / base_width_px))
+    return base_width_px, left, base_right
 
 
 def _compact_bottom_margin(height_px: int) -> float:
@@ -302,16 +303,61 @@ def _compact_bottom_margin(height_px: int) -> float:
 
 
 def _save_svg_figure(fig: Figure, out_path: Path) -> None:
+    _publication_layout(fig)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(
         out_path,
         format="svg",
         dpi=_FIG_DPI,
         metadata={"Date": None},
     )
+    remove_legacy_population_figure(out_path)
     plt.close(fig)
 
 
+def _publication_layout(fig: Figure) -> None:
+    """Measure decorations before export, keeping a consistent six-point gutter.
+
+    Constrained layout accounts for tick labels, panel titles and colorbars without
+    cropping or changing the intended page size. Figure-level footers/legends get
+    their own band, outside the axes layout.
+    """
+    canvas = cast(Any, FigureCanvasAgg(fig))
+    renderer = canvas.get_renderer()
+    bottom, top = 0.0, 1.0
+    automatic_titles = [
+        getattr(fig, name, None) for name in ("_supxlabel", "_supylabel", "_suptitle")
+    ]
+    for artist in [*fig.legends, *fig.texts]:
+        if artist in automatic_titles:
+            continue
+        if not artist.get_visible():
+            continue
+        bounds = artist.get_window_extent(renderer).transformed(fig.transFigure.inverted())
+        if bounds.y1 < 0.25:
+            bottom = max(bottom, bounds.y1 + 6 / 72 / fig.get_figheight())
+        elif bounds.y0 > 0.75 or artist.get_gid() == "phenoradar-header":
+            top = min(top, bounds.y0 - 6 / 72 / fig.get_figheight())
+    if fig.get_layout_engine() is None:
+        fig.set_layout_engine(
+            "constrained", w_pad=6 / 72, h_pad=6 / 72,
+            wspace=0.04, hspace=0.04, rect=(0, bottom, 1, top - bottom),
+        )
+    canvas.draw()
+
+
+def _legend_above(ax: Any, *, handles: list[Any] | None = None, ncol: int = 3) -> None:
+    """Give legends a separate row, so they cannot obscure data."""
+    ax.legend(
+        handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.02),
+        ncol=ncol, frameon=False, borderaxespad=0.0,
+        columnspacing=1.2, handlelength=1.6,
+    )
+
+
 def _save_pdf_figure(fig: Figure, out_path: Path, *, title: str) -> None:
+    _publication_layout(fig)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(
         out_path,
         format="pdf",
@@ -435,37 +481,44 @@ def _execute_figure_job(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
     catch_figure_error: bool,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], float, float]:
+    started = perf_counter()
     try:
         func(*args, **kwargs)
     except FigureError as exc:
         if catch_figure_error:
-            return name, [str(exc)]
+            return name, [str(exc)], started, perf_counter()
         raise
-    return name, []
+    return name, [], started, perf_counter()
 
 
-def _run_figure_jobs(jobs: list[_FigureJob], *, parallel_workers: int) -> list[str]:
+def _run_figure_jobs(
+    jobs: list[_FigureJob], *, parallel_workers: int,
+    timing_recorder: TimingRecorder | None = None,
+    workers: FigureWorkers | None = None,
+) -> list[str]:
     if not jobs:
         return []
     worker_count = max(1, min(int(parallel_workers), len(jobs)))
     if worker_count == 1:
         sequential_warnings: list[str] = []
         for name, func, args, kwargs, catch_figure_error in jobs:
-            _job_name, job_warnings = _execute_figure_job(
+            _job_name, job_warnings, started, ended = _execute_figure_job(
                 name,
                 func,
                 args,
                 kwargs,
                 catch_figure_error,
             )
+            if timing_recorder is not None:
+                timing_recorder.record_interval(started, ended, scope="figure_job", stage=name)
             sequential_warnings.extend(job_warnings)
         return sequential_warnings
 
     warnings_by_index: dict[int, list[str]] = {}
-    with ProcessPoolExecutor(
-        max_workers=worker_count,
-        mp_context=get_context("spawn"),
+    with (
+        nullcontext(workers.executor()) if workers is not None
+        else ProcessPoolExecutor(max_workers=worker_count, mp_context=get_context("spawn"))
     ) as executor:
         future_to_index = {
             executor.submit(
@@ -480,7 +533,9 @@ def _run_figure_jobs(jobs: list[_FigureJob], *, parallel_workers: int) -> list[s
         }
         for future in as_completed(future_to_index):
             index = future_to_index[future]
-            _job_name, job_warnings = future.result()
+            _job_name, job_warnings, started, ended = future.result()
+            if timing_recorder is not None:
+                timing_recorder.record_interval(started, ended, scope="figure_job", stage=_job_name)
             warnings_by_index[index] = job_warnings
 
     ordered_warnings: list[str] = []
@@ -742,7 +797,7 @@ def _cv_metrics_overview(metrics_cv: pl.DataFrame, out_path: Path) -> None:
     _place_x_axis_at_zero(ax)
     ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.legend(loc="upper right", frameon=False)
+    _legend_above(ax)
 
     fig.subplots_adjust(left=0.08, right=0.99, top=0.96, bottom=0.18)
     _save_svg_figure(fig, out_path)
@@ -858,23 +913,7 @@ def _group_bootstrap_metrics_figure(
     )
     ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    group_col = str(rows[0]["group_col"])
-    n_groups = int(rows[0]["n_groups"])
-    n_resamples = int(rows[0]["n_resamples"])
-    min_valid_resamples = min(int(row["n_valid_resamples"]) for row in rows)
     ax.set_title("OOF group-bootstrap confidence intervals", pad=8.0)
-    fig.text(
-        0.99,
-        0.01,
-        (
-            f"group_col={group_col}; groups={n_groups}; resamples={n_resamples}; "
-            f"minimum valid resamples={min_valid_resamples}"
-        ),
-        ha="right",
-        va="bottom",
-        fontsize=_ANNOTATION_FONTSIZE,
-        color=_MUTED_TEXT_COLOR,
-    )
     fig.subplots_adjust(left=0.31, right=0.985, top=0.89, bottom=0.16)
     _save_svg_figure(fig, out_path)
 
@@ -964,7 +1003,7 @@ def _cv_loss_by_split(loss_by_split_cv: pl.DataFrame, out_path: Path) -> None:
     ax.set_ylabel("Log loss", fontsize=_LABEL_FONTSIZE)
     ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.legend(loc="upper right", frameon=False)
+    _legend_above(ax)
 
     fig.subplots_adjust(left=0.09, right=0.99, top=0.96, bottom=0.16)
     _save_svg_figure(fig, out_path)
@@ -1383,7 +1422,7 @@ def _feature_importance_by_fold_heatmap(
                     fontfamily="monospace",
                 )
 
-    colorbar = fig.colorbar(image, ax=ax, fraction=0.025, pad=0.02)
+    colorbar = fig.colorbar(image, ax=ax, use_gridspec=False, fraction=0.025, pad=0.02)
     colorbar.set_label(
         "Mean feature importance per fold",
         rotation=90,
@@ -1697,24 +1736,6 @@ def _top_feature_expression_by_confusion(
     features = [str(value) for value in top.get_column("__feature").to_list()]
     if not features:
         raise FigureError(f"feature_importance.tsv is empty; cannot draw {figure_name}")
-    importance_lookup = {
-        str(row["__feature"]): float(row["__importance"]) for row in top.iter_rows(named=True)
-    }
-    coefficient_lookup = {
-        str(row["__feature"]): float(row["__coef"])
-        for row in coefficients.filter(pl.col("method") == "coef_signed")
-        .select(
-            pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("__feature"),
-            pl.col("coef_mean").cast(pl.Float64, strict=False).alias("__coef"),
-        )
-        .filter(
-            pl.col("__feature").is_not_null()
-            & (pl.col("__feature") != "")
-            & pl.col("__coef").is_not_null()
-            & pl.col("__coef").is_finite()
-        )
-        .iter_rows(named=True)
-    }
     annotation_lookup = _orthogroup_annotation_lookup(orthogroup_annotations)
     if "is_missing" in top_feature_expression.columns:
         top_feature_expression = top_feature_expression.filter(~pl.col("is_missing"))
@@ -1759,13 +1780,7 @@ def _top_feature_expression_by_confusion(
             if annotation is not None
             else []
         )
-        title_lines.extend([f"({feature})", f"importance={importance_lookup[feature]:.3g}"])
-        coefficient = coefficient_lookup.get(feature)
-        if coefficient is not None:
-            if np.isclose(coefficient, 0.0):
-                title_lines[-1] += " | β=0"
-            else:
-                title_lines[-1] += f" | β={coefficient:+.3g}"
+        title_lines.append(f"({feature})")
         title_lines_by_feature[feature] = title_lines
 
     n_columns = min(5, len(features))
@@ -1871,9 +1886,8 @@ def _top_feature_expression_by_confusion(
     fig.supxlabel(
         "OOF confusion group" if label_col == "label" else "External-test confusion group",
         fontsize=_LABEL_FONTSIZE,
-        y=10 / height_px,
     )
-    fig.supylabel("log2(TPM + 1)", fontsize=_LABEL_FONTSIZE, x=0.008)
+    fig.supylabel("log2(TPM + 1)", fontsize=_LABEL_FONTSIZE)
     fig.subplots_adjust(
         left=0.055,
         right=0.995,
@@ -1931,7 +1945,7 @@ def _predict_probability_distribution(
             label="Abstained",
         )
         bars[0].set_label("Accepted")
-        ax.legend(frameon=False, fontsize=_LABEL_FONTSIZE)
+        _legend_above(ax)
     max_count = int(counts.max()) if counts.size > 0 else 1
     if max_count < 1:
         max_count = 1
@@ -2760,8 +2774,11 @@ def _roc_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     )
     fig.patch.set_facecolor("white")
 
-    ax.plot([0.0, 1.0], [0.0, 1.0], color="#999999", linewidth=0.7, linestyle=(0, (4, 4)))
-    ax.plot(fpr, tpr, color=_COLOR_BLUE, linewidth=1.0)
+    ax.plot(
+        [0.0, 1.0], [0.0, 1.0], color="#999999", linewidth=0.7,
+        linestyle=(0, (4, 4)), label="Chance",
+    )
+    ax.plot(fpr, tpr, color=_COLOR_BLUE, linewidth=1.0, label=f"ROC AUC = {roc_auc:.3f}")
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.set_aspect("equal", adjustable="box")
@@ -2769,7 +2786,7 @@ def _roc_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     ax.set_ylabel("True Positive Rate", fontsize=_LABEL_FONTSIZE)
     ax.grid(color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.set_title(f"ROC AUC={roc_auc:.6f}", fontsize=_LABEL_FONTSIZE)
+    _legend_above(ax, ncol=1)
 
     fig.subplots_adjust(left=0.16, right=0.98, top=0.92, bottom=0.14)
     _save_svg_figure(fig, out_path)
@@ -2789,13 +2806,17 @@ def _pr_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     )
     fig.patch.set_facecolor("white")
 
-    ax.axhline(prevalence, color="#999999", linewidth=0.7, linestyle=(0, (4, 4)))
+    ax.axhline(
+        prevalence, color="#999999", linewidth=0.7, linestyle=(0, (4, 4)),
+        label=f"Positive rate = {prevalence:.3f}",
+    )
     ax.plot(
         recall_plot,
         precision_plot,
         color=_COLOR_ORANGE,
         linewidth=1.0,
         drawstyle="steps-post",
+        label=f"Average Precision={average_precision:.3f}",
     )
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
@@ -2804,10 +2825,7 @@ def _pr_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     ax.set_ylabel("Precision", fontsize=_LABEL_FONTSIZE)
     ax.grid(color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.set_title(
-        f"Average Precision={average_precision:.6f}, positive_rate={prevalence:.6f}",
-        fontsize=_LABEL_FONTSIZE,
-    )
+    _legend_above(ax, ncol=1)
 
     fig.subplots_adjust(left=0.16, right=0.98, top=0.92, bottom=0.14)
     _save_svg_figure(fig, out_path)
@@ -2830,13 +2848,16 @@ def _roc_curve_external(y_true: np.ndarray, prob: np.ndarray, out_path: Path) ->
     roc_auc = float(roc_auc_score(y_true, prob))
 
     fig, ax = plt.subplots(
-        figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 340),
+        figsize=_figure_size_inches(_CURVE_PANEL_SIZE_PX, _CURVE_PANEL_SIZE_PX),
         dpi=_FIG_DPI,
     )
     fig.patch.set_facecolor("white")
 
-    ax.plot([0.0, 1.0], [0.0, 1.0], color="#999999", linewidth=0.7, linestyle=(0, (4, 4)))
-    ax.plot(fpr, tpr, color=_COLOR_BLUE, linewidth=1.15)
+    ax.plot(
+        [0.0, 1.0], [0.0, 1.0], color="#999999", linewidth=0.7,
+        linestyle=(0, (4, 4)), label="Chance",
+    )
+    ax.plot(fpr, tpr, color=_COLOR_BLUE, linewidth=1.15, label=f"ROC AUC = {roc_auc:.3f}")
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.set_aspect("equal", adjustable="box")
@@ -2844,21 +2865,7 @@ def _roc_curve_external(y_true: np.ndarray, prob: np.ndarray, out_path: Path) ->
     ax.set_ylabel("True positive rate", fontsize=_LABEL_FONTSIZE)
     ax.grid(color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.text(
-        0.97,
-        0.05,
-        f"ROC AUC = {roc_auc:.3f}",
-        transform=ax.transAxes,
-        ha="right",
-        va="bottom",
-        fontsize=_ANNOTATION_FONTSIZE,
-        bbox={
-            "boxstyle": "square,pad=0.22",
-            "facecolor": "white",
-            "edgecolor": "#dddddd",
-            "linewidth": 0.5,
-        },
-    )
+    _legend_above(ax, ncol=1)
 
     fig.subplots_adjust(left=0.13, right=0.98, top=0.98, bottom=0.14)
     _save_svg_figure(fig, out_path)
@@ -2870,18 +2877,22 @@ def _pr_curve_external(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> 
     prevalence = float(np.mean(y_true))
 
     fig, ax = plt.subplots(
-        figsize=_figure_size_inches(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 340),
+        figsize=_figure_size_inches(_CURVE_PANEL_SIZE_PX, _CURVE_PANEL_SIZE_PX),
         dpi=_FIG_DPI,
     )
     fig.patch.set_facecolor("white")
 
-    ax.axhline(prevalence, color="#999999", linewidth=0.7, linestyle=(0, (4, 4)))
+    ax.axhline(
+        prevalence, color="#999999", linewidth=0.7, linestyle=(0, (4, 4)),
+        label=f"Positive rate = {prevalence:.3f}",
+    )
     ax.plot(
         np.asarray(recall, dtype=float),
         np.asarray(precision, dtype=float),
         color=_COLOR_ORANGE,
         linewidth=1.15,
         drawstyle="steps-post",
+        label=f"Average Precision={average_precision:.3f}",
     )
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
@@ -2890,21 +2901,7 @@ def _pr_curve_external(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> 
     ax.set_ylabel("Precision", fontsize=_LABEL_FONTSIZE)
     ax.grid(color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.text(
-        0.03,
-        0.05,
-        f"AP = {average_precision:.3f}\nPositive rate = {prevalence:.3f}",
-        transform=ax.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=_ANNOTATION_FONTSIZE,
-        bbox={
-            "boxstyle": "square,pad=0.22",
-            "facecolor": "white",
-            "edgecolor": "#dddddd",
-            "linewidth": 0.5,
-        },
-    )
+    _legend_above(ax, ncol=1)
 
     fig.subplots_adjust(left=0.13, right=0.98, top=0.98, bottom=0.14)
     _save_svg_figure(fig, out_path)
@@ -3056,7 +3053,7 @@ def _external_confusion_matrix(pred_external_test: pl.DataFrame, out_path: Path)
                 color=text_color,
             )
 
-    colorbar = fig.colorbar(image, ax=ax, fraction=0.045, pad=0.04)
+    colorbar = fig.colorbar(image, ax=ax, use_gridspec=False, fraction=0.045, pad=0.04)
     colorbar.set_label("Count", rotation=90, fontsize=_LABEL_FONTSIZE)
     colorbar.ax.tick_params(labelsize=_TICK_FONTSIZE)
 
@@ -3486,7 +3483,7 @@ def _summarize_model_selection_trials_for_figure(
     }
     if not required.issubset(model_selection_trials.columns):
         raise FigureError(
-            "model_selection_trials.tsv schema is invalid for model_selection_trials.svg"
+            "model_selection_trials.tsv schema is invalid for the model-selection figure"
         )
 
     scored = model_selection_trials
@@ -3533,51 +3530,6 @@ def _params_dict(params_json: str | None) -> dict[str, Any] | None:
     if not isinstance(parsed, dict):
         return None
     return parsed
-
-
-def _varying_param_keys(params_json_values: list[str | None]) -> set[str]:
-    dicts = [_params_dict(value) for value in params_json_values]
-    all_keys = sorted({key for item in dicts if item is not None for key in item})
-    varying: set[str] = set()
-    for key in all_keys:
-        observed: set[str] = set()
-        for item in dicts:
-            if item is None or key not in item:
-                observed.add("__MISSING__")
-                continue
-            value = item[key]
-            observed.add(
-                json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-            )
-        if len(observed) > 1:
-            varying.add(key)
-    return varying
-
-
-def _compact_params_label(
-    params_json: str | None,
-    *,
-    include_keys: set[str] | None = None,
-) -> str:
-    if params_json is None:
-        return "{}"
-    raw = params_json.strip()
-    if raw == "":
-        return "{}"
-
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return raw
-    if isinstance(parsed, dict):
-        if include_keys is not None:
-            parsed = {key: value for key, value in sorted(parsed.items()) if key in include_keys}
-        if not parsed:
-            return "{}"
-        return json.dumps(parsed, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    if parsed is None:
-        return "null"
-    return json.dumps(parsed, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
 def _model_selection_metric_axis_label(metric_names: Sequence[str]) -> str:
@@ -3632,228 +3584,38 @@ def _model_selection_summary_with_se(
     return summary
 
 
-def _model_selection_trials_summary_panels(
-    model_selection_trials_summary: pl.DataFrame,
-    out_path: Path,
-    *,
-    max_sample_sets_per_fold: int,
-) -> None:
-    required = {
-        "fold_id",
-        "sample_set_id",
-        "candidate_index",
-        "metric_name",
-        "metric_value_mean",
-        "metric_value_std",
-    }
-    if not required.issubset(model_selection_trials_summary.columns):
-        raise FigureError(
-            "model_selection_trials_summary.tsv schema is invalid for model_selection_trials.svg"
-        )
-
-    summary = _model_selection_summary_with_se(model_selection_trials_summary)
-
-    data = (
-        summary.select(
-            pl.col("fold_id").cast(pl.String, strict=False).alias("__fold_id"),
-            pl.col("sample_set_id").cast(pl.Int64, strict=False).alias("__sample_set_id"),
-            pl.col("candidate_index").cast(pl.Int64, strict=False).alias("__candidate_index"),
-            pl.col("metric_name").cast(pl.String, strict=False).alias("__metric_name"),
-            pl.col("metric_value_mean").cast(pl.Float64, strict=False).alias("__mean"),
-            pl.col("metric_value_std").cast(pl.Float64, strict=False).alias("__std"),
-            pl.col("metric_value_se").cast(pl.Float64, strict=False).alias("__se"),
-            pl.col("params_json").cast(pl.String, strict=False).alias("__params_json"),
-        )
-        .with_columns(
-            pl.when(pl.col("__se").is_null() | pl.col("__se").is_nan() | (pl.col("__se") < 0.0))
-            .then(0.0)
-            .otherwise(pl.col("__se"))
-            .alias("__se_plot")
-        )
-        .filter(
-            pl.col("__fold_id").is_not_null()
-            & (pl.col("__fold_id") != "")
-            & pl.col("__sample_set_id").is_not_null()
-            & pl.col("__candidate_index").is_not_null()
-            & pl.col("__metric_name").is_not_null()
-            & (pl.col("__metric_name") != "")
-            & pl.col("__mean").is_not_null()
-            & pl.col("__mean").is_finite()
-        )
+def _model_selection_figure_rule(
+    selected: pl.DataFrame | None, *, selection_scope: str,
+) -> str:
+    """Use the recorded rule for this stage; legacy tables default to best."""
+    if selected is None or selected.height == 0 or "selection_rule" not in selected.columns:
+        return "best"
+    if "selection_scope" not in selected.columns:
+        raise FigureError("model_selection_selected.tsv is missing selection_scope")
+    rules = (
+        selected.filter(pl.col("selection_scope") == selection_scope)
+        .get_column("selection_rule").drop_nulls().unique().to_list()
     )
-    if data.height == 0:
-        return
-
-    if max_sample_sets_per_fold < 1:
-        raise FigureError("max_sample_sets_per_fold must be >= 1")
-
-    fold_ids = [str(v) for v in data.select("__fold_id").unique().to_series().to_list()]
-    fold_ids = sorted(
-        fold_ids,
-        key=lambda value: (0, int(value)) if value.isdigit() else (1, value),
-    )
-
-    sample_sets_by_fold: dict[str, list[int]] = {}
-    per_fold_total: dict[str, int] = {}
-    n_rows = 0
-    for fold_id in fold_ids:
-        sample_set_ids = sorted(
-            int(v)
-            for v in data.filter(pl.col("__fold_id") == fold_id)
-            .select("__sample_set_id")
-            .unique()
-            .to_series()
-            .to_list()
-        )
-        per_fold_total[fold_id] = len(sample_set_ids)
-        selected_sample_set_ids = sample_set_ids[:max_sample_sets_per_fold]
-        sample_sets_by_fold[fold_id] = selected_sample_set_ids
-        n_rows = max(n_rows, len(selected_sample_set_ids))
-    if n_rows == 0:
-        return
-
-    panels: list[dict[str, Any]] = []
-    x_values: list[float] = []
-    max_candidates = 1
-    max_label_length = 1
-    for fold_id in fold_ids:
-        selected_sample_set_ids = sample_sets_by_fold[fold_id]
-        if not selected_sample_set_ids:
-            continue
-        sample_set_id = selected_sample_set_ids[0]
-        panel_data = data.filter(
-            (pl.col("__fold_id") == fold_id) & (pl.col("__sample_set_id") == sample_set_id)
-        ).sort("__candidate_index")
-        if panel_data.height == 0:
-            continue
-
-        candidates = [int(v) for v in panel_data.select("__candidate_index").to_series().to_list()]
-        means = np.array(panel_data.select("__mean").to_series().to_list(), dtype=float)
-        ses = np.array(panel_data.select("__se_plot").to_series().to_list(), dtype=float)
-        params_json_values = [
-            None if value is None else str(value)
-            for value in panel_data.select("__params_json").to_series().to_list()
-        ]
-        varying_keys = _varying_param_keys(params_json_values)
-        params_labels = [
-            _compact_params_label(value, include_keys=varying_keys) for value in params_json_values
-        ]
-        y_labels = [
-            _ellipsize_label(f"{candidate}: {params_label}", max_chars=72)
-            for candidate, params_label in zip(candidates, params_labels, strict=True)
-        ]
-
-        max_candidates = max(max_candidates, len(candidates))
-        max_label_length = max(max_label_length, max(len(label) for label in y_labels))
-        for mean_value, se_value in zip(means.tolist(), ses.tolist(), strict=True):
-            x_values.extend([mean_value - se_value, mean_value + se_value])
-
-        panels.append(
-            {
-                "fold_id": fold_id,
-                "sample_set_id": sample_set_id,
-                "candidates": candidates,
-                "means": means,
-                "ses": ses,
-                "y_labels": y_labels,
-            }
-        )
-
-    if not panels:
-        return
-
-    x_min, x_max = _padded_domain(x_values, include_zero=True)
-
-    n_panels = len(panels)
-    max_cols = min(5, n_panels)
-    n_cols = min(
-        range(1, max_cols + 1),
-        key=lambda cols: (
-            abs((cols / int(np.ceil(n_panels / cols))) - 1.6)
-            + (int(np.ceil(n_panels / cols)) * cols - n_panels) * 0.15,
-            int(np.ceil(n_panels / cols)) * cols - n_panels,
-        ),
-    )
-    n_rows = int(np.ceil(n_panels / n_cols))
-
-    panel_width_px = 340
-    left_label_px = min(640, max(190, 40 + int(max_label_length * 4)))
-    right_pad_px = 24
-    fig_width_px = left_label_px + panel_width_px * n_cols + right_pad_px
-
-    panel_height_px = max(210, 86 + max_candidates * 18)
-    header_px = 26
-    footer_px = 38
-    fig_height_px = header_px + panel_height_px * n_rows + footer_px
-
-    fig, axes = plt.subplots(
-        n_rows,
-        n_cols,
-        figsize=_figure_size_inches(fig_width_px, fig_height_px),
-        dpi=_FIG_DPI,
-        squeeze=False,
-    )
-    fig.patch.set_facecolor("white")
-
-    metric_names = [str(v) for v in data.select("__metric_name").unique().to_series().to_list()]
-    metric_axis_label = f"{_model_selection_metric_axis_label(metric_names)} mean +/- SE"
-    for panel_index, panel in enumerate(panels):
-        row_index, col_index = divmod(panel_index, n_cols)
-        ax = axes[row_index][col_index]
-        y_pos = np.arange(len(panel["candidates"]), dtype=float)
-        ax.errorbar(
-            panel["means"],
-            y_pos,
-            xerr=panel["ses"],
-            fmt="o",
-            color=_COLOR_BLUE,
-            ecolor=_COLOR_SKY,
-            elinewidth=0.8,
-            capsize=2.5,
-            markersize=3.0,
-            markeredgecolor=_COLOR_BLUE,
-        )
-        ax.set_xlim(x_min, x_max)
-        ax.set_yticks(y_pos)
-        ax.set_yticklabels(panel["y_labels"], fontsize=6, fontfamily="monospace")
-        ax.tick_params(axis="y", pad=1.5)
-        ax.invert_yaxis()
-        ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
-        ax.set_axisbelow(True)
-        ax.axvline(0.0, color=_MUTED_TEXT_COLOR, linewidth=0.8)
-        ax.set_title(str(panel["fold_id"]), fontsize=_LABEL_FONTSIZE, pad=5.0)
-        if col_index == 0:
-            ax.set_ylabel("candidate_index:params", fontsize=_LABEL_FONTSIZE)
-        ax.set_xlabel(metric_axis_label, fontsize=_LABEL_FONTSIZE, labelpad=3.0)
-
-    for panel_index in range(n_panels, n_rows * n_cols):
-        row_index, col_index = divmod(panel_index, n_cols)
-        axes[row_index][col_index].axis("off")
-
-    left_margin = left_label_px / fig_width_px
-    right_margin = 1.0 - (right_pad_px / fig_width_px)
-    top_margin = min(0.98, 1.0 - (header_px / fig_height_px) + 0.01)
-    bottom_margin = footer_px / fig_height_px
-    fig.subplots_adjust(
-        left=left_margin,
-        right=right_margin,
-        top=top_margin,
-        bottom=bottom_margin,
-        wspace=0.32,
-        hspace=0.55,
-    )
-    _save_svg_figure(fig, out_path)
+    if not rules:
+        return "best"
+    if len(rules) != 1 or rules[0] not in {"best", "one_se"}:
+        raise FigureError(f"Invalid or mixed model-selection rules for {selection_scope}: {rules}")
+    return str(rules[0])
 
 
-def _model_selection_one_se_curve(
+def _model_selection_curve(
     model_selection_trials_summary: pl.DataFrame,
     model_selection_selected: pl.DataFrame | None,
     out_path: Path,
     *,
     max_sample_sets_per_fold: int,
+    selection_rule: str = "best",
     selection_scope: str = "outer_fold",
     panel_scope_label: str = "fold",
 ) -> None:
+    if selection_rule not in {"best", "one_se"}:
+        raise FigureError(f"Invalid model-selection rule: {selection_rule}")
+    show_one_se = selection_rule == "one_se"
     required = {
         "fold_id",
         "sample_set_id",
@@ -3864,7 +3626,7 @@ def _model_selection_one_se_curve(
     if not required.issubset(model_selection_trials_summary.columns):
         raise FigureError(
             "model_selection_trials_summary.tsv schema is invalid for "
-            "model_selection_one_se_curve.svg"
+            f"{out_path.name}"
         )
 
     summary = _model_selection_summary_with_se(model_selection_trials_summary)
@@ -3913,7 +3675,7 @@ def _model_selection_one_se_curve(
         if not selected_required.issubset(model_selection_selected.columns):
             raise FigureError(
                 "model_selection_selected.tsv schema is invalid for "
-                "model_selection_one_se_curve.svg"
+                f"{out_path.name}"
             )
         selected_rows = (
             model_selection_selected.select(
@@ -3966,7 +3728,7 @@ def _model_selection_one_se_curve(
             rows = panel_data.to_dicts()
             x_values = np.array([int(row["__candidate_index"]) for row in rows], dtype=float)
             x_label = "candidate_index"
-            for param_name in ("alpha", "C"):
+            for param_name in ("lambda", "C"):
                 param_values = [
                     _numeric_param_from_json(
                         None if row["__params_json"] is None else str(row["__params_json"]),
@@ -3974,7 +3736,19 @@ def _model_selection_one_se_curve(
                     )
                     for row in rows
                 ]
-                if all(value is not None and value > 0.0 for value in param_values):
+                other_params = [
+                    {
+                        key: value
+                        for key, value in (_params_dict(row["__params_json"]) or {}).items()
+                        if key != param_name
+                    }
+                    for row in rows
+                ]
+                if (
+                    all(value is not None and value > 0.0 for value in param_values)
+                    and len(set(param_values)) == len(rows)
+                    and all(params == other_params[0] for params in other_params)
+                ):
                     x_values = np.log10(
                         np.array(
                             [value for value in param_values if value is not None], dtype=float
@@ -3991,8 +3765,11 @@ def _model_selection_one_se_curve(
             best_offset = int(np.argmax(means) if higher_is_better else np.argmin(means))
             best_mean = float(means[best_offset])
             best_se = float(ses[best_offset])
-            threshold = best_mean - best_se if higher_is_better else best_mean + best_se
-            eligible = means >= threshold if higher_is_better else means <= threshold
+            threshold = None
+            eligible = np.zeros(means.size, dtype=bool)
+            if show_one_se:
+                threshold = best_mean - best_se if higher_is_better else best_mean + best_se
+                eligible = means >= threshold if higher_is_better else means <= threshold
             selected_candidate = selected_by_key.get((fold_id, sample_set_id))
 
             order = np.argsort(x_values)
@@ -4016,13 +3793,25 @@ def _model_selection_one_se_curve(
             all_x.extend(x_values.tolist())
             for mean, se in zip(means.tolist(), ses.tolist(), strict=True):
                 all_y.extend([mean - se, mean + se])
-            all_y.append(threshold)
+            if threshold is not None:
+                all_y.append(threshold)
             x_labels.append(x_label)
 
     if not panels:
         return
 
     x_label = x_labels[0] if len(set(x_labels)) == 1 else "candidate_index"
+    if len(set(x_labels)) > 1:
+        # A shared axis label must describe the coordinates in every panel.
+        all_x = []
+        for panel in panels:
+            indices = np.asarray(panel["candidate_indices"], dtype=int)
+            order = np.argsort(indices)
+            panel["x"] = indices[order].astype(float)
+            panel["candidate_indices"] = indices[order].tolist()
+            for key in ("means", "ses", "eligible"):
+                panel[key] = panel[key][order]
+            all_x.extend(panel["x"].tolist())
     metric_axis_label = _model_selection_metric_axis_label(
         [panel["metric_name"] for panel in panels]
     )
@@ -4042,7 +3831,10 @@ def _model_selection_one_se_curve(
         ),
     )
     n_rows = int(np.ceil(n_panels / n_cols))
-    fig_width_px = max(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 230 * n_cols + 80)
+    fig_width_px = min(
+        _NATURE_DOUBLE_COLUMN_WIDTH_PX,
+        max(_NATURE_ONE_AND_HALF_COLUMN_WIDTH_PX, 230 * n_cols + 80),
+    )
     fig_height_px = max(250, 200 * n_rows + 66)
     fig, axes = plt.subplots(
         n_rows,
@@ -4082,23 +3874,24 @@ def _model_selection_one_se_curve(
             zorder=2,
             label="Candidate",
         )
-        ax.scatter(
-            x_values[eligible],
-            means[eligible],
-            s=24,
-            color=_COLOR_GREEN,
-            edgecolor="white",
-            linewidth=0.4,
-            zorder=3,
-            label="Within one-SE",
-        )
-        ax.axhline(
-            float(panel["threshold"]),
-            color=_COLOR_ORANGE,
-            linewidth=0.9,
-            linestyle="--",
-            label="one-SE threshold",
-        )
+        if show_one_se:
+            ax.scatter(
+                x_values[eligible],
+                means[eligible],
+                s=24,
+                color=_COLOR_GREEN,
+                edgecolor="white",
+                linewidth=0.4,
+                zorder=3,
+                label="Within one-SE",
+            )
+            ax.axhline(
+                float(panel["threshold"]),
+                color=_COLOR_ORANGE,
+                linewidth=0.9,
+                linestyle="--",
+                label="one-SE threshold",
+            )
 
         best_candidate = int(panel["best_candidate"])
         if best_candidate in candidate_indices:
@@ -4149,14 +3942,9 @@ def _model_selection_one_se_curve(
 
     legend_handles = [
         Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="none",
-            markerfacecolor=_COLOR_GREEN,
-            label="Within one-SE",
+            [0], [0], marker="o", color=_COLOR_BLUE, linewidth=0.8,
+            markerfacecolor=_COLOR_BLUE, label="Candidate mean ± SE",
         ),
-        Line2D([0], [0], color=_COLOR_ORANGE, linestyle="--", label="one-SE threshold"),
         Line2D(
             [0],
             [0],
@@ -4175,15 +3963,31 @@ def _model_selection_one_se_curve(
             label="Selected candidate",
         ),
     ]
+    if not any(panel["selected_candidate"] is not None for panel in panels):
+        legend_handles.pop()
+    if show_one_se:
+        legend_handles[1:1] = [
+            Line2D(
+                [0], [0], marker="o", color="none", markerfacecolor=_COLOR_GREEN,
+                label="Within one-SE",
+            ),
+            Line2D([0], [0], color=_COLOR_ORANGE, linestyle="--", label="one-SE threshold"),
+        ]
     fig.legend(
         handles=legend_handles,
         loc="lower center",
-        ncol=min(4, len(legend_handles)),
+        ncol=min(3, len(legend_handles)),
         frameon=False,
         bbox_to_anchor=(0.5, 0.01),
     )
     fig.subplots_adjust(left=0.10, right=0.995, top=0.93, bottom=0.18, wspace=0.30, hspace=0.48)
     _save_svg_figure(fig, out_path)
+    # Re-rendering must not leave the retired plot or the other rule's plot beside it.
+    prefix = "final_refit_" if selection_scope == "final_refit" else ""
+    for stem in ("model_selection_trials", "model_selection_one_se_curve", "model_selection"):
+        obsolete = out_path.with_name(f"{prefix}{stem}.svg")
+        if obsolete != out_path:
+            obsolete.unlink(missing_ok=True)
 
 
 def _feature_filter_funnel(
@@ -4360,7 +4164,7 @@ def _feature_filter_funnel(
             label="min-max",
         ),
     ]
-    ax.legend(handles=legend_handles, loc="best", frameon=False)
+    _legend_above(ax, handles=legend_handles)
     fig.subplots_adjust(left=0.08, right=0.99, top=0.96, bottom=0.16)
     _save_svg_figure(fig, out_path)
 
@@ -4613,7 +4417,7 @@ def _feature_stability_top(
         Patch(facecolor=_COLOR_PURPLE, label="Non-zero; tied coefficient sign"),
         Patch(facecolor=_COLOR_BLUE, label="Non-zero; sign unavailable"),
     ]
-    ax.legend(handles=legend_handles, loc="lower right", frameon=False, fontsize=_TICK_FONTSIZE)
+    _legend_above(ax, handles=legend_handles, ncol=2)
     fig.subplots_adjust(
         left=left_margin,
         right=right_margin,
@@ -4716,7 +4520,7 @@ def _feature_set_jaccard_heatmap(
                     color=color,
                     fontfamily="monospace",
                 )
-    colorbar = fig.colorbar(image, ax=ax, fraction=0.035, pad=0.03)
+    colorbar = fig.colorbar(image, ax=ax, use_gridspec=False, fraction=0.035, pad=0.03)
     colorbar.set_label("Jaccard similarity", fontsize=_LABEL_FONTSIZE)
     colorbar.ax.tick_params(labelsize=_TICK_FONTSIZE)
     fig.subplots_adjust(left=0.12, right=0.92, top=0.98, bottom=0.16)
@@ -4758,6 +4562,8 @@ def write_run_figures(
     top_features: int = _DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
     parallel_workers: int = 1,
+    timing_recorder: TimingRecorder | None = None,
+    workers: FigureWorkers | None = None,
     group_bootstrap_metrics: pl.DataFrame | None = None,
 ) -> list[str]:
     """Write run-level SVG figures under <run_dir>/<stage>/figures."""
@@ -5004,21 +4810,13 @@ def write_run_figures(
     if selection_summary is None and model_selection_trials is not None:
         selection_summary = _summarize_model_selection_trials_for_figure(model_selection_trials)
     if selection_summary is not None:
+        rule = _model_selection_figure_rule(model_selection_selected, selection_scope="outer_fold")
+        name = "model_selection_one_se_curve" if rule == "one_se" else "model_selection"
         add_job(
-            "model_selection_trials",
-            _model_selection_trials_summary_panels,
-            (selection_summary, cv_dir / "model_selection_trials.svg"),
-            {"max_sample_sets_per_fold": _MODEL_SELECTION_SAMPLE_SET_LIMIT},
-        )
-        add_job(
-            "model_selection_one_se_curve",
-            _model_selection_one_se_curve,
-            (
-                selection_summary,
-                model_selection_selected,
-                cv_dir / "model_selection_one_se_curve.svg",
-            ),
-            {"max_sample_sets_per_fold": _MODEL_SELECTION_SAMPLE_SET_LIMIT},
+            name,
+            _model_selection_curve,
+            (selection_summary, model_selection_selected, cv_dir / f"{name}.svg"),
+            {"max_sample_sets_per_fold": _MODEL_SELECTION_SAMPLE_SET_LIMIT, "selection_rule": rule},
         )
     if final_refit_model_selection_trials_summary is not None:
         final_selection_summary = final_refit_model_selection_trials_summary.with_columns(
@@ -5038,25 +4836,18 @@ def write_run_figures(
                 .otherwise(pl.col("fold_id").cast(pl.String, strict=False))
                 .alias("fold_id")
             )
-        add_job(
-            "final_refit_model_selection_trials",
-            _model_selection_trials_summary_panels,
-            (
-                final_selection_summary,
-                model_dir / "final_refit_model_selection_trials.svg",
-            ),
-            {"max_sample_sets_per_fold": _MODEL_SELECTION_SAMPLE_SET_LIMIT},
+        rule = _model_selection_figure_rule(final_selection_selected, selection_scope="final_refit")
+        name = (
+            "final_refit_model_selection_one_se_curve" if rule == "one_se"
+            else "final_refit_model_selection"
         )
         add_job(
-            "final_refit_model_selection_one_se_curve",
-            _model_selection_one_se_curve,
-            (
-                final_selection_summary,
-                final_selection_selected,
-                model_dir / "final_refit_model_selection_one_se_curve.svg",
-            ),
+            name,
+            _model_selection_curve,
+            (final_selection_summary, final_selection_selected, model_dir / f"{name}.svg"),
             {
                 "max_sample_sets_per_fold": _MODEL_SELECTION_SAMPLE_SET_LIMIT,
+                "selection_rule": rule,
                 "selection_scope": "final_refit",
                 "panel_scope_label": "scope",
             },
@@ -5164,7 +4955,9 @@ def write_run_figures(
             },
             catch_figure_error=True,
         )
-    return _run_figure_jobs(jobs, parallel_workers=parallel_workers)
+    return _run_figure_jobs(
+        jobs, parallel_workers=parallel_workers, timing_recorder=timing_recorder, workers=workers
+    )
 
 
 _CANDIDATE_MANIFEST_SCHEMA = {
@@ -5275,10 +5068,12 @@ def _candidate_evidence_figure(
     trait_name: str,
     out_path: Path,
     evidence_context: str = "candidate",
+    probability_threshold: float = FIXED_PROBABILITY_THRESHOLD_VALUE,
 ) -> None:
-    if evidence_context not in {"candidate", "cv_error"}:
+    if evidence_context not in {"candidate", "cv_error", "predict"}:
         raise FigureError(f"Unsupported species evidence context: {evidence_context}")
     is_cv_error = evidence_context == "cv_error"
+    is_predict = evidence_context == "predict"
     expression_col = (
         "target_log2_tpm_plus1" if is_cv_error else "candidate_log2_tpm_plus1"
     )
@@ -5312,17 +5107,14 @@ def _candidate_evidence_figure(
     species = str(candidate["species"])
     probability = float(candidate["prob"])
     if is_cv_error:
-        group_id = str(candidate.get("group_id") or "unassigned")
-        fold_id = str(candidate.get("fold_id") or "NA")
         label = int(candidate["label"])
         pred_label = int(candidate["pred_label"])
         confusion_group = str(candidate["confusion_group"])
-        metadata_text = f"Fold: {fold_id} | Group: {group_id}"
-    else:
-        metadata_text = f"Family: {candidate['family']}"
 
     feature_count = len(features)
-    figure_height = max(4.8, 1.85 + 0.39 * feature_count)
+    row_height = 0.39
+    row_height = max(row_height, 0.14 * max(len(label.splitlines()) for label in labels) + 0.12)
+    figure_height = max(5.8, 2.8 + row_height * feature_count)
     fig = plt.figure(
         figsize=(_NATURE_DOUBLE_COLUMN_WIDTH_PX / _FIG_DPI, figure_height),
         dpi=_FIG_DPI,
@@ -5333,65 +5125,41 @@ def _candidate_evidence_figure(
         ncols=2,
         height_ratios=[0.75, max(2.4, 0.32 * feature_count)],
         width_ratios=[0.43, 0.57],
-        left=0.285,
-        right=0.98,
-        top=0.81,
-        bottom=max(0.08, 0.36 / figure_height),
-        hspace=0.54,
-        wspace=0.22,
     )
     ax_stability = fig.add_subplot(grid[0, :])
     ax_contribution = fig.add_subplot(grid[1, 0])
     ax_expression = fig.add_subplot(grid[1, 1], sharey=ax_contribution)
 
-    fig.text(
-        0.025,
-        0.955,
-        species,
-        ha="left",
-        va="top",
-        fontsize=10,
-        fontstyle="italic",
-        color=_AXIS_COLOR,
-    )
-    fig.text(
-        0.025,
-        0.905,
-        metadata_text,
-        ha="left",
-        va="top",
-        fontsize=7,
-        color=_MUTED_TEXT_COLOR,
-    )
-    fig.text(
-        0.98,
-        0.947,
-        f"P({trait_name} = 1) = {probability:.3f}",
-        ha="right",
-        va="top",
-        fontsize=9,
-        color=_AXIS_COLOR,
-    )
+    header_rows = [
+        (species, 10, "italic"),
+        (f"P({trait_name} = 1) = {probability:.3f}", 9, "normal"),
+    ]
     if is_cv_error:
         decision_text = f"True = {label} | Predicted = {pred_label} | {confusion_group}"
         if candidate.get("decision_status") == "abstained":
             decision_text = f"True = {label} | Abstained (raw prediction = {pred_label})"
-        fig.text(
-            0.98,
-            0.905,
-            decision_text,
-            ha="right",
-            va="top",
-            fontsize=7,
-            color=_MUTED_TEXT_COLOR,
+        header_rows.append((decision_text, 7, "normal"))
+    renderer = cast(Any, FigureCanvasAgg(fig)).get_renderer()
+    header_y = 1 - 8 / 72 / figure_height
+    for label_text, size, fontstyle in header_rows:
+        header = fig.text(
+            8 / 72 / fig.get_figwidth(), header_y,
+            textwrap.fill(label_text, width=int(80 * 9 / size)),
+            ha="left", va="top", fontsize=size, fontstyle=fontstyle,
+            color=_AXIS_COLOR, gid="phenoradar-header",
         )
-
+        header_y -= (header.get_window_extent(renderer).height / fig.dpi + 6 / 72) / figure_height
+    stability_title = (
+        "A   OOF prediction across fold ensemble models" if is_cv_error
+        else "A   Prediction stability across outer-CV models"
+    )
+    if is_predict:
+        stability_title = (
+            "A   Prediction from fitted model" if cross_fold_predictions.height == 1
+            else "A   Predictions across fitted models"
+        )
     ax_stability.set_title(
-        (
-            "A   OOF prediction across fold ensemble models"
-            if is_cv_error
-            else "A   Prediction stability across outer-CV models"
-        ),
+        stability_title,
         loc="left",
         fontsize=8,
         pad=6,
@@ -5403,7 +5171,7 @@ def _candidate_evidence_figure(
         dtype=float,
     )
     fold_values = fold_values[np.isfinite(fold_values)]
-    if fold_values.size > 0:
+    if fold_values.size > (1 if is_predict else 0):
         q1, median, q3 = np.quantile(fold_values, [0.25, 0.50, 0.75])
         ax_stability.hlines(
             0.0,
@@ -5412,6 +5180,7 @@ def _candidate_evidence_figure(
             color="#7a7a7a",
             linewidth=0.9,
             zorder=1,
+            label="Model range",
         )
         ax_stability.hlines(
             0.0,
@@ -5420,6 +5189,7 @@ def _candidate_evidence_figure(
             color="#4d4d4d",
             linewidth=4.0,
             zorder=2,
+            label="Model IQR",
         )
         jitter = np.linspace(-0.045, 0.045, fold_values.size)
         ax_stability.scatter(
@@ -5430,6 +5200,7 @@ def _candidate_evidence_figure(
             alpha=0.72,
             linewidths=0,
             zorder=3,
+            label="Individual model",
         )
         ax_stability.scatter(
             [float(median)],
@@ -5439,21 +5210,7 @@ def _candidate_evidence_figure(
             edgecolors="white",
             linewidths=0.5,
             zorder=4,
-        )
-        summary_label = "Ensemble" if is_cv_error else "Outer-CV"
-        summary_text = (
-            f"{summary_label} median {float(median):.3f} "
-            f"(range {float(np.min(fold_values)):.3f}–{float(np.max(fold_values)):.3f})"
-        )
-        ax_stability.text(
-            0.995,
-            0.96,
-            summary_text,
-            transform=ax_stability.transAxes,
-            ha="right",
-            va="top",
-            fontsize=6,
-            color=_MUTED_TEXT_COLOR,
+            label="Model median",
         )
     ax_stability.scatter(
         [probability],
@@ -5464,22 +5221,30 @@ def _candidate_evidence_figure(
         edgecolors="white",
         linewidths=0.55,
         zorder=5,
-        label="OOF aggregate" if is_cv_error else "Final refit",
+        label=(
+            "Final model" if is_predict
+            else "OOF aggregate" if is_cv_error else "Final refit"
+        ),
+        clip_on=False,
     )
     ax_stability.set_xlim(0.0, 1.0)
     ax_stability.set_ylim(-0.14, 0.22)
     ax_stability.set_yticks([])
     ax_stability.set_xlabel(f"Predicted probability of {trait_name} = 1", labelpad=2)
     ax_stability.axvline(
-        FIXED_PROBABILITY_THRESHOLD_VALUE,
+        probability_threshold,
         color=_PROBABILITY_THRESHOLD_COLOR,
         linewidth=0.8,
         linestyle=(0, (4, 4)),
         zorder=0,
+        label="Decision threshold",
     )
     ax_stability.grid(axis="x", alpha=0.7)
     ax_stability.spines["left"].set_visible(False)
-    ax_stability.legend(loc="upper left", frameon=False, fontsize=6, handletextpad=0.3)
+    ax_stability.legend(
+        loc="upper left", bbox_to_anchor=(0, -0.55), ncol=3,
+        frameon=False, fontsize=6, handletextpad=0.3, borderaxespad=0,
+    )
 
     y_positions = np.arange(feature_count, dtype=float)
     bar_colors = np.where(
@@ -5515,6 +5280,12 @@ def _candidate_evidence_figure(
     expression_colors = {0: "#D55E00", 1: _TRAIT_POSITIVE_COLOR}
     offsets = {0: -0.14, 1: 0.14}
     for feature_idx, feature in enumerate(features):
+        if is_predict and reference.filter(pl.col("feature") == feature).height == 0:
+            ax_expression.text(
+                0.98, float(feature_idx), "Reference unavailable",
+                transform=ax_expression.get_yaxis_transform(), ha="right", va="center",
+                fontsize=5, color=_MUTED_TEXT_COLOR,
+            )
         for label in (0, 1):
             values = np.asarray(
                 reference.filter((pl.col("feature") == feature) & (pl.col("label") == label))
@@ -5614,12 +5385,14 @@ def _candidate_evidence_figure(
             label="OOF species" if is_cv_error else "Candidate",
         ),
     ]
+    if is_predict and reference.height == 0:
+        legend_handles = legend_handles[-1:]
     ax_expression.legend(
         handles=legend_handles,
-        loc="lower right",
-        bbox_to_anchor=(1.0, 1.10),
+        loc="upper left",
+        bbox_to_anchor=(0.0, -0.13),
         frameon=False,
-        ncol=3,
+        ncol=1,
         fontsize=5.8,
         handlelength=1.5,
         columnspacing=0.9,
@@ -5642,6 +5415,10 @@ def write_candidate_evidence_figures(
     trait_name: str,
     orthogroup_annotations: pl.DataFrame | None = None,
     parallel_workers: int = 1,
+    timing_recorder: TimingRecorder | None = None,
+    workers: FigureWorkers | None = None,
+    evidence_context: str = "candidate",
+    probability_threshold: float = FIXED_PROBABILITY_THRESHOLD_VALUE,
 ) -> tuple[pl.DataFrame, list[str]]:
     """Write one publication-oriented candidate-evidence PDF per positive species."""
     if candidates.height == 0 or features.height == 0:
@@ -5686,6 +5463,8 @@ def write_candidate_evidence_figures(
                     "orthogroup_annotations": orthogroup_annotations,
                     "trait_name": trait_name,
                     "out_path": out_path,
+                    "evidence_context": evidence_context,
+                    "probability_threshold": probability_threshold,
                 },
                 False,
             )
@@ -5723,10 +5502,17 @@ def write_candidate_evidence_figures(
             }
         )
 
-    warnings = _run_figure_jobs(jobs, parallel_workers=parallel_workers)
+    warnings = _run_figure_jobs(
+        jobs, parallel_workers=parallel_workers, timing_recorder=timing_recorder, workers=workers
+    )
     manifest = pl.DataFrame(manifest_rows, schema=_CANDIDATE_MANIFEST_SCHEMA).sort(
         ["prob", "species"], descending=[True, False]
     )
+    if evidence_context == "predict":
+        manifest = manifest.rename({
+            name: name.replace("cross_fold", "model") for name in manifest.columns
+            if name.startswith("cross_fold_")
+        }).rename({"n_cross_fold_predictions": "n_bundle_models"})
     manifest.write_csv(
         output_root / "candidate_manifest.tsv",
         separator="\t",
@@ -5746,6 +5532,8 @@ def write_cv_species_evidence_figures(
     trait_name: str,
     orthogroup_annotations: pl.DataFrame | None = None,
     parallel_workers: int = 1,
+    timing_recorder: TimingRecorder | None = None,
+    workers: FigureWorkers | None = None,
 ) -> tuple[pl.DataFrame, list[str]]:
     """Write one candidate-evidence-style PDF per misclassified OOF species."""
     if species_evidence.height == 0 or features.height == 0:
@@ -5822,6 +5610,8 @@ def write_cv_species_evidence_figures(
                 f"{confusion_group}"
             )
         directory = "false_negative" if confusion_group == "FN" else "false_positive"
+        if target.get("decision_status") == "abstained":
+            directory = f"abstained/{directory}"
         used_names = used_names_by_group.setdefault(directory, set())
         filename = _candidate_filename(species, used_names=used_names)
         relative_path = Path(directory) / filename
@@ -5902,7 +5692,9 @@ def write_cv_species_evidence_figures(
             }
         )
 
-    warnings = _run_figure_jobs(jobs, parallel_workers=parallel_workers)
+    warnings = _run_figure_jobs(
+        jobs, parallel_workers=parallel_workers, timing_recorder=timing_recorder, workers=workers
+    )
     manifest = pl.DataFrame(
         manifest_rows, schema=_CV_SPECIES_EVIDENCE_MANIFEST_SCHEMA
     ).sort(

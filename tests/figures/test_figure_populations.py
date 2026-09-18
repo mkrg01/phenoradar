@@ -34,9 +34,9 @@ def test_confusion_and_comparison_evaluate_the_same_population(tmp_path: Path) -
     figures._external_confusion_matrix(external, tmp_path / "confusion.svg")
     figures._cv_external_comparison_by_population(cv, external, tmp_path / "comparison.svg")
     assert external.equals(original)
-    for suffix, count, precision in (("", 4, "0.500"), ("_accepted_only", 2, "1.000")):
-        confusion = text(tmp_path / f"confusion{suffix}.svg")
-        comparison = text(tmp_path / f"comparison{suffix}.svg")
+    for subdir, count, precision in (("", 4, "0.500"), ("accepted_only", 2, "1.000")):
+        confusion = text(tmp_path / subdir / "confusion.svg")
+        comparison = text(tmp_path / subdir / "comparison.svg")
         assert f"n = {count}" in confusion
         assert f"Precision = {precision}" in confusion
         assert precision in comparison
@@ -58,11 +58,11 @@ def test_accepted_curves_explain_undefined_populations(tmp_path: Path, all_absta
     )
     for name in ("roc", "pr"):
         assert (tmp_path / f"{name}.svg").exists()
-        messages = " ".join(text(tmp_path / f"{name}_accepted_only.svg"))
+        messages = " ".join(text(tmp_path / "accepted_only" / f"{name}.svg"))
         assert ("No accepted species" if all_abstained else "fewer than two labels") in messages
     figures._external_confusion_matrix(frame, tmp_path / "confusion.svg")
     if all_abstained:
-        assert "Accuracy = 1.000" not in text(tmp_path / "confusion_accepted_only.svg")
+        assert "Accuracy = 1.000" not in text(tmp_path / "accepted_only/confusion.svg")
 
 
 def test_histogram_and_group_counts_exclude_abstained_species(tmp_path: Path) -> None:
@@ -78,7 +78,7 @@ def test_histogram_and_group_counts_exclude_abstained_species(tmp_path: Path) ->
         figure_name="group.svg",
     )
     assert "Family (n=4)" in text(tmp_path / "group.svg")
-    assert "Family (n=2)" in text(tmp_path / "group_accepted_only.svg")
+    assert "Family (n=2)" in text(tmp_path / "accepted_only/group.svg")
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -89,7 +89,7 @@ def test_pair_generation_depends_on_policy_not_rejection_count(
     if not enabled:
         frame = frame.drop("decision_status", "pred_label_selective")
     figures._predict_probability_distribution(frame, tmp_path / "hist.svg")
-    accepted = tmp_path / "hist_accepted_only.svg"
+    accepted = tmp_path / "accepted_only/hist.svg"
     assert accepted.exists() == enabled
     if enabled:
         assert text(accepted) == text(tmp_path / "hist.svg")
@@ -102,7 +102,7 @@ def test_population_figures_keep_original_canvas_without_subtitles(tmp_path: Pat
     )
     figures._predict_probability_distribution(frame, tmp_path / "hist.svg")
     baseline = ET.parse(tmp_path / "baseline.svg").getroot()
-    for name in ("hist.svg", "hist_accepted_only.svg"):
+    for name in ("hist.svg", "accepted_only/hist.svg"):
         root = ET.parse(tmp_path / name).getroot()
         for attribute in ("viewBox", "width", "height"):
             assert root.attrib[attribute] == baseline.attrib[attribute]
@@ -129,12 +129,12 @@ def test_expression_confusion_uses_raw_decisions_and_external_axis(tmp_path: Pat
         out_path=tmp_path / "expression.svg",
         label_col="true_label",
     )
-    for suffix in ("", "_accepted_only"):
-        values = text(tmp_path / f"expression{suffix}.svg")
+    for subdir in ("", "accepted_only"):
+        values = text(tmp_path / subdir / "expression.svg")
         assert "External-test confusion group" in values
         assert "OOF confusion group" not in values
         assert "FP" in values
-        assert ("n=0" in values) == bool(suffix)
+        assert ("n=0" in values) == bool(subdir)
 
 
 def test_tree_population_filters_tips_and_restores_raw_labels(tmp_path: Path) -> None:
@@ -150,7 +150,16 @@ def test_tree_population_filters_tips_and_restores_raw_labels(tmp_path: Path) ->
     )
     assert warnings == []
     assert {"tp", "fp", "tn", "fn"} <= text(tmp_path / "tree.svg")
-    accepted = text(tmp_path / "tree_accepted_only.svg")
+    accepted = text(tmp_path / "accepted_only/tree.svg")
     assert {"tp", "tn"} <= accepted
     assert "fp" not in accepted and "fn" not in accepted
     assert "abstained" not in text(tmp_path / "tree.svg")
+
+
+def test_regeneration_removes_legacy_flat_duplicate_only_after_success(tmp_path: Path) -> None:
+    legacy = tmp_path / "hist_accepted_only.svg"
+    legacy.write_text("legacy")
+    figures._predict_probability_distribution(predictions(), tmp_path / "hist.svg")
+    assert (tmp_path / "accepted_only/hist.svg").exists()
+    assert not legacy.exists()
+    assert (tmp_path / "hist.svg").exists()

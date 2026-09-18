@@ -5,10 +5,8 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pytest
-from glum import GeneralizedLinearRegressor
 from sklearn import config_context
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import (
     auc,
     average_precision_score,
@@ -40,6 +38,7 @@ from phenoradar.cv import (
     run_final_refit,
     run_outer_cv,
 )
+from phenoradar.glmnet import GlmnetLogisticRegression
 from phenoradar.interpret import InterpretationError
 from phenoradar.model_selection import Candidate, ModelSelectionError
 from phenoradar.split import build_split_artifacts
@@ -510,6 +509,7 @@ runtime:
     split_artifacts = build_split_artifacts(config)
     original_transform = cv_mod._apply_expression_transform_for_config
     original_fit_outer_sample_set = cv_mod._fit_outer_sample_set
+    original_predict_inference_plan = cv_mod._predict_outer_inference_plan
     inference_transform_shapes: list[tuple[int, int]] = []
     shared_inference_matrices: list[np.ndarray] = []
 
@@ -521,11 +521,19 @@ runtime:
     def _tracked_fit_outer_sample_set(*args: object, **kwargs: object) -> object:
         inference_matrix = kwargs["x_inference_matrix"]
         assert isinstance(inference_matrix, np.ndarray)
-        shared_inference_matrices.append(inference_matrix)
+        if inference_matrix.shape[0]:
+            shared_inference_matrices.append(inference_matrix)
         return original_fit_outer_sample_set(*args, **kwargs)  # type: ignore[arg-type]
+
+    def _tracked_predict_inference_plan(*args: object) -> object:
+        inference_matrix = args[3]
+        assert isinstance(inference_matrix, np.ndarray)
+        shared_inference_matrices.append(inference_matrix)
+        return original_predict_inference_plan(*args)  # type: ignore[arg-type]
 
     monkeypatch.setattr(cv_mod, "_apply_expression_transform_for_config", _tracked_transform)
     monkeypatch.setattr(cv_mod, "_fit_outer_sample_set", _tracked_fit_outer_sample_set)
+    monkeypatch.setattr(cv_mod, "_predict_outer_inference_plan", _tracked_predict_inference_plan)
 
     cv_artifacts = run_outer_cv(config, split_artifacts.split_manifest)
 
@@ -908,8 +916,8 @@ split:
 model_selection:
   search_strategy: grid
   search_space:
-    alpha: [0.005, 0.01]
-    max_iter: [1]
+    lambda: [0.005, 0.01]
+    maxit: [2000000]
   selected_candidate_count: 1
   inner_cv_strategy: logo
 """.strip(),
@@ -931,8 +939,8 @@ model_selection:
         "selected_model",
     }
     assert set(cv_artifacts.convergence_diagnostics.get_column("training_scope")) == {"outer_fold"}
-    assert cv_artifacts.convergence_diagnostics.filter(~pl.col("converged")).height > 0
-    assert any("non-converged fit(s)" in warning for warning in cv_artifacts.warnings)
+    assert cv_artifacts.convergence_diagnostics.filter(~pl.col("converged")).height == 0
+    assert not any("non-converged fit(s)" in warning for warning in cv_artifacts.warnings)
     assert {
         "selection_scope",
         "fold_id",
@@ -1032,12 +1040,12 @@ model_selection:
   search_strategy: tpe
   trial_count: 3
   search_space:
-    alpha:
+    lambda:
       type: continuous_log_range
       base: 10
       start_exp: -1
       end_exp: 1
-    l1_ratio:
+    alpha:
       type: continuous_range
       start: 0.0
       end: 1.0
@@ -1121,7 +1129,7 @@ split:
 model_selection:
   search_strategy: grid
   search_space:
-    alpha: [0.005, 0.01]
+    lambda: [0.005, 0.01]
   selected_candidate_percent: 50
   inner_cv_strategy: logo
 """.strip(),
@@ -1504,7 +1512,7 @@ sampling:
 model_selection:
   search_strategy: grid
   search_space:
-    alpha: [0.005, 0.01]
+    lambda: [0.005, 0.01]
   selected_candidate_count: 1
   inner_cv_strategy: logo
 """.strip(),
@@ -1528,7 +1536,8 @@ model_selection:
     candidate_timings = cv_artifacts.timing.filter(pl.col("stage") == "candidate_score")
     assert candidate_timings.height > 0
     assert set(candidate_timings.get_column("sample_set_id")) == {0, 1}
-    assert set(candidate_timings.get_column("candidate_index")) == {0, 1}
+    # One timing row represents a whole lambda path, shared by candidates.
+    assert set(candidate_timings.get_column("candidate_index")) == {None}
     assert candidate_timings.get_column("fold_id").null_count() == 0
     inner_preprocessing_timings = cv_artifacts.timing.filter(
         pl.col("stage") == "inner_cv_preprocessing"
@@ -1604,7 +1613,7 @@ sampling:
 model_selection:
   search_strategy: grid
   search_space:
-    alpha: [0.005, 0.01]
+    lambda: [0.005, 0.01]
   selected_candidate_count: 1
   inner_cv_strategy: logo
   candidate_source_policy: reuse_first_sample_set
@@ -2631,15 +2640,7 @@ def test_fit_estimator_passes_sample_weight_once_without_modification() -> None:
 
 
 def test_fit_estimator_captures_logistic_convergence_diagnostic() -> None:
-    estimator = GeneralizedLinearRegressor(
-        family="binomial",
-        solver="irls-cd",
-        alpha=0.01,
-        l1_ratio=0.5,
-        max_iter=1,
-        gradient_tol=1e-12,
-        scale_predictors=False,
-    )
+    estimator = GlmnetLogisticRegression(lambda_=0.01, alpha=0.5)
     x = np.array(
         [
             [0.0, 0.0],
@@ -2653,16 +2654,18 @@ def test_fit_estimator_captures_logistic_convergence_diagnostic() -> None:
     )
     y = np.array([0, 0, 0, 1, 1, 1], dtype=int)
 
-    with pytest.warns(ConvergenceWarning):
-        diagnostic = _fit_estimator(estimator, x, y, sample_weight=None)
+    diagnostic = _fit_estimator(estimator, x, y, sample_weight=None)
 
-    assert diagnostic.estimator_class == "GeneralizedLinearRegressor"
+    assert diagnostic.estimator_class == "GlmnetLogisticRegression"
     assert diagnostic.convergence_applicable is True
-    assert diagnostic.converged is False
-    assert diagnostic.n_iter_values == (1,)
-    assert diagnostic.max_iter == 1
-    assert diagnostic.convergence_warning_count == 1
-    assert diagnostic.convergence_warning_messages
+    assert diagnostic.converged is True
+    assert diagnostic.n_iter_values == (estimator.n_iter_,)
+    assert diagnostic.max_iter == estimator.maxit
+    assert diagnostic.convergence_warning_count == 0
+    assert not diagnostic.convergence_warning_messages
+    estimator.set_params(maxit=1)
+    with pytest.raises(CVError, match="did not complete.*Increase maxit"):
+        _fit_estimator(estimator, x, y, sample_weight=None)
 
 
 def test_linear_svm_accepts_sample_weight_with_metadata_routing_enabled(
@@ -2729,7 +2732,7 @@ model:
         _build_estimator(config, model_seed=123, y_train=np.array([1, 1, 1], dtype=int))
 
 
-def test_build_estimator_logistic_elasticnet_uses_l1_ratio_semantics() -> None:
+def test_build_estimator_logistic_elasticnet_uses_alpha_semantics() -> None:
     config = load_and_resolve_config([], allow_empty=True)
     x_train = np.array(
         [
@@ -2750,21 +2753,19 @@ def test_build_estimator_logistic_elasticnet_uses_l1_ratio_semantics() -> None:
         config,
         model_seed=123,
         y_train=y_train,
-        model_params={"alpha": 0.07, "l1_ratio": 0.0, "max_iter": 5000},
+        model_params={"lambda": 0.07, "alpha": 0.0, "maxit": 2000000},
     )
     elasticnet_estimator = _build_estimator(
         config,
         model_seed=123,
         y_train=y_train,
-        model_params={"alpha": 0.07, "l1_ratio": 0.5, "max_iter": 5000},
+        model_params={"lambda": 0.07, "alpha": 0.5, "maxit": 2000000},
     )
 
-    assert isinstance(l2_estimator, GeneralizedLinearRegressor)
-    assert isinstance(elasticnet_estimator, GeneralizedLinearRegressor)
-    assert l2_estimator.solver == "irls-cd"
-    assert elasticnet_estimator.solver == "irls-cd"
-    assert l2_estimator.l1_ratio == pytest.approx(0.0)
-    assert elasticnet_estimator.l1_ratio == pytest.approx(0.5)
+    assert isinstance(l2_estimator, GlmnetLogisticRegression)
+    assert isinstance(elasticnet_estimator, GlmnetLogisticRegression)
+    assert l2_estimator.alpha == pytest.approx(0.0)
+    assert elasticnet_estimator.alpha == pytest.approx(0.5)
 
     _fit_estimator(l2_estimator, x_train, y_train, sample_weight=None)
     _fit_estimator(elasticnet_estimator, x_train, y_train, sample_weight=None)
@@ -2772,17 +2773,17 @@ def test_build_estimator_logistic_elasticnet_uses_l1_ratio_semantics() -> None:
     assert not np.allclose(l2_estimator.coef_, elasticnet_estimator.coef_)
 
 
-def test_build_estimator_logistic_glum_supports_l1_and_sample_weight(
+def test_build_estimator_logistic_glmnet_supports_l1_and_sample_weight(
     tmp_path: Path,
 ) -> None:
     config_path = _write(
-        tmp_path / "glum.yml",
+        tmp_path / "glmnet.yml",
         """
 model:
   name: logistic_elasticnet
 model_selection:
   search_space:
-    l1_ratio: [1]
+    alpha: [1]
 """.strip()
         + "\n",
     )
@@ -2797,14 +2798,13 @@ model_selection:
         config,
         model_seed=123,
         y_train=y_train,
-        model_params={"alpha": 0.01, "l1_ratio": 1.0, "max_iter": 100},
+        model_params={"lambda": 0.01, "alpha": 1.0, "maxit": 2000000},
     )
 
     diagnostic = _fit_estimator(estimator, x_train, y_train, sample_weight)
 
-    assert isinstance(estimator, GeneralizedLinearRegressor)
-    assert estimator.solver == "irls-cd"
-    assert estimator.l1_ratio == pytest.approx(1.0)
+    assert isinstance(estimator, GlmnetLogisticRegression)
+    assert estimator.alpha == pytest.approx(1.0)
     assert np.count_nonzero(estimator.coef_) > 0
     assert diagnostic.convergence_applicable is True
     assert diagnostic.converged is True
@@ -3084,9 +3084,9 @@ model_selection:
         cv_mod,
         "generate_candidates",
         lambda **_kwargs: [
-            Candidate(candidate_index=0, params={"alpha": 0.1}),
-            Candidate(candidate_index=1, params={"alpha": 1.0}),
-            Candidate(candidate_index=2, params={"alpha": 10.0}),
+            Candidate(candidate_index=0, params={"lambda": 0.1}),
+            Candidate(candidate_index=1, params={"lambda": 1.0}),
+            Candidate(candidate_index=2, params={"lambda": 10.0}),
         ],
     )
 
@@ -3118,7 +3118,13 @@ model_selection:
             raise AssertionError("candidate must be a Candidate instance")
         return float(candidate.candidate_index), []
 
-    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+    monkeypatch.setattr(
+        cv_mod, "_score_glmnet_paths",
+        lambda **kwargs: [
+            _fake_score_candidate_inner_cv(candidate=candidate, **kwargs)
+            for candidate in kwargs["candidates"]
+        ],
+    )
 
     result = _prepare_source_selection(
         config=config,
@@ -3169,7 +3175,7 @@ model_selection:
     monkeypatch.setattr(
         cv_mod,
         "generate_candidates",
-        lambda **_kwargs: [Candidate(candidate_index=0, params={"alpha": 1.0})],
+        lambda **_kwargs: [Candidate(candidate_index=0, params={"lambda": 1.0})],
     )
     monkeypatch.setattr(
         cv_mod,
@@ -3219,8 +3225,8 @@ model_selection:
         cv_mod,
         "generate_candidates",
         lambda **_kwargs: [
-            Candidate(candidate_index=0, params={"alpha": 1.0}),
-            Candidate(candidate_index=1, params={"alpha": 1.0}),
+            Candidate(candidate_index=0, params={"lambda": 1.0}),
+            Candidate(candidate_index=1, params={"lambda": 1.0}),
         ],
     )
 
@@ -3232,7 +3238,13 @@ model_selection:
             return 0.20, []
         return 0.40, []
 
-    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+    monkeypatch.setattr(
+        cv_mod, "_score_glmnet_paths",
+        lambda **kwargs: [
+            _fake_score_candidate_inner_cv(candidate=candidate, **kwargs)
+            for candidate in kwargs["candidates"]
+        ],
+    )
     warnings: list[str] = []
 
     result = _prepare_source_selection(
@@ -3281,9 +3293,9 @@ model_selection:
         cv_mod,
         "generate_candidates",
         lambda **_kwargs: [
-            Candidate(candidate_index=0, params={"alpha": 0.1}),
-            Candidate(candidate_index=1, params={"alpha": 1.0}),
-            Candidate(candidate_index=2, params={"alpha": 10.0}),
+            Candidate(candidate_index=0, params={"lambda": 0.1}),
+            Candidate(candidate_index=1, params={"lambda": 1.0}),
+            Candidate(candidate_index=2, params={"lambda": 10.0}),
         ],
     )
 
@@ -3293,7 +3305,13 @@ model_selection:
             raise AssertionError("candidate must be a Candidate instance")
         return float(candidate.candidate_index), []
 
-    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+    monkeypatch.setattr(
+        cv_mod, "_score_glmnet_paths",
+        lambda **kwargs: [
+            _fake_score_candidate_inner_cv(candidate=candidate, **kwargs)
+            for candidate in kwargs["candidates"]
+        ],
+    )
 
     result = _prepare_source_selection(
         config=config,
@@ -3398,8 +3416,8 @@ model_selection:
         cv_mod,
         "generate_candidates",
         lambda **_kwargs: [
-            Candidate(candidate_index=0, params={"alpha": 0.5}),
-            Candidate(candidate_index=1, params={"alpha": 1.0}),
+            Candidate(candidate_index=0, params={"lambda": 0.5}),
+            Candidate(candidate_index=1, params={"lambda": 1.0}),
         ],
     )
 
@@ -3411,7 +3429,13 @@ model_selection:
             return 0.25, []
         return 0.40, []
 
-    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+    monkeypatch.setattr(
+        cv_mod, "_score_glmnet_paths",
+        lambda **kwargs: [
+            _fake_score_candidate_inner_cv(candidate=candidate, **kwargs)
+            for candidate in kwargs["candidates"]
+        ],
+    )
 
     result = _prepare_source_selection(
         config=config,
@@ -3453,9 +3477,9 @@ model_selection:
         cv_mod,
         "generate_candidates",
         lambda **_kwargs: [
-            Candidate(candidate_index=0, params={"alpha": 1.0}),
-            Candidate(candidate_index=1, params={"alpha": 0.1}),
-            Candidate(candidate_index=2, params={"alpha": 0.01}),
+            Candidate(candidate_index=0, params={"lambda": 1.0}),
+            Candidate(candidate_index=1, params={"lambda": 0.1}),
+            Candidate(candidate_index=2, params={"lambda": 0.01}),
         ],
     )
 
@@ -3481,7 +3505,13 @@ model_selection:
         ]
         return float(np.mean(fold_values)), rows
 
-    monkeypatch.setattr(cv_mod, "_score_candidate_inner_cv", _fake_score_candidate_inner_cv)
+    monkeypatch.setattr(
+        cv_mod, "_score_glmnet_paths",
+        lambda **kwargs: [
+            _fake_score_candidate_inner_cv(candidate=candidate, **kwargs)
+            for candidate in kwargs["candidates"]
+        ],
+    )
 
     result = _prepare_source_selection(
         config=config,
@@ -3608,83 +3638,6 @@ def test_with_native_thread_limit_reuses_threadpool_controller(
     assert captured_limits == [2, 3]
 
 
-def test_score_candidate_inner_cv_reuses_logistic_estimators_for_warm_start_path(
-    tmp_path: Path,
-) -> None:
-    config_path = _write(
-        tmp_path / "warm_start.yml",
-        """
-model:
-  name: logistic_elasticnet
-  logistic_warm_start_path: true
-model_selection:
-  search_space:
-    alpha: [0.1, 0.01]
-    l1_ratio: [1]
-""".strip()
-        + "\n",
-    )
-    config = load_and_resolve_config([config_path])
-    folds = [
-        cv_mod.InnerCvPreprocessedFold(
-            inner_fold_id="0",
-            x_train=np.array([[0.0, 0.0], [0.2, 1.0], [1.0, 0.2], [1.2, 1.0]], dtype=float),
-            x_valid=np.array([[0.1, 0.1], [1.1, 0.9]], dtype=float),
-            y_train=np.array([0, 0, 1, 1], dtype=int),
-            y_valid=np.array([0, 1], dtype=int),
-            sample_weight=None,
-        ),
-        cv_mod.InnerCvPreprocessedFold(
-            inner_fold_id="1",
-            x_train=np.array([[0.0, 1.0], [0.3, 0.0], [1.0, 1.0], [1.3, 0.0]], dtype=float),
-            x_valid=np.array([[0.2, 0.8], [1.2, 0.2]], dtype=float),
-            y_train=np.array([0, 0, 1, 1], dtype=int),
-            y_valid=np.array([0, 1], dtype=int),
-            sample_weight=None,
-        ),
-    ]
-    cache: dict[str, GeneralizedLinearRegressor] = {}
-
-    first_score, first_rows = cv_mod._score_candidate_inner_cv(
-        config=config,
-        training_scope_id="outer_fold_0",
-        source_sample_set_id=0,
-        candidate=Candidate(candidate_index=0, params={"alpha": 0.1, "l1_ratio": 1}),
-        preprocessed_folds=folds,
-        warm_start_estimators=cache,
-    )
-    cached_ids = {fold_id: id(estimator) for fold_id, estimator in cache.items()}
-    second_score, second_rows = cv_mod._score_candidate_inner_cv(
-        config=config,
-        training_scope_id="outer_fold_0",
-        source_sample_set_id=0,
-        candidate=Candidate(candidate_index=1, params={"alpha": 0.01, "l1_ratio": 1}),
-        preprocessed_folds=folds,
-        warm_start_estimators=cache,
-    )
-
-    assert np.isfinite(first_score)
-    assert np.isfinite(second_score)
-    assert len(first_rows) == len(second_rows) == 2
-    assert set(cache) == {"0", "1"}
-    assert {fold_id: id(estimator) for fold_id, estimator in cache.items()} == cached_ids
-    assert all(estimator.warm_start for estimator in cache.values())
-    assert all(pytest.approx(0.01) == estimator.alpha for estimator in cache.values())
-    for fold in folds:
-        cold_estimator = _build_estimator(
-            config,
-            model_seed=42,
-            y_train=fold.y_train,
-            model_params={"alpha": 0.01, "l1_ratio": 1},
-        )
-        _fit_estimator(cold_estimator, fold.x_train, fold.y_train, fold.sample_weight)
-        np.testing.assert_allclose(
-            _predict_positive_probability(cache[fold.inner_fold_id], fold.x_valid),
-            _predict_positive_probability(cold_estimator, fold.x_valid),
-            atol=1e-5,
-        )
-
-
 def test_with_native_thread_limit_falls_back_when_controller_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3734,11 +3687,11 @@ runtime:
     source_result = cv_mod.SourceSelectionResult(
         selected_candidates=[
             cv_mod.SelectedCandidate(
-                candidate=Candidate(candidate_index=0, params={"alpha": 1.0}),
+                candidate=Candidate(candidate_index=0, params={"lambda": 1.0}),
                 score=None,
             ),
             cv_mod.SelectedCandidate(
-                candidate=Candidate(candidate_index=1, params={"alpha": 0.5}),
+                candidate=Candidate(candidate_index=1, params={"lambda": 0.5}),
                 score=None,
             ),
         ],
@@ -3986,7 +3939,7 @@ def test_prepare_source_selection_tpe_emits_capping_warnings_for_trials_and_sele
                 update={
                     "search_strategy": "tpe",
                     "trial_count": 5,
-                    "search_space": {"alpha": [0.1]},
+                    "search_space": {"lambda": [0.1]},
                     "selected_candidate_count": 3,
                     "inner_cv_strategy": "logo",
                 }
@@ -4054,7 +4007,7 @@ def test_prepare_source_selection_tpe_deduplicates_selected_candidates_by_params
                 update={
                     "search_strategy": "tpe",
                     "trial_count": 2,
-                    "search_space": {"alpha": [0.1, 1.0]},
+                    "search_space": {"lambda": [0.1, 1.0]},
                     "selected_candidate_count": 2,
                     "inner_cv_strategy": "logo",
                 }
@@ -4134,7 +4087,7 @@ def test_prepare_source_selection_tpe_supports_selected_candidate_percent(
                 update={
                     "search_strategy": "tpe",
                     "trial_count": 3,
-                    "search_space": {"alpha": [0.1, 1.0, 10.0]},
+                    "search_space": {"lambda": [0.1, 1.0, 10.0]},
                     "selected_candidate_count": None,
                     "selected_candidate_percent": 50,
                     "inner_cv_strategy": "logo",
@@ -4208,7 +4161,7 @@ def test_prepare_source_selection_tpe_uses_minimize_direction_for_log_loss(
                     "search_strategy": "tpe",
                     "selection_metric": "log_loss",
                     "trial_count": 2,
-                    "search_space": {"alpha": [0.1, 1.0]},
+                    "search_space": {"lambda": [0.1, 1.0]},
                     "selected_candidate_count": 1,
                     "inner_cv_strategy": "logo",
                 }
@@ -5737,7 +5690,7 @@ def test_prepare_source_selection_tpe_maps_nan_objective_score_to_none(
                 update={
                     "search_strategy": "tpe",
                     "trial_count": 1,
-                    "search_space": {"alpha": [0.1]},
+                    "search_space": {"lambda": [0.1]},
                     "selected_candidate_count": 1,
                     "inner_cv_strategy": "logo",
                 }
@@ -5784,7 +5737,7 @@ model_selection:
     monkeypatch.setattr(
         cv_mod,
         "generate_candidates",
-        lambda **_kwargs: [Candidate(candidate_index=0, params={"alpha": 1.0})],
+        lambda **_kwargs: [Candidate(candidate_index=0, params={"lambda": 1.0})],
     )
 
     with pytest.raises(CVError, match="Selection source sampled set became single-class"):
