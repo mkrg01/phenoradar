@@ -1840,6 +1840,23 @@ def test_generated_config_can_increase_group_subsample_repeats_and_run_study(
     assert captured_indices == [1, 2, 3]
 
 
+def test_run_rejects_multiple_condition_variables_before_creating_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = _write(
+        tmp_path / "config.yml",
+        "preprocess:\n  sparse_feature_filter:\n"
+        "    min_nonzero_fraction: [0.9, 1]\n    scope: [all_samples, any_trait]\n",
+    )
+
+    result = CliRunner().invoke(app, ["run", "-c", str(config), "--quiet"])
+
+    assert result.exit_code != 0
+    assert "Only one condition variable" in result.output
+    assert not (tmp_path / "runs").exists()
+
+
 def test_run_expands_scalar_lists_into_ordered_study_and_resumes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

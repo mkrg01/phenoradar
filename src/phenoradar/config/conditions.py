@@ -304,6 +304,23 @@ def load_config_conditions(
             + ", ".join(forbidden)
         )
 
+    sampling = raw.get("sampling")
+    generated_repeats = (
+        isinstance(sampling, dict) and sampling.get("group_subsample_repeats", 1) != 1
+    )
+    varying_paths = [
+        dimension.dotted_path
+        for dimension in dimensions
+        if any(value != dimension.values[0] for value in dimension.values[1:])
+        and not (generated_repeats and dimension.path == _GROUP_SUBSAMPLE_REPEAT_INDEX_PATH)
+    ]
+    if len(varying_paths) > 1:
+        raise ConfigError(
+            "Only one condition variable may vary per study; found: "
+            + ", ".join(varying_paths)
+            + ". Use separate studies to vary different variables."
+        )
+
     combinations = product(*(dimension.values for dimension in dimensions))
     conditions: list[ConfigCondition] = []
     seen_hashes: dict[str, tuple[int, tuple[tuple[str, Any], ...]]] = {}

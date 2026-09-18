@@ -95,17 +95,18 @@ preprocess:
     max_features: 100
 ```
 
-Multiple scalar-list fields are expanded as a Cartesian product. Field order in
-the YAML and value order within each list determine `condition_index`; study
-tables and figures retain this order and are not sorted by value or performance.
+At most one condition field may contain multiple distinct values per study.
+Varying two or more fields is rejected before training; use separate studies
+to vary different variables. Fixed single-value lists are allowed. Value order
+within the varying list determines `condition_index`; study tables and figures
+retain this order and are not sorted by value or performance.
 
 Inactive scalar fields are canonicalized instead of producing duplicate
 conditions. One such case is when
 `preprocess.ranked_feature_filter.method` is `none`, `max_features` is inactive.
-That condition is generated once with `max_features: null`, independently of a
-`max_features` list. Other varying fields are still expanded normally. Thus,
-`method: [none, pair_aware]` with seven `max_features` values generates eight
-conditions rather than fourteen.
+That condition is generated with `max_features: null`. For example,
+`method: [none, pair_aware]` with fixed `max_features: 100` generates two
+conditions. Varying both `method` and `max_features` in one study is not allowed.
 
 Training-group count sensitivity uses the same mechanism. The repeat count
 creates independently ranked group subsets, and subsets with the same internal
@@ -120,7 +121,9 @@ sampling:
 This creates three repeat conditions for each numeric training-group count.
 Here `null` means all fold-local training groups. Because repeating that
 condition would select the same groups, the all-available run is generated once
-rather than three times.
+rather than three times. Internally generated repeat indices do not count as
+another varying condition field. Explicit user-supplied condition lists for
+`group_subsample_repeat_index` follow the ordinary one-variable limit.
 
 Lists that are already part of a field's schema remain ordinary single-run
 values. In particular, this remains one inner model-selection search space:

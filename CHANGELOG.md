@@ -4,6 +4,10 @@
 
 ### Breaking Changes
 
+* restrict each new condition study to one varying configuration field;
+  fixed single-value lists, inner model-selection search spaces, and generated
+  group-subsample repeats remain supported
+
 * replace scikit-learn logistic elastic net with glum's weighted binomial GLM;
   replace logistic `C` with native `alpha`, add `gradient_tol`, and remove
   `model.logistic_solver`; use defaults `alpha=0.01`, `l1_ratio=0.5`,
@@ -13,6 +17,9 @@
   and model bundles for the new backend
 
 ### Features
+
+* label condition-metric axes with the varying field name and ticks with its
+  values; qualify generic names such as `method` and `enabled` with their parent
 
 * retire model-selection trials SVGs and emit one curve per stage: `model_selection.svg`
   for `best`, or `model_selection_one_se_curve.svg` for `one_se`; show one-SE

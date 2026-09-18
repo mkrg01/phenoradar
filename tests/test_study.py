@@ -171,12 +171,73 @@ def test_generate_study_report_preserves_order_and_uses_paired_replicates(
 
 
 @pytest.mark.parametrize(
-    ("condition_labels", "expected_labels"),
+    ("condition_labels", "expected_axis_label", "expected_labels"),
     [
-        (("first", "second"), ("first", "second")),
+        (("first", "second"), "Condition settings", ("first", "second")),
+        (
+            (
+                "preprocess.sparse_feature_filter.min_nonzero_fraction=0.9",
+                "preprocess.sparse_feature_filter.min_nonzero_fraction=1.0",
+            ),
+            "min_nonzero_fraction",
+            ("0.9", "1"),
+        ),
         (
             ("abstention.threshold=1.0", "abstention.threshold=0.8"),
-            ("Abstention / threshold: 1.0", "Abstention / threshold: 0.8"),
+            "abstention.threshold",
+            ("1", "0.8"),
+        ),
+        (
+            (
+                'preprocess.expression_transform.method="log1p"',
+                'preprocess.expression_transform.method="sample_rank"',
+            ),
+            "expression_transform.method",
+            ("log1p", "sample_rank"),
+        ),
+        (
+            (
+                "preprocess.sparse_feature_filter.enabled=true",
+                "preprocess.sparse_feature_filter.enabled=false",
+            ),
+            "sparse_feature_filter.enabled",
+            ("true", "false"),
+        ),
+        (
+            (
+                'preprocess.ranked_feature_filter.method="pair_aware"; '
+                "preprocess.ranked_feature_filter.max_features=100",
+                'preprocess.ranked_feature_filter.method="pair_aware"; '
+                "preprocess.ranked_feature_filter.max_features=50",
+            ),
+            "max_features",
+            ("100", "50"),
+        ),
+        (
+            (
+                'preprocess.ranked_feature_filter.method="none"; '
+                "preprocess.ranked_feature_filter.max_features=null",
+                'preprocess.ranked_feature_filter.method="pair_aware"; '
+                "preprocess.ranked_feature_filter.max_features=100",
+            ),
+            "ranked_feature_filter.method",
+            ("none", "pair_aware"),
+        ),
+        (
+            (
+                "sampling.training_group_count=5; sampling.group_subsample_repeat_index=2",
+                "sampling.training_group_count=null; sampling.group_subsample_repeat_index=1",
+            ),
+            "training_group_count",
+            ("5 (repeat 2)", "null (repeat 1)"),
+        ),
+        (
+            (
+                "sampling.training_group_count=5; sampling.group_subsample_repeat_index=1",
+                "sampling.training_group_count=5; sampling.group_subsample_repeat_index=2",
+            ),
+            "group_subsample_repeat_index",
+            ("1", "2"),
         ),
         (
             (
@@ -185,6 +246,7 @@ def test_generate_study_report_preserves_order_and_uses_paired_replicates(
                 'preprocess.ranked_feature_filter.method="unpaired"; '
                 'preprocess.expression_transform.method="none"',
             ),
+            "Condition settings",
             (
                 "Ranked feature filter / method: pair_aware "
                 "Expression transform / method: log1p",
@@ -198,6 +260,7 @@ def test_condition_metric_figure_uses_conditions_on_y_axis(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     condition_labels: tuple[str, str],
+    expected_axis_label: str,
     expected_labels: tuple[str, str],
 ) -> None:
     rows = [
@@ -230,7 +293,7 @@ def test_condition_metric_figure_uses_conditions_on_y_axis(
     figure = captured["figure"]
     axis = figure.axes[0]
     assert axis.get_xlabel() == "ROC AUC"
-    assert axis.get_ylabel() == "Condition settings"
+    assert axis.get_ylabel() == expected_axis_label
     assert [" ".join(label.get_text().split()) for label in axis.get_yticklabels()] == list(
         expected_labels
     )

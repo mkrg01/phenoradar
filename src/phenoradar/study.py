@@ -415,6 +415,72 @@ def _condition_figure_label(raw_label: str) -> str:
     )
 
 
+def _condition_axis_labels(raw_labels: Sequence[str]) -> tuple[str, list[str]]:
+    """Put the single varying setting on the axis and its values on the ticks."""
+    fallback = ("Condition settings", [_condition_figure_label(label) for label in raw_labels])
+    settings: list[dict[str, str]] = []
+    for label in raw_labels:
+        values: dict[str, str] = {}
+        for assignment in label.split("; "):
+            path, separator, raw_value = assignment.partition("=")
+            if not separator or not path or path in values:
+                return fallback
+            try:
+                value = json.loads(raw_value)
+            except json.JSONDecodeError:
+                values[path] = raw_value
+            else:
+                if isinstance(value, float) and value.is_integer():
+                    value = int(value)
+                values[path] = (
+                    value if isinstance(value, str)
+                    else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+                )
+        settings.append(values)
+    if not settings or any(row.keys() != settings[0].keys() for row in settings[1:]):
+        return fallback
+
+    repeat_path = _GROUP_SUBSAMPLE_REPEAT_INDEX_PATH
+    primary_paths = [path for path in settings[0] if path != repeat_path]
+    varying_paths = [
+        path for path in primary_paths
+        if len({row[path] for row in settings}) > 1
+    ]
+    if _RANKED_METHOD_PATH in varying_paths and _RANKED_MAX_FEATURES_PATH in varying_paths:
+        active_counts = {
+            row[_RANKED_MAX_FEATURES_PATH] for row in settings
+            if row[_RANKED_METHOD_PATH] != "none"
+        }
+        if len(active_counts) <= 1:
+            # Disabling the filter normalizes a fixed max_features to null.
+            varying_paths.remove(_RANKED_MAX_FEATURES_PATH)
+    repeats_vary = (
+        repeat_path in settings[0] and len({row[repeat_path] for row in settings}) > 1
+    )
+    if len(varying_paths) == 1:
+        axis_path = varying_paths[0]
+    elif not varying_paths and repeats_vary:
+        axis_path = repeat_path
+    elif not varying_paths and len(primary_paths) == 1:
+        axis_path = primary_paths[0]
+    else:
+        # Retain full labels for reports from older multi-variable studies.
+        return fallback
+
+    parts = axis_path.split(".")
+    contextual_names = {
+        "method", "enabled", "name", "scope", "strategy", "weighting", "threshold", "model",
+    }
+    axis_label = ".".join(parts[-2:]) if parts[-1] in contextual_names else parts[-1]
+    labels = [row[axis_path] for row in settings]
+    if repeats_vary and axis_path != repeat_path:
+        labels = [
+            f"{label}\n(repeat {row[repeat_path]})"
+            for label, row in zip(labels, settings, strict=True)
+        ]
+    return axis_label, labels
+
+
 def _condition_metric_figure(
     condition_metrics: pl.DataFrame,
     *,
@@ -423,10 +489,9 @@ def _condition_metric_figure(
     condition_rows = condition_metrics.select(
         "condition_index", "condition_id", "condition_label"
     ).unique(maintain_order=True).sort("condition_index")
-    labels = [
-        _condition_figure_label(str(value))
-        for value in condition_rows.get_column("condition_label")
-    ]
+    axis_label, labels = _condition_axis_labels(
+        [str(value) for value in condition_rows.get_column("condition_label")]
+    )
     confidence_levels = (
         condition_metrics.get_column("confidence_level").drop_nulls().unique().to_list()
     )
@@ -474,7 +539,7 @@ def _condition_metric_figure(
         axis.set_ylim(float(row_heights.sum()), 0)
         axis.set_xlabel(_METRIC_LABELS[metric])
         if axis in axes[:, 0]:
-            axis.set_ylabel("Condition settings", labelpad=12)
+            axis.set_ylabel(axis_label, labelpad=12)
         axis.tick_params(axis="y", labelsize=9, length=0, pad=8)
         axis.grid(axis="x", alpha=0.3)
         axis.spines[["top", "right", "left"]].set_visible(False)

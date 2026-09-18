@@ -12,56 +12,81 @@ def _write(path: Path, text: str) -> Path:
     return path
 
 
-def test_scalar_lists_expand_in_config_order(tmp_path: Path) -> None:
+def test_single_varying_list_preserves_order_with_fixed_singleton_lists(tmp_path: Path) -> None:
     config_path = _write(
         tmp_path / "config.yml",
         """
 preprocess:
   ranked_feature_filter:
-    method: pair_aware
+    method: [pair_aware]
     max_features: [100, 50]
   feature_scaling:
-    method: [standard, none]
+    method: [standard]
 """.lstrip(),
     )
 
     condition_set = load_config_conditions([config_path])
 
-    assert [dimension.dotted_path for dimension in condition_set.dimensions] == [
-        "preprocess.ranked_feature_filter.max_features",
-        "preprocess.feature_scaling.method",
-    ]
     assert [condition.values for condition in condition_set.conditions] == [
         (
-            ("preprocess.ranked_feature_filter.max_features", 100),
+            ("preprocess.ranked_feature_filter.method", "pair_aware"),
+            ("preprocess.ranked_feature_filter.max_features", count),
             ("preprocess.feature_scaling.method", "standard"),
-        ),
-        (
-            ("preprocess.ranked_feature_filter.max_features", 100),
-            ("preprocess.feature_scaling.method", "none"),
-        ),
-        (
-            ("preprocess.ranked_feature_filter.max_features", 50),
-            ("preprocess.feature_scaling.method", "standard"),
-        ),
-        (
-            ("preprocess.ranked_feature_filter.max_features", 50),
-            ("preprocess.feature_scaling.method", "none"),
-        ),
+        )
+        for count in (100, 50)
     ]
-    assert [condition.index for condition in condition_set.conditions] == [1, 2, 3, 4]
-    assert len({condition.condition_id for condition in condition_set.conditions}) == 4
+    assert [condition.index for condition in condition_set.conditions] == [1, 2]
+    assert len({condition.condition_id for condition in condition_set.conditions}) == 2
 
 
-def test_directional_filter_values_expand_with_fixed_supervised_method(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "settings, expected_paths",
+    [
+        (
+            "preprocess:\n  ranked_feature_filter:\n"
+            "    method: pair_aware\n    max_features: [100, 50]\n"
+            "  feature_scaling:\n    method: [standard, none]\n",
+            ["preprocess.ranked_feature_filter.max_features", "preprocess.feature_scaling.method"],
+        ),
+        (
+            "preprocess:\n  ranked_feature_filter:\n"
+            "    method: [none, pair_aware]\n    max_features: [100, 50]\n",
+            [
+                "preprocess.ranked_feature_filter.method",
+                "preprocess.ranked_feature_filter.max_features",
+            ],
+        ),
+        (
+            "sampling:\n  training_group_count: [5, 10]\n  group_subsample_repeats: 2\n"
+            "preprocess:\n  feature_scaling:\n    method: [standard, none]\n",
+            ["sampling.training_group_count", "preprocess.feature_scaling.method"],
+        ),
+        (
+            "sampling:\n  training_group_count: [5, 10]\n"
+            "  group_subsample_repeat_index: [1, 2]\n",
+            ["sampling.training_group_count", "sampling.group_subsample_repeat_index"],
+        ),
+    ],
+)
+def test_multiple_varying_condition_fields_are_rejected(
+    tmp_path: Path, settings: str, expected_paths: list[str]
 ) -> None:
+    config_path = _write(tmp_path / "config.yml", settings)
+
+    with pytest.raises(ConfigError, match="Only one condition variable") as error:
+        load_config_conditions([config_path])
+
+    assert all(path in str(error.value) for path in expected_paths)
+    assert "Use separate studies" in str(error.value)
+
+
+def test_directional_filter_values_expand_with_fixed_supervised_method(tmp_path: Path) -> None:
     config_path = _write(
         tmp_path / "config.yml",
         """
 preprocess:
   sparse_feature_filter:
-    scope: [any_trait, trait_1]
+    scope: any_trait
   ranked_feature_filter:
     method: pair_aware
     max_features: 100
@@ -70,92 +95,32 @@ preprocess:
     )
 
     condition_set = load_config_conditions([config_path])
-
-    assert len(condition_set.conditions) == 4
     assert [
-        (
-            condition.config.preprocess.sparse_feature_filter.scope,
-            condition.config.preprocess.ranked_feature_filter.higher_in_trait,
-        )
+        condition.config.preprocess.ranked_feature_filter.higher_in_trait
         for condition in condition_set.conditions
-    ] == [
-        ("any_trait", None),
-        ("any_trait", 1),
-        ("trait_1", None),
-        ("trait_1", 1),
-    ]
+    ] == [None, 1]
 
 
-def test_none_method_is_independent_of_max_features_dimension(tmp_path: Path) -> None:
+def test_none_method_normalizes_fixed_max_features(tmp_path: Path) -> None:
     config_path = _write(
         tmp_path / "config.yml",
         """
 preprocess:
   ranked_feature_filter:
     method: [none, pair_aware]
-    max_features: [5000, 2500, 1000, 500, 250, 100, 50]
-    min_contrast_pairs: 1
+    max_features: [100]
 """.lstrip(),
     )
 
     condition_set = load_config_conditions([config_path])
-
-    assert len(condition_set.conditions) == 8
-    assert [
-        condition.config.preprocess.ranked_feature_filter.method
-        for condition in condition_set.conditions
-    ] == [
-        "none",
-        "pair_aware",
-        "pair_aware",
-        "pair_aware",
-        "pair_aware",
-        "pair_aware",
-        "pair_aware",
-        "pair_aware",
-    ]
     assert [
         condition.config.preprocess.ranked_feature_filter.max_features
         for condition in condition_set.conditions
-    ] == [None, 5000, 2500, 1000, 500, 250, 100, 50]
+    ] == [None, 100]
     assert condition_set.conditions[0].values == (
         ("preprocess.ranked_feature_filter.method", "none"),
         ("preprocess.ranked_feature_filter.max_features", None),
     )
-    assert [condition.index for condition in condition_set.conditions] == list(range(1, 9))
-
-
-def test_none_method_still_expands_other_condition_dimensions(tmp_path: Path) -> None:
-    config_path = _write(
-        tmp_path / "config.yml",
-        """
-preprocess:
-  ranked_feature_filter:
-    method: [none, pair_aware]
-    max_features: [100, 50]
-  feature_scaling:
-    method: [standard, none]
-""".lstrip(),
-    )
-
-    condition_set = load_config_conditions([config_path])
-
-    assert len(condition_set.conditions) == 6
-    assert [
-        (
-            condition.config.preprocess.ranked_feature_filter.method,
-            condition.config.preprocess.ranked_feature_filter.max_features,
-            condition.config.preprocess.feature_scaling.method,
-        )
-        for condition in condition_set.conditions
-    ] == [
-        ("none", None, "standard"),
-        ("none", None, "none"),
-        ("pair_aware", 100, "standard"),
-        ("pair_aware", 100, "none"),
-        ("pair_aware", 50, "standard"),
-        ("pair_aware", 50, "none"),
-    ]
 
 
 def test_existing_search_space_lists_remain_one_config_value(tmp_path: Path) -> None:
@@ -178,6 +143,28 @@ model_selection:
         1.0,
         10.0,
     ]
+
+
+def test_search_space_lists_do_not_count_as_condition_variables(tmp_path: Path) -> None:
+    config_path = _write(
+        tmp_path / "config.yml",
+        """
+preprocess:
+  sparse_feature_filter:
+    min_nonzero_fraction: [0.9, 1]
+model_selection:
+  search_space:
+    lambda: [0.1, 1.0]
+    alpha: [0.0, 1.0]
+""".lstrip(),
+    )
+    conditions = load_config_conditions([config_path])
+    assert len(conditions.conditions) == 2
+    assert len(conditions.dimensions) == 1
+    assert all(
+        condition.config.model_selection.search_space["alpha"] == [0.0, 1.0]
+        for condition in conditions.conditions
+    )
 
 
 def test_invalid_generated_combination_is_rejected(tmp_path: Path) -> None:

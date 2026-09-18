@@ -144,16 +144,23 @@ cross-condition outputs:
 - `figures/condition_metrics.{svg,pdf,png}`
 - `figures/training_group_sensitivity.{svg,pdf,png}` for that training-group
   sweep
-- `figures/ranked_feature_sensitivity.{svg,pdf,png}` when both ranked-filter
+- For reports from legacy studies: `figures/ranked_feature_sensitivity.{svg,pdf,png}`
+  when both ranked-filter
   method and `max_features` vary as a complete two-method grid
-- `figures/ranked_feature_method_difference.{svg,pdf,png}` for the matched
+- For reports from legacy studies: `figures/ranked_feature_method_difference.{svg,pdf,png}`
+  for the matched
   second-method improvement over the first method at each `max_features`
 
 `condition_metrics.tsv` reports absolute OOF metrics and available group-bootstrap
-intervals for every condition. Its figure labels conditions with the varying
-configuration settings and their values, including single-parameter studies. Labels
-are wrapped on the left of each panel row, with shared condition positions across
-the six metrics and spacing adapted to the label length.
+intervals for every condition. Its figure uses the varying configuration field
+as the Y-axis label and only its values as tick labels. The axis normally uses
+the final field name, such as `min_nonzero_fraction` or `max_features`.
+Generic names (`method`, `enabled`, `name`, `scope`, `strategy`, `weighting`,
+`threshold`, and `model`) include their parent, such as `expression_transform.method`.
+Fixed fields are omitted from tick labels; generated repeats are identified
+when needed to distinguish conditions. If only the repeat index varies, it
+becomes the axis. Reports from legacy multi-variable studies retain full setting
+labels. Condition positions are shared across the six metrics.
 `pairwise_comparisons.tsv` contains every unordered
 condition pair. `improvement_a_over_b` is oriented so that positive values always
 favor condition A, including for loss metrics. Pairwise intervals use matched
