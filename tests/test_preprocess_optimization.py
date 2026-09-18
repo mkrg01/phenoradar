@@ -22,6 +22,59 @@ def _config(*, neutral: bool = False, **preprocess: Any) -> AppConfig:
     return AppConfig.model_validate({"preprocess": settings})
 
 
+@pytest.mark.parametrize("neutral", [False, True])
+@pytest.mark.parametrize(
+    ("method", "direction"),
+    [("pair_aware", None), ("pair_aware", 0), ("pair_aware", 1),
+     ("unpaired", 1), ("variance", None)],
+)
+def test_null_ranked_limit_matches_disabled_filter_and_preserves_other_filters(
+    neutral: bool, method: str, direction: int | None,
+) -> None:
+    settings = {
+        "sparse_feature_filter": {
+            "enabled": True, "min_nonzero_fraction": 0.5, "scope": "all_samples",
+        },
+        "low_variance_filter": {"enabled": True, "min_variance": 0.01},
+    }
+    config = _config(
+        neutral=neutral,
+        **settings,
+        ranked_feature_filter={
+            "method": method, "max_features": None, "higher_in_trait": direction,
+            "min_contrast_pairs": 2,
+        },
+    )
+    disabled = _config(neutral=neutral, **settings)
+    missing = np.nan if neutral else 0.0
+    values = np.array(
+        [[1, 3, 2, 5], [5, 1, 4, 2], [1, missing, 2, missing],
+         [0, 0, 0, 1], [1, 1, 1, 1]], dtype=float,
+    ).T
+    names = ["positive", "negative", "one_label", "sparse", "constant"]
+    labels = np.array([0, 1, 0, 1])
+    score_rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    # No contrast groups: disabling pair-aware filtering must also remove its
+    # neutral eligibility requirements, not just skip the top-k selection.
+    selected, counts = cv_mod._select_feature_indices_with_counts(
+        config, values, names, y_train=labels,
+        ranked_feature_score_rows=score_rows, warnings=warnings,
+    )
+    expected, expected_counts = cv_mod._select_feature_indices_with_counts(
+        disabled, values, names, y_train=labels,
+    )
+
+    assert selected.tolist() == expected.tolist() == [0, 1, 2]
+    assert counts == expected_counts
+    assert counts.n_features_after_ranked_feature_filter == 3
+    assert len(score_rows) == 3
+    assert all(row["retained"] is True for row in score_rows)
+    assert all(row["skip_reason"] == "method_none" for row in score_rows)
+    assert warnings == []
+
+
 @pytest.mark.parametrize("order", ["C", "F"])
 @pytest.mark.parametrize("zero_as_missing", [False, True])
 @pytest.mark.parametrize("method", ["none", "unpaired", "pair_aware"])

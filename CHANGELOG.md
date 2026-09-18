@@ -18,6 +18,11 @@
 
 ### Features
 
+* allow `ranked_feature_filter.max_features: [null, 1000, 100]` to compare
+  no ranked filtering with numeric feature limits in one study; a null or omitted
+  limit resolves to `method: none`, including disabling directional selection
+  and pair-dependent neutral preprocessing
+
 * label condition-metric axes with the varying field name and ticks with its
   values; qualify generic names such as `method` and `enabled` with their parent
 
@@ -136,6 +141,10 @@
   are invariant to unrelated input features
 
 ### Performance
+
+* reuse exact sparse-feature counts across inner LOGO and group-kfold splits;
+  subtract validation counts from the actual sampled source with bounded memory,
+  preserving training-only feature selection and falling back for unsupported splits
 
 * reuse row-local expression transforms across inner-CV folds and vectorize pair-aware feature
   ordering; expose inner-CV preprocessing as a dedicated timing stage

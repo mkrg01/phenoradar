@@ -2260,6 +2260,107 @@ _SPARSE_FILTER_BLOCK_CELLS = 1_000_000
 _NEUTRAL_FILTER_BLOCK_CELLS = 1_000_000
 
 
+_INNER_SPARSE_CACHE_MAX_BYTES = 64 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class _InnerSparseCountCache:
+    """Training-only sparse masks derived from one partition's exact counts.
+
+    The matrix is scanned once in column blocks. Counts are discarded after
+    subtracting each validation partition, retaining only one byte-sized boolean
+    per fold and feature. This cache belongs to one actual sampled source.
+    """
+
+    selections: dict[tuple[int, ...], np.ndarray | str]
+
+    def select(self, validation_rows: np.ndarray) -> np.ndarray:
+        selected = self.selections[tuple(validation_rows.tolist())]
+        if isinstance(selected, str):
+            raise CVError(selected)
+        return np.flatnonzero(selected)
+
+
+def _build_inner_sparse_count_cache(
+    config: AppConfig,
+    matrix: np.ndarray,
+    labels: np.ndarray,
+    splits: list[tuple[np.ndarray, np.ndarray, str]],
+) -> _InnerSparseCountCache | None:
+    sparse_filter = config.preprocess.sparse_feature_filter
+    if not sparse_filter.enabled or len(splits) <= 3 or sparse_filter.min_nonzero_fraction is None:
+        return None
+    n_rows, n_features = matrix.shape
+    if n_rows == 0 or labels.shape != (n_rows,):
+        return None
+    # Masks cost one byte per fold/feature, independently of the number of
+    # classes. Large/custom workloads retain the bounded direct-scan path.
+    if len(splits) * n_features > _INNER_SPARSE_CACHE_MAX_BYTES:
+        return None
+    validation_visits = np.zeros(n_rows, dtype=np.int64)
+    for train_rows, valid_rows, _fold_id in splits:
+        if train_rows.ndim != 1 or valid_rows.ndim != 1:
+            return None
+        combined = np.concatenate((train_rows, valid_rows))
+        if (
+            train_rows.size == 0 or valid_rows.size == 0 or combined.size != n_rows
+            or not np.issubdtype(combined.dtype, np.integer)
+            or np.any(combined < 0) or np.any(combined >= n_rows)
+            or not np.all(np.bincount(combined, minlength=n_rows) == 1)
+        ):
+            return None
+        validation_visits[valid_rows] += 1
+    # Check actual row positions, rather than assuming groups or original
+    # species are complete: sampled/repeated species work as separate rows.
+    if not np.all(validation_visits == 1):
+        return None
+
+    scope = sparse_filter.scope
+    target_trait = None if scope in {"all_samples", "any_trait"} else (
+        0 if scope == "trait_0" else 1
+    )
+    traits = np.unique(labels) if target_trait is None else np.asarray([target_trait])
+    row_sets = [
+        [valid_rows] if scope == "all_samples" else
+        [valid_rows[labels[valid_rows] == trait] for trait in traits]
+        for _train_rows, valid_rows, _fold_id in splits
+    ]
+    valid_sizes = np.asarray([[rows.size for rows in fold] for fold in row_sets], dtype=np.int64)
+    train_sizes = valid_sizes.sum(axis=0) - valid_sizes
+    n_traits = train_sizes.shape[1]
+    keep = np.empty((len(splits), n_features), dtype=bool)
+    block_size = max(1, _SPARSE_FILTER_BLOCK_CELLS // max(n_rows, len(splits) * n_traits))
+    for start in range(0, n_features, block_size):
+        stop = min(start + block_size, n_features)
+        nonzero = matrix[:, start:stop] > _NONZERO_TOLERANCE
+        counts = np.empty((len(splits), n_traits, stop - start), dtype=np.int64)
+        for fold_index, fold_rows in enumerate(row_sets):
+            for trait_index, rows in enumerate(fold_rows):
+                counts[fold_index, trait_index] = np.count_nonzero(nonzero[rows, :], axis=0)
+        # Counts are integers bounded by the source row count. Held-out values
+        # and labels cancel exactly, before the same float64 division as before.
+        counts = counts.sum(axis=0) - counts
+        fraction = np.zeros((len(splits), stop - start), dtype=float)
+        for trait_index in range(n_traits):
+            sizes = train_sizes[:, trait_index, None]
+            ratio = np.zeros_like(fraction)
+            np.divide(counts[:, trait_index, :], sizes, out=ratio, where=sizes > 0)
+            np.maximum(fraction, ratio, out=fraction)
+        keep[:, start:stop] = fraction >= float(sparse_filter.min_nonzero_fraction)
+    keep.flags.writeable = False
+    selections: dict[tuple[int, ...], np.ndarray | str] = {}
+    for index, (_train_rows, valid_rows, _fold_id) in enumerate(splits):
+        key = tuple(valid_rows.tolist())
+        if target_trait is not None and train_sizes[index, 0] == 0:
+            selections[key] = (
+                f"sparse_feature_filter scope={scope} requires trait {target_trait} "
+                "in training rows"
+            )
+        else:
+            selections[key] = keep[index]
+    return _InnerSparseCountCache(selections)
+
+
 def _sparse_feature_indices(
     config: AppConfig,
     x_train_expr: np.ndarray,
@@ -2367,6 +2468,7 @@ def _select_feature_indices_with_counts(
     ranked_feature_score_rows: list[dict[str, Any]] | None = None,
     *,
     train_rows: np.ndarray | None = None,
+    sparse_selected: np.ndarray | None = None,
 ) -> tuple[np.ndarray, FeatureFilterCounts]:
     n_features_before = int(x_train_expr.shape[1])
     # Both predicates are column-local on the already transformed matrix. Keep
@@ -2378,7 +2480,10 @@ def _select_feature_indices_with_counts(
         and groups_train is None
     ):
         raise CVError("Pair-aware neutral preprocessing requires contrast groups")
-    selected = _sparse_feature_indices(config, x_train_expr, y_train, train_rows=train_rows)
+    selected = (
+        _sparse_feature_indices(config, x_train_expr, y_train, train_rows=train_rows)
+        if sparse_selected is None else sparse_selected
+    )
     if config.preprocess.missing_expression.method == "neutral":
         eligible = np.empty(selected.size, dtype=bool)
         n_train = x_train_expr.shape[0] if train_rows is None else train_rows.size
@@ -2601,6 +2706,7 @@ def _preprocess_transformed_fold_with_counts(
     *,
     train_rows: np.ndarray | None = None,
     valid_rows: np.ndarray | None = None,
+    sparse_selected: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str], FeatureFilterCounts, FeatureScaler]:
     """Preprocess transformed matrices, optionally using integer row indices.
 
@@ -2617,6 +2723,7 @@ def _preprocess_transformed_fold_with_counts(
         warnings=warnings,
         ranked_feature_score_rows=ranked_feature_score_rows,
         train_rows=train_rows,
+        sparse_selected=sparse_selected,
     )
     selected_features = [feature_names[idx] for idx in selected]
 
@@ -3492,9 +3599,9 @@ def _build_inner_cv_preprocessed_folds(
     def _build() -> list[InnerCvPreprocessedFold]:
         preprocessed_folds: list[InnerCvPreprocessedFold] = []
         x_source_expr = _apply_expression_transform_for_config(config, x_source_raw)
-        for train_idx, valid_idx, inner_fold_id in _inner_cv_splits(
-            config, y_source, groups_source
-        ):
+        splits = _inner_cv_splits(config, y_source, groups_source)
+        sparse_counts = _build_inner_sparse_count_cache(config, x_source_expr, y_source, splits)
+        for train_idx, valid_idx, inner_fold_id in splits:
             y_train = y_source[train_idx]
             y_valid = y_source[valid_idx]
             groups_train = groups_source[train_idx]
@@ -3513,6 +3620,9 @@ def _build_inner_cv_preprocessed_folds(
                     warnings=warnings,
                     train_rows=train_idx,
                     valid_rows=valid_idx,
+                    sparse_selected=(
+                        None if sparse_counts is None else sparse_counts.select(valid_idx)
+                    ),
                 )
             )
             sample_weight = _fit_sample_weights(config, y_train, groups_train)

@@ -108,6 +108,24 @@ That condition is generated with `max_features: null`. For example,
 `method: [none, pair_aware]` with fixed `max_features: 100` generates two
 conditions. Varying both `method` and `max_features` in one study is not allowed.
 
+To compare a disabled ranked filter with different feature limits, keep `method`
+fixed and include `null` in `max_features`:
+
+```yaml
+preprocess:
+  ranked_feature_filter:
+    method: pair_aware
+    max_features: [null, 1000, 100]
+```
+
+This generates three conditions in that order: no ranked filter, at most 1000
+features, and at most 100 features. The `null` condition resolves to
+`method: none` and `higher_in_trait: null`, disabling the entire ranked filter,
+including directional selection and pair-dependent neutral preprocessing.
+Other preprocessing settings still apply. Study labels retain `max_features=null`
+so all three conditions share one comparison axis. The same syntax works with
+`unpaired` and `variance`.
+
 Training-group count sensitivity uses the same mechanism. The repeat count
 creates independently ranked group subsets, and subsets with the same internal
 repeat index are nested as the training-group count increases:
@@ -599,7 +617,9 @@ Condition lists such as `scope: [all_samples, any_trait, trait_1]` are supported
 - `max_features`
   - type: `int >= 1 | null`
   - default: `null`
-  - rule: required when `method` is not `none`
+  - `null` (including omission) disables the ranked filter, resolving to
+    `method: none` and `higher_in_trait: null`; positive integers enable the
+    selected ranking method, while `method: none` always disables it
 - `min_contrast_pairs`
   - type: `int >= 1`
   - default: `1`
@@ -623,7 +643,7 @@ Condition lists such as `scope: [all_samples, any_trait, trait_1]` are supported
     directional eligibility
   - `variance` ranks by train-set sample variance without using labels
   - keeps the top `max_features`
-  - `null` ranks both effect directions by magnitude, preserving the
+  - `higher_in_trait: null` ranks both effect directions by magnitude, preserving the
     original behavior
   - `1` makes only positive effects eligible;
     `0` makes only negative effects eligible
@@ -631,7 +651,7 @@ Condition lists such as `scope: [all_samples, any_trait, trait_1]` are supported
     fill unused slots with zero-effect or opposite-direction features
   - directional modes fail closed when no candidate has an eligible effect
   - when fewer than `min_contrast_pairs` valid contrast pairs are available in a
-    split, `null` mode is skipped with a warning; directional modes fail
+    split, `higher_in_trait: null` mode is skipped with a warning; directional modes fail
     closed because their direction constraint cannot be verified
   - `pair_aware` requires `data.contrast_pair_col`; this is independent from
     `split.group_col`, so taxonomic-rank splits can still use contrast-pair

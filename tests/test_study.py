@@ -176,6 +176,14 @@ def test_generate_study_report_preserves_order_and_uses_paired_replicates(
         (("first", "second"), "Condition settings", ("first", "second")),
         (
             (
+                "preprocess.ranked_feature_filter.max_features=null",
+                "preprocess.ranked_feature_filter.max_features=1000",
+            ),
+            "max_features",
+            ("null", "1000"),
+        ),
+        (
+            (
                 "preprocess.sparse_feature_filter.min_nonzero_fraction=0.9",
                 "preprocess.sparse_feature_filter.min_nonzero_fraction=1.0",
             ),

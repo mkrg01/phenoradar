@@ -251,11 +251,6 @@ class RankedFeatureFilterConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_method_args(self) -> RankedFeatureFilterConfig:
-        if self.method != "none" and self.max_features is None:
-            raise ValueError(
-                "preprocess.ranked_feature_filter.max_features is required "
-                "when method is not none"
-            )
         if (
             self.higher_in_trait is not None
             and self.method not in {"pair_aware", "unpaired"}
@@ -264,6 +259,11 @@ class RankedFeatureFilterConfig(StrictModel):
                 "preprocess.ranked_feature_filter.higher_in_trait is only configurable "
                 "for method=pair_aware|unpaired"
             )
+        if self.max_features is None:
+            # Resolve a null limit to the existing disabled path, including
+            # directional filtering and pair-dependent neutral preprocessing.
+            self.method = "none"
+            self.higher_in_trait = None
         return self
 
 

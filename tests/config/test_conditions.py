@@ -123,6 +123,59 @@ preprocess:
     )
 
 
+@pytest.mark.parametrize("method", ["pair_aware", "unpaired", "variance"])
+@pytest.mark.parametrize("singleton_method", [False, True])
+def test_null_ranked_limit_adds_disabled_condition_in_order(
+    tmp_path: Path, method: str, singleton_method: bool,
+) -> None:
+    method_value = f"[{method}]" if singleton_method else method
+    config_path = _write(
+        tmp_path / "config.yml",
+        "preprocess:\n  ranked_feature_filter:\n"
+        f"    method: {method_value}\n"
+        "    max_features: [null, 1000, 100]\n",
+    )
+
+    condition_set = load_config_conditions([config_path])
+    conditions = condition_set.conditions
+
+    assert [condition.index for condition in conditions] == [1, 2, 3]
+    assert len({condition.condition_id for condition in conditions}) == 3
+    assert [
+        (
+            condition.config.preprocess.ranked_feature_filter.method,
+            condition.config.preprocess.ranked_feature_filter.max_features,
+        )
+        for condition in conditions
+    ] == [("none", None), (method, 1000), (method, 100)]
+    assert [
+        dict(condition.values)["preprocess.ranked_feature_filter.max_features"]
+        for condition in conditions
+    ] == [None, 1000, 100]
+    assert conditions[0].label.endswith("max_features=null")
+
+
+@pytest.mark.parametrize("method", ["pair_aware", "unpaired"])
+@pytest.mark.parametrize("direction", [0, 1])
+def test_null_ranked_limit_disables_direction_only_for_null_condition(
+    tmp_path: Path, method: str, direction: int,
+) -> None:
+    config_path = _write(
+        tmp_path / "config.yml",
+        "preprocess:\n  ranked_feature_filter:\n"
+        f"    method: {method}\n"
+        "    max_features: [null, 1000, 100]\n"
+        f"    higher_in_trait: {direction}\n",
+    )
+
+    conditions = load_config_conditions([config_path]).conditions
+
+    assert [
+        condition.config.preprocess.ranked_feature_filter.higher_in_trait
+        for condition in conditions
+    ] == [None, direction, direction]
+
+
 def test_existing_search_space_lists_remain_one_config_value(tmp_path: Path) -> None:
     config_path = _write(
         tmp_path / "config.yml",

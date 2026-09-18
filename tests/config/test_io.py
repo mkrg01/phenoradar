@@ -653,20 +653,38 @@ preprocess:
         load_and_resolve_config([cfg])
 
 
-def test_ranked_feature_filter_requires_max_features_for_ranked_method(
+@pytest.mark.parametrize("method", ["pair_aware", "unpaired", "variance"])
+@pytest.mark.parametrize("max_features_line", ["", "    max_features: null\n"])
+def test_ranked_feature_filter_null_or_omitted_limit_disables_filter(
     tmp_path: Path,
+    method: str,
+    max_features_line: str,
+) -> None:
+    cfg = _write(
+        tmp_path / "valid.yml",
+        "data:\n  contrast_pair_col: null\n"
+        "preprocess:\n  ranked_feature_filter:\n"
+        f"    method: {method}\n{max_features_line}",
+    )
+
+    resolved = load_and_resolve_config([cfg])
+
+    assert resolved.preprocess.ranked_feature_filter.method == "none"
+    assert resolved.preprocess.ranked_feature_filter.max_features is None
+    assert AppConfig.model_validate(yaml.safe_load(serialize_resolved_config(resolved))) == resolved
+
+
+@pytest.mark.parametrize("max_features", [0, -1])
+def test_ranked_feature_filter_rejects_nonpositive_limit(
+    tmp_path: Path, max_features: int,
 ) -> None:
     cfg = _write(
         tmp_path / "invalid.yml",
-        """
-preprocess:
-  ranked_feature_filter:
-    method: pair_aware
-""".strip()
-        + "\n",
+        "preprocess:\n  ranked_feature_filter:\n"
+        f"    method: pair_aware\n    max_features: {max_features}\n",
     )
 
-    with pytest.raises(ConfigError):
+    with pytest.raises(ConfigError, match="max_features"):
         load_and_resolve_config([cfg])
 
 

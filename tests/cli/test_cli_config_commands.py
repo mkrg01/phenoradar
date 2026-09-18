@@ -1857,18 +1857,27 @@ def test_run_rejects_multiple_condition_variables_before_creating_run(
     assert not (tmp_path / "runs").exists()
 
 
+@pytest.mark.parametrize(
+    ("ranked_settings", "varying_field", "expected_values"),
+    [
+        ("method: [none, pair_aware]\n    max_features: 100", "method",
+         ["none", "pair_aware"]),
+        ("method: pair_aware\n    max_features: [null, 1000, 100]", "max_features",
+         [None, 1000, 100]),
+    ],
+)
 def test_run_expands_scalar_lists_into_ordered_study_and_resumes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ranked_settings: str, varying_field: str, expected_values: list[object],
 ) -> None:
     runner = CliRunner()
     monkeypatch.chdir(tmp_path)
     config = _write(
         tmp_path / "config.yml",
-        """
+        f"""
 preprocess:
   ranked_feature_filter:
-    method: [none, pair_aware]
-    max_features: 100
+    {ranked_settings}
 sampling:
   strategy: all_samples
   max_samples_per_label_per_group: null
@@ -1927,21 +1936,22 @@ sampling:
         separator="\t",
         null_values="NA",
     ).sort("condition_index")
-    assert manifest.get_column("status").to_list() == ["completed", "completed"]
-    assert manifest.get_column("condition_index").to_list() == [1, 2]
+    condition_count = len(expected_values)
+    varying_path = f"preprocess.ranked_feature_filter.{varying_field}"
+    assert manifest.get_column("status").to_list() == ["completed"] * condition_count
+    assert manifest.get_column("condition_index").to_list() == list(range(1, condition_count + 1))
     assert [
-        json.loads(value)["preprocess.ranked_feature_filter.method"]
+        json.loads(value)[varying_path]
         for value in manifest.get_column("varying_parameters_json")
-    ] == ["none", "pair_aware"]
+    ] == expected_values
     assert split_call_count == 1
-    assert cv_call_count == 2
+    assert cv_call_count == condition_count
     assert (study_dir / "tables" / "condition_metrics.tsv").exists()
     assert (study_dir / "tables" / "pairwise_comparisons.tsv").exists()
-    differences = pl.read_csv(study_dir / "config_differences.tsv", separator="\t")
-    assert differences.get_column("preprocess.ranked_feature_filter.method").to_list() == [
-        "none",
-        "pair_aware",
-    ]
+    differences = pl.read_csv(
+        study_dir / "config_differences.tsv", separator="\t", null_values="NA",
+    )
+    assert differences.get_column(varying_path).to_list() == expected_values
     for extension in ("svg", "pdf", "png"):
         assert (study_dir / "figures" / f"condition_metrics.{extension}").exists()
         assert not (study_dir / "figures" / f"pairwise_improvement.{extension}").exists()
@@ -1953,7 +1963,7 @@ sampling:
 
     assert resumed.exit_code == 0, resumed.output
     assert split_call_count == 2
-    assert cv_call_count == 2
+    assert cv_call_count == condition_count
 
 
 def test_run_fails_when_split_artifact_build_raises(
