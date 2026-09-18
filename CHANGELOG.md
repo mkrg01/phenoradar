@@ -118,6 +118,11 @@
 
 ### Bug Fixes
 
+* correct `group_label_inverse` sample weights from `1 / (N_g * N_{g,y})` to
+  `1 / N_{g,y}`, giving equal total weight to each observed group-label
+  combination while preserving training-subset counts and mean-one normalization;
+  retraining can change results, but predictions from existing fitted bundles
+  are unchanged
 * omit the internal group-subsampling repeat index from config templates so
   increasing `group_subsample_repeats` works without removing internal fields
 * preserve the complete pre-transform feature schema in model bundles so sample-rank predictions

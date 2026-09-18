@@ -2836,12 +2836,12 @@ def _sample_training_sets(
 
 
 def _group_label_inverse_weights(y: np.ndarray, groups: np.ndarray) -> np.ndarray:
-    group_counts = Counter(groups.tolist())
+    """Give each observed group-label cell equal total weight, with mean-one weights."""
     group_label_counts = Counter((groups[idx], int(y[idx])) for idx in range(y.shape[0]))
 
     raw = np.array(
         [
-            1.0 / (group_counts[groups[idx]] * group_label_counts[(groups[idx], int(y[idx]))])
+            1.0 / group_label_counts[(groups[idx], int(y[idx]))]
             for idx in range(y.shape[0])
         ],
         dtype=float,

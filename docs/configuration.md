@@ -406,6 +406,15 @@ merely omit single-label validation folds from the reported metrics.
 - `sampling.weighting`
   - type: `none | group_label_inverse`
   - default: `none`
+  - `group_label_inverse` assigns each training species weight proportional to
+    `1 / N_{g,y}`, where `N_{g,y}` counts species with label `y` in group `g`
+    (`split.group_col`). Counts are computed separately for each fitted training
+    subset, including inner-CV training partitions and final refit, and weights
+    are normalized to mean `1` within that subset.
+  - each observed group-label combination has the same total weight. Groups
+    containing both labels therefore have equal total weight, with equal weight
+    for the two labels within each group. A single-label group has half that
+    total weight; no correction for the number of labels is applied.
 
 Compatibility rules:
 

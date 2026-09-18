@@ -1431,18 +1431,40 @@ def test_summarize_retained_features_aggregates_count_and_rate() -> None:
 
 
 def test_group_label_inverse_weights_are_normalized_and_group_label_balanced() -> None:
-    y = np.array([1, 1, 0, 0, 1, 0], dtype=int)
-    groups = np.array(["g1", "g1", "g1", "g2", "g2", "g2"], dtype=str)
+    y = np.array([1, 1, 0, 0, 1, 0, 0, 0], dtype=int)
+    groups = np.array(["g1", "g1", "g1", "g2", "g2", "g2", "g2", "g2"], dtype=str)
 
     weights = _group_label_inverse_weights(y, groups)
 
-    assert weights.shape == (6,)
+    assert weights.shape == (8,)
     assert np.mean(weights) == pytest.approx(1.0)
     assert np.all(weights > 0)
     # In group g1 label=0 is rarer than label=1, so it should receive larger weight.
     assert float(weights[2]) > float(weights[0])
     # In group g2 label=1 is rarer than label=0, so it should receive larger weight.
     assert float(weights[4]) > float(weights[3])
+    # Every observed group-label cell has equal weight despite unequal group sizes.
+    for group in ("g1", "g2"):
+        assert weights[groups == group].sum() == pytest.approx(4.0)
+        for label in (0, 1):
+            assert weights[(groups == group) & (y == label)].sum() == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize("single_label", [0, 1])
+def test_group_label_inverse_weights_balance_observed_cells_with_single_label_groups(
+    single_label: int,
+) -> None:
+    y = np.array([0, 1, 1, single_label, single_label, single_label, single_label])
+    groups = np.array(["both"] * 3 + ["single"] * 4)
+
+    weights = _group_label_inverse_weights(y, groups)
+
+    assert np.mean(weights) == pytest.approx(1.0)
+    cell_weight = len(y) / 3  # Three observed group-label cells.
+    for label in (0, 1):
+        assert weights[(groups == "both") & (y == label)].sum() == pytest.approx(cell_weight)
+    assert weights[groups == "single"].sum() == pytest.approx(cell_weight)
+    assert weights[groups == "both"].sum() == pytest.approx(2 * cell_weight)
 
 
 def test_outer_cv_selection_runs_per_sample_set(
