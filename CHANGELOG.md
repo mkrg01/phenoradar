@@ -132,6 +132,33 @@
 * parse orthogroup annotations only for features used in figures, reuse validated top-feature
   expression values for tree heatmaps, and share one nonzero mask across trait-level sparse counts
 
+## [0.6.0](https://github.com/mkrg01/phenoradar/compare/v0.5.0...v0.6.0) (2026-09-18)
+
+
+### Features
+
+* add phylogenetic imputation for unknown-species predictions ([99ac754](https://github.com/mkrg01/phenoradar/commit/99ac754749e66ff747098f9231a03cbfcb892e0b))
+* add prediction evidence and stream expression caching ([199417b](https://github.com/mkrg01/phenoradar/commit/199417beb66aa4ee76d9c1670964a68cf12c3a13))
+* replace glum with native glmnet backend ([ce5672c](https://github.com/mkrg01/phenoradar/commit/ce5672c463470dc4b12ee85513c1d96c40047cf1))
+* simplify prediction inputs and optimize CV inference ([bfe3370](https://github.com/mkrg01/phenoradar/commit/bfe3370d05094386d72e6181ea0d8a82a4e28862))
+
+
+### Bug Fixes
+
+* improve glmnet convergence with denser warm-start paths ([877a433](https://github.com/mkrg01/phenoradar/commit/877a4334c4dd53d446587f0996ddcb7a8386f9a1))
+* omit internal subsampling repeat index from config templates ([1eccc01](https://github.com/mkrg01/phenoradar/commit/1eccc01b5313151659dd49edb2ebee4e5ce26e4e))
+
+
+### Performance Improvements
+
+* avoid full-width matrix copies in inner CV ([3c90e1e](https://github.com/mkrg01/phenoradar/commit/3c90e1edd2a8b47e6aae6a524d66408e97dec3f7))
+* enable logistic warm-start paths by default ([25a249e](https://github.com/mkrg01/phenoradar/commit/25a249ed573cfaed44f19d15fb0c4424ec2cc7ac))
+* optimize prediction evidence and reuse figure workers ([0a864b0](https://github.com/mkrg01/phenoradar/commit/0a864b00ac51608b5337cffefb881eb6d3070bc6))
+* reduce abstention memory use with active-feature blocks ([f2e2755](https://github.com/mkrg01/phenoradar/commit/f2e2755e3597ed54f849ae12bf76dfd668024ed8))
+* reduce preprocessing work and temporary memory ([fe85335](https://github.com/mkrg01/phenoradar/commit/fe85335ed39a0858a99c6d74a3bc2ac7867dba67))
+* share expression cache between CV and final refit ([a03dd1a](https://github.com/mkrg01/phenoradar/commit/a03dd1ab586849703f1eedf5bded8910da3ed3e3))
+* use lambda paths for selected logistic refits ([39b7d8a](https://github.com/mkrg01/phenoradar/commit/39b7d8a74eb381f5e0d4b8aba8a426c4a672ece2))
+
 ## [0.5.0](https://github.com/mkrg01/phenoradar/compare/v0.4.0...v0.5.0) (2026-09-16)
 
 
