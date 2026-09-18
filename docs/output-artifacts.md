@@ -150,7 +150,11 @@ cross-condition outputs:
   second-method improvement over the first method at each `max_features`
 
 `condition_metrics.tsv` reports absolute OOF metrics and available group-bootstrap
-intervals for every condition. `pairwise_comparisons.tsv` contains every unordered
+intervals for every condition. Its figure labels conditions with the varying
+configuration settings and their values, including single-parameter studies. Labels
+are wrapped on the left of each panel row, with shared condition positions across
+the six metrics and spacing adapted to the label length.
+`pairwise_comparisons.tsv` contains every unordered
 condition pair. `improvement_a_over_b` is oriented so that positive values always
 favor condition A, including for loss metrics. Pairwise intervals use matched
 bootstrap replicate IDs generated from the shared groups and seed.

@@ -170,9 +170,35 @@ def test_generate_study_report_preserves_order_and_uses_paired_replicates(
     assert "Multi-condition OOF performance" not in condition_svg
 
 
+@pytest.mark.parametrize(
+    ("condition_labels", "expected_labels"),
+    [
+        (("first", "second"), ("first", "second")),
+        (
+            ("abstention.threshold=1.0", "abstention.threshold=0.8"),
+            ("Abstention / threshold: 1.0", "Abstention / threshold: 0.8"),
+        ),
+        (
+            (
+                'preprocess.ranked_feature_filter.method="pair_aware"; '
+                'preprocess.expression_transform.method="log1p"',
+                'preprocess.ranked_feature_filter.method="unpaired"; '
+                'preprocess.expression_transform.method="none"',
+            ),
+            (
+                "Ranked feature filter / method: pair_aware "
+                "Expression transform / method: log1p",
+                "Ranked feature filter / method: unpaired "
+                "Expression transform / method: none",
+            ),
+        ),
+    ],
+)
 def test_condition_metric_figure_uses_conditions_on_y_axis(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    condition_labels: tuple[str, str],
+    expected_labels: tuple[str, str],
 ) -> None:
     rows = [
         {
@@ -186,8 +212,8 @@ def test_condition_metric_figure_uses_conditions_on_y_axis(
             "confidence_level": 0.95,
         }
         for condition_index, condition_id, condition_label, point_estimate in (
-            (1, "cond_a", "first", 0.8),
-            (2, "cond_b", "second", 0.6),
+            (1, "cond_a", condition_labels[0], 0.8),
+            (2, "cond_b", condition_labels[1], 0.6),
         )
         for metric in _METRICS
     ]
@@ -204,15 +230,28 @@ def test_condition_metric_figure_uses_conditions_on_y_axis(
     figure = captured["figure"]
     axis = figure.axes[0]
     assert axis.get_xlabel() == "ROC AUC"
-    assert axis.get_ylabel() == "Condition"
-    assert [label.get_text() for label in axis.get_yticklabels()] == ["first", "second"]
+    assert axis.get_ylabel() == "Condition settings"
+    assert [" ".join(label.get_text().split()) for label in axis.get_yticklabels()] == list(
+        expected_labels
+    )
     assert axis.yaxis_inverted()
     assert axis.lines[0].get_xdata().tolist() == [0.8]
-    assert axis.lines[0].get_ydata().tolist() == [0.0]
+    assert axis.lines[0].get_ydata().tolist() == [axis.get_yticks()[0]]
+    assert not figure.axes[1].get_yticklabels()
+    assert not figure.axes[2].get_yticklabels()
+    assert [label.get_text() for label in figure.axes[3].get_yticklabels()] == [
+        label.get_text() for label in axis.get_yticklabels()
+    ]
+    figure.canvas.draw()
+    label_bounds = [label.get_window_extent() for label in axis.get_yticklabels()]
+    assert label_bounds[0].y0 > label_bounds[1].y1
+    assert all(bounds.x0 >= 0 for bounds in label_bounds)
+    assert all(panel.get_window_extent().width > 150 for panel in figure.axes)
     assert [text.get_text() for text in figure.legends[0].get_texts()] == [
         "OOF point estimate",
         "95% group-bootstrap CI",
     ]
+    study_module.plt.close(figure)
 
 
 def test_ranked_feature_sensitivity_figures_use_matched_feature_counts(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import textwrap
 from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import combinations
@@ -392,7 +393,7 @@ def _condition_figure_label(raw_label: str) -> str:
     for assignment in assignments:
         path, separator, raw_value = assignment.partition("=")
         if not separator:
-            return raw_label
+            return textwrap.fill(raw_label, width=48)
         try:
             value = json.loads(raw_value)
         except json.JSONDecodeError:
@@ -403,10 +404,15 @@ def _condition_figure_label(raw_label: str) -> str:
                 if isinstance(value, str)
                 else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
             )
-        parsed.append((path.rsplit(".", maxsplit=1)[-1], str(display_value)))
-    if len(parsed) == 1:
-        return parsed[0][1]
-    return "\n".join(f"{name}={value}" for name, value in parsed)
+        # Retain the setting's context, including for single-parameter studies
+        # and settings with the same final name (for example, "method").
+        name = path.removeprefix("preprocess.").replace("_", " ").replace(".", " / ")
+        name = name[:1].upper() + name[1:]
+        parsed.append((name, str(display_value)))
+    return "\n".join(
+        textwrap.fill(f"{name}: {value}", width=48, subsequent_indent="  ")
+        for name, value in parsed
+    )
 
 
 def _condition_metric_figure(
@@ -417,7 +423,6 @@ def _condition_metric_figure(
     condition_rows = condition_metrics.select(
         "condition_index", "condition_id", "condition_label"
     ).unique(maintain_order=True).sort("condition_index")
-    indices = condition_rows.get_column("condition_index").to_list()
     labels = [
         _condition_figure_label(str(value))
         for value in condition_rows.get_column("condition_label")
@@ -431,9 +436,11 @@ def _condition_metric_figure(
         confidence_label = "Group-bootstrap CI (confidence level varies)"
     else:
         confidence_label = "Group-bootstrap CI"
-    figure_height = max(6.5, 3.5 + 0.35 * len(indices))
-    fig, axes = plt.subplots(2, 3, figsize=(10.5, figure_height), squeeze=False)
-    y = np.arange(len(indices), dtype=float)
+    # Allocate space for every wrapped line; the same rows align across metrics.
+    row_heights = np.asarray([0.18 + 0.16 * len(label.splitlines()) for label in labels])
+    y = np.cumsum(row_heights) - row_heights / 2
+    figure_height = max(6.5, 2.2 + 2 * float(row_heights.sum()))
+    fig, axes = plt.subplots(2, 3, figsize=(13.5, figure_height), sharey=True, squeeze=False)
     has_points = False
     has_intervals = False
     for axis, metric in zip(axes.flat, _METRIC_ORDER, strict=True):
@@ -464,10 +471,13 @@ def _condition_metric_figure(
             else:
                 axis.scatter(point, y[position], color="C0", s=18)
         axis.set_yticks(y, labels=labels)
-        axis.invert_yaxis()
+        axis.set_ylim(float(row_heights.sum()), 0)
         axis.set_xlabel(_METRIC_LABELS[metric])
-        axis.set_ylabel("Condition")
+        if axis in axes[:, 0]:
+            axis.set_ylabel("Condition settings", labelpad=12)
+        axis.tick_params(axis="y", labelsize=9, length=0, pad=8)
         axis.grid(axis="x", alpha=0.3)
+        axis.spines[["top", "right", "left"]].set_visible(False)
     legend_handles: list[Line2D] = []
     if has_points:
         legend_handles.append(
