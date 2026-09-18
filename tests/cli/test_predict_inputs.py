@@ -8,6 +8,7 @@ import numpy as np
 import polars as pl
 import pytest
 import yaml
+from click import unstyle
 from typer.testing import CliRunner
 
 from phenoradar.bundle import (
@@ -285,7 +286,8 @@ def test_predict_requires_explicit_tpm_and_valid_predict_settings(
         args += ["-c", str(config)]
     result = CliRunner().invoke(app, args)
     assert result.exit_code != 0
-    assert error in result.output
+    # Rich can insert ANSI color codes around option names in CI.
+    assert error in unstyle(result.output)
 
 
 @pytest.mark.parametrize("with_metadata", [False, True])
