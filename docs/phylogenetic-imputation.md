@@ -82,7 +82,7 @@ are retained in comparison tables with `NA` probabilities.
 
 ## Outputs
 
-All outputs are confined to `inference/`:
+All run-specific outputs are written to `inference/`:
 
 | File | Content |
 | --- | --- |

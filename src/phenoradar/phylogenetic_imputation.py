@@ -14,6 +14,7 @@ from typing import Any
 
 import polars as pl
 
+from phenoradar import asr_cache
 from phenoradar.abstention import prediction_label_expr
 from phenoradar.config import AppConfig, PredictConfig
 from phenoradar.config.schema import PhylogeneticImputationConfig
@@ -95,6 +96,8 @@ def _nwkit_executable() -> str:
 def _run_asr(
     settings: PhylogeneticImputationConfig,
     directory: Path,
+    *,
+    cache_root: Path | None = None,
 ) -> tuple[pl.DataFrame, dict[str, Any], list[str]]:
     executable = _nwkit_executable()
     version = subprocess.run(
@@ -142,13 +145,35 @@ def _run_asr(
         "--tree-annotation",
         "all",
     ]
-    result = subprocess.run(arguments, capture_output=True, text=True, check=False)
-    (directory / "nwkit.stderr.txt").write_text(result.stderr, encoding="utf-8")
-    (directory / "nwkit.stdout.txt").write_text(result.stdout, encoding="utf-8")
+    key = (
+        None if cache_root is None
+        else asr_cache.cache_key(executable, version.stdout.strip(), arguments, directory)
+    )
+    cache_path = None if key is None or cache_root is None else cache_root / f"{key}.zip"
+    cached = (
+        None if cache_path is None or key is None
+        else asr_cache.restore(cache_path, key, directory)
+    )
+    if cached is None:
+        result = subprocess.run(arguments, capture_output=True, text=True, check=False)
+        (directory / "nwkit.stderr.txt").write_text(result.stderr, encoding="utf-8")
+        (directory / "nwkit.stdout.txt").write_text(result.stdout, encoding="utf-8")
+    else:
+        result = subprocess.CompletedProcess(
+            cached["command"], 0,
+            (directory / "nwkit.stdout.txt").read_text(encoding="utf-8"),
+            (directory / "nwkit.stderr.txt").read_text(encoding="utf-8"),
+        )
     provenance: dict[str, Any] = {
         "nwkit_version": version.stdout.strip(),
-        "command": arguments,
+        "command": arguments if cached is None else cached["command"],
         "returncode": result.returncode,
+        "asr_cache": {
+            "hit": cached is not None,
+            "key": key,
+            "path": None if cache_path is None else str(cache_path),
+            "requested_command": arguments,
+        },
     }
     if result.returncode:
         if "unrecognized arguments" in result.stderr or "invalid choice" in result.stderr:
@@ -185,6 +210,8 @@ def _run_asr(
     except (OSError, TypeError, ValueError, pl.exceptions.PolarsError) as exc:
         raise PhylogeneticImputationError(f"Invalid nwkit ASR output: {exc}") from exc
     warnings = [line for line in result.stderr.splitlines() if "warning" in line.lower()]
+    if cached is None and cache_path is not None and key is not None:
+        asr_cache.store(cache_path, key, directory, arguments)
     return nodes, provenance, warnings
 
 
@@ -333,7 +360,10 @@ def write_phylogenetic_imputation(
             directory / "traits.tsv", separator="\t"
         )
         if mapped.height and metadata["n_unknown_targets_in_tree"]:
-            artifacts.nodes, provenance, warnings = _run_asr(settings, directory)
+            artifacts.nodes, provenance, warnings = _run_asr(
+                settings, directory,
+                cache_root=run_dir.parent / ".phenoradar_cache" / "asr",
+            )
             metadata.update(provenance)
             artifacts.warnings.extend(warnings)
             status = "imputed" if artifacts.nodes.height else "fit_failed"

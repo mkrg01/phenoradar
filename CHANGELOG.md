@@ -18,6 +18,10 @@
 
 ### Features
 
+* reuse successful phylogenetic ASR outputs across runs with identical analysis
+  inputs and software; verify cached output integrity, retain source-command
+  provenance, and recompute expression comparisons for each run
+
 * allow `ranked_feature_filter.max_features: [null, 1000, 100]` to compare
   no ranked filtering with numeric feature limits in one study; a null or omitted
   limit resolves to `method: none`, including disabling directional selection
