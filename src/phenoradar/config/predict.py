@@ -19,6 +19,10 @@ from .schema import (
 
 
 class PredictDataConfig(StrictModel):
+    feature_mode: str = "expression"
+    alignment_dir: str | None = None
+    sequence_tpm_path: str | None = None
+    sequence_tpm_cache_dir: str | None = "runs/.phenoradar_cache/sequence_tpm"
     tpm_path: str = ""
     metadata_path: str | None = None
     tree_path: str | None = None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Literal
 
 from pydantic import (
@@ -143,6 +144,22 @@ class DataConfig(StrictModel):
     value_col: str = "tpm"
     trait_col: str = "C4"
     contrast_pair_col: str | None = "contrast_pair_id"
+    feature_mode: Literal["expression", "amino_acid"] = "expression"
+    alignment_dir: str | None = None
+    sequence_tpm_path: str | None = None
+    sequence_tpm_cache_dir: str | None = "runs/.phenoradar_cache/sequence_tpm"
+
+    @model_validator(mode="before")
+    @classmethod
+    def remove_retired_sequence_map(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "sequence_map_path" in value:
+            if value["sequence_map_path"] is not None:
+                raise ValueError(
+                    "data.sequence_map_path has been removed; FASTA IDs must match a metadata "
+                    "species ID or that ID followed by '_' and a gene suffix."
+                )
+            return {key: item for key, item in value.items() if key != "sequence_map_path"}
+        return value
 
 
 class SplitConfig(StrictModel):
@@ -507,6 +524,55 @@ class PhylogeneticImputationConfig(StrictModel):
     root_prior: Literal["equal", "empirical"] = "equal"
 
 
+class AminoAcidSiteFilter(StrictModel):
+    min_sample_fraction: float = Field(default=0.8, gt=0, le=1, allow_inf_nan=False)
+    min_residue_states: int = Field(default=2, ge=2, le=20)
+
+    @model_validator(mode="before")
+    @classmethod
+    def remove_retired_minor_filters(cls, value: Any) -> Any:
+        retired = {"min_minor_sample_count", "min_minor_group_count"}
+        if isinstance(value, dict) and (found := retired.intersection(value)):
+            for key in sorted(found):
+                warnings.warn(
+                    f"amino_acid.site_filter.{key} has been removed and is "
+                    "ignored; remove it from the configuration.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            return {key: item for key, item in value.items() if key not in retired}
+        return value
+
+
+class AminoAcidRankedFilter(StrictModel):
+    method: Literal["none", "pair_aware", "unpaired"] = "none"
+    max_sites: PositiveInt = 2000
+    min_contrast_pairs: PositiveInt = 2
+
+
+class AminoAcidConfig(StrictModel):
+    aggregation: Literal["best_covered", "aa_frequency", "tpm_weighted_frequency"] = "aa_frequency"
+    site_filter: AminoAcidSiteFilter = Field(default_factory=AminoAcidSiteFilter)
+    ranked_site_filter: AminoAcidRankedFilter = Field(default_factory=AminoAcidRankedFilter)
+
+    @model_validator(mode="before")
+    @classmethod
+    def remove_retired_fixed_settings(cls, value: Any) -> Any:
+        retired = {"centering", "site_block_size", "prediction_batch_size", "max_matrix_cells"}
+        if isinstance(value, dict) and (found := retired.intersection(value)):
+            if "centering" in found and value["centering"] != "observed_mean":
+                raise ValueError("Amino-acid centering is fixed to observed_mean")
+            warnings.warn(
+                "amino_acid settings are now fixed internally and ignored: "
+                + ", ".join(sorted(found))
+                + "; remove them from the configuration.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return {key: item for key, item in value.items() if key not in retired}
+        return value
+
+
 class AppConfig(StrictModel):
     """Top-level application configuration."""
 
@@ -526,11 +592,29 @@ class AppConfig(StrictModel):
     )
     report: ReportConfig = Field(default_factory=ReportConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
+    amino_acid: AminoAcidConfig = Field(default_factory=AminoAcidConfig)
 
     @model_validator(mode="after")
     def validate_contrast_pair_dependencies(self) -> AppConfig:
+        if self.data.feature_mode == "amino_acid":
+            if not self.data.alignment_dir:
+                raise ValueError("amino_acid mode requires data.alignment_dir")
+            if (
+                self.amino_acid.aggregation == "tpm_weighted_frequency"
+                and not self.data.sequence_tpm_path
+            ):
+                raise ValueError("tpm_weighted_frequency requires data.sequence_tpm_path")
+            if self.model.name != "logistic_elasticnet":
+                raise ValueError("amino_acid mode requires model.name=logistic_elasticnet")
+            if (
+                self.amino_acid.ranked_site_filter.method == "pair_aware"
+                and self.data.contrast_pair_col is None
+            ):
+                raise ValueError("amino_acid pair_aware ranking requires data.contrast_pair_col")
         missing = self.preprocess.missing_expression
-        if missing.method == "neutral":
+        if self.data.feature_mode == "amino_acid":
+            pass  # Expression preprocessing settings are inactive in sequence mode.
+        elif missing.method == "neutral":
             if (
                 self.model.name != "logistic_elasticnet"
                 or self.preprocess.expression_transform.method != "log1p"
@@ -548,6 +632,7 @@ class AppConfig(StrictModel):
             )
         if (
             self.preprocess.absent_feature_fill == "nan"
+            and self.data.feature_mode == "expression"
             and self.model.name != "random_forest"
             and missing.method != "neutral"
         ):
@@ -557,6 +642,7 @@ class AppConfig(StrictModel):
             )
         if (
             self.preprocess.ranked_feature_filter.method == "pair_aware"
+            and self.data.feature_mode == "expression"
             and self.data.contrast_pair_col is None
         ):
             raise ValueError(

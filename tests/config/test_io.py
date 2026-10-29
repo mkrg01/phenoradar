@@ -86,8 +86,87 @@ def test_checked_in_config_explicitly_contains_all_user_fields() -> None:
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
 
     assert payload == load_and_resolve_config([path]).model_dump(
-        mode="python", exclude={"sampling": {"group_subsample_repeat_index"}}
+        mode="python",
+        exclude={
+            "sampling": {"group_subsample_repeat_index"},
+            "data": {"sequence_tpm_cache_dir"},
+        },
     )
+    assert list(payload)[-1] == "amino_acid"
+
+
+@pytest.mark.parametrize("mode", ["expression", "amino_acid"])
+def test_one_user_config_keeps_optional_sequence_settings_at_end(mode: str) -> None:
+    config = AppConfig.model_validate(
+        {
+            "data": {
+                "feature_mode": mode,
+                "alignment_dir": "alignments",
+                "sequence_tpm_cache_dir": "custom-cache",
+            },
+            "amino_acid": {"aggregation": "best_covered"},
+        }
+    )
+    payload = yaml.safe_load(serialize_resolved_config(config, include_internal=False))
+    assert list(payload)[-1] == "amino_acid"
+    assert payload["data"]["feature_mode"] == mode
+    assert "sequence_map_path" not in payload["data"]
+    assert "sequence_tpm_cache_dir" not in payload["data"]
+    assert not {"centering", "site_block_size", "prediction_batch_size", "max_matrix_cells"} & set(
+        payload["amino_acid"]
+    )
+    assert payload["amino_acid"]["aggregation"] == "best_covered"
+    assert payload["preprocess"] == config.preprocess.model_dump(mode="python")
+    assert AppConfig.model_validate(payload).amino_acid == config.amino_acid
+    audit = yaml.safe_load(serialize_resolved_config(config))
+    assert audit == config.model_dump(mode="python")
+    assert audit["data"]["sequence_tpm_cache_dir"] == "custom-cache"
+
+
+@pytest.mark.parametrize("mode", ["expression", "amino_acid"])
+@pytest.mark.parametrize(
+    "retired_settings",
+    [
+        {"centering": "observed_mean", "prediction_batch_size": 2, "max_matrix_cells": 1000},
+        {"site_block_size": 256},
+    ],
+)
+def test_legacy_fixed_sequence_settings_load_but_are_not_serialized(
+    mode: str, retired_settings: dict[str, object]
+) -> None:
+    with pytest.warns(UserWarning, match="fixed internally and ignored"):
+        config = AppConfig.model_validate(
+            {
+                "data": {
+                    "feature_mode": mode,
+                    "alignment_dir": "alignments",
+                    "sequence_map_path": None,
+                },
+                "amino_acid": retired_settings,
+            }
+        )
+    for internal in [False, True]:
+        payload = yaml.safe_load(serialize_resolved_config(config, include_internal=internal))
+        assert "sequence_map_path" not in payload["data"]
+        assert not (
+            {"centering", "site_block_size", "prediction_batch_size", "max_matrix_cells"}
+            & set(payload["amino_acid"])
+        )
+    schema = config.model_json_schema()["$defs"]
+    assert "sequence_map_path" not in schema["DataConfig"]["properties"]
+    assert not {"centering", "site_block_size", "prediction_batch_size", "max_matrix_cells"} & set(
+        schema["AminoAcidConfig"]["properties"]
+    )
+
+
+def test_retired_sequence_map_cannot_silently_change_species_assignments() -> None:
+    with pytest.raises(ValueError, match="sequence_map_path has been removed"):
+        AppConfig.model_validate({"data": {"sequence_map_path": "ids.tsv"}})
+
+
+def test_fixed_centering_does_not_accept_a_different_model_rule() -> None:
+    with pytest.raises(ValueError, match="centering is fixed to observed_mean"):
+        AppConfig.model_validate({"amino_acid": {"centering": "none"}})
 
 
 def test_deep_merge_and_seed_default(tmp_path: Path) -> None:

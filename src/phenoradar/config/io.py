@@ -117,8 +117,11 @@ def serialize_resolved_config(
 ) -> str:
     """Serialize config with choices in comments, optionally omitting internal state."""
     payload = config.model_dump(mode="python")
-    if not include_internal and "sampling" in payload:
-        payload["sampling"].pop("group_subsample_repeat_index", None)
+    if not include_internal:
+        if "sampling" in payload:
+            payload["sampling"].pop("group_subsample_repeat_index", None)
+        if "data" in payload:
+            payload["data"].pop("sequence_tpm_cache_dir", None)
     serialized = yaml.safe_dump(
         payload,
         sort_keys=False,

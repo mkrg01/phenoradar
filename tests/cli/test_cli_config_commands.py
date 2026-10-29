@@ -464,8 +464,13 @@ def test_config_without_config_writes_default_yaml(
     )
     assert payload["figures"]["top_features"] == 30
     assert payload == AppConfig().model_dump(
-        mode="python", exclude={"sampling": {"group_subsample_repeat_index"}}
+        mode="python",
+        exclude={
+            "sampling": {"group_subsample_repeat_index"},
+            "data": {"sequence_tpm_cache_dir"},
+        },
     )
+    assert list(payload)[-1] == "amino_acid"
 
 
 def test_run_passes_top_features_to_run_and_tree_figures(

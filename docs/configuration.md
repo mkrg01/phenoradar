@@ -27,9 +27,14 @@ Resolution and override rules:
 - Generated YAML explicitly includes every user-facing setting, including inactive fields,
   `null` values, and empty sections. Comments list enum and boolean choices;
   nullable fields also show `null` or their accepted types.
+- Both feature modes use one config. Expression is the default; optional
+  `amino_acid` settings appear after the shared sections, at the end of the file.
+- Cache locations are automatic and omitted from generated user configs.
+  Complete effective settings remain in each run's `resolved_config.yml`.
 - Internal group-subsampling repeat indices are generated automatically and
   recorded in each run's `resolved_config.yml` for reproducibility.
-- Unknown keys are rejected.
+- Unknown keys are rejected. Retired amino-acid centering and workspace settings
+  are ignored with a warning; `data.sequence_map_path` accepts only legacy `null`.
 - `runtime.execution_stage` can be overridden from CLI
   (`phenoradar run -c config.yml --execution-stage ...`).
 

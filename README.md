@@ -11,6 +11,10 @@ PhenoRadar is a CLI tool for binary phenotype prediction from orthogroup-level T
 Prepare input data in the separate `phenoradar_prep` repository, then supply the
 metadata and expression TSVs to PhenoRadar.
 
+For prediction from orthogroup amino-acid alignments, see
+[amino-acid mode](docs/amino-acid.md). Both modes use the same `config.yml`;
+expression is the default and optional amino-acid settings appear at the end.
+
 ## Install
 
 ```bash

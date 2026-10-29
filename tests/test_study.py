@@ -8,6 +8,7 @@ import pytest
 from matplotlib.figure import Figure
 
 import phenoradar.study as study_module
+from phenoradar.provenance import dataset_fingerprint
 from phenoradar.study import (
     _build_training_group_sensitivity,
     _condition_metric_figure,
@@ -24,6 +25,46 @@ _METRICS = (
     "brier",
     "log_loss",
 )
+
+
+def _sequence_metadata(*, sequence: str = "a", tpm: str | None = None) -> dict:
+    inputs = {"metadata": "b" * 64, "alignment:OG1": sequence * 64}
+    if tpm:
+        inputs["sequence_tpm"] = tpm * 64
+    return {
+        "feature_mode": "amino_acid",
+        "aggregation": "tpm_weighted_frequency" if tpm else "aa_frequency",
+        "input_sha256": inputs,
+        "dataset_fingerprint": dataset_fingerprint(inputs, feature_mode="amino_acid"),
+    }
+
+
+def test_sequence_weighting_is_a_comparable_study_condition() -> None:
+    assert study_module._datasets_are_comparable(
+        [
+            _sequence_metadata(),
+            _sequence_metadata(tpm="c"),
+        ]
+    )
+
+
+@pytest.mark.parametrize("case", ["alignment", "tpm", "metadata", "unverified", "expression"])
+def test_sequence_comparison_rejects_changed_or_unverified_inputs(case: str) -> None:
+    first = _sequence_metadata(tpm="c")
+    second = _sequence_metadata(
+        tpm="d" if case == "tpm" else "c", sequence="d" if case == "alignment" else "a"
+    )
+    if case == "metadata":
+        second["input_sha256"]["metadata"] = "d" * 64
+        second["dataset_fingerprint"] = dataset_fingerprint(
+            second["input_sha256"], feature_mode="amino_acid"
+        )
+    elif case == "unverified":
+        second["dataset_fingerprint"] = "d" * 64
+    elif case == "expression":
+        second["feature_mode"] = "expression"
+        second["dataset_fingerprint"] = "d" * 64
+    assert not study_module._datasets_are_comparable([first, second])
 
 
 def _write_condition(

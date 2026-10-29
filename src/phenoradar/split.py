@@ -559,10 +559,12 @@ def build_split_artifacts(config: AppConfig) -> SplitArtifacts:
     metadata = _normalize_metadata(config)
     coverage_metadata = metadata.filter(pl.col("__pool") != _POOL_EXCLUDED)
     metadata_species = coverage_metadata.select("__species").to_series().to_list()
-    expression_species, excluded_rows = _expression_species_and_excluded_rows(
-        config, metadata_species
-    )
-    _validate_expression_coverage(coverage_metadata, expression_species)
+    excluded_rows = 0
+    if getattr(config.data, "feature_mode", "expression") == "expression":
+        expression_species, excluded_rows = _expression_species_and_excluded_rows(
+            config, metadata_species
+        )
+        _validate_expression_coverage(coverage_metadata, expression_species)
 
     training_df = metadata.filter(pl.col("__pool") == _POOL_TRAINING_VALIDATION)
     external_df = metadata.filter(pl.col("__pool") == _POOL_EXTERNAL_TEST)

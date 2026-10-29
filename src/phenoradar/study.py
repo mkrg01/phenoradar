@@ -16,6 +16,7 @@ import polars as pl
 
 from phenoradar.config import ConfigConditionSet
 from phenoradar.metrics import metric_higher_is_better
+from phenoradar.provenance import ProvenanceError, dataset_fingerprint
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
@@ -978,6 +979,41 @@ def _training_group_sensitivity_figure(
     return _save_figure_formats(fig, output_dir / "training_group_sensitivity")
 
 
+def _datasets_are_comparable(metadata_rows: Sequence[dict[str, Any]]) -> bool:
+    if len({m.get("dataset_fingerprint") for m in metadata_rows}) == 1:
+        return True
+    # Sequence aggregation is a study condition. Using TPM as gene weights
+    # adds an input role, while the underlying sequences and phenotype cohort
+    # must remain identical. Retain and verify the complete active-input hashes.
+    bases = set()
+    tpm_hashes = set()
+    for metadata in metadata_rows:
+        if metadata.get("feature_mode") != "amino_acid":
+            return False
+        inputs = metadata.get("input_sha256")
+        if not isinstance(inputs, dict):
+            return False
+        weighted = metadata.get("aggregation") == "tpm_weighted_frequency"
+        if weighted != ("sequence_tpm" in inputs):
+            return False
+        try:
+            if dataset_fingerprint(inputs, feature_mode="amino_acid") != metadata.get(
+                "dataset_fingerprint"
+            ):
+                return False
+            bases.add(
+                dataset_fingerprint(
+                    {k: v for k, v in inputs.items() if k != "sequence_tpm"},
+                    feature_mode="amino_acid",
+                )
+            )
+        except ProvenanceError:
+            return False
+        if weighted:
+            tpm_hashes.add(inputs["sequence_tpm"])
+    return len(bases) == 1 and len(tpm_hashes) <= 1
+
+
 def generate_study_report(
     study_dir: Path,
     manifest_rows: Sequence[dict[str, Any]],
@@ -1000,8 +1036,7 @@ def generate_study_report(
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         metadata_rows.append(metadata)
     split_fingerprints = {metadata.get("split_fingerprint") for metadata in metadata_rows}
-    dataset_fingerprints = {metadata.get("dataset_fingerprint") for metadata in metadata_rows}
-    if len(split_fingerprints) != 1 or len(dataset_fingerprints) != 1:
+    if len(split_fingerprints) != 1 or not _datasets_are_comparable(metadata_rows):
         raise StudyError("Study conditions do not share one dataset and split fingerprint")
 
     metric_rows = [metric for row in ordered_rows for metric in _condition_metric_rows(row)]

@@ -921,6 +921,21 @@ def _run_single(
     )
     _log(f"Configuration resolved (execution_stage={resolved.runtime.execution_stage}).")
 
+    if getattr(resolved.data, "feature_mode", "expression") == "amino_acid":
+        from phenoradar.amino_acid import AlignmentError
+        from phenoradar.amino_acid_run import run_amino_acid
+
+        try:
+            destination = run_dir_override or _build_run_dir("run")
+            result = run_amino_acid(
+                resolved, destination, split_override=split_artifacts_override,
+                study_context=study_context, progress=_log,
+            )
+        except (AlignmentError, CVError, SplitError, OSError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        typer.echo(f"Wrote amino-acid run artifacts at {result}")
+        return result
+
     tree_path = getattr(resolved.data, "tree_path", None)
     orthogroup_annotation_path = getattr(resolved.data, "orthogroup_annotation_path", None)
     _log("Collect input file identities and build split artifacts.")
@@ -2377,6 +2392,25 @@ def predict(
             help="Prediction workers and native thread limit (default: config or 1).",
         ),
     ] = None,
+    alignment_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--alignment-dir",
+            exists=True,
+            file_okay=False,
+            help="Frozen alignment directory for an amino-acid model bundle.",
+        ),
+    ] = None,
+    sequence_tpm_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--sequence-tpm-path",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="Sequence TPM TSV[.gz] for a weighted AA bundle; defaults to bundled weights.",
+        ),
+    ] = None,
     verbose: VerboseArg = False,
     quiet: QuietArg = False,
 ) -> None:
@@ -2396,6 +2430,63 @@ def predict(
         )
 
     config_paths = _normalize_config_paths(config)
+    try:
+        manifest_value = json.loads((model_bundle / "bundle_manifest.json").read_text())
+        bundle_manifest = manifest_value if isinstance(manifest_value, dict) else {}
+    except (OSError, ValueError):
+        bundle_manifest = {}
+    if bundle_manifest.get("feature_mode") == "amino_acid":
+        from phenoradar.amino_acid import AlignmentError
+        from phenoradar.amino_acid_run import predict_amino_acid
+
+        if tpm_path is not None:
+            raise typer.BadParameter("--tpm-path is not used by an amino-acid model bundle")
+        try:
+            sequence_overrides: dict[str, Any] = {"data": {}}
+            if metadata_path is not None:
+                sequence_overrides["data"]["metadata_path"] = str(metadata_path)
+            if alignment_dir is not None:
+                sequence_overrides["data"]["alignment_dir"] = str(alignment_dir)
+            if sequence_tpm_path is not None:
+                sequence_overrides["data"]["sequence_tpm_path"] = str(sequence_tpm_path)
+            if n_jobs is not None:
+                sequence_overrides["runtime"] = {"n_jobs": n_jobs}
+            sequence_inputs = load_predict_config(
+                config_paths, overrides=sequence_overrides, require_tpm=False
+            )
+            destination = predict_amino_acid(
+                model_bundle,
+                _build_run_dir("predict"),
+                metadata_path=(
+                    Path(sequence_inputs.data.metadata_path)
+                    if sequence_inputs.data.metadata_path
+                    else None
+                ),
+                alignment_dir=(
+                    Path(sequence_inputs.data.alignment_dir)
+                    if sequence_inputs.data.alignment_dir
+                    else None
+                ),
+                sequence_tpm_path=(
+                    Path(sequence_inputs.data.sequence_tpm_path)
+                    if bundle_manifest.get("bundle_format_version") == "aa-2"
+                    and sequence_inputs.data.sequence_tpm_path
+                    else sequence_tpm_path
+                ),
+                sequence_tpm_cache_dir=(
+                    Path(sequence_inputs.data.sequence_tpm_cache_dir)
+                    if sequence_inputs.data.sequence_tpm_cache_dir else None
+                ),
+                n_jobs=sequence_inputs.runtime.n_jobs,
+            )
+        except (AlignmentError, CVError, OSError, ValueError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        typer.echo(f"Wrote amino-acid predictions at {destination}")
+        return
+    if alignment_dir is not None:
+        raise typer.BadParameter("--alignment-dir requires an amino-acid model bundle")
+    if sequence_tpm_path is not None:
+        raise typer.BadParameter("--sequence-tpm-path requires an amino-acid model bundle")
     overrides: dict[str, Any] = {"data": {}}
     if tpm_path is not None:
         overrides["data"]["tpm_path"] = str(tpm_path)
