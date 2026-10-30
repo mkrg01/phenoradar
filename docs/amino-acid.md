@@ -18,9 +18,10 @@ data:
   feature_mode: amino_acid
   metadata_path: data/species_metadata.tsv
   alignment_dir: data/alignments
+  sequence_tpm_path: data/sequence_tpm.tsv.gz
 preprocess:
   amino_acid:
-    aggregation: aa_frequency
+    aggregation: tpm_weighted_frequency
 ```
 
 ```bash
@@ -49,9 +50,9 @@ species/OG combinations remain unknown, not evidence of gene absence.
 
 | `preprocess.amino_acid.aggregation` | Species-level representation |
 | --- | --- |
-| `aa_frequency` (default) | Equal-gene canonical-residue frequencies at each site |
+| `aa_frequency` | Equal-gene canonical-residue frequencies at each site |
 | `best_covered` | One gene per species/OG, chosen on training-frozen quality-filtered columns |
-| `tpm_weighted_frequency` | Canonical-residue frequencies weighted by gene TPM |
+| `tpm_weighted_frequency` (default) | Canonical-residue frequencies weighted by gene TPM |
 
 Weighted mode additionally requires:
 
@@ -89,7 +90,7 @@ never determine them.
 | `preprocess.amino_acid.site_filter.min_sample_fraction` | `0.8` | Fraction in `(0, 1]` of all training species callable at a site |
 | `preprocess.amino_acid.site_filter.min_residue_states` | `2` | Required distinct canonical states, from 2 to 20 |
 | `preprocess.amino_acid.ranked_site_filter.method` | `none` | `none`, `pair_aware`, or `unpaired` |
-| `preprocess.amino_acid.ranked_site_filter.max_sites` | `2000` | Positive retained-site limit |
+| `preprocess.amino_acid.ranked_site_filter.max_sites` | `2000` | Retained-site limit for ranking; ignored with `none` |
 | `preprocess.amino_acid.ranked_site_filter.min_contrast_pairs` | `2` | Positive valid-pair minimum for pair-aware ranking |
 
 Processing order:
@@ -104,8 +105,9 @@ Processing order:
 4. Optionally rank sites. `pair_aware` takes the norm of equally averaged
    within-pair phenotype-frequency contrasts and requires enough valid pairs
    per site. `unpaired` uses phenotype mean-composition differences. Neither
-   imposes a direction. Ties use OG ID and input column order. With ranking
-   `none`, exceeding `max_sites` is an error, not implicit truncation.
+   imposes a direction. Ties use OG ID and input column order. With `none`,
+   neither ranking nor the `max_sites` limit applies: all quality-passing sites
+   are retained.
 5. Freeze model sites, center states on training means, and drop constant state
    columns. Missing or previously unseen state mass receives the mean and has
    zero contribution; known mass in a partly novel composition retains its effect.
@@ -118,7 +120,8 @@ Minor-sample/group counts remain descriptive QC fields, without filtering sites.
 ## Joint expression and amino-acid mode
 
 Set `data.feature_mode: combined`, supply both `data.tpm_path` for OG expression
-and `data.alignment_dir`, and use neutral expression preprocessing:
+and `data.alignment_dir`, and use neutral expression preprocessing. The default
+TPM-weighted aggregation also requires `data.sequence_tpm_path`:
 
 ```yaml
 data:
@@ -126,6 +129,7 @@ data:
   metadata_path: data/species_metadata.tsv
   tpm_path: data/tpm.tsv
   alignment_dir: data/alignments
+  sequence_tpm_path: data/sequence_tpm.tsv.gz
 preprocess:
   expression:
     absent_feature_fill: nan
@@ -258,10 +262,13 @@ bundles retain pre-ranking scoring masks.
 
 ## Caching and memory
 
-Alignment-byte caches are temporary per run. Only selected sites are expanded
-into model matrices; prediction and frequency work are batched. Outer folds run
-sequentially to bound memory, while inner glmnet paths use `runtime.n_jobs`.
-Workspace limits are internal and do not cap total process memory.
+Alignment-byte caches are temporary per run. Frequencies and centering are
+computed in site blocks; large output matrices use temporary disk backing.
+Set `TMPDIR` to a location with enough space for these caches and matrices.
+Heatmaps load only the displayed sites. Outer folds run sequentially, while inner
+glmnet paths use `runtime.n_jobs`. Model fitting can still allocate in-memory
+copies; disk backing does not cap total process memory. No sites are removed
+to meet an internal matrix-size threshold.
 
 Weighted mode converts sequence TPM once into compressed Parquet parts under
 `runs/.phenoradar_cache/sequence_tpm`, relative to the working directory. This

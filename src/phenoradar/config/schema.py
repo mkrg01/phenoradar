@@ -531,7 +531,9 @@ class AminoAcidRankedFilter(StrictModel):
 
 
 class AminoAcidConfig(StrictModel):
-    aggregation: Literal["best_covered", "aa_frequency", "tpm_weighted_frequency"] = "aa_frequency"
+    aggregation: Literal["best_covered", "aa_frequency", "tpm_weighted_frequency"] = (
+        "tpm_weighted_frequency"
+    )
     site_filter: AminoAcidSiteFilter = Field(default_factory=AminoAcidSiteFilter)
     ranked_site_filter: AminoAcidRankedFilter = Field(default_factory=AminoAcidRankedFilter)
 

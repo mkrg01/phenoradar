@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -160,13 +161,26 @@ def write_frequency_figure(
         targets = manifest.filter((pl.col("pool") == "validation") & (pl.col("fold_id") == fold))[
             "species"
         ].to_list()
+        requested = {(og, position) for og, position, _ in parsed}
+        display = replace(
+            member.transform,
+            sites=[
+                site for site in member.transform.sites
+                if (site.orthogroup, site.column + 1) in requested
+            ],
+        )
+        if display.settings.aggregation == "best_covered":
+            display.representative_columns = {
+                site.orthogroup: member.transform.scoring_columns(site.orthogroup)
+                for site in display.sites
+            }
         site_index = {
-            (site.orthogroup, site.column + 1): j for j, site in enumerate(member.transform.sites)
+            (site.orthogroup, site.column + 1): j for j, site in enumerate(display.sites)
         }
         batch = PREDICTION_BATCH_SIZE
         for start in range(0, len(targets), batch):
             samples = targets[start : start + batch]
-            raw, _, _ = member.transform.raw(store, samples)
+            raw, _, _ = display.raw(store, samples)
             rows = np.array([index[sample] for sample in samples])
             for k, (og, position, aa) in enumerate(parsed):
                 j = site_index.get((og, position))

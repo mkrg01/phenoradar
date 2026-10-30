@@ -91,7 +91,8 @@ def test_ratio_paths_remain_separate_with_fold_specific_feature_counts(monkeypat
 
     config = AppConfig.model_validate(
         {
-            "data": {"feature_mode": "combined", "alignment_dir": "aa"},
+            "data": {"feature_mode": "combined", "alignment_dir": "aa",
+                     "sequence_tpm_path": "unused.tsv"},
             "preprocess": {
                 "expression": {
                     "absent_feature_fill": "nan",
@@ -310,7 +311,8 @@ def test_inactive_ratio_never_changes_candidate_generation(
 ) -> None:
     ratios = [0.1, 0.3, 1, 3, 10]
     raw = {
-        "data": {"feature_mode": mode, "alignment_dir": "unused"},
+        "data": {"feature_mode": mode, "alignment_dir": "unused",
+                 "sequence_tpm_path": "unused.tsv"},
         "model": {"name": model},
         "model_selection": {
             "search_strategy": strategy, "trial_count": 3 if strategy != "grid" else None,
@@ -334,7 +336,8 @@ def test_inactive_ratio_never_changes_candidate_generation(
 @pytest.mark.parametrize("mode", ["expression", "amino_acid"])
 def test_inactive_continuous_ratio_does_not_disable_grid(mode: str) -> None:
     raw = {
-        "data": {"feature_mode": mode, "alignment_dir": "unused"},
+        "data": {"feature_mode": mode, "alignment_dir": "unused",
+                 "sequence_tpm_path": "unused.tsv"},
         "model_selection": {"search_strategy": "grid", "search_space": {
             "lambda": [0.01], "amino_acid_penalty_ratio": {
                 "type": "continuous_range", "start": 0.1, "end": 10,

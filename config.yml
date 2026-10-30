@@ -57,13 +57,13 @@ preprocess:
       method: standard  # choices: none, standard
 
   amino_acid:
-    aggregation: aa_frequency  # choices: best_covered, aa_frequency, tpm_weighted_frequency
+    aggregation: tpm_weighted_frequency  # choices: best_covered, aa_frequency, tpm_weighted_frequency
     site_filter:
       min_sample_fraction: 0.8
       min_residue_states: 2
     ranked_site_filter:
       method: none  # choices: none, pair_aware, unpaired
-      max_sites: 2000
+      max_sites: 2000  # Used only for pair_aware or unpaired ranking
       min_contrast_pairs: 2
 model:
   name: logistic_elasticnet  # choices: logistic_elasticnet, linear_svm, random_forest

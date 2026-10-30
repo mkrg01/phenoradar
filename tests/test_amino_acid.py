@@ -90,7 +90,7 @@ def test_default_coverage_uses_ceiling_and_allows_singleton_residues(tmp_path: P
         fitted = fit_amino_acid(
             store,
             species,
-            AminoAcidConfig(),
+            AminoAcidConfig(aggregation="aa_frequency"),
             y=np.array([0, 1, 0, 1, 0, 1]),
             groups=np.array(["g0", "g0", "g1", "g1", "g2", "g2"]),
         )
@@ -371,6 +371,10 @@ def fixture_config(tmp_path: Path, aggregation: str, *, full: bool = True) -> Pa
 @pytest.mark.parametrize("aggregation", ["aa_frequency", "best_covered", "tpm_weighted_frequency"])
 def test_nested_cv_refit_bundle_and_coordinates(tmp_path: Path, aggregation: str) -> None:
     config_path = fixture_config(tmp_path, aggregation)
+    if aggregation == "tpm_weighted_frequency":
+        payload = yaml.safe_load(config_path.read_text())
+        del payload["preprocess"]["amino_acid"]["aggregation"]
+        config_path.write_text(yaml.safe_dump(payload))
     config = load_and_resolve_config([config_path])
     destination = run_amino_acid(config, tmp_path / "run")
     oof = pl.read_csv(destination / "cv/tables/prediction_cv.tsv", separator="\t")
@@ -695,6 +699,22 @@ def test_sequence_config_preserves_expression_defaults() -> None:
         AppConfig.model_validate({"data": {"feature_mode": "amino_acid"}})
 
 
+@pytest.mark.parametrize("mode", ["expression", "amino_acid", "combined"])
+def test_default_weighted_aggregation_requires_tpm_only_when_active(mode: str) -> None:
+    raw = {
+        "data": {"feature_mode": mode, "alignment_dir": "aa"},
+        "preprocess": {"expression": {
+            "absent_feature_fill": "nan", "missing_expression": {"method": "neutral"},
+        }},
+    }
+    if mode != "expression":
+        with pytest.raises(ValueError, match="sequence_tpm_path"):
+            AppConfig.model_validate(raw)
+        raw["data"]["sequence_tpm_path"] = "sequence_tpm.tsv.gz"
+    config = AppConfig.model_validate(raw)
+    assert config.preprocess.amino_acid.aggregation == "tpm_weighted_frequency"
+
+
 @pytest.mark.parametrize("strategy", ["random", "tpe"])
 def test_shared_search_strategies(tmp_path: Path, strategy: str) -> None:
     config_path = fixture_config(tmp_path, "aa_frequency", full=False)
@@ -779,6 +799,7 @@ def test_empty_site_after_representative_choice_is_filtered(tmp_path: Path) -> N
         config = AppConfig.model_validate(
             {
                 "data": {"feature_mode": "amino_acid", "alignment_dir": str(path)},
+                "preprocess": {"amino_acid": {"aggregation": "best_covered"}},
                 "abstention": {"enabled": True},
             }
         )
@@ -804,16 +825,84 @@ def test_automatic_species_assignment_rejects_ambiguous_metadata_prefixes(tmp_pa
         AlignmentStore(path, ["s1", "s1_sub"])
 
 
-def test_site_limit_is_a_guard_without_ranking(tmp_path: Path) -> None:
-    path = alignment(tmp_path / "aa", [("s1_g", "AA"), ("s2_g", "VV")])
-    with (
-        AlignmentStore(path, ["s1", "s2"]) as store,
-        pytest.raises(AlignmentError, match="exceed max_sites"),
-    ):
-        fit_amino_acid(
-            store,
-            ["s1", "s2"],
-            settings(ranked_site_filter={"method": "none", "max_sites": 1}),
-            y=np.array([0, 1]),
-            groups=np.array(["a", "b"]),
+@pytest.mark.parametrize("aggregation", ["best_covered", "aa_frequency", "tpm_weighted_frequency"])
+def test_none_ignores_site_limit_but_keeps_quality_filters(
+    tmp_path: Path, aggregation: str
+) -> None:
+    species = ["s1", "s2"]
+    records = [("s1_g", "AA-A"), ("s2_g", "VVVA")]
+    path = alignment(tmp_path / "aa", records)
+    tpm = tpm_table(tmp_path / "tpm.tsv", [(s, f"{s}_g", 1) for s in species])
+    with AlignmentStore(
+        path, species,
+        sequence_tpm_path=str(tpm) if aggregation == "tpm_weighted_frequency" else None,
+    ) as store:
+        states = [
+            fit_amino_acid(
+                store, species,
+                settings(
+                    aggregation,
+                    site_filter={"min_sample_fraction": 1},
+                    ranked_site_filter={"method": "none", "max_sites": limit},
+                ),
+                y=np.array([0, 1]), groups=np.array(["a", "b"]),
+            )
+            for limit in [1, 100]
+        ]
+        assert [site.column for site in states[0].sites] == [0, 1]
+        assert states[0].schema().equals(states[1].schema())
+        np.testing.assert_array_equal(
+            states[0].transform(store, species)[0], states[1].transform(store, species)[0]
         )
+
+
+@pytest.mark.parametrize("aggregation", ["best_covered", "aa_frequency", "tpm_weighted_frequency"])
+def test_blocked_disk_backed_matrices_preserve_features_and_representatives(
+    tmp_path: Path, monkeypatch, aggregation: str,
+) -> None:
+    import phenoradar.amino_acid as aa
+
+    records = [
+        ("s1_a", "AA-AV"), ("s1_b", "-VAVA"),
+        ("s2_a", "VVVVA"), ("s2_b", "A-AVV"),
+        ("held_a", "WX-VA"), ("held_b", "AAVVV"),
+    ]
+    path = alignment(tmp_path / "aa", records)
+    tpm = tpm_table(
+        tmp_path / "tpm.tsv",
+        [(name.split("_")[0], name, 0 if name == "held_b" else i + 1)
+         for i, (name, _) in enumerate(records)],
+    )
+    train, targets = ["s1", "s2"], ["s1", "s2", "held", "absent"]
+    with AlignmentStore(
+        path, targets,
+        sequence_tpm_path=str(tpm) if aggregation == "tpm_weighted_frequency" else None,
+    ) as store:
+        def fit():
+            return fit_amino_acid(
+                store, train, settings(aggregation),
+                y=np.array([0, 1]), groups=np.array(["a", "b"]),
+            )
+
+        baseline = fit()
+        raw, coverage, reps = baseline.raw(store, targets)
+        x, information, transform_reps = baseline.transform(store, targets)
+        # One site per block and both result matrices spilled to temporary disk.
+        monkeypatch.setattr(aa, "MAX_MATRIX_CELLS", 3)
+        blocked = fit()
+        actual_raw, actual_coverage, actual_reps = blocked.raw(store, targets)
+        actual_x, actual_information, actual_transform_reps = blocked.transform(store, targets)
+        assert blocked.schema().equals(baseline.schema())
+        for site, expected in zip(blocked.sites, baseline.sites, strict=True):
+            np.testing.assert_array_equal(site.mean, expected.mean)
+            np.testing.assert_array_equal(site.known, expected.known)
+            np.testing.assert_array_equal(site.active, expected.active)
+        np.testing.assert_array_equal(actual_raw, raw)
+        np.testing.assert_array_equal(actual_coverage, coverage)
+        np.testing.assert_array_equal(actual_x, x)
+        np.testing.assert_array_equal(actual_information, information)
+        assert actual_reps == reps
+        assert actual_transform_reps == transform_reps == reps
+        assert isinstance(actual_raw, np.memmap)
+        assert isinstance(actual_x, np.memmap)
+        assert isinstance(actual_information, np.memmap)
