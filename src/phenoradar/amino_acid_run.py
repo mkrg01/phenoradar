@@ -7,6 +7,8 @@ import gzip
 import json
 from collections import defaultdict
 from collections.abc import Callable, Iterable
+from contextlib import ExitStack
+from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,6 +33,7 @@ from phenoradar.amino_acid_outputs import (
     write_site_scores,
     write_site_stability,
 )
+from phenoradar.combined import ExpressionInput, ExpressionTransform, fit_expression
 from phenoradar.config import AppConfig
 from phenoradar.config.io import write_resolved_config
 from phenoradar.cv import (
@@ -41,6 +44,7 @@ from phenoradar.cv import (
     _dedupe_ranked_candidates_by_params,
     _deterministic_int_seed,
     _fit_sample_weights,
+    _glmnet_candidate_params,
     _inner_cv_splits,
     _metric_rows,
     _metrics_dataframe,
@@ -60,14 +64,23 @@ from phenoradar.cv import (
 from phenoradar.feature_stability import build_feature_stability_tables
 from phenoradar.glmnet import GlmnetLogisticRegression
 from phenoradar.group_bootstrap import run_oof_group_bootstrap
-from phenoradar.interpret import ModelFeatureEntry, build_interpretation_tables
+from phenoradar.interpret import (
+    InterpretationArtifacts,
+    ModelFeatureEntry,
+    build_interpretation_tables,
+)
 from phenoradar.metrics import (
     binary_log_loss,
     binary_probability_metrics,
     evaluation_metric_contract,
     evaluation_metric_contract_rows,
 )
-from phenoradar.model_selection import Candidate, expanded_search_space, generate_candidates
+from phenoradar.model_selection import (
+    Candidate,
+    active_search_space,
+    expanded_search_space,
+    generate_candidates,
+)
 from phenoradar.provenance import (
     dataset_fingerprint,
     experiment_fingerprint,
@@ -86,6 +99,18 @@ class AAMember:
     scope: str
     sample_set_id: int
     candidate: Candidate
+    expression: ExpressionTransform | None = None
+    aa_standard_deviation: np.ndarray | None = None
+
+    @property
+    def expression_width(self) -> int:
+        expression = getattr(self, "expression", None)
+        return len(expression.features) if expression is not None else 0
+
+    @property
+    def features(self) -> list[str]:
+        expression = getattr(self, "expression", None)
+        return ([] if expression is None else expression.features) + self.transform.features
 
 
 def _write(path: Path, rows: Iterable[dict[str, Any]]) -> None:
@@ -119,6 +144,7 @@ def _select(
     scope: str,
     sample_set_id: int,
     warnings: list[str],
+    expression: ExpressionInput | None = None,
 ) -> tuple[list[SelectedCandidate], list[dict[str, Any]]]:
     species, y, groups, pairs = _arrays(rows)
     prepared = []
@@ -134,6 +160,16 @@ def _select(
             )
             x_train, _, _ = fitted.transform(store, [species[i] for i in train])
             x_valid, _, _ = fitted.transform(store, [species[i] for i in valid])
+            n_expression = None
+            if expression is not None:
+                expr, xe, _, _ = fit_expression(
+                    config, expression, [species[i] for i in train],
+                    y[train], pairs[train], warnings,
+                )
+                xv, _ = expr.transform(expression, [species[i] for i in valid])
+                n_expression = xe.shape[1]
+                x_train = np.column_stack((xe, x_train))
+                x_valid = np.column_stack((xv, x_valid))
             prepared.append(
                 InnerCvPreprocessedFold(
                     fold,
@@ -142,6 +178,7 @@ def _select(
                     y[train],
                     y[valid],
                     _fit_sample_weights(config, y[train], groups[train]),
+                    n_expression,
                 )
             )
 
@@ -159,7 +196,7 @@ def _select(
     trials: list[dict[str, Any]] = []
     scored: list[SelectedCandidate] = []
     if _selection_is_active(config) and config.model_selection.search_strategy == "tpe":
-        discrete, continuous = expanded_search_space(config.model_selection.search_space)
+        discrete, continuous = expanded_search_space(active_search_space(config))
         study = optuna.create_study(
             direction=_selection_metric_optuna_direction(config.model_selection.selection_metric),
             sampler=TPESampler(
@@ -228,6 +265,7 @@ def fit_scope(
     scope: str,
     tables: Path,
     warnings: list[str],
+    expression: ExpressionInput | None = None,
 ) -> list[AAMember]:
     species, y, groups, pairs = _arrays(rows)
     selection = _select_training_groups(config, y, groups, scope=scope, fold_id=scope)
@@ -239,7 +277,8 @@ def fit_scope(
         source_id = _selection_source_sample_set_id(config, sample_set_id)
         if source_id not in source_results:
             selected, trials = _select(
-                config, store, rows[sampled[source_id].tolist()], scope, source_id, warnings
+                config, store, rows[sampled[source_id].tolist()], scope, source_id, warnings,
+                expression,
             )
             source_results[source_id] = selected
             _write(
@@ -263,8 +302,25 @@ def fit_scope(
             groups=groups[indices],
             contrast_groups=pairs[indices],
         )
-        matrix, _, representatives = fitted.transform(store, train_species)
+        matrix, observed, representatives = fitted.transform(store, train_species)
         context = {"scope": scope, "sample_set_id": sample_set_id}
+        expr = None
+        aa_std = None
+        if expression is not None:
+            scales = []
+            offset = 0
+            for j, site in enumerate(fitted.sites):
+                count = int(np.sum(site.active))
+                scales.extend(np.std(matrix[observed[:, j] > 0, offset:offset + count], axis=0))
+                offset += count
+            aa_std = np.asarray(scales)
+            expr, xe, counts, scores = fit_expression(
+                config, expression, train_species, y[indices], pairs[indices], warnings
+            )
+            matrix = np.column_stack((xe, matrix))
+            _write(tables / "expression_feature_filter_counts.tsv", [{**context, **counts}])
+            _write(tables / "expression_ranked_feature_scores.tsv",
+                   ({**context, **row} for row in scores))
         _write(tables / "amino_acid_og_qc.tsv", ({**context, **q} for q in fitted.qc))
         _write(
             tables / "amino_acid_site_qc.tsv",
@@ -283,10 +339,15 @@ def fit_scope(
                 for site in fitted.sites
             ),
         )
-        _write(
-            tables / "feature_schema.tsv",
-            ({**context, **row} for row in fitted.schema().to_dicts()),
-        )
+        schema = fitted.schema().to_dicts()
+        if expr is not None:
+            schema = expr.schema() + [{**row, "modality": "amino_acid"} for row in schema]
+            # Use one stable column order for both feature blocks.
+            schema = [{key: row.get(key) for key in
+                       ["feature", "modality", "orthogroup", "alignment_pos_1based", "residue",
+                        "aggregation", "training_mean"]}
+                      for row in schema]
+        _write(tables / "feature_schema.tsv", ({**context, **row} for row in schema))
         _write(tables / "representative_sequences.tsv", ({**context, **r} for r in representatives))
         if fitted.representative_columns is not None:
             _write(
@@ -302,6 +363,11 @@ def fit_scope(
                 config, config.runtime.seed, y[indices], model_params=result.candidate.params
             )
             assert isinstance(model, GlmnetLogisticRegression)
+            if expr is not None:
+                _, ratio = _glmnet_candidate_params(config, result.candidate.params)
+                model.penalty_factor = np.concatenate((
+                    np.ones(len(expr.features)), np.full(len(fitted.features), ratio),
+                ))
             _with_native_thread_limit(
                 config.runtime.n_jobs,
                 model.fit,
@@ -309,7 +375,8 @@ def fit_scope(
                 y[indices],
                 sample_weight=_fit_sample_weights(config, y[indices], groups[indices]),
             )
-            members.append(AAMember(fitted, model, scope, sample_set_id, result.candidate))
+            members.append(AAMember(fitted, model, scope, sample_set_id, result.candidate,
+                                    expr, aa_std))
             _write(
                 tables / "model_selection_selected.tsv",
                 [
@@ -324,11 +391,13 @@ def fit_scope(
                 ],
             )
             _write(tables / "amino_acid_site_effects.tsv", _site_effects(members[-1], matrix))
+            if expr is not None:
+                _write(tables / "combined_coefficients.tsv", _combined_coefficients(members[-1]))
     return members
 
 
 def _site_coefficients(member: AAMember) -> list[np.ndarray]:
-    offset = 0
+    offset = member.expression_width
     coefficients = []
     for site in member.transform.sites:
         beta = np.zeros(20)
@@ -343,8 +412,66 @@ def _effect_range(known: np.ndarray, beta: np.ndarray) -> float:
     return float(np.ptp(beta[known])) if np.count_nonzero(known) > 1 else 0.0
 
 
+def _combined_coefficients(member: AAMember) -> Iterable[dict[str, Any]]:
+    expression = member.expression
+    assert expression is not None and member.aa_standard_deviation is not None
+    n = member.expression_width
+    _, ratio = _glmnet_candidate_params(expression.config, member.candidate.params)
+    assert expression.scaler is not None
+    expression_scale = np.asarray(expression.scaler.scale_, dtype=float)
+    for j, (feature, coefficient) in enumerate(
+        zip(member.features, member.model.coef_, strict=True)
+    ):
+        is_expression = j < n
+        og = expression.orthogroups[j] if is_expression else json.loads(feature)[0]
+        yield {
+            "scope": member.scope,
+            "sample_set_id": member.sample_set_id,
+            "candidate_index": member.candidate.candidate_index,
+            "feature": feature,
+            "modality": "expression" if is_expression else "amino_acid",
+            "orthogroup": og,
+            "coefficient": float(coefficient),
+            "coefficient_original_unit": float(
+                coefficient / expression_scale[j] if is_expression else coefficient
+            ),
+            "coefficient_standardized": float(
+                coefficient if is_expression else
+                coefficient * member.aa_standard_deviation[j - n]
+            ),
+            "original_unit": expression.config.preprocess.expression_transform.method
+            if is_expression else "residue_frequency",
+            "penalty_factor": 1.0 if is_expression else ratio,
+        }
+
+
+def _combined_interpretation(
+    destination: Path, members: list[AAMember]
+) -> InterpretationArtifacts:
+    """Normalize importance within each modality, never across unlike units."""
+    outputs: dict[str, list[pl.DataFrame]] = defaultdict(list)
+    for modality in ["expression", "amino_acid"]:
+        entries = []
+        for member in members:
+            n = member.expression_width
+            columns = slice(0, n) if modality == "expression" else slice(n, None)
+            view = copy(member.model)
+            view.coef_ = member.model.coef_[columns]
+            entries.append(ModelFeatureEntry(member.features[columns], view,
+                                             member.scope.removeprefix("outer_fold_")))
+        result = build_interpretation_tables(entries)
+        for name in ["feature_importance", "coefficients", "feature_importance_by_fold",
+                     "coefficients_by_fold"]:
+            frame = getattr(result, name).with_columns(pl.lit(modality).alias("modality"))
+            frame.write_csv(destination / f"{modality}_{name}.tsv", separator="\t")
+            outputs[name].append(frame)
+    return InterpretationArtifacts(
+        **{name: pl.concat(frames) for name, frames in outputs.items()}, warnings=[]
+    )
+
+
 def _site_effects(member: AAMember, matrix: np.ndarray) -> Iterable[dict[str, Any]]:
-    offset = 0
+    offset = member.expression_width
     for site, beta in zip(member.transform.sites, _site_coefficients(member), strict=True):
         count = int(np.sum(site.active))
         contribution = matrix[:, offset : offset + count] @ beta[site.active]
@@ -373,6 +500,7 @@ def predict_members(
     members: list[AAMember],
     *,
     tables: Path | None = None,
+    expression: ExpressionInput | None = None,
 ) -> pl.DataFrame:
     output = []
     size = PREDICTION_BATCH_SIZE
@@ -380,6 +508,8 @@ def predict_members(
         samples = species[start : start + size]
         probabilities = []
         coverages = []
+        expression_coverages = []
+        aa_coverages = []
         matrices: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         gene_matrices: dict[str, np.ndarray] = {}
         local_rows = []
@@ -397,6 +527,11 @@ def predict_members(
                         ),
                     )
             x, observed = matrices[key]
+            expr_observed = None
+            if member.expression_width:
+                assert expression is not None and member.expression is not None
+                xe, expr_observed = member.expression.transform(expression, samples)
+                x = np.column_stack((xe, x))
             probabilities.append(member.model.predict_proba(x)[:, 1])
             betas = _site_coefficients(member)
             weights = np.array(
@@ -406,9 +541,45 @@ def predict_members(
                 ]
             )
             total = float(weights.sum())
-            coverages.append(observed @ (weights / total) if total > 0 else np.zeros(len(samples)))
+            aa_coverage = observed @ (weights / total) if total > 0 else np.zeros(len(samples))
+            if expr_observed is None:
+                coverages.append(aa_coverage)
+            else:
+                ew = np.abs(member.model.coef_[:member.expression_width])
+                et = float(ew.sum())
+                ec = expr_observed @ (ew / et) if et > 0 else np.ones(len(samples))
+                ac = aa_coverage if total > 0 else np.ones(len(samples))
+                coverages.append(np.minimum(ec, ac) if et > 0 or total > 0
+                                 else np.zeros(len(samples)))
+                expression_coverages.append(ec if et > 0 else np.full(len(samples), np.nan))
+                aa_coverages.append(ac if total > 0 else np.full(len(samples), np.nan))
             if tables is not None:
-                offset = 0
+                offset = member.expression_width
+                if expr_observed is not None:
+                    ec = x[:, :offset] @ member.model.coef_[:offset]
+                    ac = x[:, offset:] @ member.model.coef_[offset:]
+                    _write(tables / "combined_modality_contributions.tsv", (
+                        {"species": sample, "model_index": model_index, "scope": member.scope,
+                         "sample_set_id": member.sample_set_id,
+                         "candidate_index": member.candidate.candidate_index,
+                         "expression_contribution": float(ec[i]),
+                         "amino_acid_contribution": float(ac[i]),
+                         "intercept": float(member.model.intercept_),
+                         "logit": float(ec[i] + ac[i] + member.model.intercept_)}
+                        for i, sample in enumerate(samples)
+                    ))
+                    assert member.expression is not None
+                    _write(tables / "expression_local_contributions.tsv", (
+                        {"species": sample, "model_index": model_index, "scope": member.scope,
+                         "sample_set_id": member.sample_set_id,
+                         "candidate_index": member.candidate.candidate_index,
+                         "orthogroup": member.expression.orthogroups[j],
+                         "contribution": float(x[i, j] * member.model.coef_[j]),
+                         "observed": bool(expr_observed[i, j])}
+                        for i, sample in enumerate(samples)
+                        for j in np.argsort(-np.abs(x[i, :offset] * member.model.coef_[:offset]),
+                                            kind="stable")[:config.figures.top_features]
+                    ))
                 contributions = []
                 for site, beta in zip(member.transform.sites, betas, strict=True):
                     count = int(np.sum(site.active))
@@ -485,11 +656,21 @@ def predict_members(
                     "abstention_reason": None if accepted else "insufficient_information",
                 }
             )
+            if expression_coverages:
+                for name, values in [("expression", expression_coverages),
+                                     ("amino_acid", aa_coverages)]:
+                    finite = np.asarray(values)[:, i]
+                    finite = finite[np.isfinite(finite)]
+                    output[-1][f"{name}_information_coverage"] = (
+                        float(np.mean(finite)) if finite.size else None
+                    )
         if tables is not None:
             _write(tables / "amino_acid_local_contributions.tsv", local_rows)
-    return pl.DataFrame(
-        output, schema_overrides={"pred_label_selective": pl.Int64, "abstention_reason": pl.String}
-    )
+    schema = {"pred_label_selective": pl.Int64, "abstention_reason": pl.String}
+    if expression is not None:
+        schema.update({"expression_information_coverage": pl.Float64,
+                       "amino_acid_information_coverage": pl.Float64})
+    return pl.DataFrame(output, schema_overrides=schema)
 
 
 def _coordinate_rows(
@@ -626,14 +807,32 @@ def run_amino_acid(
     tpm_cache = (
         Path(config.data.sequence_tpm_cache_dir) if config.data.sequence_tpm_cache_dir else None
     )
-    with AlignmentStore(
-        Path(config.data.alignment_dir or ""),
-        all_species,
-        cache_species=training_species,
-        sequence_tpm_path=tpm_path,
-        sequence_tpm_cache_dir=tpm_cache,
-        progress=progress,
-    ) as store:
+    with ExitStack() as stack:
+        expression = (
+            stack.enter_context(ExpressionInput(config, all_species, training_species))
+            if config.data.feature_mode == "combined" else None
+        )
+        expression_identity = file_identity(Path(config.data.tpm_path)) if expression else None
+        if expression_identity:
+            _write(model_dir / "expression_input.tsv", [expression_identity])
+        store = stack.enter_context(
+            AlignmentStore(
+                Path(config.data.alignment_dir or ""),
+                all_species,
+                cache_species=training_species,
+                sequence_tpm_path=tpm_path,
+                sequence_tpm_cache_dir=tpm_cache,
+                progress=progress,
+            )
+        )
+        if expression is not None:
+            present = {s for og in store.ogs.values() for s in og.species_rows}
+            missing = sorted(set(training_species) - present)
+            if missing:
+                raise AlignmentError(
+                    "Combined training requires sequences for every training species; missing: "
+                    + ", ".join(missing[:10])
+                )
         identities = store.identities()
         _write(model_dir / "alignment_inputs.tsv", identities)
         _write(model_dir / "sequence_correspondence.tsv", store.correspondence)
@@ -653,11 +852,13 @@ def run_amino_acid(
             train = manifest.filter((pl.col("fold_id") == fold) & (pl.col("pool") == "train"))
             valid = manifest.filter((pl.col("fold_id") == fold) & (pl.col("pool") == "validation"))
             members = fit_scope(
-                config, store, train.sort("species"), f"outer_fold_{fold}", tables, warnings
+                config, store, train.sort("species"), f"outer_fold_{fold}", tables, warnings,
+                expression,
             )
             coordinate_members.extend(members)
             pred = predict_members(
-                config, store, valid["species"].to_list(), members, tables=tables
+                config, store, valid["species"].to_list(), members, tables=tables,
+                expression=expression,
             )
             pred = pred.join(
                 valid.select("species", "label", "group_id"), on="species"
@@ -676,7 +877,7 @@ def run_amino_acid(
                 }
             )
             for member in members:
-                entries.append(ModelFeatureEntry(member.transform.features, member.model, fold))
+                entries.append(ModelFeatureEntry(member.features, member.model, fold))
                 retained.extend(
                     {
                         "scope": "outer_fold",
@@ -684,7 +885,7 @@ def run_amino_acid(
                         "sample_set_id": member.sample_set_id,
                         "feature": feature,
                     }
-                    for feature in member.transform.features
+                    for feature in member.features
                 )
         predictions = pl.concat(oof).sort("species")
         predictions.write_csv(tables / "prediction_cv.tsv", separator="\t")
@@ -709,7 +910,10 @@ def run_amino_acid(
             )
         _metrics_dataframe(metrics).write_csv(tables / "metrics_cv.tsv", separator="\t")
         _write(tables / "loss_by_split_cv.tsv", losses)
-        interpretation = build_interpretation_tables(entries)
+        interpretation = (
+            _combined_interpretation(tables, coordinate_members)
+            if expression is not None else build_interpretation_tables(entries)
+        )
         for name in [
             "feature_importance",
             "coefficients",
@@ -735,7 +939,9 @@ def run_amino_acid(
             store,
             manifest,
             coordinate_members,
-            interpretation.feature_importance,
+            interpretation.feature_importance.filter(pl.col("feature").is_in(
+                {f for member in coordinate_members for f in member.transform.features}
+            )),
             config.figures.top_features,
         )
         _write(
@@ -762,7 +968,7 @@ def run_amino_acid(
                 .unique(subset="species")
                 .sort("species")
             )
-            final = fit_scope(config, store, train, "final_refit", model_dir, warnings)
+            final = fit_scope(config, store, train, "final_refit", model_dir, warnings, expression)
             write_site_scores(model_dir, final)
             needed = {s.orthogroup for member in final for s in member.transform.sites}
             target_species = (
@@ -776,6 +982,12 @@ def run_amino_acid(
                     .to_list()
                 )
             )
+            if expression is not None and target_species:
+                needed_expression = sorted({
+                    og for member in final if member.expression is not None
+                    for og in member.expression.orthogroups
+                })
+                expression.matrix(target_species, needed_expression)
             if target_species:
                 with AlignmentStore(
                     Path(config.data.alignment_dir or ""),
@@ -816,7 +1028,8 @@ def run_amino_acid(
                             dest = run_dir / stage / "tables"
                             dest.mkdir(parents=True, exist_ok=True)
                             prediction = predict_members(
-                                config, targets, target["species"].to_list(), final, tables=dest
+                                config, targets, target["species"].to_list(), final, tables=dest,
+                                expression=expression,
                             )
                             prediction = prediction.join(
                                 target.select("species", pl.col("label").alias("true_label")),
@@ -855,6 +1068,7 @@ def run_amino_acid(
         }
         input_hashes = {
             "metadata": sha256_file(Path(config.data.metadata_path)),
+            **({"tpm": expression_identity["sha256"]} if expression_identity else {}),
             **{f"alignment:{i['orthogroup']}": i["sha256"] for i in identities},
             **(
                 {"sequence_tpm": store.tpm_identity["sha256"]}
@@ -864,12 +1078,12 @@ def run_amino_acid(
         }
         dataset = dataset_fingerprint(
             input_hashes,
-            feature_mode="amino_acid",
+            feature_mode=config.data.feature_mode,
         )
         split_hash = split_fingerprint(manifest)
         metadata_out = {
             "run_id": run_dir.name,
-            "feature_mode": "amino_acid",
+            "feature_mode": config.data.feature_mode,
             "aggregation": config.amino_acid.aggregation,
             "status": "full_run_completed"
             if config.runtime.execution_stage == "full_run"
@@ -927,8 +1141,9 @@ def _save_bundle(
                                 seen.add(key)
         payload_files.append("sequence_tpm.tsv.gz")
     manifest = {
-        "feature_mode": "amino_acid",
+        "feature_mode": config.data.feature_mode,
         "bundle_format_version": (
+            "combined-1" if config.data.feature_mode == "combined" else
             "aa-3"
             if any(member.transform.representative_columns is not None for member in members)
             else "aa-2"
@@ -936,6 +1151,10 @@ def _save_bundle(
             else "aa-1"
         ),
         "sequence_tpm_source": store.tpm_identity,
+        "expression_source": (
+            file_identity(Path(config.data.tpm_path))
+            if config.data.feature_mode == "combined" else None
+        ),
         "representative_selection": (
             "quality_filtered_sites"
             if any(member.transform.representative_columns is not None for member in members)
@@ -970,11 +1189,12 @@ def predict_amino_acid(
     sequence_tpm_path: Path | None = None,
     sequence_tpm_cache_dir: Path | None = None,
     n_jobs: int | None = None,
+    tpm_path: Path | None = None,
 ) -> Path:
     from phenoradar.config import load_and_resolve_config
 
     manifest = json.loads((bundle / "bundle_manifest.json").read_text())
-    if manifest.get("bundle_format_version") not in {"aa-1", "aa-2", "aa-3"}:
+    if manifest.get("bundle_format_version") not in {"aa-1", "aa-2", "aa-3", "combined-1"}:
         raise AlignmentError("Unsupported amino-acid bundle version")
     for name in [
         "model_state.joblib",
@@ -984,6 +1204,13 @@ def predict_amino_acid(
         if sha256_file(bundle / name) != manifest["files"][name]:
             raise AlignmentError(f"Bundle checksum mismatch: {name}")
     config = load_and_resolve_config([bundle / "resolved_config.yml"])
+    combined = manifest.get("feature_mode") == "combined"
+    if combined != (config.data.feature_mode == "combined"):
+        raise AlignmentError("Bundle feature mode does not match its frozen configuration")
+    if tpm_path is not None:
+        if not combined:
+            raise AlignmentError("OG expression input requires a combined model bundle")
+        config.data.tpm_path = str(tpm_path)
     weighted = config.amino_acid.aggregation == "tpm_weighted_frequency"
     if weighted and "sequence_tpm.tsv.gz" not in manifest["files"]:
         raise AlignmentError("Weighted bundle is missing its sequence TPM payload")
@@ -1008,25 +1235,39 @@ def predict_amino_acid(
         raise AlignmentError(
             "Initial sequence prediction requires species in the frozen alignments"
         )
-    with AlignmentStore(
-        alignment_dir or Path(config.data.alignment_dir or ""),
-        species,
-        cache_species=targets,
-        only_orthogroups=set(manifest["alignment_hashes"]),
-        sequence_tpm_path=str(weights_path) if weights_path is not None else None,
-        sequence_tpm_cache_dir=sequence_tpm_cache_dir,
-    ) as store:
+    with ExitStack() as stack:
+        expression = (
+            stack.enter_context(ExpressionInput(config, targets, [])) if combined else None
+        )
+        if expression is not None:
+            names = sorted({og for m in members for og in m.expression.orthogroups})
+            expression.matrix(targets, names)
+        store = stack.enter_context(
+            AlignmentStore(
+                alignment_dir or Path(config.data.alignment_dir or ""),
+                species,
+                cache_species=targets,
+                only_orthogroups=set(manifest["alignment_hashes"]),
+                sequence_tpm_path=str(weights_path) if weights_path is not None else None,
+                sequence_tpm_cache_dir=sequence_tpm_cache_dir,
+            )
+        )
         _verify_axes(store, manifest["alignment_hashes"])
         destination.mkdir(parents=True, exist_ok=True)
         tables = destination / "predict/tables"
         tables.mkdir(parents=True, exist_ok=True)
         write_site_scores(tables, members)
+        if expression is not None:
+            _write(tables / "combined_coefficients.tsv",
+                   (row for member in members for row in _combined_coefficients(member)))
+            _write(tables / "expression_input.tsv", [file_identity(Path(config.data.tpm_path))])
         if store.tpm_identity:
             _write(
                 tables / "sequence_tpm_input.tsv",
                 [{"source": "override" if sequence_tpm_path else "bundle", **store.tpm_identity}],
             )
-        predictions = predict_members(config, store, targets, members, tables=tables)
+        predictions = predict_members(config, store, targets, members, tables=tables,
+                                      expression=expression)
         predictions.write_csv(tables / "pred_predict.tsv", separator="\t")
         _write(tables / "selected_site_sequence_map.tsv", _coordinate_rows(store, members, targets))
     return destination

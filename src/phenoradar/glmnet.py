@@ -69,11 +69,13 @@ class GlmnetLogisticRegression(ClassifierMixin, BaseEstimator):  # type: ignore[
         alpha: float = DEFAULT_ALPHA,
         thresh: float = DEFAULT_THRESH,
         maxit: int = DEFAULT_MAXIT,
+        penalty_factor: np.ndarray | None = None,
     ) -> None:
         self.lambda_ = lambda_
         self.alpha = alpha
         self.thresh = thresh
         self.maxit = maxit
+        self.penalty_factor = penalty_factor
 
     def fit(
         self, X: Any, y: np.ndarray, sample_weight: np.ndarray | None = None
@@ -86,6 +88,7 @@ class GlmnetLogisticRegression(ClassifierMixin, BaseEstimator):  # type: ignore[
             thresh=self.thresh,
             maxit=self.maxit,
             sample_weight=sample_weight,
+            penalty_factor=self.penalty_factor,
         )[0]
         self.__dict__.update(model.__dict__)
         return self
@@ -114,6 +117,7 @@ def fit_glmnet_path(
     thresh: float = DEFAULT_THRESH,
     maxit: int = DEFAULT_MAXIT,
     sample_weight: np.ndarray | None = None,
+    penalty_factor: np.ndarray | None = None,
 ) -> list[GlmnetLogisticRegression]:
     """Fit one descending path; return independent models in requested order.
 
@@ -156,6 +160,16 @@ def fit_glmnet_path(
     weights = weights / weights.max()
     weights /= weights.sum()
     n, p = x.shape
+    factors = np.ones(p) if penalty_factor is None else np.asarray(penalty_factor, dtype=float)
+    if factors.shape != (p,) or not np.isfinite(factors).all() or np.any(factors <= 0):
+        raise GlmnetError(
+            "penalty_factor must have one finite, strictly positive value per feature"
+        )
+    # The native core rescales factors to sum to p. Compensate lambda so the
+    # public objective remains loss + lambda * sum(factor_j * penalty(beta_j)).
+    factor_mean = float(np.mean(factors))
+    if not np.isfinite(factor_mean) or factor_mean <= 0:
+        raise GlmnetError("penalty_factor mean must be finite and positive")
     path = np.unique(requested)[::-1].copy()
     if sparse.issparse(x):
         x = sparse.csc_matrix(x, copy=True)
@@ -174,12 +188,14 @@ def fit_glmnet_path(
         passes = 0
         native_path_length = 0
     else:
-        native_path = _native_lambda_path(path)
+        native_path = _native_lambda_path(path) * factor_mean
+        if not np.isfinite(native_path).all():
+            raise GlmnetError("penalty_factor produces non-finite native lambdas")
         native_path_length = len(native_path)
         response = np.array(np.column_stack((y, 1 - y)) * weights[:, None], order="F")
         offset = np.zeros((n, 2), order="F")
         excluded = np.array([0], dtype=np.int32)
-        penalties = np.ones(p)
+        penalties = factors.copy()
         bounds = np.array([np.full(p, -np.inf), np.full(p, np.inf)], order="F")
         options = dict(ne=p + 1, nlam=native_path_length, isd=0, intr=1, maxit=int(maxit), kopt=0)
         if sparse.issparse(x):
@@ -233,7 +249,7 @@ def fit_glmnet_path(
             )
         if not np.allclose(returned[:count], native_path, rtol=1e-12, atol=0):
             raise GlmnetError("glmnet returned unexpected lambda values")
-        target_indices = np.searchsorted(-native_path, -path)
+        target_indices = np.searchsorted(-native_path, -path * factor_mean)
         # Discard auxiliary solutions before expanding compressed coefficients.
         coefficients = np.asarray(
             lsolns(p, compressed[:, :, target_indices], indices, sizes[target_indices])[:, 0, :]
@@ -246,7 +262,8 @@ def fit_glmnet_path(
     for strength in requested:
         index = int(np.flatnonzero(path == strength)[0])
         model = GlmnetLogisticRegression(
-            lambda_=float(strength), alpha=alpha, thresh=thresh, maxit=int(maxit)
+            lambda_=float(strength), alpha=alpha, thresh=thresh, maxit=int(maxit),
+            penalty_factor=None if penalty_factor is None else factors.copy(),
         )
         model.coef_ = coefficients[:, index].copy()
         model.intercept_ = float(intercepts[index])
@@ -257,11 +274,14 @@ def fit_glmnet_path(
         model.native_path_length_ = native_path_length
         model.converged_ = True
         residual = weights * (expit(x @ model.coef_ + model.intercept_) - y)
-        gradient = np.asarray(x.T @ residual).reshape(-1) + strength * (1 - alpha) * model.coef_
+        gradient = (
+            np.asarray(x.T @ residual).reshape(-1)
+            + strength * (1 - alpha) * factors * model.coef_
+        )
         active = model.coef_ != 0
-        subgradient = np.maximum(np.abs(gradient) - strength * alpha, 0)
+        subgradient = np.maximum(np.abs(gradient) - strength * alpha * factors, 0)
         subgradient[active] = np.abs(
-            gradient[active] + strength * alpha * np.sign(model.coef_[active])
+            gradient[active] + strength * alpha * factors[active] * np.sign(model.coef_[active])
         )
         model.kkt_residual_ = float(subgradient.sum() + abs(residual.sum()))
         models.append(model)

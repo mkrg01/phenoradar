@@ -1,219 +1,271 @@
-# Amino-acid phenotype prediction
+# Amino-acid and combined modes
 
-Expression and sequence modes use the same `config.yml`. To enable prediction
-from orthogroup alignments, set `data.feature_mode: amino_acid` and the input
-paths below. Optional `amino_acid` preprocessing is at the end of the config:
+Use orthogroup (OG) amino-acid alignments alone or jointly with expression.
+All modes share `config.yml`, grouped CV, sampling, weights, model selection,
+and mean/median ensembles. Sequence and combined modes require
+`model.name: logistic_elasticnet`.
+
+## Start a sequence run
+
+Generate a config, then set the sequence inputs:
 
 ```bash
-phenoradar run -c config.yml
+phenoradar config --out sequence.yml
 ```
-
-## Inputs
-
-Supply the normal species metadata and `data.alignment_dir`. Each `.faa`, `.fa`,
-or `.fasta` file directly in that directory is one OG; its filename stem is the
-OG ID. No input manifest or provenance file is needed. All discovered OGs are
-candidates, independent of how they were selected upstream.
-
-Each FASTA record counts as one gene. Sequence IDs are the first header token.
-They must be unique within an OG, and sequences within an OG must have equal
-alignment lengths. A record matches an exact metadata species ID, or that ID
-followed by `_` and a gene suffix. Matching must be unambiguous; otherwise input
-loading fails. Explicit sequence maps are no longer supported. Older configs
-with `sequence_map_path: null` remain readable.
-
-The canonical alphabet is `ACDEFGHIKLMNPQRSTVWY`. `-` and `.` are gaps. Other
-letters and `*` are unknown states: preserved for coordinates, excluded from
-frequency denominators. Invalid non-sequence characters are errors. Missing
-sample/OG combinations remain missing; they are not treated as gene absence.
-
-For expression-weighted frequencies, select:
 
 ```yaml
 data:
   feature_mode: amino_acid
-  alignment_dir: c4_dataset/alignments
-  sequence_tpm_path: c4_dataset/sequence_tpm.tsv.gz
+  metadata_path: data/species_metadata.tsv
+  alignment_dir: data/alignments
+amino_acid:
+  aggregation: aa_frequency
+```
+
+```bash
+phenoradar run -c sequence.yml
+```
+
+Expression `data.tpm_path` and `preprocess` transforms/filters are inactive in
+sequence-only mode. Metadata follows the usual [training format](data-format.md#metadata-tsv).
+
+## Inputs
+
+Each `.faa`, `.fa`, or `.fasta` file directly in `data.alignment_dir` is one OG;
+its filename stem is the OG ID. No manifest is needed. Records within each OG
+must have unique IDs and equal alignment lengths.
+
+The FASTA ID is the first header token. It must match an exact metadata species
+ID or that ID followed by `_` and a gene suffix. Ambiguous matches fail.
+Explicit sequence maps are unsupported; legacy `sequence_map_path: null` is
+accepted.
+
+Canonical residues are `ACDEFGHIKLMNPQRSTVWY`; `-` and `.` are gaps. Other
+letters and `*` are unknown: preserved for coordinates, excluded from frequency
+denominators. Invalid non-sequence characters fail validation. Missing
+species/OG combinations remain unknown, not evidence of gene absence.
+
+### Aggregation
+
+| `amino_acid.aggregation` | Species-level representation |
+| --- | --- |
+| `aa_frequency` (default) | Equal-gene canonical-residue frequencies at each site |
+| `best_covered` | One gene per species/OG, chosen on training-frozen quality-filtered columns |
+| `tpm_weighted_frequency` | Canonical-residue frequencies weighted by gene TPM |
+
+Weighted mode additionally requires:
+
+```yaml
+data:
+  sequence_tpm_path: data/sequence_tpm.tsv.gz
 amino_acid:
   aggregation: tpm_weighted_frequency
 ```
 
-The sequence TPM input is a TSV (optionally gzip-compressed) with `species`,
-`sequence_id`, `tpm`. Keys refer to metadata species and complete FASTA IDs.
-Each cached alignment record must have exactly one finite, nonnegative TPM;
-missing keys, duplicate matching keys and invalid matching values are errors.
-Extra rows are ignored. TPM 0 is
-valid and gives zero weight. The other two aggregation modes do not read this input.
+The TSV (optionally gzip-compressed) has `species`, `sequence_id`, `tpm`.
+Every imported alignment record needs exactly one finite, non-negative TPM;
+missing or duplicate matching keys and invalid matching values are errors.
+Keys use complete FASTA IDs; extra rows are ignored. Other aggregation modes
+ignore this input.
 
-At each site, weighted frequency is the sum of TPMs for genes carrying a given
-residue divided by the sum of TPMs for genes with any canonical residue. Gaps and
-unknowns do not enter this denominator. A zero denominator is missing, with no
-fallback to unweighted frequencies. Multiplying all TPMs in a species/OG by a
-common factor leaves its features unchanged: total OG expression is not included.
-An aggregation list compares these modes on the same metadata, alignments and
-split. Reports allow the additional TPM input in weighted mode; its hash is
-retained and must agree across weighted conditions.
+At each site, residue weights are divided by total TPM of genes with a canonical
+residue. Gaps, unknowns, and zero-weight genes contribute nothing. A zero
+denominator is missing, with no unweighted fallback. Scaling all TPMs within a
+species/OG leaves the frequencies unchanged; total OG expression requires
+[combined mode](#joint-expression-and-amino-acid-mode).
+
+An aggregation list compares modes on the same alignments and split. Weighted
+conditions retain the additional TPM hash, which must agree across those conditions.
 
 ## Preprocessing
 
-Each outer training set, inner training set, sampled set, and final refit learns
-its own preprocessing. Validation and inference rows never determine sites,
-major residues, ranking scores, or neutral values.
+Every sampled outer/inner training set and final refit learns its own site set,
+representatives, major residues, scores, and means. Validation and inference rows
+never determine them.
 
-1. Packed masks count species with at least one canonical residue at a site
-   (on a positive-TPM gene in weighted mode).
-   `min_sample_fraction` (default 0.8) uses all training species as denominator,
-   including species without that OG. This screen runs before 20-state frequency
-   counting.
-2. On surviving columns, compute each species' residue frequencies: equal-gene
-   frequencies for `aa_frequency`/`best_covered`, TPM-weighted frequencies for
-   `tpm_weighted_frequency`.
-   Filter on `min_residue_states` (distinct canonical residues; default 2).
-   There is no minimum number of species or groups carrying nonmajor residues.
-   The retired `min_minor_sample_count` and `min_minor_group_count` keys are
-   ignored with warnings when reading older configurations or bundles; resolved
-   configs omit them.
-3. For `best_covered`, choose each species' gene with the most canonical residues
-   on the quality-filtered columns in its OG; ties use sequence ID and zero
-   coverage selects no gene. Freeze these scoring columns before phenotype
-   ranking. Recheck coverage and variant filters on the chosen representatives,
-   without choosing genes again. Ranking and model features use the same genes;
-   validation/prediction chooses its genes on the training-frozen scoring columns.
-4. Optionally rank sites using the selected aggregation, including representatives
-   or TPM-weighted frequencies. `pair_aware` averages phenotype-frequency differences
-   equally over valid contrast pairs, then takes their vector norm; it requires
-   `min_contrast_pairs` per site. `unpaired` uses the difference between phenotype
-   mean compositions. Neither imposes a direction. Ties use OG ID and original
-   column order. `max_sites` limits the retained set. With ranking `none`, exceeding
-   that limit is an error rather than an implicit truncation.
-5. Freeze the model site set. `aa_frequency` uses all genes, excluding gaps/unknowns
-   separately at each site; `tpm_weighted_frequency` uses the weighted frequencies
-   above. `best_covered` keeps the representatives chosen before ranking, even
-   when ranking or constant-state removal discards some scoring sites.
-6. Center each state on its training mean. Missing or previously unseen state
-   mass receives that mean and therefore contributes zero. Known mass in a
-   partially novel composition retains its proportional effect. Drop constant
-   state columns without changing the representative-scoring site set.
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `amino_acid.site_filter.min_sample_fraction` | `0.8` | Fraction in `(0, 1]` of all training species callable at a site |
+| `amino_acid.site_filter.min_residue_states` | `2` | Required distinct canonical states, from 2 to 20 |
+| `amino_acid.ranked_site_filter.method` | `none` | `none`, `pair_aware`, or `unpaired` |
+| `amino_acid.ranked_site_filter.max_sites` | `2000` | Positive retained-site limit |
+| `amino_acid.ranked_site_filter.min_contrast_pairs` | `2` | Positive valid-pair minimum for pair-aware ranking |
 
-Sequence features are not variance-scaled. Existing expression transforms and
-filters are inactive in this mode. `lambda` and `alpha` retain their existing
-glmnet meanings; grid, random, TPE, best/one-SE selection, grouped sampling,
-sample weighting, and mean/median ensembles use the shared implementations.
+Processing order:
 
-Alignment bytes for training-pool species are cached on disk once per run.
-Presence masks are bit-packed; frequency statistics use site/gene blocks. Only
-selected sites are expanded into model matrices. Target import is restricted to
-selected OGs and predictions are batched. Frequency workspaces use column blocks.
-Outer folds run sequentially to bound memory; inner glmnet paths use
-`runtime.n_jobs`.
-Sequence TPM is converted once, in bounded blocks, to compressed Parquet parts
-automatically under `runs/.phenoradar_cache/sequence_tpm`, relative to the working
-directory. No cache location is needed in user configs.
-Later imports select required species/genes using a per-part species index,
-including across runs and the training/inference stages. Parts are queried in
-small batches; only copied matching rows are retained between batches.
-The cache includes all original TPM rows and no metadata, labels, sites, ranking
-scores or training means. Replacing metadata or changing CV settings reuses it;
-all learned preprocessing is still fitted separately within training folds.
+1. Screen callability using all training species, including those without the OG.
+   Weighted mode requires a positive-TPM canonical residue.
+2. Compute frequencies and screen residue variation.
+3. For `best_covered`, select the gene with most canonical residues on the
+   quality-filtered columns; ties use sequence ID, and zero coverage selects
+   none. Freeze these scoring columns, then recheck coverage/variation on the
+   representatives without selecting genes again.
+4. Optionally rank sites. `pair_aware` takes the norm of equally averaged
+   within-pair phenotype-frequency contrasts and requires enough valid pairs
+   per site. `unpaired` uses phenotype mean-composition differences. Neither
+   imposes a direction. Ties use OG ID and input column order. With ranking
+   `none`, exceeding `max_sites` is an error, not implicit truncation.
+5. Freeze model sites, center states on training means, and drop constant state
+   columns. Missing or previously unseen state mass receives the mean and has
+   zero contribution; known mass in a partly novel composition retains its effect.
 
-The source path, size, nanosecond modification/change times, device/inode and
-cache format identify an entry. The source SHA-256 is computed at creation and
-reused on a hit; the large source is not reread just to hash it. Changed sources
-get new entries. Changed/incomplete cached parts are rebuilt; a lock and atomic
-publication protect concurrent runs. The source must remain available. Cache
-directories can be deleted to reclaim space or force rebuilding. Older configs
-with an explicit cache location or `null` (direct reading) remain accepted.
-Alignment-byte caches remain temporary per run. CV folds share imported weights
-and positive-TPM masks.
+Sequence features are centered without variance scaling. `best_covered` uses the
+same representatives for ranking and fitting, even after sites are removed.
+Validation/prediction selects its genes on the training-frozen scoring columns.
+Retired minor-sample/group thresholds are ignored with warnings; their counts
+remain descriptive QC fields.
 
-Training-observed-mean centering is fixed. Frequency blocks (512 columns),
-prediction batches (128 species) and the workspace
-limit (50,000,000 entries in species × sites × 20) are internal constants, not
-config options. The limit guards this workspace, not total process memory.
-Older configs containing these retired settings are accepted with a warning and
-the settings are omitted from resolved output. Cache hits and locations are
-recorded in `sequence_tpm_input.tsv`.
+## Joint expression and amino-acid mode
 
-## Outputs and prediction
+Set `data.feature_mode: combined`, supply both `data.tpm_path` for OG expression
+and `data.alignment_dir`, and use neutral expression preprocessing:
 
-Standard split, OOF prediction, metric, coefficient, feature-stability and optional
-group-bootstrap tables are written under the normal stage directories. Sequence
-tables include:
+```yaml
+data:
+  feature_mode: combined
+  metadata_path: data/species_metadata.tsv
+  tpm_path: data/tpm.tsv
+  alignment_dir: data/alignments
+preprocess:
+  absent_feature_fill: nan
+  missing_expression:
+    method: neutral
+  expression_transform:
+    method: log1p
+  feature_scaling:
+    method: standard
+model_selection:
+  selected_candidate_count: 1
+  inner_cv_strategy: logo
+  search_space:
+    lambda: [0.0001, 0.001, 0.01, 0.1]
+    alpha: [1]
+    amino_acid_penalty_ratio: [0.1, 0.3, 1, 3, 10]
+```
 
-- `alignment_inputs.tsv`, `sequence_correspondence.tsv`: input hashes and ID mapping.
-- `sequence_tpm_input.tsv` (weighted mode): input hash, matched/zero-weight counts,
-  cache location and whether the cached input was reused.
-- `amino_acid_og_qc.tsv`, `amino_acid_site_qc.tsv`: train-only filtering counts,
-  pre/post-aggregation coverage, variant support and scores. `minor_samples` and
-  `minor_groups` are descriptive counts relative to the training major residue
-  (defined by mean species frequencies); neither is a filtering criterion.
-- `feature_schema.tsv`, `representative_sequences.tsv`: state columns and gene choices.
-- `representative_scoring_sites.tsv`: training-frozen, pre-ranking columns used
-  to choose representatives; gene tables distinguish scoring-site and model-site coverage.
-- `amino_acid_site_effects.tsv`: state effects versus the training major residue,
-  effect ranges and mean absolute site contributions.
-- `amino_acid_site_pss.tsv`: one row per fitted model/site with PSS, the sum of
-  absolute residue coefficients, plus `normalized_score` and within-model
-  descending `rank`.
-- `amino_acid_site_effect_range.tsv`: the same model/site keys, with the maximum
-  minus minimum coefficient over training-observed residues. Observed residues
-  with zero coefficients are included; unobserved residues are excluded.
-- `amino_acid_site_stability.tsv`, `amino_acid_og_stability.tsv`: selected-fold
-  fractions, including fractions conditional on being eligible.
-- `amino_acid_local_contributions.tsv`: leading per-model site contributions,
-  effective observation fractions, OG gene counts and callable-gene counts.
-- `selected_site_sequence_map.tsv`: all source genes for selected sites (the chosen
-  gene in representative mode), with original residues and sequence checksums;
-  weighted mode also reports `sequence_tpm` and `site_tpm_fraction`, each gene's
-  share of the callable TPM at that site (zero for gaps, unknowns or zero weight).
+`preprocess` controls expression; `amino_acid` controls sequence. All three
+sequence aggregations are supported. Both blocks share species, sampling,
+weights, and splits, with filters/scalers/representatives fitted separately in
+each training fold. OGs need not occur in both modalities. Every training species
+must occur in both input types; missing individual OGs/sites remain neutral.
 
-Both score files are written in `cv/tables`, `model/tables` for final refits, and
-`predict/tables` when loading a saved bundle. Keys include `scope`, `sample_set_id`,
-`candidate_index`, OG and original alignment position. Values are calculated per
-model, without averaging coefficients across folds. Each score is normalized by
-its total across sites in that model; all-zero models have normalized scores of
-zero. Zero-score sites remain in the tables with a blank rank; ties share a rank.
-These are coefficient-based interpretation scores, not measures of predictive
-performance. Site selection, stability and information coverage still use the
-effect range.
+Combined mode fixes `alpha=1` (LASSO). The objective is weighted logistic loss plus:
 
-Coordinates are one-based. Alignment positions always refer to the input MSA.
-Sequence positions count non-gap input characters; `X` and `*` are not silently
-deleted. Gap coordinates are empty. The OOF frequency heatmap uses each held-out
-species' fold-fitted preprocessing; grey cells are unavailable. The heatmap's
-displayed state columns are chosen by normalized absolute state coefficients
-averaged across CV models/folds (`feature_importance.tsv`). It does not rank sites
-by PSS or effect range; separate site-score plots are not currently generated.
+```text
+lambda × (sum(abs(expression coefficients)) + ratio × sum(abs(AA coefficients)))
+```
 
-If `abstention.enabled`, information coverage weights site observation fractions
-by the fitted within-site coefficient range, normalized within each model and
-then averaged across models. Frequency-mode observation includes the fraction
-of OG genes callable at that site and the fraction of residue mass known to the
-model. Weighted mode uses the fraction of OG TPM callable at the site, multiplied
-by known residue mass; it is not a fraction of all transcriptome TPM. Local
-contribution tables also report positive-TPM and callable positive-TPM gene counts.
-Intercept-only members contribute zero coverage. Metrics still include
-all OOF species, independently of selective decisions.
+The positive AA/expression penalty ratio defaults to 1; larger values penalize
+AA more. Inner CV can select both lambda and ratio. Native penalty normalization
+is compensated so retained column counts do not change this definition.
+The additive model may select only one modality; it has no expression-by-residue
+interactions. Combined mode currently rejects phylogenetic imputation.
 
-Set `runtime.execution_stage: full_run` to refit and export `model_bundle/`:
+## Information coverage
+
+When abstention is enabled, sequence coverage weights site observation fractions
+by each site's fitted coefficient range and normalizes within each model.
+Frequency-mode observation combines callable-gene fraction and known residue
+mass. Weighted mode uses callable OG-TPM fraction times known residue mass,
+not a fraction of all transcriptome TPM. Intercept-only members contribute zero.
+
+Combined models use absolute-coefficient expression coverage and site-range AA
+coverage. Per-model joint coverage is the minimum over modalities with selected
+coefficients; unused modalities impose no requirement. An intercept-only model
+has zero coverage. Missing prediction evidence is neutralized and assessed
+through this gate.
+
+Ensemble coverage is the arithmetic mean of member coverages. It is an
+information-availability measure, not calibrated correctness. Raw CV metrics
+still include every OOF species, independently of selective decisions.
+
+## Outputs
+
+Standard split, CV metric, coefficient, feature-stability, and optional bootstrap
+tables use the normal stage directories. Sequence-specific tables include:
+
+| Table | Content |
+| --- | --- |
+| `alignment_inputs.tsv`, `sequence_correspondence.tsv` | Input hashes and sequence/species mapping |
+| `sequence_tpm_input.tsv` | Weighted input identity, matched/zero counts, cache path/hit status |
+| `amino_acid_og_qc.tsv`, `amino_acid_site_qc.tsv` | Train-only coverage, variation, and scoring diagnostics |
+| `feature_schema.tsv`, `representative_sequences.tsv` | State columns and gene choices |
+| `representative_scoring_sites.tsv` | Pre-ranking columns frozen for gene selection |
+| `amino_acid_site_effects.tsv` | Effects versus training major residue, ranges, and local contribution summaries |
+| `amino_acid_site_pss.tsv` | Per-model/site sum of absolute residue coefficients |
+| `amino_acid_site_effect_range.tsv` | Per-model/site max–min coefficient among training-observed residues, including zero coefficients |
+| `amino_acid_site_stability.tsv`, `amino_acid_og_stability.tsv` | Selected-fold fractions, including fractions conditional on eligibility |
+| `amino_acid_local_contributions.tsv` | Leading per-model site effects, observation fractions, and gene counts |
+| `selected_site_sequence_map.tsv` | Original residues, sequence checksums, and coordinates; weighted mode adds gene TPM and callable-site weight fractions |
+
+PSS and effect-range scores are written in `cv/tables/`, `model/tables/` for
+refits, and `predict/tables/` for bundle predictions. Keys include model scope,
+sampled set, candidate, OG, and original alignment position. Scores are computed
+per model, normalized by that model's total, and ranked with shared ranks for
+ties. Zero scores have blank rank; all-zero models have zero normalized scores.
+These describe coefficients, not predictive performance. Site selection,
+stability, and coverage use effect range.
+
+Coordinates are one-based: alignment positions refer to the original MSA;
+sequence positions count non-gap characters, including `X` and `*`. Gap coordinates
+are empty. The OOF frequency heatmap uses held-out-fold preprocessing and displays
+states ranked by normalized absolute coefficient importance, not PSS; gray is
+unavailable. No separate site-score plots are generated.
+
+Combined mode adds:
+
+| Table | Content |
+| --- | --- |
+| `combined_coefficients.tsv` | Per-model coefficients in model/original units, standardized comparisons, and penalty factors |
+| `expression_*`, `amino_acid_*` CV interpretation tables | Importance normalized within each modality; generic tables combine rows without a shared cross-modality ranking |
+| `combined_modality_contributions.tsv` | Expression and AA contributions, intercept, total logit per species/model |
+| `expression_local_contributions.tsv` | Leading local OG expression contributions |
+
+Original expression units are `log1p(TPM)`, not raw TPM. AA standard deviations
+use observed training species and affect reporting only. Expression filter/ranking
+and AA score/representative/coordinate tables are retained. Probabilities are
+aggregated after the sigmoid, not by summing probability contributions.
+
+## Prediction
+
+Export with `--execution-stage full_run`, then predict using frozen alignments:
 
 ```bash
 phenoradar predict --model-bundle runs/RUN_ID/model_bundle \
-  --metadata-path prediction_species.tsv --alignment-dir path/to/alignments
+  --metadata-path data/prediction_species.tsv --alignment-dir data/alignments
 ```
 
-The bundle stores preprocessing, configuration and (for weighted
-mode) the TPMs for required OGs and original species. The source TPM file is not
-needed to reproduce predictions. To use a different expression input with the
-same fitted model and alignments, pass `--sequence-tpm-path new_tpm.tsv.gz`
-(or `data.sequence_tpm_path` in `--config`); the actual input hash is recorded.
-Only requested species/required OGs need matching TPMs. `--config`
-can supply input paths; it cannot retrain preprocessing. Prediction currently
-requires species from the original metadata and the original frozen alignments
-for required OGs, verified by content hashes. New alignments or added sequences
-need a future coordinate-mapping interface. Combined total-expression/sequence
-models and structure mapping are deferred.
+For a combined bundle, also pass `--tpm-path data/tpm_predict.tsv` or provide
+`data.tpm_path` through `-c`. Metadata is optional; without it, sequence/combined
+prediction targets the bundle's original species. With it, targets must be a
+subset of those species. Required OG alignments must match saved content hashes;
+new sequences or alignments require retraining.
 
-New representative bundles use `aa-3` and store their pre-ranking scoring masks.
-Older `aa-1`/`aa-2` bundles remain readable; legacy representatives retain their
-original post-ranking selection rule when predicting.
+Predictions are written to `predict/tables/pred_predict.tsv`. Full-run predictions
+use `external_test/tables/pred_external_test.tsv` and
+`inference/tables/pred_inference.tsv`.
+
+Weighted bundles include gene TPMs for required OGs and original species. The
+source TPM file is unnecessary for reproducing predictions. Override weights with
+`--sequence-tpm-path new_tpm.tsv.gz` or `data.sequence_tpm_path` in `-c`; only
+target species/required OGs need matching TPMs, and the actual hash is recorded.
+Input overrides do not refit preprocessing.
+
+Sequence bundles use `aa-3`; readers also accept `aa-1`/`aa-2` with their original
+representative rules. Combined bundles use `combined-1`. New representative
+bundles retain pre-ranking scoring masks.
+
+## Caching and memory
+
+Alignment-byte caches are temporary per run. Only selected sites are expanded
+into model matrices; prediction and frequency work are batched. Outer folds run
+sequentially to bound memory, while inner glmnet paths use `runtime.n_jobs`.
+Workspace limits are internal and do not cap total process memory.
+
+Weighted mode converts sequence TPM once into compressed Parquet parts under
+`runs/.phenoradar_cache/sequence_tpm`, relative to the working directory. This
+persistent cache stores raw input only, with no labels or learned preprocessing,
+and can be reused across metadata/CV changes. Changed sources or incomplete parts
+are rebuilt; source files must remain available. Delete cache directories to
+reclaim space or force rebuilding. Cache hits and paths appear in
+`sequence_tpm_input.tsv`; no cache setting is needed.

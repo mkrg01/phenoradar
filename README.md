@@ -5,39 +5,30 @@
 > [!WARNING]
 > This repository is under active development and may change without notice.
 
-## Overview
-
-PhenoRadar is a CLI tool for binary phenotype prediction from orthogroup-level TPM.
+PhenoRadar predicts binary phenotypes from orthogroup-level TPM using grouped
+cross-validation and reusable model bundles.
 Prepare input data in the separate `phenoradar_prep` repository, then supply the
 metadata and expression TSVs to PhenoRadar.
 
-For prediction from orthogroup amino-acid alignments, see
-[amino-acid mode](docs/amino-acid.md). Both modes use the same `config.yml`;
-expression is the default and optional amino-acid settings appear at the end.
+For prediction from orthogroup amino-acid alignments, alone or jointly with
+expression, see [amino-acid and combined modes](docs/amino-acid.md).
 
-## Install
+## Quickstart
+
+Requires Python 3.12+.
 
 ```bash
 pip install phenoradar
-```
-
-## Fastest Run
-
-Install the bundled compact test data, materialize default config, then run:
-
-```bash
 phenoradar dataset
-phenoradar config
-phenoradar run -c config.yml
+phenoradar config --out demo.yml
+phenoradar run -c demo.yml
 ```
 
-## Documentation (Recommended Order)
+This runs CV on the bundled example data and saves results under `runs/`.
 
-1. [docs/quickstart.md](docs/quickstart.md): first successful run, full run, and prediction.
-2. [docs/data-format.md](docs/data-format.md): required metadata/expression TSV schema.
-3. [docs/configuration.md](docs/configuration.md): config behavior, defaults, and key-by-key definitions.
-4. [docs/cli-reference.md](docs/cli-reference.md): all commands and options.
-5. [docs/output-artifacts.md](docs/output-artifacts.md): output files, column-level details, and interpretation guidance.
-6. [docs/pipeline-details.md](docs/pipeline-details.md): internal execution behavior.
-7. [docs/phylogenetic-imputation.md](docs/phylogenetic-imputation.md): optional
-   phylogenetic context and disagreement candidates for unknown-species predictions.
+## Documentation
+
+- [Quickstart](docs/quickstart.md): own data, model export, and prediction.
+- [Configuration](docs/configuration.md): settings, defaults, and condition comparisons.
+- [Outputs and interpretation](docs/output-artifacts.md): results and how to read them.
+- [All guides](docs/README.md): input formats, CLI, methods, and optional features.

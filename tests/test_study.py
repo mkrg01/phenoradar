@@ -48,6 +48,21 @@ def test_sequence_weighting_is_a_comparable_study_condition() -> None:
     )
 
 
+def test_joint_and_single_mode_comparison_verifies_shared_inputs() -> None:
+    aa = _sequence_metadata(tpm="c")
+    expr_inputs = {"metadata": "b" * 64, "tpm": "e" * 64}
+    expr = {"feature_mode": "expression", "input_sha256": expr_inputs,
+            "dataset_fingerprint": dataset_fingerprint(expr_inputs)}
+    inputs = {**aa["input_sha256"], **expr_inputs}
+    joint = {**aa, "feature_mode": "combined", "input_sha256": inputs,
+             "dataset_fingerprint": dataset_fingerprint(inputs, feature_mode="combined")}
+    assert study_module._datasets_are_comparable([expr, aa, joint])
+    changed = {**inputs, "tpm": "f" * 64}
+    joint = {**joint, "input_sha256": changed,
+             "dataset_fingerprint": dataset_fingerprint(changed, feature_mode="combined")}
+    assert not study_module._datasets_are_comparable([expr, aa, joint])
+
+
 @pytest.mark.parametrize("case", ["alignment", "tpm", "metadata", "unverified", "expression"])
 def test_sequence_comparison_rejects_changed_or_unverified_inputs(case: str) -> None:
     first = _sequence_metadata(tpm="c")

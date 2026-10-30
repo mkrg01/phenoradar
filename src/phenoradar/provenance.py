@@ -242,10 +242,10 @@ def dataset_fingerprint(
     file_sha256_by_role: Mapping[str, str], *, feature_mode: str = "expression"
 ) -> str:
     """Fingerprint dataset file contents by semantic role, independent of file paths."""
-    required_roles = {"metadata", "tpm"} if feature_mode == "expression" else {"metadata"}
-    if feature_mode not in {"expression", "amino_acid"}:
+    required_roles = {"metadata", "tpm"} if feature_mode != "amino_acid" else {"metadata"}
+    if feature_mode not in {"expression", "amino_acid", "combined"}:
         raise ProvenanceError(f"Unknown dataset feature mode: {feature_mode}")
-    if feature_mode == "amino_acid" and not any(
+    if feature_mode in {"amino_acid", "combined"} and not any(
         role.startswith("alignment:") for role in file_sha256_by_role
     ):
         raise ProvenanceError("Sequence dataset fingerprint requires alignment input hashes")

@@ -142,15 +142,14 @@ def _build_run_fingerprint_metadata(
     split_manifest: pl.DataFrame,
     input_files: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    dataset_sha256 = dataset_fingerprint(
-        input_hashes_by_role(
-            input_files,
-            {
-                "metadata": Path(config.data.metadata_path),
-                "tpm": Path(config.data.tpm_path),
-            },
-        )
+    input_hashes = input_hashes_by_role(
+        input_files,
+        {
+            "metadata": Path(config.data.metadata_path),
+            "tpm": Path(config.data.tpm_path),
+        },
     )
+    dataset_sha256 = dataset_fingerprint(input_hashes)
     split_sha256 = split_fingerprint(split_manifest)
     evaluation_contract = {
         "evaluation_contract_version": _EVALUATION_CONTRACT_VERSION,
@@ -166,6 +165,8 @@ def _build_run_fingerprint_metadata(
     )
     return {
         "fingerprint_schema_version": FINGERPRINT_SCHEMA_VERSION,
+        "feature_mode": "expression",
+        "input_sha256": input_hashes,
         "dataset_fingerprint": dataset_sha256,
         "split_fingerprint": split_sha256,
         "experiment_fingerprint": experiment_sha256,
@@ -921,7 +922,7 @@ def _run_single(
     )
     _log(f"Configuration resolved (execution_stage={resolved.runtime.execution_stage}).")
 
-    if getattr(resolved.data, "feature_mode", "expression") == "amino_acid":
+    if getattr(resolved.data, "feature_mode", "expression") in {"amino_acid", "combined"}:
         from phenoradar.amino_acid import AlignmentError
         from phenoradar.amino_acid_run import run_amino_acid
 
@@ -933,7 +934,7 @@ def _run_single(
             )
         except (AlignmentError, CVError, SplitError, OSError) as exc:
             raise typer.BadParameter(str(exc)) from exc
-        typer.echo(f"Wrote amino-acid run artifacts at {result}")
+        typer.echo(f"Wrote {resolved.data.feature_mode} run artifacts at {result}")
         return result
 
     tree_path = getattr(resolved.data, "tree_path", None)
@@ -2435,11 +2436,12 @@ def predict(
         bundle_manifest = manifest_value if isinstance(manifest_value, dict) else {}
     except (OSError, ValueError):
         bundle_manifest = {}
-    if bundle_manifest.get("feature_mode") == "amino_acid":
+    if bundle_manifest.get("feature_mode") in {"amino_acid", "combined"}:
         from phenoradar.amino_acid import AlignmentError
         from phenoradar.amino_acid_run import predict_amino_acid
 
-        if tpm_path is not None:
+        combined = bundle_manifest.get("feature_mode") == "combined"
+        if tpm_path is not None and not combined:
             raise typer.BadParameter("--tpm-path is not used by an amino-acid model bundle")
         try:
             sequence_overrides: dict[str, Any] = {"data": {}}
@@ -2449,10 +2451,12 @@ def predict(
                 sequence_overrides["data"]["alignment_dir"] = str(alignment_dir)
             if sequence_tpm_path is not None:
                 sequence_overrides["data"]["sequence_tpm_path"] = str(sequence_tpm_path)
+            if tpm_path is not None:
+                sequence_overrides["data"]["tpm_path"] = str(tpm_path)
             if n_jobs is not None:
                 sequence_overrides["runtime"] = {"n_jobs": n_jobs}
             sequence_inputs = load_predict_config(
-                config_paths, overrides=sequence_overrides, require_tpm=False
+                config_paths, overrides=sequence_overrides, require_tpm=combined
             )
             destination = predict_amino_acid(
                 model_bundle,
@@ -2469,8 +2473,10 @@ def predict(
                 ),
                 sequence_tpm_path=(
                     Path(sequence_inputs.data.sequence_tpm_path)
-                    if bundle_manifest.get("bundle_format_version") == "aa-2"
-                    and sequence_inputs.data.sequence_tpm_path
+                    if sequence_inputs.data.sequence_tpm_path and (
+                        bundle_manifest.get("bundle_format_version") == "aa-2"
+                        or bundle_manifest.get("sequence_tpm_source") is not None
+                    )
                     else sequence_tpm_path
                 ),
                 sequence_tpm_cache_dir=(
@@ -2478,6 +2484,8 @@ def predict(
                     if sequence_inputs.data.sequence_tpm_cache_dir else None
                 ),
                 n_jobs=sequence_inputs.runtime.n_jobs,
+                tpm_path=(Path(sequence_inputs.data.tpm_path)
+                          if combined and sequence_inputs.data.tpm_path else None),
             )
         except (AlignmentError, CVError, OSError, ValueError) as exc:
             raise typer.BadParameter(str(exc)) from exc

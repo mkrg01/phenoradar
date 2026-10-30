@@ -985,33 +985,33 @@ def _datasets_are_comparable(metadata_rows: Sequence[dict[str, Any]]) -> bool:
     # Sequence aggregation is a study condition. Using TPM as gene weights
     # adds an input role, while the underlying sequences and phenotype cohort
     # must remain identical. Retain and verify the complete active-input hashes.
-    bases = set()
-    tpm_hashes = set()
+    role_hashes: dict[str, str] = {}
+    alignment_axes: set[tuple[str, ...]] = set()
     for metadata in metadata_rows:
-        if metadata.get("feature_mode") != "amino_acid":
+        mode = metadata.get("feature_mode", "expression")
+        if mode not in {"expression", "amino_acid", "combined"}:
             return False
         inputs = metadata.get("input_sha256")
         if not isinstance(inputs, dict):
             return False
-        weighted = metadata.get("aggregation") == "tpm_weighted_frequency"
+        sequence = mode in {"amino_acid", "combined"}
+        weighted = sequence and metadata.get("aggregation") == "tpm_weighted_frequency"
         if weighted != ("sequence_tpm" in inputs):
             return False
         try:
-            if dataset_fingerprint(inputs, feature_mode="amino_acid") != metadata.get(
+            if dataset_fingerprint(inputs, feature_mode=mode) != metadata.get(
                 "dataset_fingerprint"
             ):
                 return False
-            bases.add(
-                dataset_fingerprint(
-                    {k: v for k, v in inputs.items() if k != "sequence_tpm"},
-                    feature_mode="amino_acid",
-                )
-            )
+            for role, digest in inputs.items():
+                if role in role_hashes and role_hashes[role] != digest:
+                    return False
+                role_hashes[role] = digest
+            if sequence:
+                alignment_axes.add(tuple(sorted(k for k in inputs if k.startswith("alignment:"))))
         except ProvenanceError:
             return False
-        if weighted:
-            tpm_hashes.add(inputs["sequence_tpm"])
-    return len(bases) == 1 and len(tpm_hashes) <= 1
+    return len(alignment_axes) <= 1
 
 
 def generate_study_report(

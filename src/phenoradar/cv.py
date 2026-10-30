@@ -73,6 +73,7 @@ from phenoradar.model_selection import (
     Candidate,
     ContinuousSpec,
     ModelSelectionError,
+    active_search_space,
     discrete_candidate_space_size,
     expanded_search_space,
     generate_candidates,
@@ -203,6 +204,7 @@ class InnerCvPreprocessedFold:
     y_train: np.ndarray
     y_valid: np.ndarray
     sample_weight: np.ndarray | None
+    n_expression_features: int | None = None
 
 
 @dataclass(frozen=True)
@@ -3010,6 +3012,26 @@ def _validate_model_params(model_name: str, model_params: dict[str, Any]) -> Non
             )
 
 
+def _glmnet_candidate_params(
+    config: AppConfig, params: dict[str, Any]
+) -> tuple[dict[str, Any], float]:
+    """Separate the combined-mode penalty ratio from native estimator parameters."""
+    native = dict(params)
+    value = native.pop("amino_acid_penalty_ratio", 1.0)
+    ratio = 1.0
+    if config.data.feature_mode == "combined":
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+            raise CVError("amino_acid_penalty_ratio must be a finite number > 0")
+        ratio = float(value)
+        if not np.isfinite(ratio) or ratio <= 0:
+            raise CVError("amino_acid_penalty_ratio must be a finite number > 0")
+        native.setdefault("alpha", 1.0)
+        if native["alpha"] != 1.0:
+            raise CVError("combined mode requires LASSO (alpha=1)")
+    _validate_model_params("logistic_elasticnet", native)
+    return native, ratio
+
+
 def _build_estimator(
     config: AppConfig,
     model_seed: int,
@@ -3018,7 +3040,10 @@ def _build_estimator(
     rf_n_jobs: int | None = None,
 ) -> FittedEstimator:
     params = {} if model_params is None else dict(model_params)
-    _validate_model_params(config.model.name, params)
+    if config.model.name == "logistic_elasticnet":
+        params, _ratio = _glmnet_candidate_params(config, params)
+    else:
+        _validate_model_params(config.model.name, params)
 
     if config.model.name == "logistic_elasticnet":
         return GlmnetLogisticRegression(
@@ -3816,7 +3841,7 @@ def _prepare_source_selection_tpe(
         )
 
     trial_count = int(config.model_selection.trial_count)
-    discrete_values, continuous_values = expanded_search_space(config.model_selection.search_space)
+    discrete_values, continuous_values = expanded_search_space(active_search_space(config))
     effective_trials = trial_count
     if not continuous_values:
         full_space_size = discrete_candidate_space_size(discrete_values)
@@ -3939,15 +3964,16 @@ def _score_glmnet_paths(
     timing_recorder: TimingRecorder | None,
 ) -> list[tuple[float, list[dict[str, Any]]]]:
     """Fit one native lambda path per fold and combination of other parameters."""
-    paths: dict[tuple[float, float, int], list[Candidate]] = {}
+    paths: dict[tuple[float, float, int, float], list[Candidate]] = {}
     for candidate in sorted(
         candidates, key=lambda item: -_numeric_candidate_param(item, "lambda", DEFAULT_LAMBDA)
     ):
-        _validate_model_params("logistic_elasticnet", candidate.params)
+        native, ratio = _glmnet_candidate_params(config, candidate.params)
         path_key = (
-            float(candidate.params.get("alpha", DEFAULT_ALPHA)),
-            float(candidate.params.get("thresh", DEFAULT_THRESH)),
-            int(candidate.params.get("maxit", DEFAULT_MAXIT)),
+            float(native.get("alpha", DEFAULT_ALPHA)),
+            float(native.get("thresh", DEFAULT_THRESH)),
+            int(native.get("maxit", DEFAULT_MAXIT)),
+            ratio,
         )
         paths.setdefault(path_key, []).append(candidate)
     tasks = [
@@ -3965,7 +3991,15 @@ def _score_glmnet_paths(
     ) -> list[tuple[int, float, list[dict[str, Any]]]]:
         # Each task has its own native call; no fitted state crosses folds or paths.
         started = None if timing_recorder is None else timing_recorder.start()
-        params = path[0].params
+        params, ratio = _glmnet_candidate_params(config, path[0].params)
+        penalty_options: dict[str, Any] = {}
+        if config.data.feature_mode == "combined":
+            if fold.n_expression_features is None:
+                raise CVError("Combined inner fold is missing its feature block boundary")
+            penalty_options["penalty_factor"] = np.concatenate((
+                np.ones(fold.n_expression_features),
+                np.full(fold.x_train.shape[1] - fold.n_expression_features, ratio),
+            ))
         try:
             models = _with_native_thread_limit(
                 estimator_n_jobs,
@@ -3977,6 +4011,7 @@ def _score_glmnet_paths(
                 thresh=float(params.get("thresh", DEFAULT_THRESH)),
                 maxit=int(params.get("maxit", DEFAULT_MAXIT)),
                 sample_weight=fold.sample_weight,
+                **penalty_options,
             )
         except GlmnetError as exc:
             raise CVError(f"Inner fold {fold.inner_fold_id}: {exc}") from exc

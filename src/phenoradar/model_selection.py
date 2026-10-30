@@ -141,6 +141,14 @@ def _search_space_parts(
     return discrete_values, continuous_values
 
 
+def active_search_space(config: AppConfig) -> dict[str, SearchSpaceValue]:
+    """Keep inactive modality settings in config, but exclude them from search."""
+    return {
+        name: value for name, value in config.model_selection.search_space.items()
+        if name != "amino_acid_penalty_ratio" or config.data.feature_mode == "combined"
+    }
+
+
 def expanded_search_space(
     search_space: dict[str, SearchSpaceValue],
 ) -> tuple[dict[str, list[Any]], dict[str, ContinuousSpec]]:
@@ -226,7 +234,7 @@ def generate_candidates(
     warnings: list[str],
 ) -> list[Candidate]:
     """Generate deterministic candidate params for one source sample set."""
-    search_space = config.model_selection.search_space
+    search_space = active_search_space(config)
     strategy = config.model_selection.search_strategy
     runtime_seed = int(config.runtime.seed)
 

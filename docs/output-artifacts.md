@@ -1,1315 +1,400 @@
-# Output Artifacts and Interpretation
+# Outputs and interpretation
 
-This page describes run-time outputs, when they are written, and how to interpret
-them for `run` / `predict` / `report`.
+Start with the files below in a run directory. Paths on this page describe
+expression mode; [sequence and combined modes](amino-acid.md#outputs) add their
+own tables and use different prediction filenames.
 
-With `phylogenetic_imputation.enabled: true`, unknown-species predictions also
-receive [phylogenetic interpretation outputs](phylogenetic-imputation.md#outputs)
-under `inference/`. Existing prediction and evaluation tables are unchanged.
+| Question | Read first |
+| --- | --- |
+| Did the run finish? | `run_metadata.json`: status and warnings |
+| How well did it predict held-out species? | `cv/tables/metrics_cv.tsv` and `prediction_cv.tsv` |
+| Which groups were held out? | `split/tables/fold_validation_groups.tsv` and `fold_diagnostics.tsv` |
+| Are decisions withheld for missing information? | Each stage's `abstention_summary.tsv` |
+| Which features mattered consistently? | `cv/tables/feature_importance.tsv` and `feature_stability_by_feature.tsv` |
+| What did the final model predict? | `external_test/tables/prediction_external_test.tsv` and `inference/tables/prediction_inference.tsv` |
+| What took the time? | `runtime/tables/timing.tsv` |
 
-## Quick reading order
+## Directory layout
 
-For one `run` result directory, a practical order is:
+```text
+runs/<timestamp>_run_<id>/
+  resolved_config.yml
+  run_metadata.json
+  split/tables/          # species pools and fold assignments
+  cv/{tables,figures}/   # held-out evaluation and interpretation
+  model/{tables,figures}/
+  summary/tables/
+  runtime/tables/
+  external_test/{tables,figures}/  # full_run evaluation
+  inference/{tables,figures}/      # full_run unknown-trait predictions
+  model_bundle/                   # full_run reusable model
+```
 
-1. `run_metadata.json` (status, warnings, pool counts, timing)
-2. `runtime/tables/timing.tsv` (stage, fold, sample-set, and candidate bottlenecks)
-3. `cv/tables/metrics_cv.tsv`, `cv/tables/loss_by_split_cv.tsv`,
-   `model/tables/evaluation_contract.tsv`, `model/tables/thresholds.tsv`, and
-   `summary/tables/classification_summary.tsv`
-   (overall quality, train/validation loss gap, thresholds, and threshold-wise classification tradeoffs)
-4. `cv/tables/prediction_cv.tsv`, `cv/figures/roc_curve_cv.svg`, and
-   `cv/figures/pr_curve_cv.svg`
-   (overall CV ranking behavior)
-5. `external_test/tables/prediction_external_test.tsv` /
-   `inference/tables/prediction_inference.tsv` (`full_run` only)
-6. `cv/tables/feature_importance.tsv`, `cv/tables/coefficients.tsv`, and
-   `cv/tables/feature_stability_summary.tsv`
-   (model interpretation and outer-fold stability)
-7. `model/tables/final_refit_feature_importance.tsv`,
-   `model/tables/final_refit_coefficients.tsv`, and `model/figures/`
-   (`full_run`; interpretation of the fitted final ensemble)
+Stage directories may exist without data. Conditional tables and figures require
+the corresponding pool, model support, or enabled setting. Missing or degenerate
+plot inputs are recorded as warnings.
 
-## Run directory layout
+`predict` writes `runs/<timestamp>_predict_<id>/`;
+`report` writes `reports/<timestamp>_report_<id>/`.
+For multi-condition runs, see [studies](#studies).
 
-When `abstention.enabled: true`, inspect each prediction table together with its
-`abstention_summary.tsv`. The raw probability is retained even for a withheld
-decision; use `pred_label_selective` for downstream classification and candidate
-selection.
+## Predictions
 
-The following columns are added to CV, external-test, inference, and bundled
-prediction tables (and per-fold inference predictions):
+| Table | Core columns | Meaning |
+| --- | --- | --- |
+| `cv/tables/prediction_cv.tsv` | `fold_id`, `species`, `label`, `prob` | One held-out prediction per CV species |
+| `external_test/tables/prediction_external_test.tsv` | `species`, `true_label`, `prob`, `pred_label_fixed_threshold` | Final-model evaluation, `full_run` |
+| `inference/tables/prediction_inference.tsv` | Same as external test; `true_label=NA` | Unknown-species predictions from `full_run` or expression `predict` |
+| `inference/tables/prediction_inference_by_fold.tsv` | `fold_id`, `species`, `prob` | Unknown-species sensitivity to outer-fold training composition |
+| `cv/tables/ensemble_model_probs.tsv` | `fold_id`, `model_index`, `species`, `prob` | Individual member probabilities when the ensemble has multiple models |
+
+`prob` is class-1 probability. Hard labels use the fixed threshold 0.5;
+`model/tables/thresholds.tsv` records `policy=fixed_constant` and
+`derived_from_cv=false`.
+
+Optional `uncertainty_std` is the standard deviation of member probabilities.
+It measures ensemble disagreement, not a confidence interval. Unknown-species
+predictions from outer folds are sensitivity diagnostics, not OOF performance
+estimates for those species.
+
+## Metrics
+
+`cv/tables/metrics_cv.tsv` contains `aggregate_scope`, `fold_id`, `metric`,
+`metric_value`, `n_pos`, `n_neg`, and `n_valid_folds`.
+
+| Metric | Better | Interpretation |
+| --- | --- | --- |
+| `roc_auc` | Higher | Ranking across thresholds |
+| `pr_auc` | Higher | Average Precision (`sklearn.metrics.average_precision_score`), not trapezoidal PR area |
+| `balanced_accuracy` | Higher | Mean sensitivity and specificity at 0.5 |
+| `mcc` | Higher | Matthews correlation coefficient at 0.5 |
+| `brier` | Lower | Mean squared probability error |
+
+`model/tables/evaluation_contract.tsv` records exact implementations, directions,
+input types, and threshold dependencies, including model-selection log loss.
+
+| `aggregate_scope` | Meaning |
+| --- | --- |
+| `NA` | One fold, with a concrete 1-based `fold_id` |
+| `macro` | Mean of defined fold scores; each fold has equal weight |
+| `micro` | Recomputed from all pooled OOF predictions |
+
+Single-label validation folds have `NA` for ROC AUC, Average Precision, balanced
+accuracy, and MCC. Brier score and log loss remain defined. `n_valid_folds` shows
+the number contributing to each aggregate; pooled micro metrics can remain
+defined when individual folds are single-label.
+
+`summary/tables/classification_summary.tsv` gives pooled and per-fold OOF
+confusion counts (`tp`, `fp`, `tn`, `fn`), accuracy, precision, recall, F1, and MCC.
+`full_run` adds pooled external-test results. Precision is `NA` without predicted
+positives; recall is `NA` without positive labels in the population; F1 is `NA`
+when precision/recall is undefined or both are zero.
+
+### Loss and group-bootstrap intervals
+
+| Table | Content / condition |
+| --- | --- |
+| `cv/tables/loss_by_split_cv.tsv` | `fold_id`, `split`, `metric`, `metric_value`; train vs validation log loss |
+| `external_test/tables/loss_by_split_final_refit.tsv` | Train vs external-test log loss in `full_run`; external row omitted if empty |
+| `cv/tables/group_bootstrap_metrics.tsv` | Pooled OOF estimates, percentile bounds, confidence level, valid replicate counts, group and seed metadata |
+| `cv/tables/group_bootstrap_replicates.tsv` | Per-replicate metric values, group counts, multiplicities, and label counts |
+
+Loss diagnostics average sampled-set ensemble losses when multiple sampled sets
+exist. Use the training/validation gap to inspect overfitting.
+
+Bootstrap tables require `evaluation.group_bootstrap.enabled: true`. Each
+replicate draws G groups with replacement from the G unique `split.group_col`
+values, retaining every species and repeated-group multiplicity. Models are not
+refitted. Check `n_valid_resamples` and `valid_resample_fraction`: single-label
+replicates cannot support all metrics.
+
+## Abstention
+
+When enabled, prediction tables add:
 
 | Column | Meaning |
 | --- | --- |
-| `information_coverage` | Observed fraction of absolute coefficient weight, averaged across models |
-| `abstention_threshold` | Saved fixed coverage threshold, normally `0.8` |
-| `pred_label_selective` | Fixed-0.5 binary decision for accepted species; `NA` for abstained species |
+| `information_coverage` | Model-weighted observation coverage, averaged across members |
+| `abstention_threshold` | Saved fixed coverage threshold |
+| `pred_label_selective` | Accepted fixed-0.5 label, or `NA` for abstention |
 | `decision_status` | `accepted` or `abstained` |
-| `abstention_reason` | `insufficient_information`, `no_informative_coefficients`, or `NA` when accepted |
-| `missing_features_json` | Missing important features for abstained species, ordered by coefficient weight |
-
-Each prediction stage writes:
-
-- `<stage>/tables/abstention_summary.tsv`: overall, true-label, and available
-  fold/group summaries with `n_species`, `n_accepted`, `n_abstained`,
-  `decision_rate`, accepted positive/negative counts, and `n_evaluated`.
-  Confusion counts and metrics evaluate accepted labeled species only.
-  `positive_error_rate = FP / (TP + FP)` and
-  `negative_error_rate = FN / (TN + FN)`; undefined denominators are `NA`.
-  If all species abstain, performance metrics are `NA`, not zero error.
-- `<stage>/tables/abstention_features.tsv`: readable long form of the missing
-  evidence, with `species`, `rank`, `feature`, and `coefficient_fraction`.
-  At most `figures.top_features` features are listed per species. These are
-  availability weights, not signed contributions or causal explanations.
-- `<stage>/tables/abstention_by_<group>.tsv`: additional summary by the configured
-  metadata group, when grouped summaries are available.
-
-Existing `metrics_cv.tsv`, `classification_summary.tsv`, loss, ROC/PR, and
-probability-comparison outputs continue to describe raw predictions across all
-species. Compare those baseline metrics with `abstention_summary.tsv` and its
-decision rate; selective metrics alone can hide excessive withholding.
-
-Grouped tables additionally report `n_accepted`, `n_abstained`, `n_pred_negative`,
-and `decision_rate`. Their `n_pred_positive` excludes abstention and
-`pred_positive_rate` uses accepted species as its denominator. Probability
-statistics and `top_species` still describe raw probabilities across all species.
-Candidate evidence is generated only for accepted positives. CV error-evidence
-PDFs remain diagnostics of raw fixed-0.5 errors and explicitly label abstained
-species; these PDFs are placed under `species_evidence/abstained/`.
-
-When prediction tables include abstention, prediction and evaluation SVGs are
-written for both populations:
-
-- `<name>.svg`: all species, including those whose decisions were withheld.
-  Binary groups and metrics use the raw fixed-0.5 decision.
-- `accepted_only/<name>.svg`: only species with `decision_status=accepted`.
-  Probabilities, counts, confusion groups, and metrics use this subset.
-
-The directory identifies the population: all-species figures remain directly in
-`<stage>/figures/`, and abstention-filtered figures share the same basenames under
-`<stage>/figures/accepted_only/`. Figures retain their intended canvas size
-without added population titles, subtitles, or explanatory banners. Labels, colorbars, and panel spacing are measured at export, with a
-consistent six-point outer gutter; legends occupy dedicated space outside the
-data panels. Long feature annotations wrap across lines without truncation.
-Existing sample-count labels and metric annotations use the plotted population; original totals and abstention counts remain in the summary tables.
-Legends explain visual encodings rather than repeat population descriptions. Supplementary
-configuration and numerical summaries belong in the output tables or manuscript
-captions, not as prose on the figure. Evidence PDFs identify the species and
-decision; family/fold/group metadata and coverage diagnostics remain in tables.
-The pairs are generated even when no species abstain. With abstention disabled,
-existing single-figure behavior is retained. On regeneration, an old flat
-`<name>_accepted_only.svg` is removed only after its replacement is saved.
-
-Paired figures include the CV metric overview, ROC/PR curves, the external
-confusion matrix and CV/external metric comparison, trait/fold/group probability
-plots, inference/predict probability histograms, available predict uncertainty
-plots, top-feature expression by confusion group, prediction trees, and CV
-tree-feature heatmaps. Accepted-only CV macro metrics average defined metrics
-from the remaining folds; micro metrics pool the remaining OOF species.
-An empty accepted population produces an explanatory figure rather than a
-zero-error score; accepted-only ROC/PR curves also explain when fewer than two
-labels remain.
-
-Model interpretation, model selection, training/validation loss, and the existing
-group-bootstrap figures keep their original populations. Candidate and individual
-CV error-evidence PDFs keep the selection rules described above. Prediction and
-summary TSVs are unchanged; `abstention_summary.tsv` supplies accepted-only scores.
-
-With neutral expression handling, expression-evidence tables add `is_missing`.
-Raw TPM is preserved, while missing plot values become `NA` rather than a
-low-expression point or a zero-intensity heatmap cell. Missing linear inputs
-have zero standardized contribution; an observed value at the training mean
-also has zero contribution but remains observed for coverage.
-
-`phenoradar run` writes:
-
-- `runs/<timestamp>_run_<id>/...`
-
-When scalar-list condition expansion is used, it instead writes:
-
-- `runs/<timestamp>_study_<id>/...`
-
-The study directory contains the archived source config, one shared split,
-ordered condition manifest, complete run artifacts under `conditions/`, and
-cross-condition outputs:
-
-- `condition_manifest.tsv`
-- `config_differences.tsv`
-- `study_metadata.json`
-- `split/tables/split_manifest.tsv`
-- `tables/condition_metrics.tsv`
-- `tables/pairwise_comparisons.tsv`
-- `tables/training_group_sensitivity.tsv` for a pure
-  `sampling.training_group_count`/`group_subsample_repeats` study
-- `figures/condition_metrics.{svg,pdf,png}`
-- `figures/training_group_sensitivity.{svg,pdf,png}` for that training-group
-  sweep
-- For reports from legacy studies: `figures/ranked_feature_sensitivity.{svg,pdf,png}`
-  when both ranked-filter
-  method and `max_features` vary as a complete two-method grid
-- For reports from legacy studies: `figures/ranked_feature_method_difference.{svg,pdf,png}`
-  for the matched
-  second-method improvement over the first method at each `max_features`
-
-`condition_metrics.tsv` reports absolute OOF metrics and available group-bootstrap
-intervals for every condition. Its figure uses the varying configuration field
-as the Y-axis label and only its values as tick labels. The axis normally uses
-the final field name, such as `min_nonzero_fraction` or `max_features`.
-Generic names (`method`, `enabled`, `name`, `scope`, `strategy`, `weighting`,
-`threshold`, and `model`) include their parent, such as `expression_transform.method`.
-Fixed fields are omitted from tick labels; generated repeats are identified
-when needed to distinguish conditions. If only the repeat index varies, it
-becomes the axis. Reports from legacy multi-variable studies retain full setting
-labels. Condition positions are shared across the six metrics.
-`pairwise_comparisons.tsv` contains every unordered
-condition pair. `improvement_a_over_b` is oriented so that positive values always
-favor condition A, including for loss metrics. Pairwise intervals use matched
-bootstrap replicate IDs generated from the shared groups and seed.
-`training_group_sensitivity.tsv` aggregates condition point estimates across
-group-subset repeats and reports their mean, standard deviation, quartiles, and
-range. The corresponding figure shows the mean, interquartile band, and observed
-minimum-to-maximum range across repeats against the effective mean number of
-training groups per fold.
-
-Run outputs use a stage-first layout. Stage-specific TSVs are placed in
-`<stage>/tables/`, and stage-specific SVGs are placed in `<stage>/figures/`.
-The main stage directories are `split/`, `cv/`, `model/`, `summary/`, `runtime/`,
-`external_test/`, and `inference/`.
-
-`phenoradar predict` writes:
-
-- `runs/<timestamp>_predict_<id>/...`
-
-Prediction always saves a `resolved_config.yml` containing only effective
-prediction inputs, memory guard, execution, figures, and summary settings, even when no
-input config was supplied. Model and learned preprocessing state remain in the
-source bundle, linked by path and hashes in `run_metadata.json`. The latter
-records `runtime_n_jobs`, a deterministic prediction seed policy, and only input
-files that were actually supplied; optional metadata and config need not exist.
-
-
-`phenoradar report` writes:
-
-- `reports/<timestamp>_report_<id>/...`
-
-## `run` artifacts (schemas and write conditions)
-
-Always written:
-
-- `resolved_config.yml`
-  - composed + validated config used in execution
-  - includes the generated `sampling.group_subsample_repeat_index` so each
-    group-subsampling condition can be reproduced
-- `split/tables/split_manifest.tsv`
-  - columns: `species`, `pool`, `fold_id`, `group_id`, `contrast_group_id`, `label`
-  - pools: `train`, `validation`, `external_test`, `discovery_inference`
-  - `train` / `validation` rows are the per-fold expansion of the internal
-    `training_validation` pool.
-- `split/tables/fold_validation_groups.tsv`
-  - columns: `fold_id`, `group_id`, `n_validation_species`, `n_validation_pos`,
-    `n_validation_neg`, `validation_label_profile`
-  - one row per validation-side group in each outer fold
-  - `validation_label_profile`: `both`, `positive_only`, or `negative_only`
-  - for `logo`, each `fold_id` has exactly one row
-  - for `group_kfold` and `stratified_group_kfold`, a `fold_id` can have
-    multiple rows
-- `split/tables/fold_diagnostics.tsv`
-  - one row per outer fold, written before CV execution results
-  - columns: `fold_id`, train/validation group and species counts,
-    train/validation positive and negative counts, `train_label_profile`,
-    `validation_label_profile`, and `two_class_validation_metrics_defined`
-  - use this table with `fold_validation_groups.tsv` to audit taxonomic-block
-    assignments and identify single-label validation folds
-- `model/tables/training_group_subsets.tsv`
-  - one audit row per available group in every outer fold, plus final-refit rows
-    during `full_run`
-  - records the requested and effective group counts, deterministic group rank,
-    generated repeat index, selected flag, and per-group label/species counts
-  - `group_id` is a value of `split.group_col`; selection changes training rows
-    only and does not alter `split_manifest.tsv`
-- `cv/tables/metrics_cv.tsv`
-  - columns: `aggregate_scope`, `fold_id`, `metric`, `metric_value`, `n_pos`, `n_neg`, `n_valid_folds`
-  - `aggregate_scope`: per-fold rows use `NA`, aggregate rows use `macro`/`micro`
-- `cv/tables/loss_by_split_cv.tsv`
-  - columns: `fold_id`, `split`, `metric`, `metric_value`
-  - current `split` values: `train`, `validation`
-  - current `metric` value: `log_loss`
-- `model/tables/thresholds.tsv`
-  - columns: `threshold_name`, `threshold_value`, `source`, `policy`,
-    `derived_from_cv`, `selection_metric`, `selection_scope`
-  - threshold names: `fixed_probability_threshold`
-- `model/tables/evaluation_contract.tsv`
-  - one row per metric key with its display name, exact implementation, optimization
-    direction, input type, threshold dependency, and compatibility note
-  - `pr_auc` is explicitly mapped to `sklearn.metrics.average_precision_score`
-- `cv/tables/feature_importance.tsv`
-  - columns: `feature`, `importance_mean`, `importance_std`, `n_models`, `n_folds`, `method`
-- `cv/tables/feature_importance_by_fold.tsv`
-  - columns: `fold_id`, `feature`, `importance_mean`, `n_models`, `method`
-- `cv/tables/coefficients.tsv`
-  - columns: `feature`, `coef_mean`, `coef_std`, `n_models`, `n_folds`, `method`, `reason`
-- `cv/tables/coefficients_by_fold.tsv`
-  - columns: `fold_id`, `feature`, `coef_mean`, `n_models`, `method`, `reason`
-  - for non-linear models, coefficient values can be `NA` with `reason=unsupported_model_non_linear`
-- `cv/tables/feature_stability_by_feature.tsv`
-  - one row per feature, computed after all outer folds have completed
-  - reports retention frequency, non-zero selection frequency, and selection
-    frequency conditional on having survived preprocessing
-  - for signed linear models, also reports positive/negative fold counts and
-    coefficient-sign agreement; these fields are `NA` for non-linear models
-- `cv/tables/feature_stability_by_fold_pair.tsv`
-  - one row per outer-fold pair
-  - `jaccard` compares the two final non-zero feature sets as
-    `intersection / union`; it is `NA` when both sets are empty
-- `cv/tables/feature_stability_summary.tsv`
-  - one-row summary of selection counts, pairwise Jaccard statistics, and
-    coefficient-sign agreement
-  - stability artifacts reuse already fitted outer-fold models and are purely
-    diagnostic; they do not affect feature selection, predictions, or scores
-- `cv/tables/prediction_cv.tsv`
-  - columns: `fold_id`, `species`, `label`, `prob`
-  - optional `uncertainty_std` (ensemble size > 1)
-- `<stage>/tables/group_summary_<group>.tsv` (when `summary.group_col` is present in metadata)
-  - written for `cv`; also for `external_test` and `inference` in `full_run` when those prediction pools are non-empty
-  - `<group>` is derived from `summary.group_col`; for example `family` writes `group_summary_family.tsv`
-  - columns:
-    - `group_col`, `group_id` (the selected metadata column value)
-    - `n_species`, `n_true_positive`, `n_true_negative`, `n_pred_positive`,
-      `pred_positive_rate`
-    - `prob_min`, `prob_q1`, `prob_median`, `prob_mean`, `prob_q3`, `prob_max`
-    - `uncertainty_mean`, `top_species`, `top_prob`
-- `model/tables/feature_filter_counts.tsv`
-  - columns:
-    - `scope`, `fold_id`, `sample_set_id`
-    - `n_features_before`
-    - `n_features_after_sparse_feature_filter`
-    - `n_features_after_low_variance`
-    - `n_features_after_ranked_feature_filter`
-    - `n_features_after_correlation`
-    - `n_features_after_all`
-- `model/tables/feature_filter_counts_summary.tsv`
-  - columns:
-    - `scope`, `stage`, `n_records`
-    - `n_features_min`, `n_features_q1`, `n_features_median`, `n_features_mean`,
-      `n_features_q3`, `n_features_max`
-    - `retained_ratio_min`, `retained_ratio_q1`, `retained_ratio_median`,
-      `retained_ratio_mean`, `retained_ratio_q3`, `retained_ratio_max`
-- `model/tables/ranked_feature_scores.tsv`
-  - one row per ranked-filter candidate in each outer-fold or final-refit sample set
-  - includes `method`, `higher_in_trait`, `feature`, signed `effect`,
-    `direction_match`, `standard_error`, `score`, `rank`, `retained`,
-    label/pair counts, requested/effective feature counts, and any skip reason
-  - in directional modes, ineligible candidates have `rank=NA` and cannot be
-    retained merely to fill `max_features`
-- `model/tables/retained_features.tsv`
-  - columns:
-    - `scope`, `fold_id`, `sample_set_id`, `feature`
-- `model/tables/retained_features_summary.tsv`
-  - columns:
-    - `scope`, `fold_id`, `feature`
-    - `retained_count`, `n_sample_sets`, `retained_rate`
-- `model/tables/model_sparsity.tsv`
-  - columns:
-    - `scope`, `fold_id`, `sample_set_id`, `model_index`, `model_name`
-    - `n_features_after_all`, `n_nonzero_features`, `nonzero_ratio`
-    - `count_method`, `reason`
-- `model/tables/model_sparsity_summary.tsv`
-  - columns:
-    - `scope`, `model_name`
-    - `n_models`, `n_models_with_nonzero_count`
-    - `n_nonzero_min`, `n_nonzero_median`, `n_nonzero_mean`, `n_nonzero_max`
-    - `nonzero_ratio_min`, `nonzero_ratio_median`, `nonzero_ratio_mean`, `nonzero_ratio_max`
-- `model/tables/convergence_diagnostics.tsv`
-  - one row per estimator fit, including inner-CV candidate evaluation, selected outer-fold
-    models, and final-refit candidate/model fits
-  - columns:
-    - `training_scope`, `fit_scope`, `fold_id`, `sample_set_id`
-    - `selection_source_sample_set_id`, `candidate_index`, `inner_fold_id`, `model_index`
-    - `model_name`, `estimator_class`, `convergence_applicable`, `converged`
-    - `n_iter_max`, `n_iter_values_json`, `max_iter`
-    - `convergence_warning_count`, `convergence_warning_message`, `params_json`
-- `summary/tables/classification_summary.tsv`
-  - columns:
-    - `pool`, `fold_id`
-    - `threshold_name`, `threshold_value`
-    - `n_total`, `tp`, `fp`, `tn`, `fn`
-    - `accuracy`, `precision`, `recall`, `f1`, `mcc`
-    - `precision`: `NA` when `tp + fp = 0`
-    - `recall`: `NA` when `tp + fn = 0`
-    - `f1`: `NA` when precision/recall is undefined or both are zero
-  - includes:
-    - `validation_oof` pooled row (`fold_id=NA`)
-    - `validation_oof` per-fold rows (`fold_id=<outer fold id>`)
-    - `external_test` pooled row (`full_run` only, `fold_id=NA`)
-- `run_metadata.json`
-  - provenance and execution metadata (`status`, timings, seed policy, git/runtime snapshot, warnings)
-  - software provenance: `provenance_schema_version`, `phenoradar_version`,
-    `phenoradar_install_type`, `git_source`, `git_commit`, `git_dirty`, and
-    `git_worktree_patch_sha256`
-  - Git fields describe the imported PhenoRadar source checkout only. For an installed
-    distribution they are left explicitly unavailable instead of inspecting the invocation
-    directory or an enclosing unrelated repository.
-  - comparison identity: `fingerprint_schema_version`, `dataset_fingerprint`,
-    `split_fingerprint`, `experiment_fingerprint`, and `evaluation_contract`
-  - `evaluation_contract.metric_contract` records exact metric implementations and the
-    fixed, non-CV-derived classification threshold policy
-  - `dataset_fingerprint` hashes metadata/TPM contents by semantic role (not their paths)
-  - `split_fingerprint` hashes realized species pool/fold/group/label assignments
-- `runtime/tables/timing.tsv`
-  - columns: `scope`, `stage`, `fold_id`, `sample_set_id`, `candidate_index`,
-    `started_at_sec`, `ended_at_sec`, `duration_sec`
-  - always written for successful `run` commands
-  - uses a monotonic wall clock; offsets are relative to one recorder created at
-    command start
-  - records top-level run stages, outer-CV/final-refit stages, each outer fold,
-    sampled-set preprocessing/fitting, and model-selection candidate scoring
-  - `run_metadata.json.timing.stage_duration_sec` repeats the top-level
-    `scope=run` durations for machine-readable comparison
-- stage-specific `figures/` directories
-  - always creates `cv/figures/`, `model/figures/`, `external_test/figures/`,
-    and `inference/figures/`.
-  - always attempts:
-    - `cv/figures/cv_metrics_overview.svg`
-    - `cv/figures/cv_loss_by_split.svg`
-    - `cv/figures/feature_importance_top.svg`
-    - `cv/figures/top_feature_expression_by_confusion.svg`
-    - `cv/figures/feature_importance_by_fold_heatmap.svg`
-    - `cv/figures/coefficients_signed_top.svg`
-    - `cv/figures/feature_stability_top.svg`
-    - `cv/figures/feature_set_jaccard_heatmap.svg`
-    - `cv/figures/cv_species_probability_by_trait.svg`
-    - `cv/figures/cv_fold_trait_probability.svg`
-    - `cv/figures/feature_filter_funnel.svg`
-    - `cv/figures/non_zero_feature_count_by_fold.svg`
-    - `cv/figures/probability_by_<group>.svg` (attempted when `summary.group_col` is present in metadata)
-    - `cv/figures/model_selection.svg` (`selection_rule=best`)
-    - `cv/figures/model_selection_one_se_curve.svg` (`selection_rule=one_se`)
-    - `cv/figures/roc_curve_cv.svg` (may be skipped with warning for degenerate folds)
-    - `cv/figures/pr_curve_cv.svg` (may be skipped with warning for degenerate folds)
-    - `model/figures/final_refit_feature_importance_top.svg` (`full_run`)
-    - `model/figures/final_refit_coefficients_signed_top.svg` (`full_run`; linear model)
-    - `model/figures/final_refit_feature_filter_funnel.svg` (`full_run`)
-    - `model/figures/final_refit_model_selection.svg` (`full_run`, `selection_rule=best`)
-    - `model/figures/final_refit_model_selection_one_se_curve.svg` (`full_run`, `selection_rule=one_se`)
-    - `external_test/figures/final_refit_loss_by_split.svg` (attempted in `full_run`)
-    - `external_test/figures/top_feature_expression_by_confusion.svg` (attempted in `full_run` when external test rows exist)
-    - `external_test/figures/external_species_probability_by_trait.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
-    - `external_test/figures/external_confusion_matrix.svg` (attempted in `full_run`; may be skipped with warning when external test set is empty)
-    - `external_test/figures/cv_external_metric_comparison.svg` (attempted in `full_run`; may be skipped with warning when the pooled CV or external-test summary is missing)
-    - `external_test/figures/external_roc_curve.svg` (attempted in `full_run`; may be skipped with warning when external test labels are single-class)
-    - `external_test/figures/external_pr_curve.svg` (attempted in `full_run`; may be skipped with warning when external test labels are single-class)
-    - `inference/figures/inference_probability_distribution.svg` (attempted in `full_run`; may be skipped with warning when inference set is empty)
-    - `inference/figures/species_probability_cv_and_inference.svg` (attempted in `full_run`; may be skipped with warning when inference set is empty)
-    - `inference/figures/candidate_evidence/candidate_manifest.tsv` and one vector PDF
-      per positive inference candidate (attempted in `full_run` for linear final models)
-    - `<stage>/figures/probability_by_<group>.svg` (attempted for non-empty prediction stages when `summary.group_col` is present in metadata)
-
-Conditionally written:
-
-- `cv/tables/cv_species_evidence.tsv` (linear outer-fold model and at least one
-  fixed-threshold OOF misclassification)
-  - one row per plotted FP/FN species
-  - columns include `fold_id`, `species`, `group_id`, true/predicted labels,
-    `confusion_group`, OOF probability, species-level log loss, optional ensemble
-    uncertainty, and model count
-- `cv/tables/cv_species_feature_evidence.tsv` (same condition)
-  - one row per species-local feature, ranked by mean absolute local contribution
-    from only the models used for that species' held-out-fold OOF prediction
-  - columns include signed/absolute contribution summaries, raw target TPM,
-    `log2(TPM + 1)`, local rank, and model count
-- `cv/tables/cv_species_reference_expression.tsv` (same condition)
-  - expression references for the local features of each misclassified target species
-  - references are restricted to the unique training species actually sampled by at
-    least one ensemble member in that target's outer fold
-- `cv/tables/group_bootstrap_metrics.tsv`
-  (`evaluation.group_bootstrap.enabled=true`)
-  - one row per metric (`roc_auc`, `pr_auc`, `balanced_accuracy`, `mcc`,
-    `brier`, `log_loss`)
-  - columns: `metric`, `point_estimate`, `ci_lower`, `ci_upper`,
-    `confidence_level`, `n_resamples`, `n_valid_resamples`,
-    `valid_resample_fraction`, `n_groups`, `group_col`, `bootstrap_method`,
-    `seed`
-- `cv/tables/group_bootstrap_replicates.tsv`
-  (`evaluation.group_bootstrap.enabled=true`)
-  - one row per bootstrap replicate and metric
-  - columns: `resample_id`, `metric`, `metric_value`, `n_sampled_groups`,
-    `n_unique_sampled_groups`, `n_species_with_multiplicity`, `n_pos`, `n_neg`
-- `cv/figures/group_bootstrap_metrics.svg`
-  (`evaluation.group_bootstrap.enabled=true`)
-  - pooled OOF point estimates with configured percentile confidence intervals
-- `external_test/tables/prediction_external_test.tsv` (`full_run` only)
-  - columns:
-    - `species`, `true_label`, `prob`
-    - `pred_label_fixed_threshold`
-    - optional `uncertainty_std`
-- `inference/tables/prediction_inference.tsv` (`full_run` only)
-  - columns:
-    - `species`, `true_label`, `prob`
-    - `pred_label_fixed_threshold`
-    - optional `uncertainty_std`
-  - `true_label` values are `NA` because inference labels are unknown
-- `inference/tables/prediction_inference_by_fold.tsv` (`full_run` with inference samples)
-  - columns: `fold_id`, `species`, `prob`
-  - applies every fitted outer-fold predictor to the same discovery-inference species
-  - each `prob` is aggregated within that fold using `ensemble.probability_aggregation`
-  - this is a sensitivity diagnostic for training-set composition, not an OOF estimate or
-    a formal confidence interval for the inference species
-- `inference/tables/candidate_evidence_candidates.tsv` (`full_run`, linear final model,
-  and at least one inference species predicted as `1`)
-  - one row per plotted candidate with `species`, `prob`, and `family`
-  - `family` contains the metadata family name, or `unassigned` when unavailable
-- `inference/tables/candidate_feature_evidence.tsv` (same condition)
-  - one row per candidate-local top feature, ordered by mean absolute local contribution
-  - the maximum features per candidate is `figures.top_features`
-  - columns include signed/absolute contribution summaries, candidate TPM,
-    `log2(TPM + 1)`, local rank, and final-model count
-- `inference/tables/candidate_reference_expression.tsv` (same condition)
-  - expression reference for the unique labeled species in the internal
-    train/validation pool and the features used in candidate evidence figures
-  - columns: `species`, `label`, `feature`, `tpm`, `log2_tpm_plus1`
-- `external_test/tables/loss_by_split_final_refit.tsv` (`full_run` only)
-  - columns: `split`, `metric`, `metric_value`
-  - current `split` values: `train`, `external_test` (external row is omitted when external pool is empty)
-  - current `metric` value: `log_loss`
-- `model_bundle/` (`full_run` only)
-  - reusable inference bundle (see bundle section below)
-- `cv/tables/ensemble_model_probs.tsv` (ensemble size > 1)
-  - columns: `fold_id`, `model_index`, `species`, `prob`
-- `cv/tables/model_selection_trials.tsv` (candidate selection active)
-  - columns: `fold_id`, `sample_set_id`, `candidate_index`, `inner_fold_id`, `metric_name`, `metric_value`, `params_json`
-- `cv/tables/model_selection_trials_summary.tsv` (candidate selection active)
-  - columns: `fold_id`, `sample_set_id`, `candidate_index`, `metric_name`, `params_json`
-  - columns: `n_inner_folds`, `n_valid_inner_folds`, `metric_value_mean`, `metric_value_std`, `metric_value_se`
-- `model/tables/model_selection_selected.tsv` (candidate selection active)
-  - columns:
-    - `selection_scope`, `fold_id`, `sample_set_id`, `selection_source_sample_set_id`
-    - `rank`, `candidate_index`, `metric_name`, `metric_value`, `metric_value_se`, `selection_rule`
-    - `n_available_candidates`, `n_scored_candidates`
-    - `selected_candidate_count_requested`, `selected_candidate_count_effective`
-    - `params_json`
-- `model/tables/final_refit_feature_importance.tsv` / `final_refit_coefficients.tsv`
-  (`full_run`)
-  - final-ensemble summaries across fitted model members
-- `model/tables/final_refit_feature_importance_by_model.tsv` /
-  `final_refit_coefficients_by_model.tsv` (`full_run`)
-  - one row per final ensemble member and feature; features absent from a member's
-    retained schema are represented by zero importance/coefficient
-- `model/tables/final_refit_model_selection_trials.tsv` /
-  `final_refit_model_selection_trials_summary.tsv`
-  (candidate selection active in `full_run`)
-  - inner-CV candidate evidence used specifically for final-refit selection
-
-## Run interpretation guide
-
-The section headings below use short artifact names. The write locations follow
-the run layout above, for example CV tables live under `cv/tables/`, model
-diagnostic tables under `model/tables/`, and CV figures under `cv/figures/`.
-
-### Metric semantics (`metrics_cv.tsv`)
-
-`metric` column meanings:
-
-| metric | better direction | threshold dependent | interpretation note |
-| --- | --- | --- | --- |
-| `roc_auc` | higher | no | Ranking quality across all thresholds. |
-| `pr_auc` | higher | no | Compatibility key for Average Precision (`sklearn.metrics.average_precision_score`), not trapezoidal PR-curve area. |
-| `balanced_accuracy` | higher | yes | Mean of sensitivity and specificity at fixed threshold. |
-| `mcc` | higher | yes | Correlation-like binary metric; robust under imbalance. |
-| `brier` | lower | no | Probability calibration error (squared). |
-
-For a single-label validation fold, `roc_auc`, `pr_auc`,
-`balanced_accuracy`, and `mcc` are explicitly written as `NA`. Brier score and
-validation log loss remain defined. Aggregate `micro` metrics are recomputed
-from all pooled out-of-fold predictions and can therefore remain defined even
-when individual folds are single-label.
-
-`aggregate_scope` meaning:
-
-- `NA`: per-fold row (`fold_id` is concrete 1-based fold index).
-- `macro`: mean of fold metrics (each fold weighted equally; NaN-aware).
-- `micro`: metric recomputed from all out-of-fold predictions pooled together.
-
-`n_valid_folds` is metric-specific for aggregate rows:
-
-- If some folds are not computable for a metric (for example single-class fold for AUC), this value shows how many folds were valid.
-
-### Timing semantics (`runtime/tables/timing.tsv`)
-
-- `scope=figures` separates annotation loading, run figures, CV species evidence,
-  candidate evidence, and tree figures. `figure_job` and `tree_figure_job` record
-  individual worker intervals; their `stage` identifies the rendering job.
-  A job may write both all-species and accepted-only population variants.
-- Prediction also writes this file, using `scope=predict` for prediction,
-  evidence preparation, figure generation, and total. Candidate figure jobs
-  appear under `scope=figure_job`.
-- `scope=run` contains the major command stages such as split construction,
-  outer CV, optional group bootstrap, final refit, artifact writing, and figure
-  generation.
-- `scope=outer_cv` and `scope=final_refit` contain stage-level measurements.
-- `scope=outer_fold` adds `fold_id`; sampled-set and candidate rows also add
-  `sample_set_id` and, where applicable, `candidate_index`.
-- `started_at_sec` and `ended_at_sec` expose overlap between parallel work.
-  Concurrent row durations must not be summed to estimate elapsed wall time.
-- Use `stage=total` rows for outer-CV, final-refit, and per-fold wall-clock
-  comparisons. Use the finer rows to locate the expensive preprocessing,
-  candidate scoring, fitting, or prediction path.
-- `stage=inner_cv_preprocessing` measures creation of the train-only
-  preprocessed inner-fold cache before candidate scoring. It appears once per
-  outer fold and source sample set when model selection is active.
-
-### Core run artifact interpretation
-
-#### `split_manifest.tsv`
-
-- `pool`:
-  - `train` / `validation`: species used in outer CV (same species appears across folds).
-  - `external_test`: labeled species without a pair when splitting by the
-    configured contrast-pair column, or species in single-label groups when
-    `split.require_both_labels_per_group=true`; evaluated only in `full_run`.
-  - `discovery_inference`: unlabeled species; inference target in `full_run`.
-  - `train` / `validation` are the per-fold representation of the internal
-    `training_validation` pool.
-  - Species marked by `split.exclude_col` are omitted from `split_manifest.tsv`.
-- `fold_id`:
-  - 1-based fold index for `train`/`validation`.
-  - `NA` for `external_test` and `discovery_inference`.
-- `group_id`: the `split.group_col` value used for CV groups.
-- `contrast_group_id`: the `data.contrast_pair_col` value when configured;
-  used by contrast-pair-specific features.
-- `label`: known only where metadata has trait label.
-
-#### `fold_validation_groups.tsv`
-
-- Lookup table from outer `fold_id` to validation-side `group_id`.
-- Use this when numeric `fold_id` values need to be interpreted later.
-- In `logo`, this is the held-out group for each fold.
-- In `group_kfold` and `stratified_group_kfold`, multiple validation groups can
-  map to the same fold.
-- `validation_label_profile` identifies two-class, positive-only, and
-  negative-only validation groups.
-
-#### `fold_diagnostics.tsv`
-
-- Pre-CV audit table with one row per realized outer fold.
-- Reports train/validation group counts, species counts, positive/negative
-  counts, and label profiles.
-- `two_class_validation_metrics_defined=false` means fold-level ROC AUC,
-  Average Precision, balanced accuracy, and MCC will be written as `NA`.
-- A single-label validation fold is allowed, but every training fold must still
-  contain both labels.
-
-#### `evaluation_contract.tsv`
-
-- Machine-readable registry for every metric emitted or used for model selection.
-- `implementation` names the exact scikit-learn function used.
-- `input_type=predicted_label` metrics use the named fixed threshold; probability metrics
-  are threshold-independent.
-- The legacy-compatible key `pr_auc` has `display_name=Average Precision` and
-  `implementation=sklearn.metrics.average_precision_score`.
-
-#### `group_bootstrap_metrics.tsv` and `group_bootstrap_replicates.tsv` (optional)
-
-- The resampling unit is the actual `split.group_col`, not necessarily family.
-  For example, selecting `contrast_pair_id` or `order` bootstraps contrast
-  pairs or orders, respectively.
-- With `G` unique OOF groups, each replicate draws `G` groups with replacement
-  and includes all member species. Repeated groups contribute their species
-  repeatedly.
-- The models are not refit. The tables quantify sampling uncertainty of pooled
-  OOF performance under group-level resampling.
-- `point_estimate` is computed once from all OOF rows; `ci_lower` and `ci_upper`
-  are percentile bounds from finite bootstrap values.
-- A replicate containing only one label has `NA` for metrics that require two
-  labels. Use `n_valid_resamples` and `valid_resample_fraction` to assess how
-  much information supported each interval.
-
-#### `thresholds.tsv`
-
-- `fixed_probability_threshold`:
-  - Constant probability threshold `0.5`.
-  - Used for `pred_label_fixed_threshold` and threshold-dependent metrics in CV.
-- `policy` is `fixed_constant` and `derived_from_cv` is `false`.
-- `selection_scope` is `NA` because the threshold is fixed rather than selected from CV.
-
-#### `loss_by_split_cv.tsv`
-
-- Fold-level final loss diagnostics using `log_loss`.
-- `train`:
-  - loss on sampled training subsets used for model fitting.
-  - when multiple sampled sets exist, reported value is the mean across sampled-set ensembles.
-- `validation`:
-  - loss on fold validation data.
-  - when multiple sampled sets exist, reported value is the mean across sampled-set ensembles.
-- Use this table to compare train/validation gap by fold as an overfitting check.
-
-#### `loss_by_split_final_refit.tsv` (`full_run`)
-
-- Final-refit loss diagnostics using `log_loss`.
-- `train`:
-  - loss on sampled training subsets used in final refit.
-  - when multiple sampled sets exist, reported value is the mean across sampled-set ensembles.
-- `external_test`:
-  - loss on external labeled data.
-  - omitted when external-test pool is empty.
-- Use this table to compare final-refit train vs external generalization gap.
-
-#### `prediction_cv.tsv`
-
-- One row per validation sample prediction in outer CV.
-- `prob` is class-1 probability.
-- `label` is true binary label.
-- `uncertainty_std` (optional):
-  - Standard deviation of per-model probabilities in ensemble.
-  - Larger value means lower ensemble agreement.
-- Use this file to inspect separation, calibration, and threshold effects without touching final-refit outputs.
-
-#### `tree_prediction_cv_annotation.tsv` (optional)
-
-- Written when `data.tree_path` is set.
-- ggtree/Toytree-friendly tip annotation for CV species with non-empty
-  `split.group_col`.
-- Columns: `label`, `species`, `true_label`, `prob`, `pred_label`, `uncertainty_std`,
-  `group_id`, `fold_id`.
-- `group_id` contains the `split.group_col` value, also used as the display label.
-- `pred_label` uses the fixed threshold recorded in `thresholds.tsv` (currently `0.5`).
-
-#### `tree_contrast_pairs_annotation.tsv` (optional)
-
-- Written when `data.tree_path` is set.
-- ggtree/Toytree-friendly metadata QC annotation for all species with non-empty
-  `split.group_col`.
-- Columns: `label`, `species`, `true_label`, `group_id`.
-- Use this file to inspect which tree tips participate in split groups before
-  interpreting prediction probabilities.
-
-#### `tree_feature_heatmap_annotation.tsv` (optional)
-
-- Written when `data.tree_path` is set.
-- Long-form ggtree/Toytree-friendly feature heatmap values for species with non-empty
-  `split.group_col` and the top `figures.top_features` features by `importance_mean`.
-- Columns: `label`, `species`, `true_label`, `prob`, `group_id`, `feature_rank`,
-  `feature`, `orthogroup_annotation_taxid`, `orthogroup_annotation`, `importance_mean`,
-  `coef_mean`, `tpm`, `log2_tpm_plus1`, `z_score_log2_tpm`.
-- `prob` is the out-of-fold predicted probability of label `1` when available.
-- `log2_tpm_plus1` is `log2(TPM + 1)` after duplicate `(species, feature)` rows are
-  summed; `z_score_log2_tpm` is computed within each feature across included species.
-- `orthogroup_annotation_taxid` and `orthogroup_annotation` are populated when
-  `data.orthogroup_annotation_path` is set.
-
-#### `prediction_external_test.tsv` / `prediction_inference.tsv`
-
-- `prob`: predicted probability of label `1`.
-- `pred_label_fixed_threshold`: hard label from fixed threshold.
-- `true_label`:
-  - present in `prediction_external_test.tsv` (known trait labels).
-  - present in `prediction_inference.tsv` as `NA` (labels are unknown).
-- `uncertainty_std` (optional):
-  - Standard deviation of per-model probabilities in ensemble.
-  - Larger value means lower ensemble agreement.
-
-#### `tree_prediction_external_annotation.tsv` / `tree_prediction_predict_annotation.tsv` (optional)
-
-- Written when `data.tree_path` is set and the corresponding prediction table exists.
-- External-test columns: `label`, `species`, `true_label`, `prob`, `pred_label`,
-  `uncertainty_std`, `group_id`.
-- Predict columns: `label`, `species`, `true_label`, `prob`,
-  `pred_label_fixed_threshold`, `uncertainty_std`, `group_id`.
-- The annotation TSV retains predicted species even when a species is absent from the tree;
-  Toytree SVG output is pruned to species present in the tree.
-
-#### `feature_filter_counts.tsv`
-
-- One row per preprocessing result (`scope`, `fold_id`, `sample_set_id`).
-- Values are stage-wise feature counts through:
-  - raw (`n_features_before`)
-  - sparse feature
-  - low variance
-  - ranked filter
-  - correlation
-  - final (`n_features_after_all`)
-- Use this table to inspect fold/sample-set-specific filtering behavior.
-
-#### `feature_filter_counts_summary.tsv`
-
-- Summary of `feature_filter_counts.tsv` grouped by (`scope`, `stage`).
-- `*_q1`, `*_median`, and `*_q3` report the 25th, 50th, and 75th percentiles.
-- `retained_ratio_*` is the ratio relative to `n_features_before`.
-- Use this table for quick stage-wise trend checks without scanning all folds/sample sets.
-
-#### `retained_features.tsv`
-
-- One row per retained feature after preprocessing for a given
-  (`scope`, `fold_id`, `sample_set_id`).
-- `feature` is the feature name that survived all preprocessing filters.
-- Use this table when you need the exact retained-feature list for each fold/sample set.
-
-#### `retained_features_summary.tsv`
-
-- Summary of `retained_features.tsv` grouped by (`scope`, `fold_id`, `feature`).
-- `retained_count` is how many sampled sets retained that feature in the fold.
-- `retained_rate = retained_count / n_sample_sets`.
-- Use this table to compare feature retention across folds without scanning every sample set.
-
-#### `model_sparsity.tsv`
-
-- One row per fitted model in CV/final-refit scopes.
-- `n_nonzero_features`:
-  - count of non-zero features derived from model-specific signals
-    (`coef_` for linear models, `feature_importances_` for random forest).
-  - can be `NA` when unavailable, with the reason in `reason`.
-- `nonzero_ratio`:
-  - `n_nonzero_features / n_features_after_all` when count is available.
-
-#### `model_sparsity_summary.tsv`
-
-- Summary grouped by (`scope`, `model_name`).
-- `n_models_with_nonzero_count` helps identify how many models exposed usable sparsity counts.
-
-#### `convergence_diagnostics.tsv`
-
-- `fit_scope=candidate_evaluation` identifies fits used to score hyperparameter candidates;
-  `fit_scope=selected_model` identifies models used for predictions.
-- `convergence_applicable=false` means the estimator has no iterative convergence contract
-  (for example, Random Forest); it does not mean that fitting failed.
-- For glmnet logistic models, successful native convergence is recorded as
-  `converged=true`. Native errors and incomplete lambda paths abort training;
-  unconverged logistic models are not scored or exported. `n_iter_max` and
-  `n_iter_values_json` contain the coordinate-descent passes for the **entire
-  originating path**, including internal warm-start points between positive
-  candidate lambdas. Candidates on the same path share this count. The generic
-  `max_iter` column records glmnet's configured `maxit` budget for that entire
-  native path. Internal points do not create extra candidate or diagnostic rows.
-- For calibrated SVMs, `converged=false` indicates that at least one sub-estimator
-  reached its iteration limit. `n_iter_values_json` preserves the counts of all
-  sub-estimators. A compact non-convergence summary is also stored in
-  `run_metadata.json` `warnings`.
-- Grid/random logistic timing rows with `stage=candidate_score` represent a whole
-  fold/lambda path and have an empty `candidate_index`. Path time is recorded
-  once, without duplicating it across candidates. TPE and non-logistic candidate
-  timing rows retain their candidate indices.
-
-#### `feature_importance.tsv`
-
-- `importance_mean`:
-  - Mean of fold-level normalized importance values.
-  - Within each fold, normalized importance is averaged across fitted models first.
-- `importance_std`:
-  - Variation across fold-level mean importance values.
-  - Large value suggests unstable feature reliance.
-- `n_models` / `n_folds`:
-  - Total fitted model count and outer-fold count used for the summary.
-- `method`:
-  - `coef_abs_l1_norm`: linear model coefficients (absolute, L1-normalized per model).
-  - `feature_importances_l1_norm`: random forest importances (L1-normalized per model).
-
-#### `feature_importance_by_fold.tsv`
-
-- One row per (`fold_id`, `feature`).
-- `importance_mean` is the mean normalized importance across fitted models in that fold.
-- These fold-level values are the points and boxplot distribution in
-  `cv/figures/feature_importance_top.svg` and the cells in
-  `cv/figures/feature_importance_by_fold_heatmap.svg`.
-
-#### `coefficients.tsv`
-
-- `coef_mean` / `coef_std` summarize fold-level mean signed linear coefficients.
-- Positive `coef_mean`: higher standardized feature value pushes probability toward class `1`.
-- Negative `coef_mean`: pushes toward class `0`.
-- For non-linear models, coefficient columns can be `NA` with
-  `reason=unsupported_model_non_linear`.
-
-#### `coefficients_by_fold.tsv`
-
-- One row per (`fold_id`, `feature`).
-- `coef_mean` is the mean signed coefficient across fitted linear models in that fold.
-- These fold-level values are the points and boxplot distribution in
-  `cv/figures/coefficients_signed_top.svg`.
-
-#### Final-refit feature interpretation tables (`full_run`)
-
-- `model/tables/final_refit_feature_importance.tsv` and
-  `model/tables/final_refit_coefficients.tsv` summarize the fitted final ensemble,
-  independently of whether an external-test pool exists.
-- Their `importance_std` / `coef_std` values describe variation across individual
-  final ensemble members, rather than variation across outer-CV folds.
-- `final_refit_feature_importance_by_model.tsv` contains `model_index`, `feature`,
-  normalized `importance`, and `method` for each member.
-- `final_refit_coefficients_by_model.tsv` contains `model_index`, `feature`, signed
-  `coefficient`, `method`, and `reason`. Coefficients are `NA` for unsupported
-  non-linear models.
-- A feature omitted by one member's preprocessing is represented as zero for that
-  member, allowing models with different retained schemas to be summarized together.
-- These tables describe model reliance; they are not external-test performance
-  estimates and do not replace the outer-CV stability tables.
-
-#### Feature-stability tables
-
-- `selection_frequency` is the fraction of all outer folds in which a feature's
-  final model signal is non-zero (`abs(coef_mean) > 1e-12` for signed linear
-  models; `importance_mean > 1e-12` otherwise).
-- `selection_frequency_when_retained` separates model-selection instability from
-  preprocessing instability by using only folds where the feature was retained
-  in the denominator.
-- `sign_agreement_rate` is the larger of the positive and negative non-zero fold
-  counts divided by the number of non-zero folds. It is reported only when a
-  signed coefficient is available and the feature is selected in at least two folds.
-- Pairwise `jaccard` is `1` for identical non-empty sets, `0` for disjoint sets,
-  and closer to `1` as outer folds choose more similar features.
-- These are post-hoc outer-CV diagnostics. They must not be used to alter the
-  evaluated folds retrospectively; doing so would leak validation information.
-
-#### `classification_summary.tsv`
-
-- Purpose:
-  - threshold-wise confusion-matrix and standard classification metrics summary.
-- `pool`:
-  - `validation_oof`: out-of-fold validation predictions.
-  - `external_test`: final-refit external test predictions (`full_run` only).
-- `fold_id`:
-  - per-fold rows for `validation_oof` (`1`, `2`, ...).
-  - pooled row uses `NA`.
-- `tp`, `fp`, `tn`, `fn`:
-  - confusion matrix counts at each threshold.
-- `accuracy`:
-  - overall fraction of correct predictions (`(tp + tn) / n_total`).
-- `precision`:
-  - predicted-positive purity (`tp / (tp + fp)`).
-  - `NA` when no positive predictions are made.
-- `recall`:
-  - true positive recall (`tp / (tp + fn)`).
-  - `NA` when a pool has no positive labels.
-- `f1`:
-  - harmonic mean of precision and recall.
-  - `NA` when precision/recall is undefined or both are zero.
-- `mcc`:
-  - Matthews correlation coefficient in `[-1, 1]`.
-  - `1` is perfect agreement, `0` is no better than random-like agreement, `-1` is total disagreement.
-- `threshold_name`:
-  - currently `fixed_probability_threshold`.
-
-#### `model_selection_trials.tsv` (when candidate selection is enabled)
-
-- One row per inner-CV trial result.
-- `metric_value`: score for one candidate on one inner fold.
-- `params_json`: exact hyperparameter set for that candidate.
-- Compare candidates by averaging `metric_value` within
-  (`fold_id`, `sample_set_id`, `candidate_index`).
-
-#### `model_selection_trials_summary.tsv` (when candidate selection is enabled)
-
-- One row per candidate after aggregating all inner folds.
-- Grouping keys are
-  (`fold_id`, `sample_set_id`, `candidate_index`, `metric_name`, `params_json`).
-- `metric_value_mean`:
-  - inner-fold mean score (NaN values are ignored).
-- `metric_value_std`:
-  - population std (`ddof=0`) across valid inner-fold scores.
-- `metric_value_se`:
-  - `metric_value_std / sqrt(n_valid_inner_folds)`.
-- `n_inner_folds` / `n_valid_inner_folds`:
-  - total inner folds vs folds with valid numeric score.
-- The corresponding `model/tables/final_refit_model_selection_trials.tsv` and
-  `final_refit_model_selection_trials_summary.tsv` use the same schema, with
-  `fold_id=NA`, and record the inner-CV search performed for the final refit.
-
-#### `model_selection_selected.tsv` (when candidate selection is enabled)
-
-- `selection_scope`:
-  - `outer_fold`: selections used in outer CV training.
-  - `final_refit`: selections used for full-run refit.
-- `rank`: rank among selected candidates after applying `selection_rule`.
-  - With `best`, direction depends on `metric_name`:
-    - `mcc` / `balanced_accuracy`: higher is better.
-    - `log_loss`: lower is better.
-  - With `one_se`, candidates within one standard error of the best mean score
-    are ranked by model simplicity first.
-- `metric_value_se`:
-  - standard error used by `selection_rule=one_se`; NaN when not available.
-- `selection_source_sample_set_id`:
-  - sampled set used for candidate selection (`reuse_first_sample_set` uses `0` for all rows).
-- `selected_candidate_count_requested` vs `selected_candidate_count_effective`:
-  - shows requested vs effective top-K after candidate availability and deduplication.
-  - when `selected_candidate_percent` is used, `selected_candidate_count_requested`
-    is the per-sampled-set count derived from that percentage.
-
-### Run figures
-
-- `cv/figures/cv_metrics_overview.svg`
-  - Blue: macro, orange: micro.
-  - Axis is drawn from observed metric range; the x-axis is placed at the zero score baseline.
-- `cv/figures/cv_loss_by_split.svg`
-  - Fold-wise final `log_loss` comparison of `train` vs `validation`.
-  - Useful for quick overfitting diagnostics without per-iteration learning curves.
-- `cv/figures/group_bootstrap_metrics.svg`
-  (`evaluation.group_bootstrap.enabled=true`)
-  - Pooled OOF metric estimates with group-bootstrap percentile intervals.
-  - The axis label identifies the confidence level. Grouping and resampling
-    metadata remain in `group_bootstrap_metrics.tsv`, rather than appearing as
-    supplementary text on the figure.
-- `cv/figures/roc_curve_cv.svg`
-  - Pooled OOF ROC curve.
-  - Curve summarizes all folds together (not per-fold overlays).
-- `cv/figures/pr_curve_cv.svg`
-  - Pooled OOF precision-recall curve.
-  - Curve summarizes all folds together (not per-fold overlays).
-  - The curve legend reports Average Precision, matching the implementation behind the
-    compatibility metric key `pr_auc`.
-- `cv/figures/feature_importance_top.svg`
-  - Top `figures.top_features` features by mean fold-level `importance_mean`.
-  - Horizontal boxplot plus fold-level points.
-  - When `data.orthogroup_annotation_path` is set, labels are rendered as
-    `full annotation (orthogroup ID)` instead of ID-only labels.
-- `cv/figures/top_feature_expression_by_confusion.svg`
-  - Small multiples for the same top-importance features, ordered by
-    `importance_mean`.
-  - Each panel shows `log2(TPM + 1)` boxplots and species-level points in the
-    OOF `TP`, `FN`, `TN`, and `FP` groups at the fixed probability threshold.
-  - Panel headings identify the orthogroup annotation and ID; importance and
-    coefficients remain in the corresponding tables and dedicated feature figures.
-  - Correct predictions use circles and errors use crosses.
-- `cv/figures/feature_importance_by_fold_heatmap.svg`
-  - Top `figures.top_features` features by mean fold-level `importance_mean`.
-  - Rows are features, columns are CV folds, and color is fold-level
-    `importance_mean` from `feature_importance_by_fold.tsv`.
-  - The continuous white-to-blue scale starts at zero, so unimportant fold-feature
-    cells remain white and larger importances become darker blue.
-  - When `data.orthogroup_annotation_path` is set, row labels are rendered as
-    `full annotation (orthogroup ID)` instead of ID-only labels.
-- `cv/figures/coefficients_signed_top.svg`
-  - Top `figures.top_features` by absolute mean fold-level coefficient magnitude.
-  - Horizontal boxplot plus fold-level points; right is positive and left is negative.
-  - When `data.orthogroup_annotation_path` is set, labels are rendered as
-    `full annotation (orthogroup ID)` instead of ID-only labels.
-- `cv/figures/feature_stability_top.svg`
-  - Top `figures.top_features` features ranked by outer-fold selection frequency.
-  - Gray bars show preprocessing retention; colored bars show final non-zero
-    selection. Color indicates the dominant coefficient sign when available.
-- `cv/figures/feature_set_jaccard_heatmap.svg`
-  - Symmetric outer-fold heatmap of final non-zero feature-set overlap.
-  - The diagonal is `1`; off-diagonal values come from
-    `feature_stability_by_fold_pair.tsv`.
-- `cv/figures/cv_species_probability_by_trait.svg`
-  - Out-of-fold species probabilities grouped by trait (`label`).
-  - Boxplot with per-species points and trait-wise mean markers.
-  - The dashed horizontal line marks the fixed probability threshold at `0.5`.
-- `cv/figures/cv_fold_trait_probability.svg`
-  - Fold-level probability distribution grouped by trait.
-  - Useful for checking fold-to-fold drift or fold-specific overlap.
-- `cv/figures/species_evidence/` (linear outer-fold model and at least one OOF FP/FN)
-  - contains one vector PDF per misclassified OOF species, grouped into
-    `false_positive/` and `false_negative/`; withheld decisions use
-    `abstained/false_positive/` and `abstained/false_negative/`
-  - panel A shows the individual model probabilities from the actual held-out fold,
-    the aggregate OOF probability, and the fixed threshold
-  - panel B shows signed species-local contributions to the linear score, ranked by
-    mean absolute contribution across that fold's ensemble members; features absent
-    from a model-local schema contribute zero
-  - panel C compares the target's `log2(TPM + 1)` with label-0 and label-1 expression
-    among the species sampled for that fold's training
-  - `species_manifest.tsv` records fold/group identity, true and predicted labels,
-    FP/FN status, OOF probability, log loss, model-probability summaries, feature
-    count, and relative PDF path
-  - local contribution is unavailable for non-linear models; PhenoRadar skips these
-    PDFs with a warning rather than substituting a different explainer
-- `cv/figures/feature_filter_funnel.svg`
-  - Outer-CV feature-count trend through the enabled `preprocess.*_filter` steps.
-  - Line is median count; shaded band is IQR; dashed lines are min-max.
-  - Legend identifies median/IQR/min-max.
-- `cv/figures/non_zero_feature_count_by_fold.svg`
-  - Fold-wise distribution of `n_nonzero_features` from `model_sparsity.tsv`.
-  - Boxplots are shown when a fold has multiple models; points show individual models.
-- `cv/figures/model_selection.svg` (`selection_rule=best`) or
-  `cv/figures/model_selection_one_se_curve.svg` (`selection_rule=one_se`)
-  - One curve figure is written per selection stage. The separate trials SVG is retired;
-    candidate details remain in `model_selection_trials*.tsv`.
-  - Both rules show candidate mean scores and standard-error bars, the best mean,
-    and the selected candidate when selection records are available.
-  - Only `one_se` shows the one-SE threshold and eligible-candidate highlighting.
-  - Uses `log10(lambda)` or `log10(C)` when the parameter is positive, unique per
-    candidate, and other parameters are fixed. Otherwise uses `candidate_index`.
-  - All folds are shown; per fold, only the first `sample_set_id` is plotted.
-  - The rule is read from the stage's `model_selection_selected.tsv` records;
-    legacy inputs without a recorded rule use the `best` presentation.
-  - Regeneration removes the retired trials SVG and the opposite-rule SVG only
-    after the replacement figure is saved successfully.
-- `model/figures/final_refit_feature_importance_top.svg` (`full_run`)
-  - Top features of the fitted final ensemble.
-  - Boxplots and points show variation across final ensemble members, not CV folds.
-- `model/figures/final_refit_coefficients_signed_top.svg` (`full_run`, linear model)
-  - Signed coefficients on the configured transformed/scaled model-input scale.
-  - Boxplots and points show variation across final ensemble members.
-- `model/figures/final_refit_feature_filter_funnel.svg` (`full_run`)
-  - Final-refit feature-count trend through the enabled `preprocess.*_filter` steps.
-  - Uses the full training/validation pool and does not depend on external-test rows.
-- `model/figures/final_refit_model_selection.svg` (`selection_rule=best`) or
-  `model/figures/final_refit_model_selection_one_se_curve.svg` (`selection_rule=one_se`)
-  - The same rule-dependent presentation for the inner CV performed specifically
-    for final refit in `full_run`.
-- `external_test/figures/external_species_probability_by_trait.svg` (`full_run` with external samples)
-  - External-test species probabilities grouped by `true_label`.
-  - Boxplot with per-species points and trait-wise mean markers.
-- `external_test/figures/external_confusion_matrix.svg` (`full_run` with external samples)
-  - Fixed-threshold external-test confusion matrix.
-  - Cells show counts and the row-wise percentage within each true-label class.
-  - Side annotations report accuracy, precision, recall, specificity, F1, and MCC.
-- `external_test/figures/cv_external_metric_comparison.svg` (`full_run` with external samples)
-  - Grouped-bar comparison of pooled out-of-fold CV and external-test classification metrics.
-  - With abstention, recomputes fixed-threshold metrics from each figure's
-    prediction population. Otherwise uses the fixed-threshold rows from
-    `summary/tables/classification_summary.tsv`.
-  - Shows accuracy, precision, recall, F1, and MCC.
-- `external_test/figures/external_roc_curve.svg` / `external_test/figures/external_pr_curve.svg` (`full_run` with both external-test labels)
-  - External-test ROC and precision-recall curves from `prediction_external_test.tsv`.
-  - The ROC panel annotates ROC AUC. The PR panel annotates average precision and the external-test positive rate.
-- `external_test/figures/top_feature_expression_by_confusion.svg`
-  (`full_run` with external samples)
-  - Uses final-ensemble feature ranking and coefficients together with external-test
-    `true_label` and final predictions.
-  - Each panel shows `log2(TPM + 1)` values in external-test TP, FN, TN, and FP groups.
-- `<stage>/figures/probability_by_<group>.svg` (when `summary.group_col` is present in metadata)
-  - Group-wise predicted probability distributions for the configured summary group.
-  - Uses the values of `summary.group_col` directly for y-axis labels.
-  - For example, `summary.group_col: family` writes `probability_by_family.svg`.
-- `inference/figures/inference_probability_distribution.svg` (`full_run` with inference samples)
-  - Histogram of `prediction_inference.tsv` probabilities in bins
-    `[0.0, 0.1), ... , [0.9, 1.0]`.
-- `inference/figures/species_probability_cv_and_inference.svg` (`full_run` with inference samples)
-  - Three-column comparison of CV out-of-fold probabilities for trait `0` and `1`
-    plus unannotated inference probabilities.
-  - The x-axis label uses the configured trait name, and the dashed horizontal line
-    marks the fixed probability threshold at `0.5`.
-- `inference/figures/candidate_evidence/` (`full_run`, linear final model, and positive candidates)
-  - contains one publication-oriented PDF per inference species predicted as `1`
-  - PDFs are grouped into `p_095_100`, `p_090_095`, `p_085_090`, `p_080_085`,
-    and `p_050_080` subdirectories using the final-refit probability
-  - panel A shows the distribution of probabilities obtained by applying each
-    outer-fold predictor to the same candidate, with the final-refit probability
-    as a diamond; its legend identifies individual models, range, IQR, median,
-    final prediction, and decision threshold
-  - panel B shows signed candidate-local linear contributions, ranked by mean absolute
-    contribution across final models; absent model-local features contribute zero
-  - panel C shows known label-0 and label-1 internal-CV expression values as
-    semi-transparent species points with 10--90% ranges, IQRs, and medians, plus the
-    candidate as a diamond on a shared `log2(TPM + 1)` axis
-  - OrthoDB annotation is the primary feature label when
-    `data.orthogroup_annotation_path` is configured; the orthogroup ID is retained
-  - `candidate_manifest.tsv` records family, final probability, cross-fold probability
-    summaries, feature count, probability bin, and relative PDF path
-  - local contribution is unavailable for non-linear final models; PhenoRadar skips
-    these candidate PDFs with a warning rather than substituting a different explainer
-- `external_test/figures/final_refit_loss_by_split.svg` (`full_run`)
-  - Final-refit `log_loss` comparison of `train` and `external_test`.
-  - Useful for quick train-vs-external generalization diagnostics.
-- `cv/figures/tree_prediction_cv.svg` / `external_test/figures/tree_prediction_external.svg` (optional)
-  - Written when `data.tree_path` is set and Toytree is available.
-  - Rectangular Toytree view with aligned tracks for trait label, probability,
-    predicted label, uncertainty, group, and fold where applicable.
-- `cv/figures/tree_group.svg` (optional)
-  - Written when `data.tree_path` is set and Toytree is available.
-  - Rectangular Toytree view with trait-label and split-group tracks for metadata QC.
-- `cv/figures/tree_feature_heatmap_zscore.svg` / `cv/figures/tree_feature_heatmap_log2_tpm.svg` (optional)
-  - Written when `data.tree_path` is set and Toytree is available.
-  - Rectangular Toytree views with top-feature heatmap tiles ordered by
-    `importance_mean`; the feature count is controlled by `figures.top_features`.
-  - Show the numeric trait label and predicted probability immediately before the
-    feature heatmap.
-  - Include an inline continuous color-bar legend showing the plotted value scale
-    and missing-value color.
-  - When `data.orthogroup_annotation_path` is set, feature labels are rendered as
-    `orthogroup ID: full annotation` instead of ID-only labels.
-  - The z-score figure emphasizes relative per-feature expression patterns; the
-    log2-TPM figure preserves absolute expression scale after `log2(TPM + 1)`.
-  - Species labels are colored by OOF `TP`, `FN`, `TN`, and `FP` status using the
-    same palette as `top_feature_expression_by_confusion.svg`; an in-figure legend
-    defines the four colors.
-
-## `predict` artifacts (schemas and interpretation)
-
-- `resolved_config.yml` (including the effective figure settings)
-- `inference/tables/prediction_inference.tsv`
-  - columns:
-    - `species`, `true_label`, `prob`
-    - `pred_label_fixed_threshold`
-    - optional `uncertainty_std`
-  - `true_label` values are `NA` because inference labels are unknown
-  - `prob` is predicted probability of label `1`
-- `inference/tables/group_summary_<group>.tsv` (when `summary.group_col` is present in metadata)
-  - Same schema as run-stage grouped summaries.
-- `run_metadata.json`
-  - includes bundle manifest/payload hash values and bundle source metadata
-  - includes the same PhenoRadar version/build provenance fields as `run`
-  - copies `bundle_source_provenance_schema_version`,
-    `bundle_source_phenoradar_version`, and `bundle_source_git_commit` from the bundle
-    manifest without inferring values for legacy bundles
-- `inference/figures/`
-  - `predict_probability_distribution.svg`
-  - `probability_by_<group>.svg` (when `summary.group_col` is present in metadata)
-  - optional `predict_uncertainty.svg` (bundle ensemble size > 1)
-
-- `inference/tables/candidate_evidence_candidates.tsv` (linear bundle, accepted positives)
-  - candidate species, probability, family (or `unassigned`), and available
-    selective-decision / coverage columns
-- `inference/tables/candidate_feature_evidence.tsv`
-  - same local contribution and raw-expression columns as the `full_run` table;
-    each model uses its saved feature order, transformation, and fitted scaler
-  - ensemble features are ranked by mean absolute contribution; the signed mean,
-    minimum, and maximum are also retained. Contributions describe linear scores,
-    not an additive decomposition of the aggregated probability.
-- `inference/tables/candidate_model_probabilities.tsv`
-  - `species`, zero-based `model_index`, `prob`; the models are fitted bundle
-    members, not independently refitted CV models
-- `inference/tables/candidate_reference_expression.tsv`
-  - known-trait reference rows for plotted features; missing references remain
-    unavailable and are never inferred from predictions
-- `inference/figures/candidate_evidence/candidate_manifest.tsv`
-  - species, probability bin, relative PDF path, feature count, `n_bundle_models`,
-    and `model_prob_*` summaries
-- `run_metadata.json.input_files` additionally records any legacy reference TSV
-  or annotation input consumed outside the integrity-verified bundle
-
-### Predict figures
-
-- `inference/figures/candidate_evidence/<probability_bin>/<species>.pdf`
-  - one figure per accepted positive species with nonzero local linear evidence
-  - fitted-model probabilities (with the bundled classification threshold),
-    signed local contributions, and candidate versus known-trait expression
-  - information coverage and its acceptance threshold are retained in the
-    prediction tables instead of supplementary figure text
-  - unavailable references are explicitly marked; absent outer-CV models are
-    never represented as a CV stability assessment
-  - local feature count follows `figures.top_features`, defaulting to the bundle's
-    saved training value when the `figures` section is omitted
-
-- `inference/figures/predict_probability_distribution.svg`
-  - Histogram of predicted probabilities in bins `[0.0, 0.1), ... , [0.9, 1.0]`.
-- `inference/figures/predict_uncertainty.svg` (ensemble only)
-  - Top species by `uncertainty_std`; high bars indicate less stable predictions.
-- `inference/figures/probability_by_<group>.svg`
-  - Group-wise predicted probability distributions for `summary.group_col`.
-- `inference/figures/tree_prediction_predict.svg` (optional)
-  - Written when `data.tree_path` is set and Toytree is available.
-  - Tree view with aligned tracks for true label when known, probability,
-    fixed-threshold prediction, uncertainty, and group when available.
-
-## `report` artifacts (schemas and interpretation)
-
-- `report_manifest.json`
-  - selected runs, options, skipped runs, ranked count
-  - `generated_by` records the PhenoRadar version/build that generated the report
-  - `report_options.metric_direction` is `maximize` or `minimize`
-  - `report_options` also records the metric display name, implementation, and any
-    fixed-threshold dependency
-  - `experiment_compatibility` records verification status, fingerprints, unknown legacy
-    runs, and whether mixed comparison was explicitly enabled
-  - `software_compatibility` records observed PhenoRadar versions, legacy runs with unknown
-    versions, dirty source-checkout runs, and whether versions are mixed
-- `report_runs.tsv`
-  - one row per included run after selection/filtering
-  - columns: `run_id`, `run_dir`, `command`, `execution_stage`, `status`, `start_time`,
-    `end_time`, `duration_sec`, software-provenance columns, `primary_metric`,
-    `metric_contract_version`,
-    `metric_display_name`,
-    `metric_implementation`, `metric_threshold_name`, `metric_threshold_value`,
-    `aggregate_scope`, `metric_value`,
-    `fingerprint_schema_version`, `dataset_fingerprint`, `split_fingerprint`,
-    `experiment_fingerprint`
-  - `metric_value` can be `NA` (for example missing/invalid metrics in non-strict mode)
-  - metric-definition columns are `NA` for legacy runs whose calculation contract cannot
-    be verified; they are never inferred from the currently installed version
-- `report_ranking.tsv`
-  - ranked runs with non-null metric
-  - columns: `run_id`, `run_dir`, `execution_stage`, `start_time`, `metric_name`,
-    software-provenance columns, metric-definition columns, `aggregate_scope`, `metric_value`,
-    fingerprint columns, `rank`
-  - `rank` follows the selected metric's documented better direction: descending for
-    `mcc`, `balanced_accuracy`, `roc_auc`, and `pr_auc`; ascending for `brier`
-  - ties are ordered by `start_time`, then `run_id`, both ascending
-- `report_warnings.tsv`
-  - columns: `run_id`, `run_dir`, `warning_type`, `message`
-  - aggregated ingestion warnings across runs; prioritize recurring `warning_type`
-- optional narrative output by `--output-format`:
-  - `report.md`, `report.html`, or `report.json`
-- `figures/`
-  - `report_metric_ranking.svg`
-  - `report_metric_comparison.svg`
-  - `report_stage_breakdown.svg` (only when more than one stage appears)
-
-### Report figures
-
-- `report_metric_ranking.svg`
-  - Top ranked runs from `report_ranking.tsv`; the axis states whether higher or lower is better.
-- `report_metric_comparison.svg`
-  - Comparable runs with non-null metric from `report_runs.tsv`, ordered in the same better
-    direction as `report_ranking.tsv`.
-- `report_stage_breakdown.svg`
-  - Count of runs by `execution_stage` (shown only when more than one stage exists).
-
-## Model bundle layout (`model_bundle/`)
-
-Files:
-
-- `bundle_manifest.json`
-  - records `threshold_name`, `threshold_fixed`, `threshold_policy`, and
-    `threshold_derived_from_cv=false`
-  - records the exporting build in `source_provenance_schema_version`,
-    `source_phenoradar_version`, `source_phenoradar_install_type`, `source_git_source`,
-    `source_git_commit`, `source_git_dirty`, and `source_git_worktree_patch_sha256`
-- `feature_schema.tsv`
-  - ordered union of features consumed by at least one fitted model
-- `transform_feature_schema.tsv`
-  - complete ordered raw-feature schema supplied to the expression transform during final refit
-  - prediction raw values are aligned to this schema before sample-rank transforms
-- `preprocess_state.joblib`
-  - contains both feature schemas plus preprocessing method metadata
-    (`expression_transform`, `feature_scaling`)
-  - may include model-local preprocessing entries (`model_preprocess`),
-    including selected features and optional scaler state
-- `model_state.joblib`
-- `thresholds.tsv`
-- `resolved_config.yml`
-
-Bundle loading enforces:
-
-- supported `bundle_format_version`
-- required file presence
-- file inventory size/SHA-256 checks
-- feature schema continuity and consistency with preprocess/model states
-
-Bundle format compatibility:
-
-- current exports use format version `3`, which persists neutral-expression and
-  fixed-abstention policies. Readers also support versions `1` and `2` with their
-  original policies. Neutral scalers and their declared policy must agree.
-- version `1` bundles using feature-wise `none` or `log1p` transforms remain loadable.
-- version `1` rank-transform bundles cannot reconstruct the complete pre-transform schema and
-  must be regenerated with the current PhenoRadar version.
-
-## Status and warning interpretation
-
-- Primary status values:
-  - run: `cv_completed`, `full_run_completed`
-  - predict: `predict_completed`
-- CLI commands print warning summaries at completion when warnings are present.
-- `run_metadata.json` `warnings` aggregates runtime and figure-generation warnings.
-- Estimator non-convergence is captured in those warnings and detailed in
-  `model/tables/convergence_diagnostics.tsv`; raw `ConvergenceWarning` messages are not left
-  only on stderr.
-- `report_warnings.tsv` includes per-run ingestion warnings during report aggregation.
-
-### Portable interpretation snapshots
-
-New `full_run` bundles optionally include `reference_expression.parquet` and
-`orthogroup_annotations.parquet`. Both are recorded in the bundle manifest and
-covered by the existing size/hash integrity checks. Reference expression covers
-nonzero-coefficient features from the final models and only known-trait species
-in the training/validation pool; external-test and unknown-trait species are
-excluded. References are saved even when that run has no positive inference
-candidates. The manifest also records the learned trait name for figure labels.
-
-Older version 1–3 bundles remain supported. If no reference snapshot is present,
-`predict` can read the original run's `candidate_reference_expression.tsv`.
-That legacy table may cover only some local features; the others are marked as
-unavailable. If neither source exists, local contributions and candidate
-expression are still plotted. Training data are never rescanned or refitted by
-this fallback. Annotation labels can similarly use an accessible annotation path
-in the saved training config, or an explicit prediction annotation input.
+| `abstention_reason` | `insufficient_information`, `no_informative_coefficients`, or `NA` |
+| `missing_features_json` | Missing important features, ordered by coefficient weight |
+
+Use `pred_label_selective` for downstream classification and candidate
+selection. Coverage measures available information, not calibrated correctness;
+see [coverage policies](configuration.md#missing-expression-and-abstention).
+
+Each prediction stage also writes:
+
+| Table under `<stage>/tables/` | Content |
+| --- | --- |
+| `abstention_summary.tsv` | Overall, label, fold, and available group summaries of accepted/abstained counts and selective performance |
+| `abstention_features.tsv` | Missing evidence: `species`, `rank`, `feature`, `coefficient_fraction`; up to `figures.top_features` per species |
+| `abstention_by_<group>.tsv` | Additional grouped decision summaries when metadata allows |
+
+`decision_rate = n_accepted / n_species`. Selective metrics use accepted labeled
+species only; all-abstained metrics are `NA`. `positive_error_rate` is
+`FP / (TP + FP)` and `negative_error_rate` is `FN / (TN + FN)`; undefined ratios
+are `NA`.
+
+Raw metrics, loss, and classification summaries retain all species. Always
+compare selective performance with decision rate. Grouped positive rates use
+accepted species as the denominator, while probability summaries retain all
+species. Candidate evidence includes accepted positives only.
+
+Prediction/evaluation figures have all-species versions directly under
+`<stage>/figures/` and accepted-only versions with the same names under
+`<stage>/figures/accepted_only/`. These pairs are written even if nobody abstains;
+empty accepted sets receive explanatory figures. Model interpretation, selection,
+training loss, and bootstrap figures keep their original populations.
+
+Neutral-expression evidence preserves raw TPM and adds `is_missing`. Missing
+plot values appear unavailable rather than as zero expression. Missing inputs
+and observations at the training mean both have zero standardized contribution,
+but only the latter count as observed.
+
+## Splits and model diagnostics
+
+| Table | Content / use |
+| --- | --- |
+| `split/tables/split_manifest.tsv` | `species`, `pool`, `fold_id`, `group_id`, `contrast_group_id`, `label` |
+| `split/tables/fold_validation_groups.tsv` | Held-out groups per fold, species/label counts, and `validation_label_profile` |
+| `split/tables/fold_diagnostics.tsv` | Train/validation group and label counts; `two_class_validation_metrics_defined` |
+| `model/tables/training_group_subsets.tsv` | Requested/effective group counts, deterministic ranks, repeat index, selection flags |
+| `model/tables/feature_filter_counts.tsv` | Feature counts before/after each filter by scope, fold, and sampled set |
+| `model/tables/feature_filter_counts_summary.tsv` | Stage-wise count and retained-ratio summaries |
+| `model/tables/ranked_feature_scores.tsv` | Signed effects, direction eligibility, errors/scores/ranks, retention flags, and skip reasons |
+| `model/tables/retained_features.tsv` | Exact retained feature list per scope/fold/sampled set |
+| `model/tables/retained_features_summary.tsv` | Retained counts and rates across sampled sets |
+| `model/tables/model_sparsity.tsv` | Per-model nonzero counts, ratios, counting method, and unavailable reasons |
+| `model/tables/model_sparsity_summary.tsv` | Sparsity summaries by scope and model |
+| `model/tables/convergence_diagnostics.tsv` | Fit scope, candidate/model IDs, convergence status, iteration counts, warnings, and parameters |
+
+Manifest pools are per-fold `train`/`validation`, held-out `external_test`, and
+unknown `discovery_inference`. Excluded species are absent. `group_id` is the
+CV group; `contrast_group_id` is the separately configured contrast pair.
+External/inference rows have no fold ID.
+
+For convergence diagnostics, `fit_scope=candidate_evaluation` identifies search
+fits; `selected_model` identifies prediction models. `convergence_applicable=false`
+means no iterative convergence contract, as for random forest. Logistic native
+failures stop training; successful path counts include internal warm-start
+points and are shared by candidates on that path. For SVM, `converged=false`
+means at least one calibrated sub-estimator reached its iteration limit.
+
+## Feature interpretation
+
+| Table under `cv/tables/` | Content |
+| --- | --- |
+| `feature_importance.tsv` | `feature`, `importance_mean`, `importance_std`, model/fold counts, method |
+| `feature_importance_by_fold.tsv` | Per-fold mean normalized importance |
+| `coefficients.tsv` | Mean/std signed coefficients, counts, method, unavailable reason |
+| `coefficients_by_fold.tsv` | Per-fold mean signed coefficients |
+| `feature_stability_by_feature.tsv` | Preprocessing retention, nonzero selection, conditional selection, sign agreement |
+| `feature_stability_by_fold_pair.tsv` | Nonzero-feature-set intersections, unions, and Jaccard similarity |
+| `feature_stability_summary.tsv` | Overall selection, Jaccard, and sign-agreement summaries |
+
+Importances are normalized per model, averaged within each fold, then across
+folds. Standard deviations describe fold-level variation. Linear importance uses
+absolute coefficients; random forest uses native feature importance. Signed
+coefficients describe the configured transformed/scaled inputs; positive values
+push toward class 1. Nonlinear coefficients are `NA` with an explanatory reason.
+
+`selection_frequency` counts nonzero fold signals across all outer folds;
+`selection_frequency_when_retained` conditions on surviving preprocessing.
+`sign_agreement_rate` is the dominant nonzero sign fraction, reported for signed
+features selected in at least two folds. Jaccard is intersection/union and is
+`NA` for two empty sets. These diagnostics reuse fitted folds; changing the
+evaluated feature set retrospectively would leak validation information.
+
+`full_run` adds `model/tables/final_refit_feature_importance.tsv` and
+`final_refit_coefficients.tsv`, plus corresponding `*_by_model.tsv` tables.
+Their variation is across final ensemble members, not CV folds. A feature absent
+from a member has zero importance/coefficient in that member's summary.
+
+### Candidate selection diagnostics
+
+| Table | Content / condition |
+| --- | --- |
+| `cv/tables/model_selection_trials.tsv` | Inner-fold scores and exact `params_json` per candidate/sample set |
+| `cv/tables/model_selection_trials_summary.tsv` | Candidate mean, population std, SE, and valid fold counts |
+| `model/tables/model_selection_selected.tsv` | Selected ranks, rule, source sample set, requested/effective counts |
+| `model/tables/final_refit_model_selection_trials.tsv` and `*_summary.tsv` | Equivalent search evidence for final refit |
+
+These require active candidate selection. Standard error is population standard
+deviation divided by the square root of valid inner folds. The selected table
+records `outer_fold` or `final_refit` scope and the rule used; percentage-based
+selection records the derived requested count. See
+[model selection](configuration.md#model_selection) for ranking rules.
+
+## Figures and species evidence
+
+Most figures are SVGs under the matching stage. `figures.top_features` limits
+global or species-local features; optional OG annotations replace ID-only labels.
+
+| Purpose | Figures under `cv/figures/` |
+| --- | --- |
+| Performance | `cv_metrics_overview.svg`, `roc_curve_cv.svg`, `pr_curve_cv.svg`, optional `group_bootstrap_metrics.svg` |
+| Training gap | `cv_loss_by_split.svg` |
+| Probability distributions | `cv_species_probability_by_trait.svg`, `cv_fold_trait_probability.svg`, `probability_by_<group>.svg` |
+| Feature reliance | `feature_importance_top.svg`, `feature_importance_by_fold_heatmap.svg`, `coefficients_signed_top.svg` |
+| Expression by TP/FN/TN/FP | `top_feature_expression_by_confusion.svg` using `log2(TPM + 1)` |
+| Stability | `feature_stability_top.svg`, `feature_set_jaccard_heatmap.svg` |
+| Filtering and sparsity | `feature_filter_funnel.svg`, `non_zero_feature_count_by_fold.svg` |
+| Candidate selection | `model_selection.svg` for `best`, or `model_selection_one_se_curve.svg` for `one_se` |
+
+Selection curves show inner-CV means and SEs; only one-SE curves show the
+one-SE eligibility threshold. Candidate details remain in tables. Final-refit
+figures under `model/figures/` use the `final_refit_` prefix and summarize final
+ensemble members.
+
+External-test figures include probability distributions, confusion matrix,
+ROC/PR curves, CV/external metric comparison, top-feature expression, and
+`final_refit_loss_by_split.svg`. Inference figures include
+`inference_probability_distribution.svg` and
+`species_probability_cv_and_inference.svg`. Group plots require the configured
+metadata column; ROC/PR plots require a usable label population.
+
+### Local evidence PDFs
+
+Linear models can produce:
+
+| Directory | Species / fitted models used |
+| --- | --- |
+| `cv/figures/species_evidence/{false_positive,false_negative}/` | Raw fixed-0.5 OOF errors; only their actual held-out-fold models |
+| `cv/figures/species_evidence/abstained/` | The same OOF error diagnostics for withheld decisions |
+| `inference/figures/candidate_evidence/<probability_bin>/` | Accepted positive candidates; final models or loaded bundle members |
+
+PDFs show member probabilities, signed local contributions, and target expression
+against known-trait references when available. Local features are ranked by mean
+absolute contribution; absent member features contribute zero. Contributions
+add on the linear-score scale, not as probability components.
+
+CV references include only species sampled for that target's training fold.
+Full-run candidates use known-trait training/CV references and can show
+outer-fold prediction sensitivity alongside the final probability. Expression
+`predict` shows bundle-member probabilities instead. Nonlinear models skip
+local linear PDFs with a warning.
+
+Underlying tables include `cv_species_evidence.tsv`,
+`cv_species_feature_evidence.tsv`, and `cv_species_reference_expression.tsv`
+under `cv/tables/`; candidates use `candidate_evidence_candidates.tsv`,
+`candidate_feature_evidence.tsv`, and `candidate_reference_expression.tsv` under
+`inference/tables/`. Each PDF directory has a species/candidate manifest with
+relative paths and probability summaries.
+
+### Groups and trees
+
+`<stage>/tables/group_summary_<group>.tsv` reports species/label counts, positive
+decision rates, probability quantiles, uncertainty, and top species. Group names
+come directly from `summary.group_col`.
+
+With `data.tree_path`, tree tables include `tree_prediction_cv_annotation.tsv`,
+`tree_contrast_pairs_annotation.tsv`, `tree_feature_heatmap_annotation.tsv`, and
+stage-specific external/predict annotations. They support ggtree reuse; predicted
+species absent from the tree stay in annotation tables.
+
+Toytree figures include `tree_prediction_cv.svg`, `tree_group.svg`,
+`tree_feature_heatmap_log2_tpm.svg`, `tree_feature_heatmap_zscore.svg`, and
+stage-specific prediction trees. Heatmap values and annotations are retained in
+the long-form table. Top features follow importance ranking; z-scores are within
+feature across included species. Optional
+[phylogenetic outputs](phylogenetic-imputation.md#outputs) live under `inference/`.
+
+## Timing and provenance
+
+`runtime/tables/timing.tsv` has `scope`, `stage`, `fold_id`, `sample_set_id`,
+`candidate_index`, `started_at_sec`, `ended_at_sec`, and `duration_sec`.
+
+Start with `scope=run, stage=total` (or `scope=predict` for expression prediction).
+Narrow to outer folds, sampled sets, candidate scoring, or figure jobs to locate
+cost. All offsets use one monotonic clock. Nested and parallel durations overlap;
+do not sum them as elapsed time. Logistic path-scoring rows may have no candidate
+index because one interval covers a whole path.
+
+`run_metadata.json` records status, warnings, timing, input hashes, seed policy,
+PhenoRadar version/build, and dataset/split/experiment fingerprints. Git fields
+describe the imported PhenoRadar checkout; installed distributions do not borrow
+Git identity from the invocation directory. Prediction additionally records
+source-bundle hashes and available exporting-build provenance.
+
+Successful statuses are `cv_completed`, `full_run_completed`, and
+`predict_completed`. Warnings include skipped figures and convergence diagnostics;
+review them before interpreting missing results.
+
+## `predict` artifacts
+
+Expression prediction writes effective `resolved_config.yml`, `run_metadata.json`,
+`runtime/tables/timing.tsv`, and the inference predictions described above.
+Optional inference outputs include grouped summaries, abstention tables, tree
+annotations, and local evidence PDFs.
+
+`inference/tables/candidate_model_probabilities.tsv` contains `species`,
+zero-based `model_index`, and `prob` for fitted bundle members. Its manifest
+reports `n_bundle_models` and probability summaries. Missing reference expression
+is marked unavailable; it is never inferred from predictions.
+
+Main figures are `predict_probability_distribution.svg`, optional
+`predict_uncertainty.svg`, `probability_by_<group>.svg`, and
+`tree_prediction_predict.svg` under `inference/figures/`.
+
+## Studies
+
+Multi-condition runs write `runs/<timestamp>_study_<id>/` with an archived source
+config, shared split, and full run artifacts under `conditions/`.
+
+| File | Meaning |
+| --- | --- |
+| `condition_manifest.tsv`, `config_differences.tsv` | Ordered conditions and changed settings |
+| `study_metadata.json` | Study status and provenance |
+| `tables/condition_metrics.tsv` | Absolute OOF metrics and available bootstrap intervals |
+| `tables/pairwise_comparisons.tsv` | Every unordered condition pair; positive `improvement_a_over_b` favors A, including losses |
+| `tables/training_group_sensitivity.tsv` | Group-count study summaries across subset repeats |
+| `figures/condition_metrics.{svg,pdf,png}` | Metrics in configured condition order |
+| `figures/training_group_sensitivity.{svg,pdf,png}` | Mean, IQR, and min–max across subset repeats |
+
+Pairwise intervals match bootstrap replicate IDs on the shared groups and seed.
+Sensitivity plots use effective mean training groups per fold. Legacy study
+reports may also contain ranked-filter sensitivity and method-difference plots.
+
+## `report` artifacts
+
+| File | Meaning |
+| --- | --- |
+| `report_manifest.json` | Selection, options, skipped runs, comparison compatibility, and report-generating build |
+| `report_runs.tsv` | Included runs, status/timing, software provenance, metric definitions/values, and fingerprints |
+| `report_ranking.tsv` | Runs with valid metrics, sorted by the selected better direction and assigned ranks |
+| `report_warnings.tsv` | `run_id`, `run_dir`, `warning_type`, `message` |
+| `report.md`, `report.html`, or `report.json` | Optional narrative selected by `--output-format` |
+| `figures/` | Metric ranking/comparison and multi-stage breakdown SVGs |
+
+Legacy unknown metric definitions remain `NA`; they are not guessed from the
+installed version. The manifest separates experiment compatibility from software
+version/build warnings. See [report controls](cli-reference.md#report).
+
+## Model bundle
+
+Expression `full_run` exports:
+
+| File | Purpose |
+| --- | --- |
+| `bundle_manifest.json` | Format, file inventory/checksums, threshold policy, exporting-build provenance |
+| `feature_schema.tsv` | Ordered union of model-consumed features |
+| `transform_feature_schema.tsv` | Complete raw schema required before rank transforms |
+| `preprocess_state.joblib` | Model-local selected features, transformations, scalers, missing/abstention policies |
+| `model_state.joblib` | Fitted models |
+| `thresholds.tsv`, `resolved_config.yml` | Saved decision contract and training settings |
+| `reference_expression.parquet`, `orthogroup_annotations.parquet` | Optional portable interpretation snapshots |
+| `observed_traits.parquet` | Optional known-trait references for phylogenetic context |
+
+Loading validates format, required files, sizes/checksums, and schema/state
+consistency. Current expression exports use format `3`; readers support `1` and
+`2` with their original policies. Version-1 rank-transform bundles lack the full
+transform schema and must be regenerated.
+
+Expression references cover nonzero final-model features and known-trait
+training/CV species, excluding external-test and unknown species. Older bundles
+can reuse the source run's candidate reference TSV when accessible; unavailable
+references are marked and prediction continues. No training data are refitted.
+Sequence/combined bundles have [separate formats and alignment requirements](amino-acid.md#prediction).

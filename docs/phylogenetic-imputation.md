@@ -1,14 +1,13 @@
-# Phylogenetic imputation of unknown traits
+# Phylogenetic imputation
 
-PhenoRadar can compare expression-based predictions for unknown species with
-binary-trait imputation from `nwkit asr`. This is optional interpretation after
-prediction: observed labels, expression predictions, model training, CV, and
-external-test evaluation are unchanged. It does not classify species into known
-or novel evolutionary lineages, and it does not train on imputed labels.
+Compare expression predictions for unknown-trait species with binary-trait
+imputation from `nwkit asr`. This optional interpretation runs after prediction;
+observed labels, model training, CV, and external-test evaluation remain unchanged.
+Imputed labels are never used for training.
 
 ## Installation and configuration
 
-Install the optional tree reader and a compatible `nwkit` executable:
+Install the optional reader and the nwkit version used by integration tests:
 
 ```bash
 pip install 'phenoradar[phylogeny]'
@@ -17,19 +16,14 @@ nwkit --version
 nwkit asr --help
 ```
 
-The pinned source above is nwkit 0.43.21, used by the integration tests. A
-compatible newer installation can also be used. `nwkit` can live in a separate
-environment if its executable is on `PATH`; ETE4 must be available in the
-PhenoRadar environment. A nwkit installation alongside PhenoRadar is also found
-when that environment's scripts directory is not on `PATH`.
-
-For a checkout, install the reader with `uv sync --extra dev --extra phylogeny`.
-An isolated nwkit environment avoids changing PhenoRadar's locked dependencies.
+The pin is nwkit 0.43.21. A compatible nwkit may run in another environment if
+its executable is on `PATH`; ETE4 must be in the PhenoRadar environment. A nwkit
+executable alongside PhenoRadar is also detected. For a checkout, use
+`uv sync --extra dev --extra phylogeny` to install the reader.
 
 ```yaml
 data:
   tree_path: species_tree.nwk
-
 phylogenetic_imputation:
   enabled: true
   branch_length_mode: unit
@@ -37,117 +31,89 @@ phylogenetic_imputation:
   root_prior: equal
 ```
 
-The defaults are `enabled: false`, `branch_length_mode: input`, `model: ER`,
-and `root_prior: equal`. `model` also accepts `ARD`; `root_prior` also accepts
-`empirical`. The same section is accepted by `run` and `predict`.
+| Setting | Default | Options |
+| --- | --- | --- |
+| `enabled` | `false` | Enable for expression `full_run` and `predict` with unknown targets |
+| `branch_length_mode` | `input` | `input` or `unit` |
+| `model` | `ER` | `ER` or `ARD`, with rates fitted by nwkit |
+| `root_prior` | `equal` | `equal` or `empirical` observed-state frequencies |
 
-Only `full_run` and `predict` execute imputation, and only when they predict at
-least one species without an observed trait. `cv_only` never executes it.
+`cv_only` never executes imputation. Combined mode does not support it.
 
 ## Trees and reference traits
 
-Supply a rooted Newick tree containing both prediction targets and known-trait
-reference species. The supplied root is retained, including multifurcating
-roots. An explicit `[&U]` unrooted marker is rejected. Polytomies are preserved.
+Supply a rooted Newick tree containing targets and known-trait references.
+The supplied root and polytomies are preserved; an explicit `[&U]` marker is
+rejected.
 
-- `input`: use every supplied non-root branch length. Missing, negative, and
-  non-finite lengths are errors; zero lengths are retained. Root stem length
-  does not participate in inference.
-- `unit`: replace every non-root branch length with 1 in an analysis copy,
-  regardless of whether the input has lengths. The original file is unchanged.
+- `input` uses supplied non-root lengths. Missing, negative, or non-finite lengths
+  are errors; zero is valid. Root stem length does not participate.
+- `unit` assigns every non-root length 1 in an analysis copy. This suits taxonomy
+  trees with absent/arbitrary lengths; distances are branch counts, not time.
 
-`unit` is useful for taxonomy trees with absent or arbitrary lengths. Its
-probabilities are conditional on equal branch lengths; its distances describe
-branch counts, not time. Fine-grained taxonomic subdivisions can affect results.
-Neither mode integrates uncertainty in topology or branch lengths.
+Results are conditional on the tree and branch treatment; neither mode integrates
+topology/length uncertainty. Taxonomic subdivisions can affect unit-length results.
 
-Known binary traits come from the existing metadata, using `data.species_col`
-and `data.trait_col`. No additional reference table is required. All observed,
-non-excluded species can provide reference traits, including species assigned to
-external testing. These labels are used only for interpreting unknown species;
-there is no feedback into model fitting or performance evaluation. Rows selected
-by `split.exclude_col` are excluded from the saved reference as well.
+Known traits come from metadata using `data.species_col` and `data.trait_col`.
+All observed, non-excluded species can serve as interpretation references,
+including external-test species. No extra reference table is needed.
 
-Every new `full_run` model bundle saves these known traits as an optional,
-integrity-verified `observed_traits.parquet`, even if imputation is disabled.
-`predict` merges this snapshot with observed traits in its optional metadata;
-conflicting labels for the same species are errors. The bundled trait name is
-used for metadata lookup unless `data.trait_col` is explicitly specified.
-Species with a known trait in either source are not discrepancy candidates.
+New expression `full_run` bundles save an integrity-verified
+`observed_traits.parquet` even when imputation is disabled. `predict` merges it
+with optional metadata traits; conflicting labels are errors. The saved trait
+name is used unless `data.trait_col` is explicitly supplied. Species with known
+traits in either source are excluded from discrepancy candidates.
 
-Older bundles still load. If neither the bundle nor prediction metadata provides
-known traits, only imputation is skipped, with unavailable results and a recorded
-reason. No prior-only probabilities are substituted. Missing targets in the tree
-are retained in comparison tables with `NA` probabilities.
+Older bundles remain usable. With no known references, imputation is skipped
+with a recorded reason and unavailable probabilities; no prior-only values are
+substituted. Targets missing from the tree remain in comparison tables with `NA`.
 
 ## Outputs
 
-All run-specific outputs are written to `inference/`:
+All paths are under `inference/`:
 
 | File | Content |
 | --- | --- |
-| `tables/phylogenetic_imputation.tsv` | Prediction targets and reference species, with observed traits and ASR probabilities |
-| `tables/phylogenetic_comparison.tsv` | Unknown prediction targets, sorted by descending absolute probability difference |
-| `tables/phylogenetic_positive_candidates.tsv` | Accepted expression-positive unknown targets with `phylo_prob < 0.5` and a positive difference, sorted by descending signed difference |
-| `figures/tree_phylogenetic_imputation.svg` | Tree, ancestral probabilities, observed traits, expression probabilities, phylogenetic probabilities, differences, and statuses |
-| `figures/phylogenetic_comparison.svg` | Unknown-species probability comparison, with up to ten largest-disagreement species labeled |
-| `phylogenetic_imputation/reference_traits.tsv` | Snapshot of all supplied known traits |
-| `phylogenetic_imputation/traits.tsv` | Known traits that matched the analysis tree, passed to nwkit |
-| `phylogenetic_imputation/tree.nwk` | Analysis tree after the selected branch-length treatment |
-| `phylogenetic_imputation/asr.tsv` | All-node state probabilities from nwkit |
-| `phylogenetic_imputation/model.tsv` | Fitted nwkit model parameters and diagnostics |
-| `phylogenetic_imputation/annotated_tree.nhx` | nwkit tree with ancestral and tip-state probability annotations |
-| `phylogenetic_imputation/metadata.json` | Settings, reference scope/counts, tree/reference hashes, nwkit version/command, status and warnings |
-| `phylogenetic_imputation/nwkit.stderr.txt`, `nwkit.stdout.txt` | External-command diagnostics |
+| `tables/phylogenetic_imputation.tsv` | Targets and references, observed traits, ASR probabilities, and status |
+| `tables/phylogenetic_comparison.tsv` | Unknown targets ordered by absolute probability difference |
+| `tables/phylogenetic_positive_candidates.tsv` | Accepted positive unknowns with `phylo_prob < 0.5` and positive signed difference |
+| `figures/tree_phylogenetic_imputation.svg` | Tree, ancestral probabilities, traits, predictions, differences, and statuses |
+| `figures/phylogenetic_comparison.svg` | Probability comparison with the largest disagreements labeled |
+| `phylogenetic_imputation/{reference_traits,traits}.tsv` | All supplied references and the tree-matched nwkit input |
+| `phylogenetic_imputation/{tree.nwk,annotated_tree.nhx}` | Analysis tree and nwkit annotations |
+| `phylogenetic_imputation/{asr,model}.tsv` | Node probabilities and fitted-model diagnostics |
+| `phylogenetic_imputation/metadata.json` | Settings, reference scope, hashes, command/version, status, and warnings |
+| `phylogenetic_imputation/nwkit.{stderr,stdout}.txt` | External-command diagnostics |
 
-Files requiring a tree or successful fit are absent when that step is skipped
-or fails. Nothing is written when the feature is disabled or no unknown targets
-exist. An incompatible/missing nwkit executable or invalid input is an error.
-A failed numerical fit leaves comparison probabilities unavailable, records the
-failure, and retains the expression predictions.
+Disabled imputation or no unknown targets produces no files. Missing/incompatible
+nwkit or invalid input is an error. A numerical fit failure retains expression
+predictions, records the failure, and leaves phylogenetic probabilities unavailable;
+fit-dependent files may be absent.
 
-The annotation and comparison tables include:
+| Column | Meaning |
+| --- | --- |
+| `observed_trait` | Actual known 0/1 state or `NA`; never overwritten |
+| `phylo_prob` | ASR probability of state 1; known tips are conditioned on observed states |
+| `phylo_status` | `observed`, `imputed`, `missing_tree_tip`, `missing_reference`, or `fit_failed` |
+| `phylo_is_imputed` | True only for successfully imputed unknown tips |
+| `is_prediction_target` | Distinguishes targets from reference-only species |
+| `prob` | Original expression probability |
+| `prob_difference` | Expression minus phylogenetic probability, for imputed unknown targets |
+| `abs_prob_difference` | Absolute difference |
 
-- `observed_trait`: the actual known 0/1 state, or `NA`; never overwritten by ASR.
-- `phylo_prob`: ASR probability of state 1; observed tips are conditioned on
-  their supplied states, so their values are not held-out predictions.
-- `phylo_status`: `observed`, `imputed`, `missing_tree_tip`, `missing_reference`,
-  or `fit_failed`.
-- `phylo_is_imputed`: true only for successfully imputed unknown tips.
-- `is_prediction_target`: distinguishes targets from reference-only species.
-- `prob`: the original expression probability, when the species was predicted.
-- `prob_difference`: expression probability minus phylogenetic probability,
-  computed only for successfully imputed unknown prediction targets.
-- `abs_prob_difference`: absolute value of that difference.
-- Available expression decision and abstention columns.
+Comparison tables retain abstained species. Positive candidates require an
+accepted positive decision and phylogenetic probability strictly below 0.5;
+equal-to-0.5 or unavailable values are excluded. Candidate evidence TSVs include
+available phylogenetic values; evidence PDFs leave them to the dedicated plots.
 
-The discrepancy tables retain abstained species for inspection, but the positive
-candidate subset requires an expression-positive selective decision, a
-phylogenetic probability strictly below 0.5, and a positive signed difference.
-Species with phylogenetic probability equal to 0.5 or unavailable are excluded.
-Candidate evidence TSVs
-include phylogenetic probability and signed difference when available. These
-supplementary values are omitted from evidence PDFs; the dedicated phylogenetic
-comparison figures display them. Existing prediction TSVs and their `true_label`
-columns are unchanged.
+Tree figures retain observed references around targets. Gray means unavailable;
+unknown observed-trait cells stay gray, targets are bold, and internal-node color
+shows ASR state-1 probability. Differences and rankings are neither p-values nor
+probabilities of a novel evolutionary origin. Existing prediction tables and
+`true_label` values are unchanged.
 
-The tree includes observed references around unknown targets. Any display
-pruning happens after fitting, preserves branch lengths, and uses the original
-node IDs for ancestral probabilities. Gray cells mean missing or unavailable
-values; the observed-trait column remains gray for imputed species. Expression
-targets are shown in bold. Internal-node color represents the ASR probability of
-state 1. Neither differences nor their rankings are p-values or probabilities of
-a novel evolutionary origin.
-
-## Integration checks
-
-To include checks against an actual nwkit installation:
+For integration checks with a real executable:
 
 ```bash
 PHENORADAR_TEST_NWKIT=/path/to/nwkit uv run --extra phylogeny pytest -q
 ```
-
-The tests cover polytomies, explicit/missing lengths, known-label references,
-disagreement ranking, abstention, bundle reuse, and unchanged expression-model
-predictions and evaluation. They do not add phylogenetic cross-validation to the
-application pipeline.

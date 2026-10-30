@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from math import isfinite
 from typing import Any, Literal
 
 from pydantic import (
@@ -144,7 +145,7 @@ class DataConfig(StrictModel):
     value_col: str = "tpm"
     trait_col: str = "C4"
     contrast_pair_col: str | None = "contrast_pair_id"
-    feature_mode: Literal["expression", "amino_acid"] = "expression"
+    feature_mode: Literal["expression", "amino_acid", "combined"] = "expression"
     alignment_dir: str | None = None
     sequence_tpm_path: str | None = None
     sequence_tpm_cache_dir: str | None = "runs/.phenoradar_cache/sequence_tpm"
@@ -433,7 +434,12 @@ class ModelSelectionConfig(StrictModel):
                 "search_strategy=random|tpe"
             )
 
-        if self.search_strategy == "grid" and self.has_continuous_search_space:
+        # The ratio is mode-specific; AppConfig checks it when combined is active.
+        continuous_shared = any(
+            isinstance(value, (ContinuousRangeSpec, ContinuousLogRangeSpec))
+            for name, value in self.search_space.items() if name != "amino_acid_penalty_ratio"
+        )
+        if self.search_strategy == "grid" and continuous_shared:
             raise ValueError(
                 "model_selection.search_strategy=grid does not support "
                 "continuous_range/continuous_log_range"
@@ -596,7 +602,7 @@ class AppConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_contrast_pair_dependencies(self) -> AppConfig:
-        if self.data.feature_mode == "amino_acid":
+        if self.data.feature_mode in {"amino_acid", "combined"}:
             if not self.data.alignment_dir:
                 raise ValueError("amino_acid mode requires data.alignment_dir")
             if (
@@ -632,7 +638,7 @@ class AppConfig(StrictModel):
             )
         if (
             self.preprocess.absent_feature_fill == "nan"
-            and self.data.feature_mode == "expression"
+            and self.data.feature_mode != "amino_acid"
             and self.model.name != "random_forest"
             and missing.method != "neutral"
         ):
@@ -642,7 +648,7 @@ class AppConfig(StrictModel):
             )
         if (
             self.preprocess.ranked_feature_filter.method == "pair_aware"
-            and self.data.feature_mode == "expression"
+            and self.data.feature_mode != "amino_acid"
             and self.data.contrast_pair_col is None
         ):
             raise ValueError(
@@ -668,7 +674,35 @@ class AppConfig(StrictModel):
                     f"required={required_groups}"
                 )
         if self.model.name == "logistic_elasticnet":
-            supported = {"lambda", "alpha", "maxit", "thresh"}
+            supported = {"lambda", "alpha", "maxit", "thresh", "amino_acid_penalty_ratio"}
+            if self.data.feature_mode == "combined":
+                if self.preprocess.missing_expression.method != "neutral":
+                    raise ValueError("combined mode requires missing_expression.method=neutral")
+                alpha = self.model_selection.search_space.get("alpha", [1.0])
+                if not isinstance(alpha, list) or any(a != 1.0 for a in alpha):
+                    raise ValueError("combined mode requires fixed LASSO alpha: [1]")
+                ratio = self.model_selection.search_space.get("amino_acid_penalty_ratio", [1.0])
+                if self.model_selection.search_strategy == "grid" and isinstance(
+                    ratio, (ContinuousRangeSpec, ContinuousLogRangeSpec)
+                ):
+                    raise ValueError(
+                        "model_selection.search_strategy=grid does not support continuous "
+                        "amino_acid_penalty_ratio ranges"
+                    )
+                if isinstance(ratio, list):
+                    bounds = ratio
+                elif isinstance(ratio, (LogRangeSpec, ContinuousLogRangeSpec)):
+                    try:
+                        bounds = [ratio.base ** ratio.start_exp, ratio.base ** ratio.end_exp]
+                    except OverflowError as exc:
+                        raise ValueError("amino_acid_penalty_ratio must be finite") from exc
+                else:
+                    bounds = [ratio.start, ratio.end]
+                if any(isinstance(v, bool) or not isinstance(v, (int, float))
+                       or not isfinite(v) or v <= 0 for v in bounds):
+                    raise ValueError("amino_acid_penalty_ratio must be finite and > 0")
+                if self.phylogenetic_imputation.enabled:
+                    raise ValueError("combined mode does not support phylogenetic imputation")
             unsupported = sorted(set(self.model_selection.search_space) - supported)
             if unsupported:
                 raise ValueError(

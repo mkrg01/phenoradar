@@ -1,494 +1,212 @@
 # Configuration
 
-Optional `phylogenetic_imputation` settings apply only to unknown-species
-interpretation in `full_run` and `predict`. See
-[phylogenetic imputation](phylogenetic-imputation.md) for installation, branch
-length modes, reference traits, and outputs.
-
-PhenoRadar config files are YAML mappings validated by Pydantic.
-
-This page is the canonical reference for config input behavior, defaults, and
-key-by-key definitions.
-For runtime execution flow tied to config keys, see
-[pipeline-details.md](pipeline-details.md).
-
-## Config input behavior
-
-CLI config input is one YAML file:
-
-- `run`: required (`-c config.yml`)
-- `predict`: optional (`-c predict_config.yml`); see [prediction settings](#prediction-settings)
-- `config`: optional (`-c config.yml`), omitted means built-in defaults only
-
-Resolution and override rules:
-
-- CLI accepts one `-c` file (`run` required, `predict`/`config` optional).
-- Unspecified keys are filled by built-in defaults.
-- Generated YAML explicitly includes every user-facing setting, including inactive fields,
-  `null` values, and empty sections. Comments list enum and boolean choices;
-  nullable fields also show `null` or their accepted types.
-- Both feature modes use one config. Expression is the default; optional
-  `amino_acid` settings appear after the shared sections, at the end of the file.
-- Cache locations are automatic and omitted from generated user configs.
-  Complete effective settings remain in each run's `resolved_config.yml`.
-- Internal group-subsampling repeat indices are generated automatically and
-  recorded in each run's `resolved_config.yml` for reproducibility.
-- Unknown keys are rejected. Retired amino-acid centering and workspace settings
-  are ignored with a warning; `data.sequence_map_path` accepts only legacy `null`.
-- `runtime.execution_stage` can be overridden from CLI
-  (`phenoradar run -c config.yml --execution-stage ...`).
-
-Use `config` to inspect resolved output:
+Use one YAML file for all feature modes. Generate a commented config or validate
+an existing one before a long run:
 
 ```bash
-phenoradar config [--out resolved.yml]
+phenoradar config --out defaults.yml
+phenoradar config -c config.yml --out resolved.yml
 ```
 
-### Prediction settings
+Omitted keys use built-in defaults; unknown keys are rejected. Generated configs
+list all user-facing settings, including inactive and nullable fields. Each run
+saves its effective settings in `resolved_config.yml`.
 
-`predict` requires a model bundle and an explicit TPM path, supplied through
-`--tpm-path` or `data.tpm_path`. It never falls back to the bundled example data.
-`--tpm-path`, `--metadata-path`, and `--n-jobs` override corresponding config
-values; otherwise prediction-specific defaults apply.
+The repository's working `config.yml` differs from built-in defaults: it uses
+custom data paths, neutral missing-expression handling, abstention, and model
+selection. The defaults below describe `phenoradar config` without `-c`.
 
-Only these settings are used and saved in prediction `resolved_config.yml`:
+Use these sections to find settings:
 
-| Setting | Default / meaning |
-| --- | --- |
-| `data.tpm_path` | Required input expression TSV |
-| `data.metadata_path` | `null`; all TPM species, or the supplied metadata's species subset |
-| `data.species_col`, `data.feature_col`, `data.value_col` | `species`, `orthogroup`, `tpm` |
-| `data.tree_path` | `null`; optional prediction tree |
-| `data.orthogroup_annotation_path` | `null`; optional labels overriding bundled annotations |
-| `figures.top_features` | Bundle's training-time value when `figures` is omitted; otherwise `30` unless specified |
-| `data.trait_col`, `data.contrast_pair_col` | `C4`, `contrast_pair_id`; optional tree annotations |
-| `preprocess.max_pivot_cells` | `50000000`; memory guard |
-| `runtime.n_jobs` | `1`; positive prediction worker/thread count |
-| `summary.group_col` | `family`; grouped summaries when metadata supplies this column |
-| `phylogenetic_imputation` | Disabled by default; optional ASR context for unknown species, with the same settings as `run` |
-
-A metadata TSV needs only the species column. Missing trait and contrast-pair
-columns do not prevent prediction or tree output. Without metadata, no group
-summary is attempted. Use metadata with a grouping column for grouped summaries.
-
-Legacy run configs remain accepted. Recognized training sections and training-only
-keys in the sections above are ignored, without running training validation;
-for example, `model`, `split`, `sampling`, `model_selection`, and learned
-preprocessing choices cannot alter predictions. Unknown prediction-setting keys
-are rejected. Bundle state supplies all learned preprocessing and decision
-policies. Its source and hashes are saved in `run_metadata.json`, together with
-the effective worker count and hashes of the input files actually supplied.
-Prediction is deterministic from the fitted bundle and does not use `runtime.seed`.
-
-For `predict`, the launcher sets `POLARS_MAX_THREADS` from the effective worker
-count before importing Polars, replacing any inherited value. The inference
-calls also cap native BLAS/OpenMP threads and temporarily set the loaded
-estimator's worker count when supported. This does not change saved bundle files.
-
-The remaining sections describe the training/config-generation schema.
-
-### Ordered multi-condition runs
-
-For `phenoradar run`, a list assigned to a field that is scalar in the schema
-creates one condition per value. No separate experiment section or reference
-condition is used. For example:
-
-```yaml
-preprocess:
-  ranked_feature_filter:
-    method: [none, pair_aware, unpaired, variance]
-    max_features: 100
-```
-
-At most one condition field may contain multiple distinct values per study.
-Varying two or more fields is rejected before training; use separate studies
-to vary different variables. Fixed single-value lists are allowed. Value order
-within the varying list determines `condition_index`; study tables and figures
-retain this order and are not sorted by value or performance.
-
-Inactive scalar fields are canonicalized instead of producing duplicate
-conditions. One such case is when
-`preprocess.ranked_feature_filter.method` is `none`, `max_features` is inactive.
-That condition is generated with `max_features: null`. For example,
-`method: [none, pair_aware]` with fixed `max_features: 100` generates two
-conditions. Varying both `method` and `max_features` in one study is not allowed.
-
-To compare a disabled ranked filter with different feature limits, keep `method`
-fixed and include `null` in `max_features`:
-
-```yaml
-preprocess:
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: [null, 1000, 100]
-```
-
-This generates three conditions in that order: no ranked filter, at most 1000
-features, and at most 100 features. The `null` condition resolves to
-`method: none` and `higher_in_trait: null`, disabling the entire ranked filter,
-including directional selection and pair-dependent neutral preprocessing.
-Other preprocessing settings still apply. Study labels retain `max_features=null`
-so all three conditions share one comparison axis. The same syntax works with
-`unpaired` and `variance`.
-
-Training-group count sensitivity uses the same mechanism. The repeat count
-creates independently ranked group subsets, and subsets with the same internal
-repeat index are nested as the training-group count increases:
-
-```yaml
-sampling:
-  training_group_count: [5, 10, 15, null]
-  group_subsample_repeats: 3
-```
-
-This creates three repeat conditions for each numeric training-group count.
-Here `null` means all fold-local training groups. Because repeating that
-condition would select the same groups, the all-available run is generated once
-rather than three times. Internally generated repeat indices do not count as
-another varying condition field. Explicit user-supplied condition lists for
-`group_subsample_repeat_index` follow the ordinary one-variable limit.
-
-Lists that are already part of a field's schema remain ordinary single-run
-values. In particular, this remains one inner model-selection search space:
-
-```yaml
-model_selection:
-  search_space:
-    alpha: [0.0001, 0.001, 0.01, 0.1]
-```
-
-Multi-condition runs share one realized outer split. Condition lists are
-therefore rejected for `data`, `split`, `runtime`, evaluation/report controls,
-inner-CV split controls, and operational preprocessing controls. Use a separate
-config and study when comparing generalization regimes or datasets.
-
-Resume an interrupted study with the same source config:
-
-```bash
-phenoradar run -c config.yml --resume runs/<study_id>
-```
-
-## Default config
-
-Generate resolved defaults with:
-
-```bash
-phenoradar config
-```
-
-```yaml
-data:
-  metadata_path: testdata/c4_tiny/species_metadata.tsv
-  tpm_path: testdata/c4_tiny/tpm.tsv
-  tree_path: null  # type: string or null
-  orthogroup_annotation_path: null  # type: string or null
-  species_col: species
-  feature_col: orthogroup
-  value_col: tpm
-  trait_col: C4
-  contrast_pair_col: contrast_pair_id  # type: string or null
-split:
-  group_col: contrast_pair_id
-  exclude_col: null  # type: string or null
-  require_both_labels_per_group: false  # choices: true, false
-  outer_cv_strategy: logo  # choices: logo, group_kfold, stratified_group_kfold
-  outer_cv_n_splits: null  # type: integer or null
-sampling:
-  strategy: group_balanced  # choices: all_samples, group_balanced
-  max_samples_per_label_per_group: 1  # type: integer or null
-  sampled_set_count: 10
-  training_group_count: null  # type: integer or null
-  group_subsample_repeats: 1
-  weighting: none  # choices: none, group_label_inverse
-preprocess:
-  max_pivot_cells: 50000000
-  absent_feature_fill: 0  # choices: 0, nan
-  missing_expression:
-    method: none  # choices: none, neutral
-    zero_as_missing: false  # choices: true, false
-  expression_transform:
-    method: log1p  # choices: none, log1p, sample_rank, sample_percentile_rank
-  sparse_feature_filter:
-    enabled: true  # choices: true, false
-    min_nonzero_fraction: 0.8  # type: number or null
-    scope: any_trait  # choices: all_samples, any_trait, trait_0, trait_1
-  low_variance_filter:
-    enabled: false  # choices: true, false
-    min_variance: null  # type: number or null
-  ranked_feature_filter:
-    method: none  # choices: none, pair_aware, unpaired, variance
-    max_features: null  # type: integer or null
-    min_contrast_pairs: 1
-    higher_in_trait: null  # choices: 0, 1, null
-  correlation_filter:
-    enabled: false  # choices: true, false
-    method: pearson  # choices: pearson, spearman
-    max_abs_correlation: null  # type: number or null
-  feature_scaling:
-    method: standard  # choices: none, standard
-model:
-  name: logistic_elasticnet  # choices: logistic_elasticnet, linear_svm, random_forest
-abstention:
-  enabled: false  # choices: true, false
-  threshold: 0.8
-model_selection:
-  selected_candidate_count: null  # type: integer or null
-  selected_candidate_percent: null  # type: number or null
-  candidate_source_policy: per_sample_set  # choices: per_sample_set, reuse_first_sample_set
-  search_strategy: grid  # choices: grid, random, tpe
-  trial_count: null  # type: integer or null
-  search_space: {}
-  inner_cv_strategy: null  # choices: logo, group_kfold, stratified_group_kfold, null
-  inner_cv_n_splits: null  # type: integer or null
-  selection_metric: log_loss  # choices: mcc, balanced_accuracy, log_loss
-  selection_rule: best  # choices: best, one_se
-ensemble:
-  probability_aggregation: mean  # choices: mean, median
-evaluation:
-  group_bootstrap:
-    enabled: false  # choices: true, false
-    n_resamples: 2000
-    confidence_level: 0.95
-summary:
-  group_col: family
-figures:
-  top_features: 30
-phylogenetic_imputation:
-  enabled: false  # choices: true, false
-  branch_length_mode: input  # choices: input, unit
-  model: ER  # choices: ER, ARD
-  root_prior: equal  # choices: equal, empirical
-report: {}
-runtime:
-  seed: 42
-  n_jobs: 1
-  execution_stage: cv_only  # choices: cv_only, full_run
-```
-
-## Top-level structure
-
-- `data`
-- `split`
-- `sampling`
-- `preprocess`
-- `model`
-- `abstention`
-- `model_selection`
-- `ensemble`
-- `evaluation`
-- `summary`
-- `figures`
-- `phylogenetic_imputation`
-- `report`
-- `runtime`
-
-## Key enums (quick lookup)
-
-- `runtime.execution_stage`: `cv_only` | `full_run`
-- `split.outer_cv_strategy`: `logo` | `group_kfold` | `stratified_group_kfold`
-- `model.name`: `logistic_elasticnet` | `linear_svm` | `random_forest`
-- `sampling.strategy`: `all_samples` | `group_balanced`
-- `sampling.weighting`: `none` | `group_label_inverse`
-- `preprocess.expression_transform.method`: `none` | `log1p` | `sample_rank` | `sample_percentile_rank`
-- `preprocess.absent_feature_fill`: `0` | `nan`
-- `preprocess.feature_scaling.method`: `none` | `standard`
-- `ensemble.probability_aggregation`: `mean` | `median`
-- `model_selection.search_strategy`: `grid` | `random` | `tpe`
-- `model_selection.selection_metric`: `mcc` | `balanced_accuracy` | `log_loss`
-- `model_selection.selection_rule`: `best` | `one_se`
+- [Inputs](#data), [splits](#split), and [sampling](#sampling)
+- [Expression preprocessing](#preprocess) and [missing expression](#missing-expression-and-abstention)
+- [Models](#model) and [model selection](#model_selection)
+- [Output and runtime settings](#output-and-runtime-settings)
+- [Prediction settings](#prediction-settings) and [condition comparisons](#ordered-multi-condition-runs)
 
 ## `data`
 
-- `data.metadata_path`
-  - type: `str`
-  - default: `testdata/c4_tiny/species_metadata.tsv`
-- `data.tpm_path`
-  - type: `str`
-  - default: `testdata/c4_tiny/tpm.tsv`
-- `data.tree_path`
-  - type: `str | null`
-  - default: `null`
-  - optional Newick tree used to write tree prediction annotation TSVs and, when
-    Toytree is available, Toytree SVG figures.
-- `data.orthogroup_annotation_path`
-  - type: `str | null`
-  - default: `null`
-  - optional headerless TSV/TSV.GZ with orthogroup ID, annotation taxid, and
-    annotation text columns. When set, run-level feature interpretation figures
-    and tree feature heatmaps use annotation labels instead of ID-only labels.
-- `data.species_col`
-  - type: `str`
-  - default: `species`
-- `data.feature_col`
-  - type: `str`
-  - default: `orthogroup`
-- `data.value_col`
-  - type: `str`
-  - default: `tpm`
-- `data.trait_col`
-  - type: `str`
-  - default: `C4`
-- `data.contrast_pair_col`
-  - type: `str | null`
-  - default: `contrast_pair_id`
-  - optional contrast-pair column used by contrast-specific features such as
-    `preprocess.ranked_feature_filter.method=pair_aware` and tree contrast-pair
-    QC. Set to `null`
-    when the workflow does not use contrast pairs.
+Keys in each table are relative to the section heading.
+
+| Key | Default | Purpose / accepted values |
+| --- | --- | --- |
+| `metadata_path` | `testdata/c4_tiny/species_metadata.tsv` | Species metadata TSV |
+| `tpm_path` | `testdata/c4_tiny/tpm.tsv` | Long-format OG expression TSV |
+| `species_col` | `species` | Species ID column |
+| `feature_col` | `orthogroup` | Expression feature column |
+| `value_col` | `tpm` | Expression value column |
+| `trait_col` | `C4` | Binary label column |
+| `contrast_pair_col` | `contrast_pair_id` | Pair-aware scoring column; `null` disables contrast-pair features |
+| `tree_path` | `null` | Optional Newick tree for annotations and figures |
+| `orthogroup_annotation_path` | `null` | Optional headerless annotation TSV/TSV.GZ |
+| `feature_mode` | `expression` | `expression`, `amino_acid`, or `combined` |
+| `alignment_dir` | `null` | Required for sequence and combined modes |
+| `sequence_tpm_path` | `null` | Gene-level TPM TSV/TSV.GZ for weighted sequence frequencies |
+
+See [data format](data-format.md) for input validation and
+[amino-acid and combined modes](amino-acid.md) for sequence-specific behavior.
+Cache paths are automatic and omitted from generated user configs.
 
 ## `split`
 
-- `split.group_col`
-  - type: `str`
-  - default: `contrast_pair_id`
-  - grouping column used for outer CV, group-balanced sampling, and
-    group-label inverse weighting.
-  - when this column matches the non-null `data.contrast_pair_col`, labeled
-    species without a contrast pair automatically enter `external_test`.
-  - with other split groups, labeled species must have a non-empty group
-    unless explicitly excluded. Missing contrast pairs do not affect their
-    pool assignment.
-- `split.exclude_col`
-  - type: `str | null`
-  - default: `null`
-  - optional metadata column marking species to remove from CV, external test,
-    and inference pools. Accepted true values are `yes`, `true`, and `1`;
-    false values are `no`, `false`, `0`, empty, or null.
-- `split.require_both_labels_per_group`
-  - type: `bool`
-  - default: `false`
-  - when true, only groups containing both labels (`0` and `1`) are eligible
-    for CV. Eligibility is checked using labeled, non-excluded species with
-    a split group, before any folds are constructed.
-    Labeled species in single-label groups are assigned to `external_test`
-    and are absent from both CV training/validation and final-refit training.
-    Trait-missing species remain in `discovery_inference`.
-  - with `false` and `sampling.strategy: all_samples`, single-label groups
-    remain in CV. Validation folds may contain one label; every training fold
-    must contain both. `group_balanced` sampling requires both labels in each
-    group.
-- `split.outer_cv_strategy`
-  - type: `logo | group_kfold | stratified_group_kfold`
-  - default: `logo`
-  - `stratified_group_kfold` keeps groups intact while approximating the
-    overall trait-label ratio in each fold. It shuffles groups reproducibly
-    using `runtime.seed`.
-- `split.outer_cv_n_splits`
-  - type: `int >= 1 | null`
-  - default: `null`
-  - rule:
-    - required when `outer_cv_strategy=group_kfold|stratified_group_kfold`
-    - must be `>= 2`
-    - must be `null` when `outer_cv_strategy=logo`
+| Key | Default | Purpose / accepted values |
+| --- | --- | --- |
+| `group_col` | `contrast_pair_id` | Metadata group kept intact during CV; also used for sampling and weighting |
+| `exclude_col` | `null` | Optional column removing flagged species from every pool |
+| `require_both_labels_per_group` | `false` | Reserve labeled single-label groups for external testing |
+| `outer_cv_strategy` | `logo` | `logo`, `group_kfold`, or `stratified_group_kfold` |
+| `outer_cv_n_splits` | `null` | Required integer ≥ 2 for either K-fold strategy; must be `null` for `logo` |
 
-For family-level CV using existing `family` annotations:
+`logo` holds out one group at a time. `stratified_group_kfold` approximates the
+label ratio while preserving groups and shuffling reproducibly with
+`runtime.seed`.
 
-```yaml
-split:
-  group_col: family
-  require_both_labels_per_group: true
-```
+With a contrast-pair split, labeled species missing a pair become external-test
+species. For other split groups, missing groups are errors unless the species
+is excluded or unlabeled. `require_both_labels_per_group: true` removes
+single-label groups from both CV and final-refit training. See
+[pool assignment](data-format.md#metadata-tsv) for all routing rules.
 
-This uses all eligible labeled species in families containing both labels,
-including species without contrast pairs. Single-label families become
-`external_test`. This filters the training population before CV; it does not
-merely omit single-label validation folds from the reported metrics.
+Every training fold must contain both labels. Validation folds may contain only
+one label; metrics requiring both labels are then `NA`.
 
 ## `sampling`
 
-- `sampling.strategy`
-  - type: `all_samples | group_balanced`
-  - default: `group_balanced`
-- `sampling.max_samples_per_label_per_group`
-  - type: `int >= 1 | null`
-  - default: `1`
-- `sampling.sampled_set_count`
-  - type: `int >= 1`
-  - default: `10`
-- `sampling.training_group_count`
-  - type: `int >= 1 | null`
-  - default: `null`
-  - exact number of fold-local training groups retained before species-level
-    sample-set construction
-  - groups are values of `split.group_col`; validation groups are never removed
-    or changed by this setting
-  - `null` keeps every available training group
-  - a numeric count is an error when a fold or final-refit scope has fewer
-    available training groups
-- `sampling.group_subsample_repeats`
-  - type: `int >= 1`
-  - default: `1`
-  - number of independently ranked training-group subsets evaluated for each
-    numeric `training_group_count`
-  - values greater than `1` automatically create separate study conditions with
-    internal repeat indices `1..group_subsample_repeats`
-  - each internal repeat index is combined with `runtime.seed`, so increasing
-    the repeat count preserves all previously generated subsets
-  - for a fixed internal repeat index, group rankings do not depend on
-    `training_group_count`, so smaller counts are strict prefixes of larger
-    counts
-  - effectively inactive when `training_group_count=null`; the all-available
-    condition is run once
-- `sampling.weighting`
-  - type: `none | group_label_inverse`
-  - default: `none`
-  - `group_label_inverse` assigns each training species weight proportional to
-    `1 / N_{g,y}`, where `N_{g,y}` counts species with label `y` in group `g`
-    (`split.group_col`). Counts are computed separately for each fitted training
-    subset, including inner-CV training partitions and final refit, and weights
-    are normalized to mean `1` within that subset.
-  - each observed group-label combination has the same total weight. Groups
-    containing both labels therefore have equal total weight, with equal weight
-    for the two labels within each group. A single-label group has half that
-    total weight; no correction for the number of labels is applied.
+| Key | Default | Purpose / accepted values |
+| --- | --- | --- |
+| `strategy` | `group_balanced` | Balanced subsets per group, or `all_samples` |
+| `max_samples_per_label_per_group` | `1` | Positive per-label cap for balanced sampling; `null` for no cap |
+| `sampled_set_count` | `10` | Positive number of sampled training sets |
+| `training_group_count` | `null` | Exact positive number of training groups; `null` keeps all |
+| `group_subsample_repeats` | `1` | Positive number of independent group-subset conditions |
+| `weighting` | `none` | `none` or `group_label_inverse` |
 
-Compatibility rules:
+For `all_samples`, set both related fields explicitly:
 
-- when `sampling.strategy=all_samples`
-  - `sampling.max_samples_per_label_per_group` must be `null`
-  - `sampling.sampled_set_count` must be `1`
-- `group_balanced` requires each `split.group_col` group in the
-  `training_validation` pool to contain both labels (`0` and `1`) before CV
-  split execution.
-- `group_label_inverse` weights labels within `split.group_col` groups and does
-  not require contrast-pair metadata.
-- training-group subsampling happens after the outer split and only on its
-  training side. Increase `group_subsample_repeats` to measure sensitivity to
-  group composition; repeats are separate study conditions, not members of the
-  `sampled_set_count` ensemble.
-- when model selection is active, `training_group_count` must be at least `2`
-  for inner `logo`, or at least `model_selection.inner_cv_n_splits` for inner
-  `group_kfold`/`stratified_group_kfold`.
+```yaml
+sampling:
+  strategy: all_samples
+  max_samples_per_label_per_group: null
+  sampled_set_count: 1
+```
+
+`group_balanced` requires both labels in every training group.
+`group_label_inverse` assigns each species weight proportional to `1 / N(g,y)`,
+then normalizes weights to mean 1 within each fitted subset. Every observed
+group-label combination has equal total weight; a single-label group therefore
+has half the total weight of a two-label group.
+
+`training_group_count` changes only the training side of each outer fold and is
+also applied during final refit. It fails if any scope has too few groups.
+With model selection, it must support at least two groups for inner `logo`, or
+at least `inner_cv_n_splits` for inner K-fold CV.
+
+Group-subset repeats are separate study conditions, not ensemble members. For a
+fixed repeat index, smaller group counts are prefixes of the same deterministic
+group ranking. Increasing the repeat count preserves existing subsets. The
+all-groups (`null`) condition runs once. See [condition comparisons](#ordered-multi-condition-runs).
 
 ## `preprocess`
 
-- `preprocess.max_pivot_cells`
-  - type: `int >= 1`
-  - default: `50000000`
-  - meaning: upper bound for direct species x feature pivot size before chunked
-    pivot mode
-- `preprocess.absent_feature_fill`
-  - type: `0 | nan`
-  - default: `0`
-  - behavior:
-    - `0`: represent an absent `(species, feature)` coordinate as numeric zero
-    - `nan`: preserve it as a floating-point missing value through expression
-      transforms, optional scaling, model fitting, and prediction
-  - rule: `nan` is supported with `model.name=random_forest` or the neutral
-    logistic-regression mode described below
-  - sparse filtering still counts an absent coordinate as not nonzero; the
-    remaining feature statistics use available finite observations
-  - the selected policy is stored in full-run model bundles and reused during
-    `predict`, including for bundle features entirely absent from prediction input
+Expression processing runs in this order:
 
-### `preprocess.missing_expression` and `abstention`
+1. Expression transform
+2. Sparse and missing-observation eligibility filters
+3. Low-variance filter
+4. Ranked feature filter
+5. Correlation filter
+6. Feature scaling
 
-These features are opt-in in built-in defaults. The checked-in `config.yml`
-enables neutral expression handling and fixed-threshold abstention:
+Each model learns filters and scaling from its sampled training rows, including
+within inner CV. Validation and prediction rows never fit preprocessing.
+Expression preprocessing is inactive in sequence-only mode.
+
+| Key | Default | Purpose / accepted values |
+| --- | --- | --- |
+| `max_pivot_cells` | `50000000` | Positive dense-cell threshold for chunked matrix construction; not a total memory cap |
+| `absent_feature_fill` | `0` | `0` or `nan`; `nan` requires random forest or neutral logistic regression |
+| `expression_transform.method` | `log1p` | `none`, `log1p`, `sample_rank`, `sample_percentile_rank` |
+| `feature_scaling.method` | `standard` | `standard` or `none` |
+
+`log1p` is the natural logarithm of `1 + TPM`. Rank transforms rank positive
+features within each species and keep zeros at zero. Percentile ranks divide by
+the number of positive features, so the largest positive feature is 1. Ranking
+uses the full transform schema before feature filtering.
+
+`standard` fits training means and standard deviations, then reuses them for
+validation and prediction. The absent-feature policy is also saved in bundles.
+
+### Sparse feature filter
+
+| Key under `sparse_feature_filter` | Default | Purpose / accepted values |
+| --- | --- | --- |
+| `enabled` | `true` | Enable prevalence filtering |
+| `min_nonzero_fraction` | `0.8` | Required fraction in `[0, 1]` when enabled |
+| `scope` | `any_trait` | `all_samples`, `any_trait`, `trait_0`, or `trait_1` |
+
+`all_samples` uses all sampled training species. `any_trait` keeps a feature if
+at least one label class meets the threshold; `trait_0` and `trait_1` use only
+that class. Zeros and missing values count in the denominator, never the
+numerator. Model sample weights do not change these fractions.
+
+For example, a feature observed in all five trait-1 species and one of five
+trait-0 species has prevalence 0.6 overall and 1.0 in trait 1. At a 0.8 threshold,
+`all_samples` removes it; `any_trait` and `trait_1` retain it.
+
+### Low-variance and correlation filters
+
+| Key | Default | Rule |
+| --- | --- | --- |
+| `low_variance_filter.enabled` | `false` | Enable variance filtering |
+| `low_variance_filter.min_variance` | `null` | Required value ≥ 0 when enabled |
+| `correlation_filter.enabled` | `false` | Enable correlated-feature removal |
+| `correlation_filter.method` | `pearson` | `pearson` or `spearman` |
+| `correlation_filter.max_abs_correlation` | `null` | Required value in `(0, 1]` when enabled |
+
+### Ranked feature filter
+
+| Key under `ranked_feature_filter` | Default | Purpose / accepted values |
+| --- | --- | --- |
+| `method` | `none` | `none`, `pair_aware`, `unpaired`, or `variance` |
+| `max_features` | `null` | Positive feature limit; `null` disables the entire ranked filter |
+| `min_contrast_pairs` | `1` | Positive minimum valid-pair count for pair-aware scoring |
+| `higher_in_trait` | `null` | Both directions (`null`), higher in trait `1`, or higher in trait `0` |
+
+`pair_aware` ranks stabilized t-like scores from within-pair label contrasts.
+It requires `data.contrast_pair_col`, independently of `split.group_col`.
+`unpaired` ranks label-mean differences divided by stabilized Welch standard
+errors. Both fall back to effect magnitude when usable standard errors are
+unavailable. `variance` ranks training sample variance without labels.
+
+Direction applies only to `pair_aware` or `unpaired`: the signed effect is
+`mean(trait 1) - mean(trait 0)`. Directional filters keep at most `max_features`
+eligible features, never filling with opposite or zero effects. They fail if
+no eligible features remain or direction cannot be verified. With too few
+valid pairs, two-sided pair-aware filtering instead skips with a warning.
+
+For positive trait-1 expression evidence:
 
 ```yaml
-model:
-  name: logistic_elasticnet
+preprocess:
+  sparse_feature_filter:
+    min_nonzero_fraction: 0.9
+    scope: trait_1
+  ranked_feature_filter:
+    method: pair_aware
+    max_features: 200
+    higher_in_trait: 1
+```
+
+Prevalence in trait 1 alone does not establish higher expression than trait 0.
+The ranking direction constrains univariate filtering, not the final model's
+coefficient signs.
+
+## Missing expression and abstention
+
+Both features are disabled in built-in defaults. To make missing expression
+neutral in a logistic model and withhold decisions with low information coverage:
+
+```yaml
 preprocess:
   absent_feature_fill: nan
   missing_expression:
@@ -503,487 +221,127 @@ abstention:
   threshold: 0.8
 ```
 
-- `preprocess.missing_expression.method`: `none` (default) or `neutral`.
-  Neutral mode requires logistic regression, `log1p`, standard scaling, and
-  `absent_feature_fill: nan`. Retrain the model when enabling this mode.
-- `zero_as_missing`: default `false`. With `true`, explicit numeric zeros are
-  treated as unknown after duplicate coordinates have been summed. Missing
-  coordinates are unknown with either setting. Positive TPM remains observed;
-  no small-positive-expression cutoff is inferred. This policy cannot distinguish
-  biological silence from technical failure and discards zero-expression evidence.
-- Unknown values stay missing during feature selection. All-missing, singleton,
-  and constant-observation features are removed. Supervised ranking requires
-  observations in both labels; pair-aware filtering also requires the configured
-  number of valid contrasts for each retained feature.
-- Means and population standard deviations are fitted on observed values in each
-  model's sampled training set. Standardized missing inputs become exactly zero,
-  so their additive linear contribution is zero. Raw TPM and observation status
-  are kept separately for evidence. Validation/inference never refits these statistics.
-- `abstention.enabled`: default `false`; requires neutral mode.
-- `abstention.threshold`: fixed value in `(0, 1]`, default `0.8`. No CV threshold
-  search, artificial missingness training, or minimum validation sample count is
-  introduced. Existing model selection and evaluation CV remain available.
+| Key | Default | Rule |
+| --- | --- | --- |
+| `preprocess.missing_expression.method` | `none` | `neutral` requires logistic regression, `log1p`, standard scaling, and `absent_feature_fill: nan` |
+| `preprocess.missing_expression.zero_as_missing` | `false` | With `true`, treat summed numeric zeros as unknown; requires neutral mode for expression |
+| `abstention.enabled` | `false` | Requires neutral mode for expression; sequence modes use site coverage |
+| `abstention.threshold` | `0.8` | Fixed information-coverage threshold in `(0, 1]` |
 
-For each model, information coverage is
-`sum(abs(coef[j]) * observed[j]) / sum(abs(coef[j]))`. Intercept-only models
-have zero coverage. For ensembles, coverages are averaged arithmetically,
-independently of mean/median probability aggregation. A genuinely observed value
-equal to the training mean counts as observed, even though its standardized value
-is zero. Opposite-signed model coefficients never cancel in this calculation.
+Neutral mode fits means and population standard deviations on observed training
+values. Unknown standardized inputs become zero, giving zero linear contribution.
+All-missing, singleton, and constant-observation features are removed; supervised
+filters require observations in both labels and, where applicable, valid pairs.
+Retraining is required when enabling this policy.
 
-Predictions with coverage at least the threshold are accepted; lower coverage
-produces a null selective label. Probabilities and the raw fixed-0.5 labels remain
-available. A model with no informative coefficients always abstains. The gate
-does not reject a probability merely because it is close to 0.5. Coverage is a
-measurement-availability heuristic, not a calibrated confidence or error bound.
-Removing negative evidence can still increase the predicted probability.
+Missing coordinates are unknown regardless of `zero_as_missing`. Enabling it
+also discards measured zero-expression evidence; positive TPM remains observed.
+Raw TPM and observation status remain available in evidence tables.
 
-The bundle persists both policies, the scalers, and the fixed gate threshold;
-`predict` uses the saved policies rather than the prediction config's overrides.
+For each expression model, information coverage is:
 
-### `preprocess.expression_transform`
-
-- `method`
-  - type: `none | log1p | sample_rank | sample_percentile_rank`
-  - default: `log1p`
-  - behavior:
-    - applied after the expression matrix is built and before feature filters
-    - `none`: use input values as-is
-    - `log1p`: use `log(1 + value)`; values must be non-negative
-    - `sample_rank`: within each sample, rank positive feature values and keep
-      zero values at `0`
-    - `sample_percentile_rank`: same zero-preserving sample-wise ranking, scaled
-      by the number of positive features so the largest positive feature is `1`
-
-### `preprocess.sparse_feature_filter`
-
-- `enabled`
-  - type: `bool`
-  - default: `true`
-- `min_nonzero_fraction`
-  - type: `float in [0, 1] | null`
-  - default: `0.8`
-  - rule: required when `enabled=true`
-  - behavior: keeps a feature when its nonzero fraction is at least this value
-    in the training population selected by `scope`
-- `scope`
-  - type: `all_samples | any_trait | trait_0 | trait_1`
-  - default: `any_trait`
-  - behavior:
-    - `all_samples`: divides the nonzero count by the total number of sampled
-      training species, without using their trait labels
-    - `any_trait`: calculates the fraction separately in each trait class and
-      keeps a feature if at least one class meets the threshold
-    - `trait_0` / `trait_1`: calculates the fraction only in the selected class;
-      that class must be present in the training rows
-
-For example, with five species of each trait, a feature detected in one trait-0
-species and all five trait-1 species has overall fraction `6/10 = 0.6`. At a
-threshold of `0.8`, `all_samples` removes it, while `any_trait` and `trait_1`
-retain it. With unequal class sizes, `all_samples` still divides by total species
-count; it does not take an unweighted mean of the two class fractions and does
-not use model sample weights.
-
-The filter runs on each model's sampled training set, including inner-CV training
-partitions when model selection is enabled. Validation and prediction species
-never affect its fractions. Values are counted after the expression transform
-and before standardization or neutral filling, using the existing nonzero
-tolerance. Zeros and missing values at this stage remain in the denominator but
-not the numerator. Under neutral `log1p` handling, uncertain raw zeros are
-already missing when the filter runs.
-
-To select features by their overall training prevalence:
-
-```yaml
-preprocess:
-  sparse_feature_filter:
-    enabled: true
-    min_nonzero_fraction: 0.8
-    scope: all_samples
+```text
+sum(abs(coefficient) × observed) / sum(abs(coefficient))
 ```
 
-Condition lists such as `scope: [all_samples, any_trait, trait_1]` are supported.
+Ensemble coverage is the arithmetic mean of member coverages; intercept-only
+members contribute zero. An observed value at its training mean still counts
+as observed. Sequence and combined coverage are defined in the
+[mode guide](amino-acid.md#information-coverage).
 
-### `preprocess.low_variance_filter`
+Coverage at or above the threshold accepts the fixed-0.5 decision; otherwise
+`pred_label_selective` is null. Raw probabilities and fixed-threshold labels
+remain available. This gate measures information availability; it is not a
+calibrated probability of correctness and does not reject probabilities near
+0.5. Removing negative evidence can still raise a probability.
 
-- `enabled`
-  - type: `bool`
-  - default: `false`
-- `min_variance`
-  - type: `float >= 0 | null`
-  - default: `null`
-  - rule: required when `enabled=true`
-
-### `preprocess.ranked_feature_filter`
-
-- `method`
-  - type: `none | pair_aware | unpaired | variance`
-  - default: `none`
-- `max_features`
-  - type: `int >= 1 | null`
-  - default: `null`
-  - `null` (including omission) disables the ranked filter, resolving to
-    `method: none` and `higher_in_trait: null`; positive integers enable the
-    selected ranking method, while `method: none` always disables it
-- `min_contrast_pairs`
-  - type: `int >= 1`
-  - default: `1`
-- `higher_in_trait`
-  - type: `0 | 1 | null`
-  - default: `null`
-  - rule: a non-`null` value is valid only with `pair_aware` or `unpaired`
-- behavior:
-  - all methods are fitted using training rows only, after sparse and
-    low-variance filtering and before correlation filtering
-  - `none` keeps all candidates and does not require `max_features`
-  - `pair_aware` calculates `mean(trait 1) - mean(trait 0)` within each valid
-    contrast group and ranks by a stabilized paired t-like score computed from
-    per-group label contrasts; with no usable standard errors it ranks by
-    unstandardized effect magnitude while still enforcing directional
-    eligibility
-  - `unpaired` calculates `mean(trait 1) - mean(trait 0)`, ignores contrast
-    groups, and ranks by a stabilized label-mean
-    difference divided by its Welch standard error; with no usable standard
-    errors it ranks by unstandardized effect magnitude while still enforcing
-    directional eligibility
-  - `variance` ranks by train-set sample variance without using labels
-  - keeps the top `max_features`
-  - `higher_in_trait: null` ranks both effect directions by magnitude, preserving the
-    original behavior
-  - `1` makes only positive effects eligible;
-    `0` makes only negative effects eligible
-  - directional modes keep at most `max_features` eligible features and never
-    fill unused slots with zero-effect or opposite-direction features
-  - directional modes fail closed when no candidate has an eligible effect
-  - when fewer than `min_contrast_pairs` valid contrast pairs are available in a
-    split, `higher_in_trait: null` mode is skipped with a warning; directional modes fail
-    closed because their direction constraint cannot be verified
-  - `pair_aware` requires `data.contrast_pair_col`; this is independent from
-    `split.group_col`, so taxonomic-rank splits can still use contrast-pair
-    feature scoring where contrast pairs are available.
-
-To retain features that provide positive expression evidence for trait `1`, use
-both filters together:
-
-```yaml
-preprocess:
-  sparse_feature_filter:
-    enabled: true
-    min_nonzero_fraction: 0.9
-    scope: trait_1
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: 200
-    min_contrast_pairs: 1
-    higher_in_trait: 1
-```
-
-`scope: trait_1` only requires frequent nonzero expression within trait `1`;
-it does not by itself require expression to be higher than in trait `0`.
-Conversely, `higher_in_trait` constrains the univariate train-fold filtering
-effect but does not constrain the sign or monotonicity learned by the final
-multivariable model.
-
-### `preprocess.correlation_filter`
-
-- `enabled`
-  - type: `bool`
-  - default: `false`
-- `method`
-  - type: `pearson | spearman`
-  - default: `pearson`
-- `max_abs_correlation`
-  - type: `float | null`
-  - default: `null`
-  - rules:
-    - required when `enabled=true`
-    - must be in `(0, 1]`
-
-### `preprocess.feature_scaling`
-
-- `method`
-  - type: `none | standard`
-  - default: `standard`
-  - behavior:
-    - applied after all feature filters and before model fitting/prediction
-    - `none`: do not scale selected features
-    - `standard`: fit a scikit-learn `StandardScaler` on the sampled training
-      matrix and transform validation/target matrices with that fitted state
+The bundle freezes preprocessing, coverage policy, and threshold. See
+[selective outputs](output-artifacts.md#abstention) for downstream use.
 
 ## `model`
 
-- `model.name`
-  - type: `logistic_elasticnet | linear_svm | random_forest`
-  - default: `logistic_elasticnet`
-  - behavior:
-    - `logistic_elasticnet` uses the native glmnet binomial solver through
-      `python-glmnet`; no R installation or subprocess is needed.
-    - `alpha=0` gives L2, `alpha=1` gives L1, and `0 < alpha < 1` gives elastic net.
-    - `lambda` controls regularization strength; larger values shrink more.
-    - The intercept is unpenalized. Internal standardization is disabled:
-      feature scaling is controlled by `preprocess.feature_scaling`, including
-      observed-only scaling for neutral missing-expression inputs.
-    - `linear_svm` and `random_forest` use scikit-learn.
+`model.name` defaults to `logistic_elasticnet`. It uses native glmnet through
+`python-glmnet`, with an unpenalized intercept and no internal standardization.
+Scaling is controlled by `preprocess`. `linear_svm` and `random_forest` use
+scikit-learn. Sequence and combined modes require logistic regression.
 
-For grid and random searches, candidates with identical `alpha`, `thresh`, and
-`maxit` are fitted in a single descending lambda path per inner fold. Each fold
-has independent fitted state. Independent folds and paths are scheduled within
-`runtime.n_jobs`. TPE proposes candidates sequentially and uses individual fits.
-Path fitting is automatic; there is no solver or warm-start switch.
+Hyperparameters belong in `model_selection.search_space`:
 
-Positive lambda gaps are automatically filled with internal warm-start points,
-with at most 0.05 decades between successive values. These points aid convergence;
-they are not additional search candidates and receive no CV scores. Requested
-lambdas and convergence settings remain exact and unchanged. A single candidate
-stays a single fit, and lambda zero has no logarithmic bridge.
+| Model | Parameters and defaults |
+| --- | --- |
+| `logistic_elasticnet` | `lambda=0.01`, `alpha=0.5`, `maxit=2000000`, `thresh=1e-14` |
+| `linear_svm` | `C`, `max_iter` |
+| `random_forest` | `n_estimators`, `max_depth`, `min_samples_split`, `min_samples_leaf` |
+| Combined logistic model | Fixed `alpha=1`; optional positive `amino_acid_penalty_ratio=1` |
 
-Outer-CV and final-refit training also use the available stronger candidate lambdas
-with matching `alpha`, `thresh`, and `maxit` as a descending path to the selected
-lambda. Each refit uses its own training data and retains only the selected model.
-Only the original candidate lambdas are eligible for selection; if no matching
-stronger candidate exists, the refit uses the selected lambda alone. This behavior
-requires no config change.
+For logistic regression, `lambda ≥ 0` increases regularization strength.
+`alpha` is the L1 fraction in `[0, 1]`: 0 gives L2, 1 gives L1. The objective is
+sample-weighted mean binary log loss plus:
 
-The logistic search parameters are now `lambda`, `alpha`, `maxit`, and `thresh`.
-Configs using removed keys must be updated, and previously saved logistic model
-bundles must be regenerated. In particular, `alpha` now means the L1 fraction.
+```text
+lambda × alpha × sum(abs(beta)) + 0.5 × lambda × (1 − alpha) × sum(beta²)
+```
+
+`maxit` limits coordinate-descent passes for the entire native lambda path;
+`thresh > 0` controls relative objective improvement. Native errors or incomplete
+paths stop training. Increase `maxit` when its limit is reached. Path fitting is
+automatic; see [solver behavior](pipeline-details.md#solver-behavior).
+
+Old logistic search keys must be replaced with glmnet parameters and old logistic
+bundles regenerated. There is no direct conversion from the previous `C` scale.
 
 ## `model_selection`
 
-- `model_selection.selected_candidate_count`
-  - type: `int >= 1 | null`
-  - default: `null`
-- `model_selection.selected_candidate_percent`
-  - type: `float > 0 and <= 100 | null`
-  - default: `null`
-  - rule: mutually exclusive with `selected_candidate_count`
-- `model_selection.candidate_source_policy`
-  - type: `per_sample_set | reuse_first_sample_set`
-  - default: `per_sample_set`
-- `model_selection.search_strategy`
-  - type: `grid | random | tpe`
-  - default: `grid`
-- `model_selection.trial_count`
-  - type: `int >= 1 | null`
-  - default: `null`
-  - rule: required when `search_strategy=random|tpe`
-- `model_selection.search_space`
-  - type: mapping (`dict[str, SearchSpaceValue]`)
-  - default: `{}`
-- `model_selection.inner_cv_strategy`
-  - type: `logo | group_kfold | stratified_group_kfold | null`
-  - default: `null`
-- `model_selection.inner_cv_n_splits`
-  - type: `int >= 1 | null`
-  - default: `null`
-  - rules:
-    - required when `inner_cv_strategy=group_kfold|stratified_group_kfold`
-    - must be `>= 2`
-    - must be `null` when `inner_cv_strategy=logo|null`
-- `model_selection.selection_metric`
-  - type: `mcc | balanced_accuracy | log_loss`
-  - default: `log_loss`
-- `model_selection.selection_rule`
-  - type: `best | one_se`
-  - default: `best`
-  - behavior:
-    - `best`: rank candidates by the inner-CV mean `selection_metric`.
-    - `one_se`: find the best inner-CV mean score, keep candidates within one
-      standard error of that best score, then prefer the simpler model among
-      that eligible set.
+| Key | Default | Purpose / accepted values |
+| --- | --- | --- |
+| `selected_candidate_count` | `null` | Positive number to retain per sampled set |
+| `selected_candidate_percent` | `null` | Percentage in `(0, 100]`; mutually exclusive with count |
+| `candidate_source_policy` | `per_sample_set` | Select independently, or `reuse_first_sample_set` (set 0) |
+| `search_strategy` | `grid` | `grid`, `random`, or `tpe` |
+| `trial_count` | `null` | Required positive count for `random` and `tpe` |
+| `search_space` | `{}` | Parameter lists or range specifications |
+| `inner_cv_strategy` | `null` | `logo`, `group_kfold`, or `stratified_group_kfold` |
+| `inner_cv_n_splits` | `null` | Integer ≥ 2 for K-fold strategies; `null` otherwise |
+| `selection_metric` | `log_loss` | `log_loss` (lower), `mcc` or `balanced_accuracy` (higher) |
+| `selection_rule` | `best` | Best mean inner-CV score, or `one_se` |
 
-Compatibility rules:
+Selection is enabled only when count or percent is set, and then requires an
+inner-CV strategy. Otherwise candidates are fitted directly as ensemble members.
+An empty search space yields one default candidate; lists cannot be empty.
+Selected hyperparameter sets are deduplicated.
 
-- `selected_candidate_count` and `selected_candidate_percent` are mutually exclusive.
-- `selected_candidate_count` or `selected_candidate_percent` requires `inner_cv_strategy`.
-- when selection is active, top-N selection is applied per sampled set and selected models are always distinct by hyperparameter set.
-- with `selection_rule=one_se`, "simpler" means larger `lambda` for logistic
-  elastic net (then larger `alpha`), or smaller `C` for linear SVM.
-  For random forest, shallower trees, larger split/leaf minima, and fewer trees
-  are preferred in that order.
-- `candidate_source_policy=per_sample_set`: select candidates independently for each sampled set.
-- `candidate_source_policy=reuse_first_sample_set`: select candidates once from sampled set `0` and reuse them for all sampled sets.
-- `search_strategy=grid` cannot use
-  `continuous_range`/`continuous_log_range`.
-- search-space list values cannot be empty.
+`one_se` keeps candidates within one standard error of the best score and prefers
+simpler models: larger `lambda`, then larger `alpha` for logistic regression;
+smaller `C` for SVM; shallower trees, larger split/leaf minima, then fewer trees
+for random forest.
 
-### `model_selection.search_space` value formats
-
-Each parameter value can be one of:
-
-- explicit list, e.g. `lambda: [0.0001, 0.001, 0.01]`
-- `range`
-- `int_range`
-- `log_range`
-- `continuous_range`
-- `continuous_log_range`
-
-`continuous_*` types are valid only for `random`/`tpe`.
-
-For `grid`, explicit lists are expanded as-is. If a parameter list has exactly
-one value (for example, `max_iter: [200]`), that parameter is effectively fixed
-while other parameters are searched.
-
-#### `range` (discrete float values)
-
-Use this when you want evenly spaced floating-point candidates.
-
-Fields:
-
-- `type`: must be `range`
-- `start`: first value
-- `end`: upper boundary
-- `step`: increment (`> 0`)
-- `inclusive_end`: whether `end` can be included (default `false`)
-
-Behavior:
-
-- `inclusive_end=false`:
-  - generate `start, start + step, ...` while value `< end`
-- `inclusive_end=true`:
-  - generate `start, start + step, ...` while value `<= end`
-- if `end < start`, config validation fails
-- if expansion produces zero values, run fails (for example:
-  `start=1.0, end=1.0, step=0.1, inclusive_end=false`)
-
-Example:
-
-```yaml
-search_space:
-  lambda:
-    type: range
-    start: 0.001
-    end: 0.011
-    step: 0.002
-    inclusive_end: true
-```
-
-Expanded values: `0.001, 0.003, 0.005, 0.007, 0.009, 0.011`
-
-#### `int_range` (discrete integer values)
-
-Same idea as `range`, but integer-only.
-
-Fields:
-
-- `type`: must be `int_range`
-- `start`: first integer value
-- `end`: upper boundary
-- `step`: increment (`> 0`)
-- `inclusive_end`: whether `end` can be included (default `false`)
-
-Example:
-
-```yaml
-search_space:
-  max_iter:
-    type: int_range
-    start: 100
-    end: 301
-    step: 100
-    inclusive_end: false
-```
-
-Expanded values: `100, 200, 300`
-
-#### `log_range` (discrete logarithmic values)
-
-Use this for multiplicative spacing such as `0.001, 0.01, 0.1, ...`.
-
-Fields:
-
-- `type`: must be `log_range`
-- `base`: logarithm base (`> 0`, and not `1`)
-- `start_exp`: first exponent
-- `end_exp`: exponent upper boundary
-- `step_exp`: exponent increment (`> 0`)
-- `inclusive_end`: whether `end_exp` can be included (default `false`)
-
-Values are generated as `base ** exponent`.
-
-Example:
-
-```yaml
-search_space:
-  lambda:
-    type: log_range
-    base: 10
-    start_exp: -5
-    end_exp: -1
-    step_exp: 1
-    inclusive_end: true
-```
-
-Expanded values: `0.00001, 0.0001, 0.001, 0.01, 0.1`
-
-#### `continuous_range` and `continuous_log_range`
-
-These are sampled continuously (not expanded into a full discrete list), and
-can be used only with `search_strategy=random|tpe`.
-
-- `continuous_range`: uniform sample in `[start, end]`
-- `continuous_log_range`: sample exponent in `[start_exp, end_exp]`, then
-  transform with `base ** exponent`
-
-Example (`random` + spec-based ranges):
+A complete selection example:
 
 ```yaml
 model_selection:
-  search_strategy: random
-  trial_count: 30
+  selected_candidate_count: 1
+  inner_cv_strategy: logo
   search_space:
-    lambda:
-      type: log_range
-      base: 10
-      start_exp: -5
-      end_exp: -1
-      step_exp: 1
-    alpha:
-      type: continuous_range
-      start: 0.0
-      end: 1.0
+    lambda: [0.0001, 0.001, 0.01, 0.1]
+    alpha: [1]
 ```
 
-Example (`grid` + explicit `[]` lists):
+### Search-space formats
 
-```yaml
-model_selection:
-  search_strategy: grid
-  trial_count: null
-  search_space:
-    lambda: [0.0001, 0.001, 0.01]
-    alpha: [0.2, 0.5, 0.8]
-    maxit: [2000000]
-```
+| Value / `type` | Fields | Behavior |
+| --- | --- | --- |
+| List, e.g. `[0.001, 0.01]` | Explicit values | One value fixes a parameter |
+| `range` | `start`, `end`, `step` | Discrete float increments |
+| `int_range` | `start`, `end`, `step` | Discrete integer increments |
+| `log_range` | `base`, `start_exp`, `end_exp`, `step_exp` | Discrete `base ** exponent` values |
+| `continuous_range` | `start`, `end` | Uniform sampling in the interval |
+| `continuous_log_range` | `base`, `start_exp`, `end_exp` | Uniform exponent sampling, then exponentiation |
 
-### Allowed search-space parameter names by model
+Discrete ranges exclude the endpoint unless `inclusive_end: true`. Steps must be
+positive and bounds ordered; expansions must be non-empty. Log bases must be
+positive and differ from 1. Continuous ranges require `random` or `tpe`.
 
-- `logistic_elasticnet`: `lambda`, `alpha`, `maxit`, `thresh`
-- `linear_svm`: `C`, `max_iter`
-- `random_forest`: `n_estimators`, `max_depth`, `min_samples_split`,
-  `min_samples_leaf`
-
-Unknown logistic parameter names are rejected during config validation;
-unsupported parameters for other models are rejected at training time.
-
-For logistic elastic net, defaults are `lambda=0.01`, `alpha=0.5`,
-`maxit=2000000`, and `thresh=1e-14`. `lambda >= 0` sets regularization
-strength directly: larger values shrink coefficients more. `alpha` is in
-`[0, 1]`. `maxit` is a positive integer limiting coordinate-descent passes across
-the entire lambda path; it is not an IRLS iteration count. `thresh > 0` controls
-glmnet's relative objective-improvement stopping criterion. The strict default
-was chosen to preserve prediction accuracy at weak regularization. If the native
-solver fails or returns an incomplete path, training fails with an error rather
-than scoring partially converged candidates. Increase `maxit` when its limit is
-reached. Native convergence does not imply a fixed gradient-residual tolerance.
-
-The optimized objective is the sample-weighted mean binary log loss plus
-`lambda * alpha * sum(abs(beta))` and
-`0.5 * lambda * (1 - alpha) * sum(beta ** 2)`. The intercept is unpenalized.
-Multiplying all sample weights by the same positive constant leaves this
-objective unchanged. There is no conversion from the previous `C` scale.
-
-A starting grid for the working expression model is:
+For example, this produces nine lambda values from `1e-5` through `0.1`:
 
 ```yaml
 model_selection:
@@ -996,126 +354,126 @@ model_selection:
       step_exp: 0.5
       inclusive_end: true
     alpha: [1]
-    maxit: [2000000]
-    thresh: [1.0e-14]
 ```
 
-This evaluates nine regularization strengths. Re-tune this grid for the data;
-it is not a numerical translation of a previous scikit-learn run.
+## Output and runtime settings
 
-## `ensemble`
+| Key | Default | Purpose / accepted values |
+| --- | --- | --- |
+| `ensemble.probability_aggregation` | `mean` | `mean` or `median` of member probabilities |
+| `evaluation.group_bootstrap.enabled` | `false` | Group-resampled percentile intervals for pooled OOF metrics |
+| `evaluation.group_bootstrap.n_resamples` | `2000` | Positive replicate count |
+| `evaluation.group_bootstrap.confidence_level` | `0.95` | Value strictly between 0 and 1 |
+| `summary.group_col` | `family` | Metadata column for grouped summaries and display labels |
+| `figures.top_features` | `30` | Number of displayed global or species-local features, from 1 to 100 |
+| `runtime.seed` | `42` | Reproducible splitting, sampling, and model fitting |
+| `runtime.n_jobs` | `1` | Positive CPU upper bound for parallel work |
+| `runtime.execution_stage` | `cv_only` | `cv_only` or `full_run`; CLI `--execution-stage` overrides it |
 
-- `ensemble.probability_aggregation`
-  - type: `mean | median`
-  - default: `mean`
+The group bootstrap resamples `split.group_col` from pooled out-of-fold (OOF)
+predictions without refitting. Its seed derives from `runtime.seed`.
 
-## `evaluation`
+Training parallelism shares the `n_jobs` budget across folds, candidates, and
+supported model threads; sequence outer folds run sequentially to bound memory.
+The CLI initializes Polars threads from this value unless `POLARS_MAX_THREADS`
+is already set. Native BLAS/OpenMP threads are limited during execution. Direct
+Python invocations must set Polars limits before import when a strict cap matters.
 
-- `evaluation.group_bootstrap.enabled`
-  - type: `bool`
-  - default: `false`
-  - behavior: resample intact outer-CV groups from pooled OOF predictions and
-    estimate percentile confidence intervals without refitting models.
-- `evaluation.group_bootstrap.n_resamples`
-  - type: `int`
-  - default: `2000`
-  - rule: must be `>= 1`
-- `evaluation.group_bootstrap.confidence_level`
-  - type: `float`
-  - default: `0.95`
-  - rule: must be strictly between `0` and `1`
+`phylogenetic_imputation` defaults to `enabled: false`, `branch_length_mode: input`,
+`model: ER`, `root_prior: equal`. See the
+[phylogenetic guide](phylogenetic-imputation.md) for options and requirements.
+`report: {}` has no configurable fields. Classification uses a fixed probability
+threshold of 0.5 throughout.
 
-The bootstrap group is always `split.group_col`. For example, it is
-`contrast_pair_id`, `family`, or `order` when that column is selected for
-the split. If there are `G` unique OOF groups, every replicate draws `G` groups
-with replacement and includes all species in every selected group. The seed is
-derived deterministically from `runtime.seed`.
+## Prediction settings
 
-## `summary`
+Expression `predict` requires a bundle and an explicit TPM path through
+`--tpm-path` or `data.tpm_path`; it never falls back to example data. Config and
+metadata are optional. CLI input paths and `--n-jobs` override config values.
 
-- `summary.group_col`
-  - type: `str`
-  - default: `family`
-  - behavior:
-    - metadata column used for stage-level grouped prediction summaries and display labels.
-    - values are readable names, such as `Poaceae` in the `family` column;
-      a separate ID or name column is not required.
-    - if the column is absent from `data.metadata_path`, grouped summary tables
-      and figures are skipped with a warning; model training/prediction still
-      proceeds.
+| Setting | Prediction default / behavior |
+| --- | --- |
+| `data.tpm_path` | Required expression TSV |
+| `data.metadata_path` | `null`; predict all TPM species, or select metadata species |
+| `data.species_col`, `data.feature_col`, `data.value_col` | `species`, `orthogroup`, `tpm` |
+| `data.tree_path`, `data.orthogroup_annotation_path` | `null`; optional tree and labels |
+| `data.trait_col`, `data.contrast_pair_col` | `C4`, `contrast_pair_id`; optional annotations |
+| `preprocess.max_pivot_cells` | `50000000` |
+| `runtime.n_jobs` | `1`; also overrides inherited `POLARS_MAX_THREADS` for expression prediction |
+| `summary.group_col` | `family`; summaries require metadata with this column |
+| `figures.top_features` | Saved training value if `figures` is omitted; otherwise 30 unless specified |
+| `phylogenetic_imputation` | Disabled; same options as training |
 
-## `figures`
+For example:
 
-- `figures.top_features`
-  - type: `int`
-  - default: `30`
-  - rule: must be in `[1, 100]`
-  - behavior:
-    - controls how many top-ranked features are shown in
-      `cv/figures/feature_importance_top.svg`,
-      `cv/figures/feature_importance_by_fold_heatmap.svg`,
-      `cv/figures/coefficients_signed_top.svg`,
-      `cv/figures/feature_stability_top.svg`, and tree feature heatmaps when
-      `data.tree_path` is set.
-    - also limits the candidate-local features in each
-      `inference/figures/candidate_evidence/**/*.pdf`; candidate features are ranked
-      separately for each species by mean absolute local contribution.
-    - also limits the species-local features in each misclassified-OOF diagnostic under
-      `cv/figures/species_evidence/**/*.pdf`; features are ranked separately for each
-      species using only the models that produced its held-out-fold prediction.
+```yaml
+data:
+  tpm_path: data/tpm_predict.tsv
+runtime:
+  n_jobs: 4
+```
 
-## `phylogenetic_imputation`
+Legacy training configs remain accepted: training-only fields are ignored and
+cannot alter the learned model, transforms, scaling, aggregation, or decision
+policies. Unknown prediction keys are rejected. Prediction is deterministic from
+the bundle and does not use `runtime.seed`. Effective prediction settings and
+input/bundle hashes are saved with the results.
 
-- `enabled`: default `false`; interpret unknown-species predictions only in
-  `full_run` and `predict`. It does not execute in CV or external-test evaluation.
-- `branch_length_mode`: `input` (default) requires all non-root branch lengths;
-  `unit` assigns each non-root branch length 1 in an analysis copy.
-- `model`: `ER` (default) or `ARD`, with transition rates fitted by nwkit.
-- `root_prior`: `equal` (default) or `empirical` observed-state frequencies.
+For sequence and combined prediction inputs and supported overrides, see
+[the mode guide](amino-acid.md#prediction).
 
-References come from existing metadata and the model bundle; there is no extra
-reference-table setting. See [phylogenetic imputation](phylogenetic-imputation.md)
-for installation, input validation, and comparison outputs.
+## Ordered multi-condition runs
 
-## `report`
+For `run`, an ordered list in a normally scalar field creates one condition per
+value on a shared outer split:
 
-- No user-configurable report settings are currently defined.
-- Prediction labels use the fixed probability threshold `0.5`.
+```yaml
+preprocess:
+  ranked_feature_filter:
+    method: [none, pair_aware, unpaired, variance]
+    max_features: 100
+```
 
-## `runtime`
+Only one field may contain multiple distinct values per study. Conditions keep
+config order; comparisons are symmetric, with no reference condition. Lists in
+`search_space` retain their normal meaning as hyperparameter candidates.
 
-- `runtime.seed`
-  - type: `int`
-  - default: `42`
-- `runtime.n_jobs`
-  - type: `int`
-  - default: `1`
-  - rule: must be `>= 1`
-  - behavior:
-    - global CPU upper bound for training-time parallel work.
-    - outer-CV folds can run in parallel up to this limit.
-    - within each running fold, model-selection candidate scoring
-      (`search_strategy=grid|random` with selection active) can
-      also run in parallel.
-    - per-model `random_forest` threads are auto-adjusted against the remaining
-      fold budget so combined fold/candidate/model parallel work stays within
-      this limit.
-    - NumPy/SciPy/scikit-learn native thread pools (BLAS/OpenMP) are
-      runtime-limited to this budget at execution points.
-    - Polars thread-pool size is process-initialized.
-    - when using `phenoradar` / `phrad` CLI entrypoints, `POLARS_MAX_THREADS`
-      is auto-set from resolved `runtime.n_jobs` unless already set.
-    - when running without the launcher entrypoint (for example
-      `python -m phenoradar.cli`), set `POLARS_MAX_THREADS` before process
-      start when you need a strict cap.
-- `runtime.execution_stage`
-  - type: `cv_only | full_run`
-  - default: `cv_only`
+Inactive settings are canonicalized: `method: none` ignores `max_features`.
+To compare no ranked filtering with several feature limits, keep the method
+fixed and include `null`:
 
-## Practical notes
+```yaml
+preprocess:
+  ranked_feature_filter:
+    method: pair_aware
+    max_features: [null, 1000, 100]
+```
 
-- Empty `search_space` is valid and means "no hyperparameter variation".
-- With default config, model selection is effectively disabled
-  (`selected_candidate_count: null` and `selected_candidate_percent: null`).
-- Use `phenoradar config` to inspect resolved and validated config before a long
-  run.
+The `null` condition disables the entire ranked filter, including direction and
+pair-dependent eligibility, while other preprocessing remains active.
+
+For training-group sensitivity:
+
+```yaml
+sampling:
+  training_group_count: [5, 10, 15, null]
+  group_subsample_repeats: 3
+```
+
+Each numeric count gets three independently ranked subsets; the all-groups
+condition runs once. Generated repeat indices do not count as another varying
+field and are recorded in each run's resolved config.
+
+Condition lists are rejected for input data, outer and inner split controls,
+runtime, evaluation, figures, summary/report controls, and operational preprocessing fields.
+Use separate studies to compare datasets or generalization regimes.
+
+Resume an interrupted study with the same source config:
+
+```bash
+phenoradar run -c config.yml --resume runs/STUDY_ID
+```
+
+See [study outputs](output-artifacts.md#studies) for tables and figures. Retired
+amino-acid settings remain readable with warnings; `data.sequence_map_path`
+accepts only legacy `null`.

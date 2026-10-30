@@ -10,7 +10,7 @@ data:
   contrast_pair_col: contrast_pair_id  # type: string or null
 
   # Optional amino-acid inputs.
-  feature_mode: expression  # choices: expression, amino_acid
+  feature_mode: expression  # choices: expression, amino_acid, combined
   alignment_dir: null  # type: string or null
   sequence_tpm_path: null  # type: string or null; species/sequence_id/tpm TSV[.gz]
 
@@ -74,6 +74,7 @@ model_selection:
       step_exp: 0.5
       inclusive_end: true  # choices: true, false
     alpha: [1]
+    amino_acid_penalty_ratio: [0.1, 0.3, 1, 3, 10]  # Combined mode only; omitted means 1 (ordinary joint LASSO)
     maxit: [2000000]
     thresh: [1.0e-14]
   inner_cv_strategy: stratified_group_kfold  # choices: logo, group_kfold, stratified_group_kfold, null
@@ -113,7 +114,7 @@ runtime:
   n_jobs: 32
   execution_stage: cv_only  # choices: cv_only, full_run
 
-# Optional amino-acid preprocessing; active only for data.feature_mode: amino_acid.
+# Optional amino-acid preprocessing; active for feature_mode: amino_acid or combined.
 amino_acid:
   aggregation: aa_frequency  # choices: best_covered, aa_frequency, tpm_weighted_frequency
   site_filter:
