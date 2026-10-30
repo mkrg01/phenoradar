@@ -43,7 +43,7 @@ def combined_config(tmp_path: Path, aggregation: str = "aa_frequency") -> Path:
     rows.append("external\tTARGET_ONLY\t999999")
     tpm.write_text("\n".join(rows) + "\n")
     raw["data"]["tpm_path"] = str(tpm)
-    raw["preprocess"] = {
+    raw.setdefault("preprocess", {})["expression"] = {
         "absent_feature_fill": "nan",
         "missing_expression": {"method": "neutral", "zero_as_missing": True},
         "sparse_feature_filter": {"enabled": False},
@@ -89,10 +89,17 @@ def test_invalid_penalty_vectors(factors: list[float]) -> None:
 def test_ratio_paths_remain_separate_with_fold_specific_feature_counts(monkeypatch) -> None:
     import phenoradar.cv as cv
 
-    config = AppConfig.model_validate({
-        "data": {"feature_mode": "combined", "alignment_dir": "aa"},
-        "preprocess": {"absent_feature_fill": "nan", "missing_expression": {"method": "neutral"}},
-    })
+    config = AppConfig.model_validate(
+        {
+            "data": {"feature_mode": "combined", "alignment_dir": "aa"},
+            "preprocess": {
+                "expression": {
+                    "absent_feature_fill": "nan",
+                    "missing_expression": {"method": "neutral"},
+                }
+            },
+        }
+    )
     rng = np.random.default_rng(9)
     folds = [InnerCvPreprocessedFold(str(i), rng.normal(size=(12, p)), rng.normal(size=(4, p)),
                                     np.tile([0, 1], 6), np.tile([0, 1], 2), None, n)
@@ -183,7 +190,7 @@ def test_combined_full_run_and_frozen_predictions(tmp_path: Path, aggregation: s
 
 @pytest.mark.parametrize("overrides", [
     {"model_selection": {"search_space": {"alpha": [0.5]}}},
-    {"preprocess": {"feature_scaling": {"method": "none"}}},
+    {"preprocess": {"expression": {"feature_scaling": {"method": "none"}}}},
     {"phylogenetic_imputation": {"enabled": True}},
 ])
 def test_combined_rejects_unsupported_model_choices(tmp_path: Path, overrides: dict) -> None:
@@ -258,7 +265,7 @@ def test_joint_model_uses_both_independent_signals_and_preserves_aa_offsets(tmp_
     config = load_and_resolve_config([combined_config(tmp_path)])
     config.model_selection.selected_candidate_count = None
     config.model_selection.search_space = {"lambda": [0.005], "amino_acid_penalty_ratio": [0.7]}
-    config.amino_acid.ranked_site_filter.method = "none"
+    config.preprocess.amino_acid.ranked_site_filter.method = "none"
     rng = np.random.default_rng(85)
     species = [f"sample{i}" for i in range(160)]
     expression = rng.normal(size=len(species))
@@ -337,7 +344,7 @@ def test_inactive_continuous_ratio_does_not_disable_grid(mode: str) -> None:
     config = AppConfig.model_validate(raw)
     assert active_search_space(config) == {"lambda": [0.01]}
     raw["data"]["feature_mode"] = "combined"
-    raw["preprocess"] = {"absent_feature_fill": "nan",
+    raw.setdefault("preprocess", {})["expression"] = {"absent_feature_fill": "nan",
                          "missing_expression": {"method": "neutral"}}
     with pytest.raises(ValueError, match="grid.*continuous.*amino_acid_penalty_ratio"):
         AppConfig.model_validate(raw)

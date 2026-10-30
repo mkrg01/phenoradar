@@ -31,14 +31,14 @@ def test_delayed_validation_gather_preserves_preprocessing(
     neutral = transform == "log1p" and scaling == "standard"
     config = AppConfig.model_validate(
         {
-            "preprocess": {
+            "preprocess": {"expression": {
                 "absent_feature_fill": "nan" if neutral else 0,
                 "missing_expression": {"method": "neutral" if neutral else "none"},
                 "expression_transform": {"method": transform},
                 "feature_scaling": {"method": scaling},
                 "sparse_feature_filter": {"min_nonzero_fraction": 0.5},
                 "ranked_feature_filter": {"method": rank_method, "max_features": 3},
-            }
+            }}
         }
     )
     raw = np.random.default_rng(582).lognormal(size=(16, 18))
@@ -98,7 +98,7 @@ def test_indexed_filters_use_only_training_rows(
     monkeypatch.setattr(cv, "_NEUTRAL_FILTER_BLOCK_CELLS", 8)  # Single-column chunks.
     config = AppConfig.model_validate(
         {
-            "preprocess": {
+            "preprocess": {"expression": {
                 "absent_feature_fill": "nan" if neutral else 0,
                 "missing_expression": {"method": "neutral" if neutral else "none"},
                 "sparse_feature_filter": {"scope": scope, "min_nonzero_fraction": 0.5},
@@ -109,7 +109,7 @@ def test_indexed_filters_use_only_training_rows(
                     "method": "pearson" if correlation == "none" else correlation,
                     "max_abs_correlation": 0.95,
                 },
-            }
+            }}
         }
     )
     source = np.random.default_rng(672).lognormal(size=(12, 14))
@@ -163,11 +163,11 @@ def test_indexed_neutral_single_column_keeps_materialized_row_reduction(
     monkeypatch.setattr(cv, "_NEUTRAL_FILTER_BLOCK_CELLS", 81)
     config = AppConfig.model_validate(
         {
-            "preprocess": {
+            "preprocess": {"expression": {
                 "absent_feature_fill": "nan",
                 "missing_expression": {"method": "neutral"},
                 "sparse_feature_filter": {"min_nonzero_fraction": 1.0},
-            }
+            }}
         }
     )
     source = np.zeros((100, width), order=layout)
@@ -189,10 +189,10 @@ def test_indexed_neutral_single_column_keeps_materialized_row_reduction(
 def test_indexed_preprocessing_preserves_repeated_training_rows_and_empty_validation() -> None:
     config = AppConfig.model_validate(
         {
-            "preprocess": {
+            "preprocess": {"expression": {
                 "sparse_feature_filter": {"scope": "any_trait", "min_nonzero_fraction": 0.5},
                 "ranked_feature_filter": {"method": "unpaired", "max_features": 2},
-            }
+            }}
         }
     )
     source = np.random.default_rng(592).lognormal(size=(8, 5))
@@ -225,12 +225,12 @@ def test_inner_fold_builder_never_materializes_all_columns_before_selection(
     monkeypatch.setattr(cv, "_NEUTRAL_FILTER_BLOCK_CELLS", 16)
     config = AppConfig.model_validate(
         {
-            "preprocess": {
+            "preprocess": {"expression": {
                 "absent_feature_fill": "nan",
                 "missing_expression": {"method": "neutral"},
                 "sparse_feature_filter": {"min_nonzero_fraction": 1.0},
                 "ranked_feature_filter": {"method": "pair_aware", "max_features": 2},
-            },
+            }},
             "model_selection": {"selected_candidate_count": 1, "inner_cv_strategy": "logo"},
         }
     )

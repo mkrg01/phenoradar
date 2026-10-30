@@ -28,11 +28,11 @@ from phenoradar.split import build_split_artifacts
 
 def neutral_config(**updates: object) -> AppConfig:
     data: dict[str, object] = {
-        "preprocess": {
+        "preprocess": {"expression": {
             "absent_feature_fill": "nan",
             "missing_expression": {"method": "neutral", "zero_as_missing": True},
             "sparse_feature_filter": {"enabled": False},
-        },
+        }},
         "abstention": {"enabled": True},
         "sampling": {
             "strategy": "all_samples",
@@ -146,7 +146,7 @@ def test_neutral_mode_contract() -> None:
         AppConfig.model_validate({"abstention": {"enabled": True}})
     for key, value in [
         ("model", {"name": "random_forest"}),
-        ("preprocess", {"missing_expression": {"method": "neutral"}}),
+        ("preprocess", {"expression": {"missing_expression": {"method": "neutral"}}}),
     ]:
         with pytest.raises(ValidationError, match="requires"):
             neutral_config(**{key: value})
@@ -155,9 +155,9 @@ def test_neutral_mode_contract() -> None:
 @pytest.mark.parametrize("method", ["pair_aware", "unpaired"])
 def test_supervised_filtering_does_not_treat_missing_label_as_low_expression(method: str) -> None:
     config = neutral_config()
-    config.preprocess.ranked_feature_filter.method = method
-    config.preprocess.ranked_feature_filter.max_features = 3
-    config.preprocess.ranked_feature_filter.min_contrast_pairs = 2
+    config.preprocess.expression.ranked_feature_filter.method = method
+    config.preprocess.expression.ranked_feature_filter.max_features = 3
+    config.preprocess.expression.ranked_feature_filter.min_contrast_pairs = 2
     # one_label has observations only in label 1; one_pair has one valid contrast.
     train = np.array([[1, 0, 1], [8, 8, 8], [2, 0, 0], [9, 9, 9]], dtype=float)
     _, _, names, _ = _preprocess_train_and_target(
@@ -212,9 +212,9 @@ def test_cv_refit_bundle_with_real_missingness(tmp_path: Path, prune: bool) -> N
             "search_space": {"lambda": [0.01, 0.1]},
         },
     )
-    config.preprocess.sparse_feature_filter.enabled = prune
-    config.preprocess.sparse_feature_filter.scope = "all_samples"
-    config.preprocess.sparse_feature_filter.min_nonzero_fraction = 0.5
+    config.preprocess.expression.sparse_feature_filter.enabled = prune
+    config.preprocess.expression.sparse_feature_filter.scope = "all_samples"
+    config.preprocess.expression.sparse_feature_filter.min_nonzero_fraction = 0.5
     split = build_split_artifacts(config)
     cv = run_outer_cv(config, split.split_manifest)
     assert cv.oof_predictions["information_coverage"].is_not_null().all()

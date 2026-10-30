@@ -57,12 +57,12 @@ _FORBIDDEN_DIMENSION_PREFIXES = (
     ("report",),
     ("model_selection", "inner_cv_strategy"),
     ("model_selection", "inner_cv_n_splits"),
-    ("preprocess", "max_pivot_cells"),
-    ("preprocess", "absent_feature_fill"),
+    ("preprocess", "expression", "absent_feature_fill"),
 )
 
 _RANKED_MAX_FEATURES_PATH = (
     "preprocess",
+    "expression",
     "ranked_feature_filter",
     "max_features",
 )
@@ -216,10 +216,11 @@ def _normalize_inactive_condition_fields(
     values: list[tuple[str, Any]],
 ) -> None:
     """Canonicalize fields that are inactive for the selected condition."""
-    preprocess = raw.get("preprocess")
+    preprocessing = raw.get("preprocess")
+    expression = preprocessing.get("expression") if isinstance(preprocessing, dict) else None
     ranked_filter = (
-        preprocess.get("ranked_feature_filter")
-        if isinstance(preprocess, dict)
+        expression.get("ranked_feature_filter")
+        if isinstance(expression, dict)
         else None
     )
     if isinstance(ranked_filter, dict) and ranked_filter.get("method", "none") == "none":
@@ -247,7 +248,7 @@ def _differs_only_by_inactive_fields(
     resolved: AppConfig,
 ) -> bool:
     inactive_paths: set[str] = set()
-    if resolved.preprocess.ranked_feature_filter.method == "none":
+    if resolved.preprocess.expression.ranked_feature_filter.method == "none":
         inactive_paths.add(_RANKED_MAX_FEATURES_DOTTED_PATH)
     if resolved.sampling.training_group_count is None:
         inactive_paths.add(_GROUP_SUBSAMPLE_REPEAT_INDEX_DOTTED_PATH)

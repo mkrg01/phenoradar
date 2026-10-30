@@ -96,7 +96,7 @@ def test_predict_all_tpm_species_without_metadata_or_training(
     assert resolved["data"]["metadata_path"] is None
     assert resolved["runtime"] == {"n_jobs": 2}
     assert "model" not in resolved and "split" not in resolved
-    assert resolved["preprocess"] == {"max_pivot_cells": 50_000_000}
+    assert "preprocess" not in resolved
     provenance = json.loads((run / "run_metadata.json").read_text())
     assert provenance["timing"]["artifact_path"] == "runtime/tables/timing.tsv"
     timing = pl.read_csv(run / "runtime/tables/timing.tsv", separator="\t", null_values="NA")
@@ -161,7 +161,7 @@ def test_predict_cli_overrides_config_and_selects_metadata_species(
                 "data": {"tpm_path": "missing.tsv", "metadata_path": "missing-metadata.tsv"},
                 "runtime": {"n_jobs": 0},
                 # Training settings have no effect and need not satisfy training validation.
-                "preprocess": {"missing_expression": {"method": "neutral"}},
+                "preprocess": {"expression": {"missing_expression": {"method": "neutral"}}},
                 "model": {"name": "random_forest"},
             }
         )

@@ -1,4 +1,4 @@
-"""Prediction-only settings and compatibility with existing run configs."""
+"""Prediction inputs; learned preprocessing comes from the model bundle."""
 
 from __future__ import annotations
 
@@ -34,11 +34,6 @@ class PredictDataConfig(StrictModel):
     contrast_pair_col: str | None = "contrast_pair_id"
 
 
-class PredictPreprocessConfig(StrictModel):
-    # This is a memory guard, not a learned preprocessing choice.
-    max_pivot_cells: PositiveInt = 50_000_000
-
-
 class PredictRuntimeConfig(StrictModel):
     n_jobs: PositiveInt = 1
 
@@ -47,13 +42,29 @@ class PredictConfig(StrictModel):
     """Inputs and execution settings; learned state comes only from the bundle."""
 
     data: PredictDataConfig = Field(default_factory=PredictDataConfig)
-    preprocess: PredictPreprocessConfig = Field(default_factory=PredictPreprocessConfig)
     runtime: PredictRuntimeConfig = Field(default_factory=PredictRuntimeConfig)
     summary: SummaryConfig = Field(default_factory=SummaryConfig)
     figures: FiguresConfig = Field(default_factory=FiguresConfig)
     phylogenetic_imputation: PhylogeneticImputationConfig = Field(
         default_factory=PhylogeneticImputationConfig
     )
+
+
+def _check_config_keys(
+    value: Mapping[str, Any], model: type[StrictModel], prefix: str = ""
+) -> None:
+    unknown = set(value) - model.model_fields.keys()
+    if unknown:
+        context = f"{prefix} " if prefix else "config "
+        raise ConfigError(f"Unknown {context}field(s): {', '.join(sorted(unknown))}")
+    for key, item in value.items():
+        nested = model.model_fields[key].annotation
+        if (
+            isinstance(item, Mapping)
+            and isinstance(nested, type)
+            and issubclass(nested, StrictModel)
+        ):
+            _check_config_keys(item, nested, f"{prefix}.{key}" if prefix else key)
 
 
 def load_predict_config(
@@ -66,9 +77,7 @@ def load_predict_config(
     if len(config_paths) > 1:
         raise ConfigError("`--config` / `-c` can be specified at most once.")
     raw = _load_yaml_mapping(config_paths[0]) if config_paths else {}
-    unknown = set(raw) - AppConfig.model_fields.keys()
-    if unknown:
-        raise ConfigError(f"Unknown config field(s): {', '.join(sorted(unknown))}")
+    _check_config_keys(raw, AppConfig)
 
     selected: dict[str, Any] = {}
     for section, field in PredictConfig.model_fields.items():
@@ -77,13 +86,8 @@ def load_predict_config(
         value = raw[section]
         if not isinstance(value, Mapping):
             raise ConfigError(f"{section} must be a mapping")
-        legacy_type = AppConfig.model_fields[section].annotation
         predict_type = field.annotation
-        assert isinstance(legacy_type, type) and issubclass(legacy_type, StrictModel)
         assert isinstance(predict_type, type) and issubclass(predict_type, StrictModel)
-        unknown = set(value) - legacy_type.model_fields.keys()
-        if unknown:
-            raise ConfigError(f"Unknown {section} field(s): {', '.join(sorted(unknown))}")
         selected[section] = {
             key: item for key, item in value.items() if key in predict_type.model_fields
         }

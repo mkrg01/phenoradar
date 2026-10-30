@@ -92,7 +92,7 @@ are reported with source-line examples and never treated as zero. Duplicate
 `(species, orthogroup)` rows are validated individually, then summed.
 
 An absent coordinate is zero by default. To keep absent coordinates missing,
-use `preprocess.absent_feature_fill: nan` with random forest or
+use `preprocess.expression.absent_feature_fill: nan` with random forest or
 [neutral logistic regression](configuration.md#missing-expression-and-abstention).
 Explicit blank/`NA` TPM values remain invalid. Neutral mode can also treat
 numeric zeros as unknown with `zero_as_missing: true`, after duplicate summation.

@@ -499,7 +499,8 @@ class AATransform:
     ) -> tuple[np.ndarray, np.ndarray, list[dict[str, Any]]]:
         if len(species) * max(1, len(self.sites) * 20) > MAX_MATRIX_CELLS:
             raise AlignmentError(
-                "AA matrix limit exceeded; reduce amino_acid.ranked_site_filter.max_sites"
+                "AA matrix limit exceeded; reduce "
+                "preprocess.amino_acid.ranked_site_filter.max_sites"
             )
         values = np.full((len(species), len(self.sites), 20), np.nan, dtype=np.float32)
         coverage = np.zeros((len(species), len(self.sites)), dtype=np.float32)

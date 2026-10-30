@@ -45,7 +45,8 @@ Keys in each table are relative to the section heading.
 
 See [data format](data-format.md) for input validation and
 [amino-acid and combined modes](amino-acid.md) for sequence-specific behavior.
-Cache paths are automatic and omitted from generated user configs.
+Cache paths and matrix-construction chunk sizes are managed internally and
+omitted from generated user configs.
 
 ## `split`
 
@@ -108,6 +109,13 @@ all-groups (`null`) condition runs once. See [condition comparisons](#ordered-mu
 
 ## `preprocess`
 
+Group settings under `expression` and `amino_acid`, in that order. Expression-only
+runs use `preprocess.expression`; sequence-only runs use `preprocess.amino_acid`;
+combined runs use both. All modes share one config file. Flat preprocessing keys,
+top-level `amino_acid`, and removed settings are rejected.
+
+The settings below are relative to `preprocess.expression`; see the
+[sequence guide](amino-acid.md#preprocessing) for `preprocess.amino_acid`.
 Expression processing runs in this order:
 
 1. Expression transform
@@ -123,7 +131,6 @@ Expression preprocessing is inactive in sequence-only mode.
 
 | Key | Default | Purpose / accepted values |
 | --- | --- | --- |
-| `max_pivot_cells` | `50000000` | Positive dense-cell threshold for chunked matrix construction; not a total memory cap |
 | `absent_feature_fill` | `0` | `0` or `nan`; `nan` requires random forest or neutral logistic regression |
 | `expression_transform.method` | `log1p` | `none`, `log1p`, `sample_rank`, `sample_percentile_rank` |
 | `feature_scaling.method` | `standard` | `standard` or `none` |
@@ -188,13 +195,14 @@ For positive trait-1 expression evidence:
 
 ```yaml
 preprocess:
-  sparse_feature_filter:
-    min_nonzero_fraction: 0.9
-    scope: trait_1
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: 200
-    higher_in_trait: 1
+  expression:
+    sparse_feature_filter:
+      min_nonzero_fraction: 0.9
+      scope: trait_1
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: 200
+      higher_in_trait: 1
 ```
 
 Prevalence in trait 1 alone does not establish higher expression than trait 0.
@@ -208,14 +216,15 @@ neutral in a logistic model and withhold decisions with low information coverage
 
 ```yaml
 preprocess:
-  absent_feature_fill: nan
-  missing_expression:
-    method: neutral
-    zero_as_missing: true
-  expression_transform:
-    method: log1p
-  feature_scaling:
-    method: standard
+  expression:
+    absent_feature_fill: nan
+    missing_expression:
+      method: neutral
+      zero_as_missing: true
+    expression_transform:
+      method: log1p
+    feature_scaling:
+      method: standard
 abstention:
   enabled: true
   threshold: 0.8
@@ -223,8 +232,8 @@ abstention:
 
 | Key | Default | Rule |
 | --- | --- | --- |
-| `preprocess.missing_expression.method` | `none` | `neutral` requires logistic regression, `log1p`, standard scaling, and `absent_feature_fill: nan` |
-| `preprocess.missing_expression.zero_as_missing` | `false` | With `true`, treat summed numeric zeros as unknown; requires neutral mode for expression |
+| `preprocess.expression.missing_expression.method` | `none` | `neutral` requires logistic regression, `log1p`, standard scaling, and `absent_feature_fill: nan` |
+| `preprocess.expression.missing_expression.zero_as_missing` | `false` | With `true`, treat summed numeric zeros as unknown; requires neutral mode for expression |
 | `abstention.enabled` | `false` | Requires neutral mode for expression; sequence modes use site coverage |
 | `abstention.threshold` | `0.8` | Fixed information-coverage threshold in `(0, 1]` |
 
@@ -398,7 +407,6 @@ metadata are optional. CLI input paths and `--n-jobs` override config values.
 | `data.species_col`, `data.feature_col`, `data.value_col` | `species`, `orthogroup`, `tpm` |
 | `data.tree_path`, `data.orthogroup_annotation_path` | `null`; optional tree and labels |
 | `data.trait_col`, `data.contrast_pair_col` | `C4`, `contrast_pair_id`; optional annotations |
-| `preprocess.max_pivot_cells` | `50000000` |
 | `runtime.n_jobs` | `1`; also overrides inherited `POLARS_MAX_THREADS` for expression prediction |
 | `summary.group_col` | `family`; summaries require metadata with this column |
 | `figures.top_features` | Saved training value if `figures` is omitted; otherwise 30 unless specified |
@@ -413,7 +421,7 @@ runtime:
   n_jobs: 4
 ```
 
-Legacy training configs remain accepted: training-only fields are ignored and
+Training configs using the current schema are accepted: training-only fields are ignored and
 cannot alter the learned model, transforms, scaling, aggregation, or decision
 policies. Unknown prediction keys are rejected. Prediction is deterministic from
 the bundle and does not use `runtime.seed`. Effective prediction settings and
@@ -429,9 +437,10 @@ value on a shared outer split:
 
 ```yaml
 preprocess:
-  ranked_feature_filter:
-    method: [none, pair_aware, unpaired, variance]
-    max_features: 100
+  expression:
+    ranked_feature_filter:
+      method: [none, pair_aware, unpaired, variance]
+      max_features: 100
 ```
 
 Only one field may contain multiple distinct values per study. Conditions keep
@@ -444,9 +453,10 @@ fixed and include `null`:
 
 ```yaml
 preprocess:
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: [null, 1000, 100]
+  expression:
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: [null, 1000, 100]
 ```
 
 The `null` condition disables the entire ranked filter, including direction and
@@ -474,6 +484,4 @@ Resume an interrupted study with the same source config:
 phenoradar run -c config.yml --resume runs/STUDY_ID
 ```
 
-See [study outputs](output-artifacts.md#studies) for tables and figures. Retired
-amino-acid settings remain readable with warnings; `data.sequence_map_path`
-accepts only legacy `null`.
+See [study outputs](output-artifacts.md#studies) for tables and figures.

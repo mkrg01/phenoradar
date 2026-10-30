@@ -99,13 +99,13 @@ def _stub_resolved_config(
         figures=SimpleNamespace(top_features=top_features),
         phylogenetic_imputation=SimpleNamespace(enabled=False),
         model_selection=SimpleNamespace(),
-        preprocess=SimpleNamespace(
+        preprocess=SimpleNamespace(expression=SimpleNamespace(
             missing_expression=SimpleNamespace(method="none", zero_as_missing=False),
             sparse_feature_filter=SimpleNamespace(enabled=True),
             low_variance_filter=SimpleNamespace(enabled=True),
             ranked_feature_filter=SimpleNamespace(method="none"),
             correlation_filter=SimpleNamespace(enabled=False),
-        ),
+        )),
         data=SimpleNamespace(
             metadata_path="metadata.tsv",
             tpm_path="tpm.tsv",
@@ -433,6 +433,7 @@ sampling:
     assert "search_seed" not in payload["model_selection"]
     assert payload["sampling"]["weighting"] == "group_label_inverse"
     assert "group_subsample_repeat_index" not in payload["sampling"]
+    assert "max_pivot_cells" not in payload["preprocess"]
 
 
 def test_config_without_config_writes_default_yaml(
@@ -456,10 +457,10 @@ def test_config_without_config_writes_default_yaml(
     assert payload["data"]["tpm_path"] == "testdata/c4_tiny/tpm.tsv"
     assert payload["data"]["tree_path"] is None
     assert payload["data"]["orthogroup_annotation_path"] is None
-    assert payload["preprocess"]["absent_feature_fill"] == 0
-    assert payload["preprocess"]["sparse_feature_filter"]["scope"] == "any_trait"
+    assert payload["preprocess"]["expression"]["absent_feature_fill"] == 0
+    assert payload["preprocess"]["expression"]["sparse_feature_filter"]["scope"] == "any_trait"
     assert (
-        payload["preprocess"]["ranked_feature_filter"]["higher_in_trait"]
+        payload["preprocess"]["expression"]["ranked_feature_filter"]["higher_in_trait"]
         is None
     )
     assert payload["figures"]["top_features"] == 30
@@ -470,7 +471,7 @@ def test_config_without_config_writes_default_yaml(
             "data": {"sequence_tpm_cache_dir"},
         },
     )
-    assert list(payload)[-1] == "amino_acid"
+    assert list(payload["preprocess"]) == ["expression", "amino_acid"]
 
 
 def test_run_passes_top_features_to_run_and_tree_figures(
@@ -1851,8 +1852,12 @@ def test_run_rejects_multiple_condition_variables_before_creating_run(
     monkeypatch.chdir(tmp_path)
     config = _write(
         tmp_path / "config.yml",
-        "preprocess:\n  sparse_feature_filter:\n"
-        "    min_nonzero_fraction: [0.9, 1]\n    scope: [all_samples, any_trait]\n",
+        """preprocess:
+  expression:
+    sparse_feature_filter:
+      min_nonzero_fraction: [0.9, 1]
+      scope: [all_samples, any_trait]
+""",
     )
 
     result = CliRunner().invoke(app, ["run", "-c", str(config), "--quiet"])
@@ -1865,9 +1870,9 @@ def test_run_rejects_multiple_condition_variables_before_creating_run(
 @pytest.mark.parametrize(
     ("ranked_settings", "varying_field", "expected_values"),
     [
-        ("method: [none, pair_aware]\n    max_features: 100", "method",
+        ("method: [none, pair_aware]\n      max_features: 100", "method",
          ["none", "pair_aware"]),
-        ("method: pair_aware\n    max_features: [null, 1000, 100]", "max_features",
+        ("method: pair_aware\n      max_features: [null, 1000, 100]", "max_features",
          [None, 1000, 100]),
     ],
 )
@@ -1881,8 +1886,9 @@ def test_run_expands_scalar_lists_into_ordered_study_and_resumes(
         tmp_path / "config.yml",
         f"""
 preprocess:
-  ranked_feature_filter:
-    {ranked_settings}
+  expression:
+    ranked_feature_filter:
+      {ranked_settings}
 sampling:
   strategy: all_samples
   max_samples_per_label_per_group: null
@@ -1942,7 +1948,7 @@ sampling:
         null_values="NA",
     ).sort("condition_index")
     condition_count = len(expected_values)
-    varying_path = f"preprocess.ranked_feature_filter.{varying_field}"
+    varying_path = f"preprocess.expression.ranked_feature_filter.{varying_field}"
     assert manifest.get_column("status").to_list() == ["completed"] * condition_count
     assert manifest.get_column("condition_index").to_list() == list(range(1, condition_count + 1))
     assert [

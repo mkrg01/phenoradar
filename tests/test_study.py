@@ -232,16 +232,16 @@ def test_generate_study_report_preserves_order_and_uses_paired_replicates(
         (("first", "second"), "Condition settings", ("first", "second")),
         (
             (
-                "preprocess.ranked_feature_filter.max_features=null",
-                "preprocess.ranked_feature_filter.max_features=1000",
+                "preprocess.expression.ranked_feature_filter.max_features=null",
+                "preprocess.expression.ranked_feature_filter.max_features=1000",
             ),
             "max_features",
             ("null", "1000"),
         ),
         (
             (
-                "preprocess.sparse_feature_filter.min_nonzero_fraction=0.9",
-                "preprocess.sparse_feature_filter.min_nonzero_fraction=1.0",
+                "preprocess.expression.sparse_feature_filter.min_nonzero_fraction=0.9",
+                "preprocess.expression.sparse_feature_filter.min_nonzero_fraction=1.0",
             ),
             "min_nonzero_fraction",
             ("0.9", "1"),
@@ -253,36 +253,36 @@ def test_generate_study_report_preserves_order_and_uses_paired_replicates(
         ),
         (
             (
-                'preprocess.expression_transform.method="log1p"',
-                'preprocess.expression_transform.method="sample_rank"',
+                'preprocess.expression.expression_transform.method="log1p"',
+                'preprocess.expression.expression_transform.method="sample_rank"',
             ),
             "expression_transform.method",
             ("log1p", "sample_rank"),
         ),
         (
             (
-                "preprocess.sparse_feature_filter.enabled=true",
-                "preprocess.sparse_feature_filter.enabled=false",
+                "preprocess.expression.sparse_feature_filter.enabled=true",
+                "preprocess.expression.sparse_feature_filter.enabled=false",
             ),
             "sparse_feature_filter.enabled",
             ("true", "false"),
         ),
         (
             (
-                'preprocess.ranked_feature_filter.method="pair_aware"; '
-                "preprocess.ranked_feature_filter.max_features=100",
-                'preprocess.ranked_feature_filter.method="pair_aware"; '
-                "preprocess.ranked_feature_filter.max_features=50",
+                'preprocess.expression.ranked_feature_filter.method="pair_aware"; '
+                "preprocess.expression.ranked_feature_filter.max_features=100",
+                'preprocess.expression.ranked_feature_filter.method="pair_aware"; '
+                "preprocess.expression.ranked_feature_filter.max_features=50",
             ),
             "max_features",
             ("100", "50"),
         ),
         (
             (
-                'preprocess.ranked_feature_filter.method="none"; '
-                "preprocess.ranked_feature_filter.max_features=null",
-                'preprocess.ranked_feature_filter.method="pair_aware"; '
-                "preprocess.ranked_feature_filter.max_features=100",
+                'preprocess.expression.ranked_feature_filter.method="none"; '
+                "preprocess.expression.ranked_feature_filter.max_features=null",
+                'preprocess.expression.ranked_feature_filter.method="pair_aware"; '
+                "preprocess.expression.ranked_feature_filter.max_features=100",
             ),
             "ranked_feature_filter.method",
             ("none", "pair_aware"),
@@ -305,17 +305,17 @@ def test_generate_study_report_preserves_order_and_uses_paired_replicates(
         ),
         (
             (
-                'preprocess.ranked_feature_filter.method="pair_aware"; '
-                'preprocess.expression_transform.method="log1p"',
-                'preprocess.ranked_feature_filter.method="unpaired"; '
-                'preprocess.expression_transform.method="none"',
+                'preprocess.expression.ranked_feature_filter.method="pair_aware"; '
+                'preprocess.expression.expression_transform.method="log1p"',
+                'preprocess.expression.ranked_feature_filter.method="unpaired"; '
+                'preprocess.expression.expression_transform.method="none"',
             ),
             "Condition settings",
             (
-                "Ranked feature filter / method: pair_aware "
-                "Expression transform / method: log1p",
-                "Ranked feature filter / method: unpaired "
-                "Expression transform / method: none",
+                "Expression / ranked feature filter / method: pair_aware "
+                "Expression / expression transform / method: log1p",
+                "Expression / ranked feature filter / method: unpaired "
+                "Expression / expression transform / method: none",
             ),
         ),
     ],
@@ -421,8 +421,8 @@ def test_ranked_feature_sensitivity_figures_use_matched_feature_counts(
             "condition_id": condition_id,
             "varying_parameters_json": json.dumps(
                 {
-                    "preprocess.ranked_feature_filter.method": method,
-                    "preprocess.ranked_feature_filter.max_features": max_features,
+                    "preprocess.expression.ranked_feature_filter.method": method,
+                    "preprocess.expression.ranked_feature_filter.max_features": max_features,
                 }
             ),
         }
@@ -457,9 +457,9 @@ def test_ranked_sensitivity_metadata_rejects_additional_direction_axis() -> None
             "condition_id": f"condition_{index}",
             "varying_parameters_json": json.dumps(
                 {
-                    "preprocess.ranked_feature_filter.method": method,
-                    "preprocess.ranked_feature_filter.max_features": max_features,
-                    "preprocess.ranked_feature_filter.higher_in_trait": direction,
+                    "preprocess.expression.ranked_feature_filter.method": method,
+                    "preprocess.expression.ranked_feature_filter.max_features": max_features,
+                    "preprocess.expression.ranked_feature_filter.higher_in_trait": direction,
                 }
             ),
         }

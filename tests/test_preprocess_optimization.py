@@ -19,7 +19,7 @@ def _config(*, neutral: bool = False, **preprocess: Any) -> AppConfig:
             missing_expression={"method": "neutral"},
         )
     settings.update(preprocess)
-    return AppConfig.model_validate({"preprocess": settings})
+    return AppConfig.model_validate({"preprocess": {"expression": settings}})
 
 
 @pytest.mark.parametrize("neutral", [False, True])

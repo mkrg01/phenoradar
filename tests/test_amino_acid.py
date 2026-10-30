@@ -100,15 +100,9 @@ def test_default_coverage_uses_ceiling_and_allows_singleton_residues(tmp_path: P
 
 
 @pytest.mark.parametrize("retired", ["min_minor_sample_count", "min_minor_group_count"])
-def test_retired_minor_filters_warn_and_are_omitted(retired: str) -> None:
-    with pytest.warns(UserWarning, match=f"{retired} has been removed"):
-        config = AminoAcidConfig.model_validate({"site_filter": {retired: 100}})
-    assert config.site_filter.model_dump() == {
-        "min_sample_fraction": 0.8,
-        "min_residue_states": 2,
-    }
-    schema = config.model_json_schema()["$defs"]["AminoAcidSiteFilter"]["properties"]
-    assert not {"min_minor_sample_count", "min_minor_group_count"}.intersection(schema)
+def test_retired_minor_filters_are_rejected(retired: str) -> None:
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        AminoAcidConfig.model_validate({"site_filter": {retired: 100}})
 
 
 @pytest.mark.parametrize("aggregation", ["best_covered", "aa_frequency", "tpm_weighted_frequency"])
@@ -121,8 +115,7 @@ def test_major_phenotype_residue_is_not_filtered_by_minor_group_support(
     records = [(f"{sample}_g", residue) for sample, residue in zip(species, "VAVAAA", strict=True)]
     path = alignment(tmp_path / "aa", records)
     tpm = tpm_table(tmp_path / "tpm.tsv", [(sample, f"{sample}_g", 1) for sample in species])
-    with pytest.warns(UserWarning, match="min_minor_group_count has been removed"):
-        config = settings(aggregation, site_filter={"min_minor_group_count": 3})
+    config = settings(aggregation)
     schemas, matrices, minor_groups = [], [], []
     with AlignmentStore(
         path,
@@ -339,7 +332,7 @@ def fixture_config(tmp_path: Path, aggregation: str, *, full: bool = True) -> Pa
             "alignment_dir": str(aa),
             "sequence_tpm_cache_dir": str(tmp_path / "tpm_cache"),
         },
-        "amino_acid": {
+        "preprocess": {"amino_acid": {
             "aggregation": aggregation,
             "site_filter": {"min_sample_fraction": 0.5},
             "ranked_site_filter": {
@@ -347,7 +340,7 @@ def fixture_config(tmp_path: Path, aggregation: str, *, full: bool = True) -> Pa
                 "max_sites": 10,
                 "min_contrast_pairs": 1,
             },
-        },
+        }},
         "sampling": {
             "strategy": "all_samples",
             "sampled_set_count": 1,
@@ -436,7 +429,7 @@ def test_representative_bundle_and_coordinates_keep_pre_rank_gene_choices(tmp_pa
         residue = "V" if sequence[2] == "A" else "A"
         with fasta.open("a") as handle:
             handle.write(f"{other}\n-X{residue}-*--\n")
-    payload["amino_acid"]["ranked_site_filter"]["max_sites"] = 1
+    payload["preprocess"]["amino_acid"]["ranked_site_filter"]["max_sites"] = 1
     config_path.write_text(yaml.safe_dump(payload))
     destination = run_amino_acid(load_and_resolve_config([config_path]), tmp_path / "run")
     manifest = json.loads((destination / "model_bundle/bundle_manifest.json").read_text())
@@ -691,7 +684,7 @@ def test_weighted_config_requires_tpm() -> None:
         AppConfig.model_validate(
             {
                 "data": {"feature_mode": "amino_acid", "alignment_dir": "aa"},
-                "amino_acid": {"aggregation": "tpm_weighted_frequency"},
+                "preprocess": {"amino_acid": {"aggregation": "tpm_weighted_frequency"}},
             }
         )
 
@@ -720,7 +713,7 @@ def test_shared_search_strategies(tmp_path: Path, strategy: str) -> None:
 def test_condition_comparison_uses_shared_split(tmp_path: Path, monkeypatch) -> None:
     config_path = fixture_config(tmp_path, "aa_frequency", full=False)
     payload = yaml.safe_load(config_path.read_text())
-    payload["amino_acid"]["aggregation"] = [
+    payload["preprocess"]["amino_acid"]["aggregation"] = [
         "best_covered",
         "aa_frequency",
         "tpm_weighted_frequency",

@@ -17,11 +17,12 @@ def test_single_varying_list_preserves_order_with_fixed_singleton_lists(tmp_path
         tmp_path / "config.yml",
         """
 preprocess:
-  ranked_feature_filter:
-    method: [pair_aware]
-    max_features: [100, 50]
-  feature_scaling:
-    method: [standard]
+  expression:
+    ranked_feature_filter:
+      method: [pair_aware]
+      max_features: [100, 50]
+    feature_scaling:
+      method: [standard]
 """.lstrip(),
     )
 
@@ -29,9 +30,9 @@ preprocess:
 
     assert [condition.values for condition in condition_set.conditions] == [
         (
-            ("preprocess.ranked_feature_filter.method", "pair_aware"),
-            ("preprocess.ranked_feature_filter.max_features", count),
-            ("preprocess.feature_scaling.method", "standard"),
+            ("preprocess.expression.ranked_feature_filter.method", "pair_aware"),
+            ("preprocess.expression.ranked_feature_filter.max_features", count),
+            ("preprocess.expression.feature_scaling.method", "standard"),
         )
         for count in (100, 50)
     ]
@@ -43,27 +44,44 @@ preprocess:
     "settings, expected_paths",
     [
         (
-            "preprocess:\n  ranked_feature_filter:\n"
-            "    method: pair_aware\n    max_features: [100, 50]\n"
-            "  feature_scaling:\n    method: [standard, none]\n",
-            ["preprocess.ranked_feature_filter.max_features", "preprocess.feature_scaling.method"],
-        ),
-        (
-            "preprocess:\n  ranked_feature_filter:\n"
-            "    method: [none, pair_aware]\n    max_features: [100, 50]\n",
+            """preprocess:
+  expression:
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: [100, 50]
+    feature_scaling:
+      method: [standard, none]
+""",
             [
-                "preprocess.ranked_feature_filter.method",
-                "preprocess.ranked_feature_filter.max_features",
+                "preprocess.expression.ranked_feature_filter.max_features",
+                "preprocess.expression.feature_scaling.method",
             ],
         ),
         (
-            "sampling:\n  training_group_count: [5, 10]\n  group_subsample_repeats: 2\n"
-            "preprocess:\n  feature_scaling:\n    method: [standard, none]\n",
-            ["sampling.training_group_count", "preprocess.feature_scaling.method"],
+            """preprocess:
+  expression:
+    ranked_feature_filter:
+      method: [none, pair_aware]
+      max_features: [100, 50]
+""",
+            [
+                "preprocess.expression.ranked_feature_filter.method",
+                "preprocess.expression.ranked_feature_filter.max_features",
+            ],
         ),
         (
-            "sampling:\n  training_group_count: [5, 10]\n"
-            "  group_subsample_repeat_index: [1, 2]\n",
+            """sampling:
+  training_group_count: [5, 10]
+  group_subsample_repeats: 2
+preprocess:
+  expression:
+    feature_scaling:
+      method: [standard, none]
+""",
+            ["sampling.training_group_count", "preprocess.expression.feature_scaling.method"],
+        ),
+        (
+            "sampling:\n  training_group_count: [5, 10]\n  group_subsample_repeat_index: [1, 2]\n",
             ["sampling.training_group_count", "sampling.group_subsample_repeat_index"],
         ),
     ],
@@ -85,18 +103,19 @@ def test_directional_filter_values_expand_with_fixed_supervised_method(tmp_path:
         tmp_path / "config.yml",
         """
 preprocess:
-  sparse_feature_filter:
-    scope: any_trait
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: 100
-    higher_in_trait: [null, 1]
+  expression:
+    sparse_feature_filter:
+      scope: any_trait
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: 100
+      higher_in_trait: [null, 1]
 """.lstrip(),
     )
 
     condition_set = load_config_conditions([config_path])
     assert [
-        condition.config.preprocess.ranked_feature_filter.higher_in_trait
+        condition.config.preprocess.expression.ranked_feature_filter.higher_in_trait
         for condition in condition_set.conditions
     ] == [None, 1]
 
@@ -106,20 +125,21 @@ def test_none_method_normalizes_fixed_max_features(tmp_path: Path) -> None:
         tmp_path / "config.yml",
         """
 preprocess:
-  ranked_feature_filter:
-    method: [none, pair_aware]
-    max_features: [100]
+  expression:
+    ranked_feature_filter:
+      method: [none, pair_aware]
+      max_features: [100]
 """.lstrip(),
     )
 
     condition_set = load_config_conditions([config_path])
     assert [
-        condition.config.preprocess.ranked_feature_filter.max_features
+        condition.config.preprocess.expression.ranked_feature_filter.max_features
         for condition in condition_set.conditions
     ] == [None, 100]
     assert condition_set.conditions[0].values == (
-        ("preprocess.ranked_feature_filter.method", "none"),
-        ("preprocess.ranked_feature_filter.max_features", None),
+        ("preprocess.expression.ranked_feature_filter.method", "none"),
+        ("preprocess.expression.ranked_feature_filter.max_features", None),
     )
 
 
@@ -131,9 +151,12 @@ def test_null_ranked_limit_adds_disabled_condition_in_order(
     method_value = f"[{method}]" if singleton_method else method
     config_path = _write(
         tmp_path / "config.yml",
-        "preprocess:\n  ranked_feature_filter:\n"
-        f"    method: {method_value}\n"
-        "    max_features: [null, 1000, 100]\n",
+        f"""preprocess:
+  expression:
+    ranked_feature_filter:
+      method: {method_value}
+      max_features: [null, 1000, 100]
+""",
     )
 
     condition_set = load_config_conditions([config_path])
@@ -143,13 +166,13 @@ def test_null_ranked_limit_adds_disabled_condition_in_order(
     assert len({condition.condition_id for condition in conditions}) == 3
     assert [
         (
-            condition.config.preprocess.ranked_feature_filter.method,
-            condition.config.preprocess.ranked_feature_filter.max_features,
+            condition.config.preprocess.expression.ranked_feature_filter.method,
+            condition.config.preprocess.expression.ranked_feature_filter.max_features,
         )
         for condition in conditions
     ] == [("none", None), (method, 1000), (method, 100)]
     assert [
-        dict(condition.values)["preprocess.ranked_feature_filter.max_features"]
+        dict(condition.values)["preprocess.expression.ranked_feature_filter.max_features"]
         for condition in conditions
     ] == [None, 1000, 100]
     assert conditions[0].label.endswith("max_features=null")
@@ -162,16 +185,19 @@ def test_null_ranked_limit_disables_direction_only_for_null_condition(
 ) -> None:
     config_path = _write(
         tmp_path / "config.yml",
-        "preprocess:\n  ranked_feature_filter:\n"
-        f"    method: {method}\n"
-        "    max_features: [null, 1000, 100]\n"
-        f"    higher_in_trait: {direction}\n",
+        f"""preprocess:
+  expression:
+    ranked_feature_filter:
+      method: {method}
+      max_features: [null, 1000, 100]
+      higher_in_trait: {direction}
+""",
     )
 
     conditions = load_config_conditions([config_path]).conditions
 
     assert [
-        condition.config.preprocess.ranked_feature_filter.higher_in_trait
+        condition.config.preprocess.expression.ranked_feature_filter.higher_in_trait
         for condition in conditions
     ] == [None, direction, direction]
 
@@ -203,8 +229,9 @@ def test_search_space_lists_do_not_count_as_condition_variables(tmp_path: Path) 
         tmp_path / "config.yml",
         """
 preprocess:
-  sparse_feature_filter:
-    min_nonzero_fraction: [0.9, 1]
+  expression:
+    sparse_feature_filter:
+      min_nonzero_fraction: [0.9, 1]
 model_selection:
   search_space:
     lambda: [0.1, 1.0]
@@ -255,13 +282,14 @@ def test_absent_feature_fill_condition_list_is_rejected(tmp_path: Path) -> None:
         tmp_path / "config.yml",
         """
 preprocess:
-  absent_feature_fill: [0, nan]
+  expression:
+    absent_feature_fill: [0, nan]
 model:
   name: random_forest
 """.lstrip(),
     )
 
-    with pytest.raises(ConfigError, match="preprocess.absent_feature_fill"):
+    with pytest.raises(ConfigError, match="preprocess.expression.absent_feature_fill"):
         load_config_conditions([config_path])
 
 
@@ -270,9 +298,10 @@ def test_duplicate_condition_values_are_rejected(tmp_path: Path) -> None:
         tmp_path / "config.yml",
         """
 preprocess:
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: [100, 100]
+  expression:
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: [100, 100]
 """.lstrip(),
     )
 

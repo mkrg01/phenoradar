@@ -9,6 +9,7 @@ from phenoradar.config import (
     AppConfig,
     ConfigError,
     load_and_resolve_config,
+    load_predict_config,
     serialize_resolved_config,
 )
 
@@ -84,89 +85,54 @@ def test_annotated_search_space_preserves_values_and_lists_range_types(
 def test_checked_in_config_explicitly_contains_all_user_fields() -> None:
     path = Path(__file__).resolve().parents[2] / "config.yml"
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-
     assert payload == load_and_resolve_config([path]).model_dump(
         mode="python",
-        exclude={
-            "sampling": {"group_subsample_repeat_index"},
-            "data": {"sequence_tpm_cache_dir"},
-        },
+        exclude={"sampling": {"group_subsample_repeat_index"},
+                 "data": {"sequence_tpm_cache_dir"}},
     )
-    assert list(payload)[-1] == "amino_acid"
+    assert list(payload["preprocess"]) == ["expression", "amino_acid"]
+    assert "amino_acid" not in payload
 
 
 @pytest.mark.parametrize("mode", ["expression", "amino_acid"])
-def test_one_user_config_keeps_optional_sequence_settings_at_end(mode: str) -> None:
-    config = AppConfig.model_validate(
-        {
-            "data": {
-                "feature_mode": mode,
-                "alignment_dir": "alignments",
-                "sequence_tpm_cache_dir": "custom-cache",
-            },
-            "amino_acid": {"aggregation": "best_covered"},
-        }
-    )
-    payload = yaml.safe_load(serialize_resolved_config(config, include_internal=False))
-    assert list(payload)[-1] == "amino_acid"
-    assert payload["data"]["feature_mode"] == mode
-    assert "sequence_map_path" not in payload["data"]
+def test_one_user_config_groups_preprocessing_by_modality(mode: str) -> None:
+    config = AppConfig.model_validate({
+        "data": {"feature_mode": mode, "alignment_dir": "alignments",
+                 "sequence_tpm_cache_dir": "custom-cache"},
+        "preprocess": {"amino_acid": {"aggregation": "best_covered"}},
+    })
+    rendered = serialize_resolved_config(config, include_internal=False)
+    payload = yaml.safe_load(rendered)
+    assert list(payload["preprocess"]) == ["expression", "amino_acid"]
+    assert "\n\n  amino_acid:" in rendered
     assert "sequence_tpm_cache_dir" not in payload["data"]
-    assert not {"centering", "site_block_size", "prediction_batch_size", "max_matrix_cells"} & set(
-        payload["amino_acid"]
-    )
-    assert payload["amino_acid"]["aggregation"] == "best_covered"
-    assert payload["preprocess"] == config.preprocess.model_dump(mode="python")
-    assert AppConfig.model_validate(payload).amino_acid == config.amino_acid
-    audit = yaml.safe_load(serialize_resolved_config(config))
-    assert audit == config.model_dump(mode="python")
-    assert audit["data"]["sequence_tpm_cache_dir"] == "custom-cache"
+    assert "max_pivot_cells" not in rendered
+    assert AppConfig.model_validate(payload).preprocess == config.preprocess
+    assert yaml.safe_load(serialize_resolved_config(config)) == config.model_dump(mode="python")
 
 
-@pytest.mark.parametrize("mode", ["expression", "amino_acid"])
-@pytest.mark.parametrize(
-    "retired_settings",
-    [
-        {"centering": "observed_mean", "prediction_batch_size": 2, "max_matrix_cells": 1000},
-        {"site_block_size": 256},
-    ],
-)
-def test_legacy_fixed_sequence_settings_load_but_are_not_serialized(
-    mode: str, retired_settings: dict[str, object]
+@pytest.mark.parametrize("raw", [
+    {"amino_acid": {}},
+    {"preprocess": {"absent_feature_fill": 0}},
+    {"preprocess": {"max_pivot_cells": 7}},
+    {"preprocess": {"expression": {"max_pivot_cells": 7}}},
+    {"data": {"sequence_map_path": None}},
+    {"data": {"sequence_map_path": "ids.tsv"}},
+    *[{"preprocess": {"amino_acid": {key: value}}} for key, value in [
+        ("centering", "observed_mean"), ("site_block_size", 512),
+        ("prediction_batch_size", 128), ("max_matrix_cells", 1000),
+    ]],
+    *[{"preprocess": {"amino_acid": {"site_filter": {key: 1}}}}
+      for key in ["min_minor_sample_count", "min_minor_group_count"]],
+])
+def test_old_and_removed_config_fields_are_rejected(
+    tmp_path: Path, raw: dict[str, object]
 ) -> None:
-    with pytest.warns(UserWarning, match="fixed internally and ignored"):
-        config = AppConfig.model_validate(
-            {
-                "data": {
-                    "feature_mode": mode,
-                    "alignment_dir": "alignments",
-                    "sequence_map_path": None,
-                },
-                "amino_acid": retired_settings,
-            }
-        )
-    for internal in [False, True]:
-        payload = yaml.safe_load(serialize_resolved_config(config, include_internal=internal))
-        assert "sequence_map_path" not in payload["data"]
-        assert not (
-            {"centering", "site_block_size", "prediction_batch_size", "max_matrix_cells"}
-            & set(payload["amino_acid"])
-        )
-    schema = config.model_json_schema()["$defs"]
-    assert "sequence_map_path" not in schema["DataConfig"]["properties"]
-    assert not {"centering", "site_block_size", "prediction_batch_size", "max_matrix_cells"} & set(
-        schema["AminoAcidConfig"]["properties"]
-    )
-
-
-def test_retired_sequence_map_cannot_silently_change_species_assignments() -> None:
-    with pytest.raises(ValueError, match="sequence_map_path has been removed"):
-        AppConfig.model_validate({"data": {"sequence_map_path": "ids.tsv"}})
-
-
-def test_fixed_centering_does_not_accept_a_different_model_rule() -> None:
-    with pytest.raises(ValueError, match="centering is fixed to observed_mean"):
-        AppConfig.model_validate({"amino_acid": {"centering": "none"}})
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        AppConfig.model_validate(raw)
+    path = _write(tmp_path / "old.yml", yaml.safe_dump(raw))
+    with pytest.raises(ConfigError, match="Unknown"):
+        load_predict_config([path], require_tpm=False)
 
 
 def test_deep_merge_and_seed_default(tmp_path: Path) -> None:
@@ -225,16 +191,16 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.model_selection.selection_metric == "log_loss"
     assert resolved.model_selection.selection_rule == "best"
     assert resolved.model_selection.candidate_source_policy == "per_sample_set"
-    assert resolved.preprocess.absent_feature_fill == 0
-    assert resolved.preprocess.expression_transform.method == "log1p"
-    assert resolved.preprocess.sparse_feature_filter.enabled is True
+    assert resolved.preprocess.expression.absent_feature_fill == 0
+    assert resolved.preprocess.expression.expression_transform.method == "log1p"
+    assert resolved.preprocess.expression.sparse_feature_filter.enabled is True
     assert (
-        resolved.preprocess.sparse_feature_filter.min_nonzero_fraction
+        resolved.preprocess.expression.sparse_feature_filter.min_nonzero_fraction
         == 0.8
     )
-    assert resolved.preprocess.sparse_feature_filter.scope == "any_trait"
-    assert resolved.preprocess.ranked_feature_filter.higher_in_trait is None
-    assert resolved.preprocess.feature_scaling.method == "standard"
+    assert resolved.preprocess.expression.sparse_feature_filter.scope == "any_trait"
+    assert resolved.preprocess.expression.ranked_feature_filter.higher_in_trait is None
+    assert resolved.preprocess.expression.feature_scaling.method == "standard"
     assert resolved.evaluation.group_bootstrap.enabled is False
     assert resolved.evaluation.group_bootstrap.n_resamples == 2000
     assert resolved.evaluation.group_bootstrap.confidence_level == 0.95
@@ -259,16 +225,16 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
     assert resolved.model_selection.selection_metric == "log_loss"
     assert resolved.model_selection.selection_rule == "best"
     assert resolved.model_selection.candidate_source_policy == "per_sample_set"
-    assert resolved.preprocess.absent_feature_fill == 0
-    assert resolved.preprocess.expression_transform.method == "log1p"
-    assert resolved.preprocess.sparse_feature_filter.enabled is True
+    assert resolved.preprocess.expression.absent_feature_fill == 0
+    assert resolved.preprocess.expression.expression_transform.method == "log1p"
+    assert resolved.preprocess.expression.sparse_feature_filter.enabled is True
     assert (
-        resolved.preprocess.sparse_feature_filter.min_nonzero_fraction
+        resolved.preprocess.expression.sparse_feature_filter.min_nonzero_fraction
         == 0.8
     )
-    assert resolved.preprocess.sparse_feature_filter.scope == "any_trait"
-    assert resolved.preprocess.ranked_feature_filter.higher_in_trait is None
-    assert resolved.preprocess.feature_scaling.method == "standard"
+    assert resolved.preprocess.expression.sparse_feature_filter.scope == "any_trait"
+    assert resolved.preprocess.expression.ranked_feature_filter.higher_in_trait is None
+    assert resolved.preprocess.expression.feature_scaling.method == "standard"
     assert resolved.evaluation.group_bootstrap.enabled is False
     assert resolved.evaluation.group_bootstrap.n_resamples == 2000
     assert resolved.evaluation.group_bootstrap.confidence_level == 0.95
@@ -606,9 +572,10 @@ def test_preprocess_sparse_feature_rejects_null_fraction_when_enabled(tmp_path: 
         tmp_path / "invalid.yml",
         """
 preprocess:
-  sparse_feature_filter:
-    enabled: true
-    min_nonzero_fraction: null
+  expression:
+    sparse_feature_filter:
+      enabled: true
+      min_nonzero_fraction: null
 """.strip()
         + "\n",
     )
@@ -622,7 +589,8 @@ def test_preprocess_nan_absent_feature_fill_accepts_random_forest(tmp_path: Path
         tmp_path / "valid.yml",
         """
 preprocess:
-  absent_feature_fill: nan
+  expression:
+    absent_feature_fill: nan
 model:
   name: random_forest
 """.strip()
@@ -631,7 +599,7 @@ model:
 
     resolved = load_and_resolve_config([cfg])
 
-    assert resolved.preprocess.absent_feature_fill == "nan"
+    assert resolved.preprocess.expression.absent_feature_fill == "nan"
 
 
 @pytest.mark.parametrize("value", ["zero", "false", "1"])
@@ -643,7 +611,8 @@ def test_preprocess_absent_feature_fill_rejects_values_other_than_numeric_zero_o
         tmp_path / "invalid.yml",
         f"""
 preprocess:
-  absent_feature_fill: {value}
+  expression:
+    absent_feature_fill: {value}
 """.strip()
         + "\n",
     )
@@ -659,7 +628,8 @@ def test_preprocess_nan_absent_feature_fill_rejects_non_random_forest(
         tmp_path / "invalid.yml",
         """
 preprocess:
-  absent_feature_fill: nan
+  expression:
+    absent_feature_fill: nan
 model:
   name: logistic_elasticnet
 """.strip()
@@ -675,15 +645,16 @@ def test_preprocess_sparse_feature_accepts_trait_scope(tmp_path: Path) -> None:
         tmp_path / "valid.yml",
         """
 preprocess:
-  sparse_feature_filter:
-    scope: trait_1
+  expression:
+    sparse_feature_filter:
+      scope: trait_1
 """.strip()
         + "\n",
     )
 
     resolved = load_and_resolve_config([cfg])
 
-    assert resolved.preprocess.sparse_feature_filter.scope == "trait_1"
+    assert resolved.preprocess.expression.sparse_feature_filter.scope == "trait_1"
 
 
 def test_preprocess_low_variance_requires_min_variance_when_enabled(tmp_path: Path) -> None:
@@ -691,8 +662,9 @@ def test_preprocess_low_variance_requires_min_variance_when_enabled(tmp_path: Pa
         tmp_path / "invalid.yml",
         """
 preprocess:
-  low_variance_filter:
-    enabled: true
+  expression:
+    low_variance_filter:
+      enabled: true
 """.strip()
         + "\n",
     )
@@ -706,8 +678,9 @@ def test_correlation_filter_requires_threshold_when_enabled(tmp_path: Path) -> N
         tmp_path / "invalid.yml",
         """
 preprocess:
-  correlation_filter:
-    enabled: true
+  expression:
+    correlation_filter:
+      enabled: true
 """.strip()
         + "\n",
     )
@@ -721,9 +694,10 @@ def test_correlation_filter_rejects_threshold_out_of_bounds(tmp_path: Path) -> N
         tmp_path / "invalid.yml",
         """
 preprocess:
-  correlation_filter:
-    enabled: true
-    max_abs_correlation: 1.5
+  expression:
+    correlation_filter:
+      enabled: true
+      max_abs_correlation: 1.5
 """.strip()
         + "\n",
     )
@@ -733,7 +707,7 @@ preprocess:
 
 
 @pytest.mark.parametrize("method", ["pair_aware", "unpaired", "variance"])
-@pytest.mark.parametrize("max_features_line", ["", "    max_features: null\n"])
+@pytest.mark.parametrize("max_features_line", ["", "      max_features: null\n"])
 def test_ranked_feature_filter_null_or_omitted_limit_disables_filter(
     tmp_path: Path,
     method: str,
@@ -741,15 +715,19 @@ def test_ranked_feature_filter_null_or_omitted_limit_disables_filter(
 ) -> None:
     cfg = _write(
         tmp_path / "valid.yml",
-        "data:\n  contrast_pair_col: null\n"
-        "preprocess:\n  ranked_feature_filter:\n"
-        f"    method: {method}\n{max_features_line}",
+        f"""data:
+  contrast_pair_col: null
+preprocess:
+  expression:
+    ranked_feature_filter:
+      method: {method}
+{max_features_line}""",
     )
 
     resolved = load_and_resolve_config([cfg])
 
-    assert resolved.preprocess.ranked_feature_filter.method == "none"
-    assert resolved.preprocess.ranked_feature_filter.max_features is None
+    assert resolved.preprocess.expression.ranked_feature_filter.method == "none"
+    assert resolved.preprocess.expression.ranked_feature_filter.max_features is None
     assert AppConfig.model_validate(yaml.safe_load(serialize_resolved_config(resolved))) == resolved
 
 
@@ -759,8 +737,12 @@ def test_ranked_feature_filter_rejects_nonpositive_limit(
 ) -> None:
     cfg = _write(
         tmp_path / "invalid.yml",
-        "preprocess:\n  ranked_feature_filter:\n"
-        f"    method: pair_aware\n    max_features: {max_features}\n",
+        f"""preprocess:
+  expression:
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: {max_features}
+""",
     )
 
     with pytest.raises(ConfigError, match="max_features"):
@@ -772,17 +754,18 @@ def test_ranked_feature_filter_accepts_supervised_higher_in_trait(tmp_path: Path
         tmp_path / "valid.yml",
         """
 preprocess:
-  ranked_feature_filter:
-    method: unpaired
-    max_features: 10
-    higher_in_trait: 1
+  expression:
+    ranked_feature_filter:
+      method: unpaired
+      max_features: 10
+      higher_in_trait: 1
 """.strip()
         + "\n",
     )
 
     resolved = load_and_resolve_config([cfg])
 
-    assert resolved.preprocess.ranked_feature_filter.higher_in_trait == 1
+    assert resolved.preprocess.expression.ranked_feature_filter.higher_in_trait == 1
 
 
 @pytest.mark.parametrize("method", ["none", "variance"])
@@ -794,11 +777,12 @@ def test_ranked_feature_filter_rejects_higher_in_trait_for_unsupervised_method(
     cfg = _write(
         tmp_path / "invalid.yml",
         (
-            "preprocess:\n"
-            "  ranked_feature_filter:\n"
-            f"    method: {method}\n"
-            f"{max_features}"
-            "    higher_in_trait: 1\n"
+            f"""preprocess:
+  expression:
+    ranked_feature_filter:
+      method: {method}
+{max_features}    higher_in_trait: 1
+"""
         ),
     )
 
@@ -811,9 +795,10 @@ def test_removed_pair_aware_filter_key_is_rejected(tmp_path: Path) -> None:
         tmp_path / "invalid.yml",
         """
 preprocess:
-  pair_aware_filter:
-    enabled: true
-    max_features: 10
+  expression:
+    pair_aware_filter:
+      enabled: true
+      max_features: 10
 """.strip()
         + "\n",
     )
@@ -829,16 +814,17 @@ def test_unpaired_ranked_filter_does_not_require_contrast_pair_col(tmp_path: Pat
 data:
   contrast_pair_col: null
 preprocess:
-  ranked_feature_filter:
-    method: unpaired
-    max_features: 10
+  expression:
+    ranked_feature_filter:
+      method: unpaired
+      max_features: 10
 """.strip()
         + "\n",
     )
 
     resolved = load_and_resolve_config([cfg])
 
-    assert resolved.preprocess.ranked_feature_filter.method == "unpaired"
+    assert resolved.preprocess.expression.ranked_feature_filter.method == "unpaired"
 
 
 def test_generic_group_options_allow_null_contrast_pair_col(tmp_path: Path) -> None:
@@ -869,9 +855,10 @@ def test_pair_aware_filter_requires_contrast_pair_col(tmp_path: Path) -> None:
 data:
   contrast_pair_col: null
 preprocess:
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: 10
+  expression:
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: 10
 """.strip()
         + "\n",
     )
@@ -891,9 +878,10 @@ data:
 split:
   group_col: family
 preprocess:
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: 10
+  expression:
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: 10
 """.strip()
         + "\n",
     )
@@ -902,7 +890,7 @@ preprocess:
 
     assert resolved.data.contrast_pair_col == "contrast_pair_id"
     assert resolved.split.group_col == "family"
-    assert resolved.preprocess.ranked_feature_filter.min_contrast_pairs == 1
+    assert resolved.preprocess.expression.ranked_feature_filter.min_contrast_pairs == 1
 
 
 def test_pair_aware_filter_rejects_zero_min_contrast_pairs(tmp_path: Path) -> None:
@@ -910,10 +898,11 @@ def test_pair_aware_filter_rejects_zero_min_contrast_pairs(tmp_path: Path) -> No
         tmp_path / "invalid.yml",
         """
 preprocess:
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: 10
-    min_contrast_pairs: 0
+  expression:
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: 10
+      min_contrast_pairs: 0
 """.strip()
         + "\n",
     )

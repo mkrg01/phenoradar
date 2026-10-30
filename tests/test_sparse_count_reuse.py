@@ -21,7 +21,7 @@ def _config(scope: str = "any_trait", strategy: str = "logo", **preprocess: Any)
     }
     settings.update(preprocess)
     return AppConfig.model_validate({
-        "preprocess": settings,
+        "preprocess": {"expression": settings},
         "sampling": {"weighting": "group_label_inverse"},
         "model_selection": {
             "selected_candidate_count": 1, "inner_cv_strategy": strategy,
@@ -40,7 +40,7 @@ def test_cached_counts_match_direct_scan_at_boundaries(
 ) -> None:
     monkeypatch.setattr(cv, "_SPARSE_FILTER_BLOCK_CELLS", 35)
     config = _config(scope, strategy)
-    config.preprocess.sparse_feature_filter.min_nonzero_fraction = threshold
+    config.preprocess.expression.sparse_feature_filter.min_nonzero_fraction = threshold
     matrix = np.random.default_rng(681).choice(
         [0, cv._NONZERO_TOLERANCE, np.nextafter(cv._NONZERO_TOLERANCE, np.inf),
          2.0, np.nan, np.inf, -np.inf], size=(40, 26),
@@ -175,7 +175,7 @@ def test_unsupported_or_unhelpful_splits_fall_back(
     if case == "few_folds":
         splits = splits[:3]
     elif case == "disabled":
-        config.preprocess.sparse_feature_filter.enabled = False
+        config.preprocess.expression.sparse_feature_filter.enabled = False
     elif case == "overlap":
         splits[-1] = splits[0]
     elif case == "memory":

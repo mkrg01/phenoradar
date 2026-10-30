@@ -60,13 +60,13 @@ def _config(tmp_path: Path) -> AppConfig:
                 "sampled_set_count": 1,
                 "max_samples_per_label_per_group": None,
             },
-            "preprocess": {
+            "preprocess": {"expression": {
                 "sparse_feature_filter": {
                     "enabled": True,
                     "scope": "all_samples",
                     "min_nonzero_fraction": 0.25,
                 },
-            },
+            }},
             "model_selection": {
                 "selected_candidate_count": 1,
                 "inner_cv_strategy": "group_kfold",
@@ -111,12 +111,12 @@ def test_shared_cache_matches_independent_cv_and_refit(
     neutral: bool,
 ) -> None:
     config = _config(tmp_path)
-    config.preprocess.max_pivot_cells = max_pivot_cells
-    config.preprocess.expression_transform.method = transform
+    monkeypatch.setattr(cv_mod, "MAX_PIVOT_CELLS", max_pivot_cells)
+    config.preprocess.expression.expression_transform.method = transform
     if neutral:
-        config.preprocess.absent_feature_fill = "nan"
-        config.preprocess.missing_expression.method = "neutral"
-        config.preprocess.missing_expression.zero_as_missing = True
+        config.preprocess.expression.absent_feature_fill = "nan"
+        config.preprocess.expression.missing_expression.method = "neutral"
+        config.preprocess.expression.missing_expression.zero_as_missing = True
         config.abstention.enabled = True
     split = build_split_artifacts(config).split_manifest
     expected_cv = run_outer_cv(config, split)
@@ -227,11 +227,12 @@ def test_run_cache_cleans_up_if_a_later_stage_fails(tmp_path: Path) -> None:
 @pytest.mark.parametrize("max_pivot_cells", [64, 50_000_000])
 @pytest.mark.parametrize("fill", [0, "nan"])
 def test_streamed_cache_preserves_wide_matrix_and_duplicate_coordinates(
-    tmp_path: Path, max_pivot_cells: int, fill: int | str
+    tmp_path: Path, max_pivot_cells: int, fill: int | str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    config.preprocess.max_pivot_cells = max_pivot_cells
-    config.preprocess.absent_feature_fill = fill
+    monkeypatch.setattr(cv_mod, "MAX_PIVOT_CELLS", max_pivot_cells)
+    config.preprocess.expression.absent_feature_fill = fill
     features = [f"f{i:04d}" for i in range(1024)]
     # Split duplicate coordinates across distant input rows and reverse the
     # requested feature order so hash-group output order cannot affect alignment.
@@ -317,18 +318,19 @@ def test_streamed_cache_sums_many_floating_point_duplicates(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
-    "setting", ["tpm_path", "value_col", "absent_feature_fill", "max_pivot_cells"]
+    "setting", ["tpm_path", "value_col", "absent_feature_fill"]
 )
 def test_run_cache_rejects_changed_input_settings(tmp_path: Path, setting: str) -> None:
     config = _config(tmp_path)
     with RunExpressionCache() as cache:
         cache.get_builder(config)
-        owner = config.data if setting in {"tpm_path", "value_col"} else config.preprocess
+        owner = (
+            config.data if setting in {"tpm_path", "value_col"} else config.preprocess.expression
+        )
         value = {
             "tpm_path": "different.tsv",
             "value_col": "other",
             "absent_feature_fill": "nan",
-            "max_pivot_cells": 1,
         }[setting]
         setattr(owner, setting, value)
         with pytest.raises(CVError, match="different input settings"):
@@ -348,28 +350,28 @@ def test_deferred_inference_matches_eager_full_matrix(
     config = _config(tmp_path)
     config.runtime.n_jobs = n_jobs
     config.ensemble.probability_aggregation = aggregation
-    config.preprocess.ranked_feature_filter.method = "variance"
-    config.preprocess.ranked_feature_filter.max_features = 1
-    config.preprocess.max_pivot_cells = 8
+    config.preprocess.expression.ranked_feature_filter.method = "variance"
+    config.preprocess.expression.ranked_feature_filter.max_features = 1
+    monkeypatch.setattr(cv_mod, "MAX_PIVOT_CELLS", 8)
     config.model_selection.selected_candidate_count = 2
     if mode in {"none", "log1p"}:
-        config.preprocess.expression_transform.method = mode
+        config.preprocess.expression.expression_transform.method = mode
     elif mode == "rank":
-        config.preprocess.expression_transform.method = "sample_percentile_rank"
+        config.preprocess.expression.expression_transform.method = "sample_percentile_rank"
     elif mode == "neutral":
-        config.preprocess.absent_feature_fill = "nan"
-        config.preprocess.missing_expression.method = "neutral"
-        config.preprocess.missing_expression.zero_as_missing = True
+        config.preprocess.expression.absent_feature_fill = "nan"
+        config.preprocess.expression.missing_expression.method = "neutral"
+        config.preprocess.expression.missing_expression.zero_as_missing = True
         config.abstention.enabled = True
     elif mode == "forest":
         config.model.name = "random_forest"
-        config.preprocess.absent_feature_fill = "nan"
+        config.preprocess.expression.absent_feature_fill = "nan"
         config.model_selection.search_space = {"n_estimators": [3, 5]}
     elif mode == "dense":
-        config.preprocess.sparse_feature_filter.enabled = False
-        config.preprocess.low_variance_filter.enabled = False
-        config.preprocess.ranked_feature_filter.method = "none"
-        config.preprocess.correlation_filter.enabled = False
+        config.preprocess.expression.sparse_feature_filter.enabled = False
+        config.preprocess.expression.low_variance_filter.enabled = False
+        config.preprocess.expression.ranked_feature_filter.method = "none"
+        config.preprocess.expression.correlation_filter.enabled = False
     elif mode == "sampled":
         metadata_path, tpm_path = Path(config.data.metadata_path), Path(config.data.tpm_path)
         with metadata_path.open("a") as out:
@@ -406,8 +408,8 @@ def test_deferred_inference_builds_only_retained_union_after_all_fits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    config.preprocess.ranked_feature_filter.method = "variance"
-    config.preprocess.ranked_feature_filter.max_features = 1
+    config.preprocess.expression.ranked_feature_filter.method = "variance"
+    config.preprocess.expression.ranked_feature_filter.max_features = 1
     split = build_split_artifacts(config)
     completed_fits: list[str] = []
     inference_builds: list[tuple[tuple[int, ...], list[str]]] = []
@@ -449,9 +451,9 @@ def test_deferred_inference_preserves_zero_coefficient_abstention(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    config.preprocess.absent_feature_fill = "nan"
-    config.preprocess.missing_expression.method = "neutral"
-    config.preprocess.missing_expression.zero_as_missing = True
+    config.preprocess.expression.absent_feature_fill = "nan"
+    config.preprocess.expression.missing_expression.method = "neutral"
+    config.preprocess.expression.missing_expression.zero_as_missing = True
     config.abstention.enabled = True
     config.model_selection.search_space = {"lambda": [1e6]}
     split = build_split_artifacts(config).split_manifest
@@ -465,9 +467,11 @@ def test_deferred_inference_preserves_zero_coefficient_abstention(
     assert set(predictions["abstention_reason"]) == {"no_informative_coefficients"}
 
 
-def test_input_timing_separates_preparation_from_matrix_work(tmp_path: Path) -> None:
+def test_input_timing_separates_preparation_from_matrix_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config = _config(tmp_path)
-    config.preprocess.max_pivot_cells = 8
+    monkeypatch.setattr(cv_mod, "MAX_PIVOT_CELLS", 8)
     split = build_split_artifacts(config).split_manifest
     recorder = TimingRecorder()
     with RunExpressionCache() as cache:

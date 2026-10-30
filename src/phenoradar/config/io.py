@@ -161,6 +161,8 @@ def serialize_resolved_config(
         annotate(root, [schema])
     lines: list[str] = []
     for index, line in enumerate(serialized.splitlines()):
+        if line == "  amino_acid:" and "preprocess" in payload:
+            lines.append("")
         if index in preceding_comments:
             indent = len(line) - len(line.lstrip())
             lines.append(" " * indent + "# " + preceding_comments[index])

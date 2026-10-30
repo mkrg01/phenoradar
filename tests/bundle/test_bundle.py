@@ -257,8 +257,8 @@ def test_bundle_export_load_and_predict(tmp_path: Path) -> None:
         probability_aggregation=config.ensemble.probability_aggregation,
         threshold_fixed=float(threshold_fixed),
         source_run_id=run_dir.name,
-        expression_transform=config.preprocess.expression_transform.method,
-        feature_scaling=config.preprocess.feature_scaling.method,
+        expression_transform=config.preprocess.expression.expression_transform.method,
+        feature_scaling=config.preprocess.expression.feature_scaling.method,
     )
     refit_pred_df, refit_warnings = predict_with_bundle(config, refit_bundle)
     pred_df, warnings = predict_with_bundle(config, bundle)
@@ -313,10 +313,11 @@ def test_bundle_export_load_and_predict_with_rank_transform_no_scaling(tmp_path:
 sampling:
   sampled_set_count: 1
 preprocess:
-  expression_transform:
-    method: sample_percentile_rank
-  feature_scaling:
-    method: none
+  expression:
+    expression_transform:
+      method: sample_percentile_rank
+    feature_scaling:
+      method: none
 """,
     )
 
@@ -379,13 +380,14 @@ def test_rank_bundle_prediction_ignores_features_outside_transform_schema(
 sampling:
   sampled_set_count: 1
 preprocess:
-  expression_transform:
-    method: {rank_method}
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: 1
-  feature_scaling:
-    method: none
+  expression:
+    expression_transform:
+      method: {rank_method}
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: 1
+    feature_scaling:
+      method: none
 """,
     )
     baseline, baseline_warnings = predict_with_bundle(config, bundle)
@@ -839,8 +841,9 @@ def test_load_model_bundle_rejects_v1_contextual_rank_transform(tmp_path: Path) 
 sampling:
   sampled_set_count: 1
 preprocess:
-  expression_transform:
-    method: sample_rank
+  expression:
+    expression_transform:
+      method: sample_rank
 """,
     )
     _rewrite_bundle_as_v1(bundle.bundle_dir)

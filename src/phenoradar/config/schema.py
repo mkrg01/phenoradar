@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from math import isfinite
 from typing import Any, Literal
 
@@ -150,18 +149,6 @@ class DataConfig(StrictModel):
     sequence_tpm_path: str | None = None
     sequence_tpm_cache_dir: str | None = "runs/.phenoradar_cache/sequence_tpm"
 
-    @model_validator(mode="before")
-    @classmethod
-    def remove_retired_sequence_map(cls, value: Any) -> Any:
-        if isinstance(value, dict) and "sequence_map_path" in value:
-            if value["sequence_map_path"] is not None:
-                raise ValueError(
-                    "data.sequence_map_path has been removed; FASTA IDs must match a metadata "
-                    "species ID or that ID followed by '_' and a gene suffix."
-                )
-            return {key: item for key, item in value.items() if key != "sequence_map_path"}
-        return value
-
 
 class SplitConfig(StrictModel):
     """Data split and CV controls."""
@@ -209,7 +196,7 @@ class SparseFeatureFilterConfig(StrictModel):
     def validate_enabled_args(self) -> SparseFeatureFilterConfig:
         if self.enabled and self.min_nonzero_fraction is None:
             raise ValueError(
-                "preprocess.sparse_feature_filter."
+                "preprocess.expression.sparse_feature_filter."
                 "min_nonzero_fraction "
                 "is required when enabled=true"
             )
@@ -226,7 +213,7 @@ class LowVarianceFilterConfig(StrictModel):
     def validate_enabled_args(self) -> LowVarianceFilterConfig:
         if self.enabled and self.min_variance is None:
             raise ValueError(
-                "preprocess.low_variance_filter.min_variance "
+                "preprocess.expression.low_variance_filter.min_variance "
                 "is required when enabled=true"
             )
         return self
@@ -243,10 +230,13 @@ class CorrelationFilterConfig(StrictModel):
     def validate_enabled_args(self) -> CorrelationFilterConfig:
         if self.enabled and self.max_abs_correlation is None:
             raise ValueError(
-                "preprocess.correlation_filter.max_abs_correlation is required when enabled=true"
+                "preprocess.expression.correlation_filter.max_abs_correlation "
+                "is required when enabled=true"
             )
         if self.max_abs_correlation is not None and not (0 < self.max_abs_correlation <= 1):
-            raise ValueError("preprocess.correlation_filter.max_abs_correlation must be in (0, 1]")
+            raise ValueError(
+                "preprocess.expression.correlation_filter.max_abs_correlation must be in (0, 1]"
+            )
         return self
 
 
@@ -263,7 +253,7 @@ class RankedFeatureFilterConfig(StrictModel):
     def reject_boolean_higher_in_trait(cls, value: Any) -> Any:
         if isinstance(value, bool):
             raise ValueError(
-                "preprocess.ranked_feature_filter.higher_in_trait must be 0, 1, or null"
+                "preprocess.expression.ranked_feature_filter.higher_in_trait must be 0, 1, or null"
             )
         return value
 
@@ -274,7 +264,7 @@ class RankedFeatureFilterConfig(StrictModel):
             and self.method not in {"pair_aware", "unpaired"}
         ):
             raise ValueError(
-                "preprocess.ranked_feature_filter.higher_in_trait is only configurable "
+                "preprocess.expression.ranked_feature_filter.higher_in_trait is only configurable "
                 "for method=pair_aware|unpaired"
             )
         if self.max_features is None:
@@ -318,10 +308,9 @@ class AbstentionConfig(StrictModel):
         return value
 
 
-class PreprocessConfig(StrictModel):
-    """Preprocessing settings."""
+class ExpressionPreprocessConfig(StrictModel):
+    """Train-fitted expression preprocessing."""
 
-    max_pivot_cells: PositiveInt = 50_000_000
     absent_feature_fill: AbsentFeatureFill = 0
     missing_expression: MissingExpressionConfig = Field(default_factory=MissingExpressionConfig)
     expression_transform: ExpressionTransformConfig = Field(
@@ -341,7 +330,7 @@ class PreprocessConfig(StrictModel):
     @classmethod
     def reject_boolean_absent_feature_fill(cls, value: Any) -> Any:
         if isinstance(value, bool):
-            raise ValueError("preprocess.absent_feature_fill must be 0 or nan")
+            raise ValueError("preprocess.expression.absent_feature_fill must be 0 or nan")
         return value
 
 
@@ -534,21 +523,6 @@ class AminoAcidSiteFilter(StrictModel):
     min_sample_fraction: float = Field(default=0.8, gt=0, le=1, allow_inf_nan=False)
     min_residue_states: int = Field(default=2, ge=2, le=20)
 
-    @model_validator(mode="before")
-    @classmethod
-    def remove_retired_minor_filters(cls, value: Any) -> Any:
-        retired = {"min_minor_sample_count", "min_minor_group_count"}
-        if isinstance(value, dict) and (found := retired.intersection(value)):
-            for key in sorted(found):
-                warnings.warn(
-                    f"amino_acid.site_filter.{key} has been removed and is "
-                    "ignored; remove it from the configuration.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            return {key: item for key, item in value.items() if key not in retired}
-        return value
-
 
 class AminoAcidRankedFilter(StrictModel):
     method: Literal["none", "pair_aware", "unpaired"] = "none"
@@ -561,22 +535,12 @@ class AminoAcidConfig(StrictModel):
     site_filter: AminoAcidSiteFilter = Field(default_factory=AminoAcidSiteFilter)
     ranked_site_filter: AminoAcidRankedFilter = Field(default_factory=AminoAcidRankedFilter)
 
-    @model_validator(mode="before")
-    @classmethod
-    def remove_retired_fixed_settings(cls, value: Any) -> Any:
-        retired = {"centering", "site_block_size", "prediction_batch_size", "max_matrix_cells"}
-        if isinstance(value, dict) and (found := retired.intersection(value)):
-            if "centering" in found and value["centering"] != "observed_mean":
-                raise ValueError("Amino-acid centering is fixed to observed_mean")
-            warnings.warn(
-                "amino_acid settings are now fixed internally and ignored: "
-                + ", ".join(sorted(found))
-                + "; remove them from the configuration.",
-                UserWarning,
-                stacklevel=2,
-            )
-            return {key: item for key, item in value.items() if key not in retired}
-        return value
+
+class PreprocessConfig(StrictModel):
+    """Separate preprocessing settings for each input modality."""
+
+    expression: ExpressionPreprocessConfig = Field(default_factory=ExpressionPreprocessConfig)
+    amino_acid: AminoAcidConfig = Field(default_factory=AminoAcidConfig)
 
 
 class AppConfig(StrictModel):
@@ -598,7 +562,6 @@ class AppConfig(StrictModel):
     )
     report: ReportConfig = Field(default_factory=ReportConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
-    amino_acid: AminoAcidConfig = Field(default_factory=AminoAcidConfig)
 
     @model_validator(mode="after")
     def validate_contrast_pair_dependencies(self) -> AppConfig:
@@ -606,53 +569,53 @@ class AppConfig(StrictModel):
             if not self.data.alignment_dir:
                 raise ValueError("amino_acid mode requires data.alignment_dir")
             if (
-                self.amino_acid.aggregation == "tpm_weighted_frequency"
+                self.preprocess.amino_acid.aggregation == "tpm_weighted_frequency"
                 and not self.data.sequence_tpm_path
             ):
                 raise ValueError("tpm_weighted_frequency requires data.sequence_tpm_path")
             if self.model.name != "logistic_elasticnet":
                 raise ValueError("amino_acid mode requires model.name=logistic_elasticnet")
             if (
-                self.amino_acid.ranked_site_filter.method == "pair_aware"
+                self.preprocess.amino_acid.ranked_site_filter.method == "pair_aware"
                 and self.data.contrast_pair_col is None
             ):
                 raise ValueError("amino_acid pair_aware ranking requires data.contrast_pair_col")
-        missing = self.preprocess.missing_expression
+        missing = self.preprocess.expression.missing_expression
         if self.data.feature_mode == "amino_acid":
             pass  # Expression preprocessing settings are inactive in sequence mode.
         elif missing.method == "neutral":
             if (
                 self.model.name != "logistic_elasticnet"
-                or self.preprocess.expression_transform.method != "log1p"
-                or self.preprocess.feature_scaling.method != "standard"
-                or self.preprocess.absent_feature_fill != "nan"
+                or self.preprocess.expression.expression_transform.method != "log1p"
+                or self.preprocess.expression.feature_scaling.method != "standard"
+                or self.preprocess.expression.absent_feature_fill != "nan"
             ):
                 raise ValueError(
-                    "preprocess.missing_expression.method=neutral requires "
+                    "preprocess.expression.missing_expression.method=neutral requires "
                     "logistic_elasticnet, log1p, standard scaling, and absent_feature_fill=nan"
                 )
         elif missing.zero_as_missing or self.abstention.enabled:
             raise ValueError(
                 "zero_as_missing and abstention require "
-                "preprocess.missing_expression.method=neutral"
+                "preprocess.expression.missing_expression.method=neutral"
             )
         if (
-            self.preprocess.absent_feature_fill == "nan"
+            self.preprocess.expression.absent_feature_fill == "nan"
             and self.data.feature_mode != "amino_acid"
             and self.model.name != "random_forest"
             and missing.method != "neutral"
         ):
             raise ValueError(
-                "preprocess.absent_feature_fill=nan is only supported when "
+                "preprocess.expression.absent_feature_fill=nan is only supported when "
                 "model.name=random_forest"
             )
         if (
-            self.preprocess.ranked_feature_filter.method == "pair_aware"
+            self.preprocess.expression.ranked_feature_filter.method == "pair_aware"
             and self.data.feature_mode != "amino_acid"
             and self.data.contrast_pair_col is None
         ):
             raise ValueError(
-                "preprocess.ranked_feature_filter.method=pair_aware requires "
+                "preprocess.expression.ranked_feature_filter.method=pair_aware requires "
                 "data.contrast_pair_col"
             )
         selection_active = (
@@ -676,7 +639,7 @@ class AppConfig(StrictModel):
         if self.model.name == "logistic_elasticnet":
             supported = {"lambda", "alpha", "maxit", "thresh", "amino_acid_penalty_ratio"}
             if self.data.feature_mode == "combined":
-                if self.preprocess.missing_expression.method != "neutral":
+                if self.preprocess.expression.missing_expression.method != "neutral":
                     raise ValueError("combined mode requires missing_expression.method=neutral")
                 alpha = self.model_selection.search_space.get("alpha", [1.0])
                 if not isinstance(alpha, list) or any(a != 1.0 for a in alpha):

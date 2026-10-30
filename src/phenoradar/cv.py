@@ -95,6 +95,7 @@ except ImportError:  # pragma: no cover - available via scikit-learn dependency.
 _THREADPOOL_CONTROLLER: ThreadpoolController | None = None
 _THREADPOOL_CONTROLLER_LOCK = Lock()
 _CONTEXTUAL_EXPRESSION_TRANSFORMS = frozenset({"sample_rank", "sample_percentile_rank"})
+MAX_PIVOT_CELLS = 50_000_000
 
 
 class CVError(ValueError):
@@ -928,13 +929,13 @@ def _config_with_runtime_n_jobs(config: AppConfig, n_jobs: int) -> AppConfig:
 def _validate_expression_transform_method(method: str) -> str:
     if method in {"none", "log1p", "sample_rank", "sample_percentile_rank"}:
         return method
-    raise CVError(f"Unsupported preprocess.expression_transform.method: {method}")
+    raise CVError(f"Unsupported preprocess.expression.expression_transform.method: {method}")
 
 
 def _validate_feature_scaling_method(method: str) -> str:
     if method in {"none", "standard"}:
         return method
-    raise CVError(f"Unsupported preprocess.feature_scaling.method: {method}")
+    raise CVError(f"Unsupported preprocess.expression.feature_scaling.method: {method}")
 
 
 def _sample_rank_transform(values: np.ndarray, *, percentile: bool) -> np.ndarray:
@@ -975,8 +976,8 @@ def apply_expression_transform(
 def _apply_expression_transform_for_config(config: AppConfig, matrix: np.ndarray) -> np.ndarray:
     return apply_expression_transform(
         matrix,
-        config.preprocess.expression_transform.method,
-        zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
+        config.preprocess.expression.expression_transform.method,
+        zero_as_missing=config.preprocess.expression.missing_expression.zero_as_missing,
     )
 
 
@@ -999,7 +1000,7 @@ def fit_feature_scaling(
     x_train: np.ndarray,
     x_target: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, FeatureScaler]:
-    method = _validate_feature_scaling_method(config.preprocess.feature_scaling.method)
+    method = _validate_feature_scaling_method(config.preprocess.expression.feature_scaling.method)
     x_train_values = np.asarray(x_train, dtype=float)
     x_target_values = np.asarray(x_target, dtype=float)
     if method == "none":
@@ -1007,7 +1008,7 @@ def fit_feature_scaling(
 
     scaler = (
         NeutralStandardScaler()
-        if config.preprocess.missing_expression.method == "neutral"
+        if config.preprocess.expression.missing_expression.method == "neutral"
         else StandardScaler()
     )
     x_train_scaled = np.asarray(scaler.fit_transform(x_train_values), dtype=float)
@@ -1158,7 +1159,7 @@ def _build_cv_species_evidence(
         scaled = apply_feature_scaling(
             selected,
             entry.scaler,
-            config.preprocess.feature_scaling.method,
+            config.preprocess.expression.feature_scaling.method,
         )
         model_contributions = scaled * coefficient[np.newaxis, :]
         union_indices = np.array(
@@ -1275,9 +1276,10 @@ def _build_cv_species_evidence(
                 )
 
     reference_frame = pl.DataFrame(reference_rows, schema=_CV_SPECIES_REFERENCE_EXPRESSION_SCHEMA)
-    if config.preprocess.missing_expression.method == "neutral":
+    if config.preprocess.expression.missing_expression.method == "neutral":
         reference_frame = mark_expression_observations(
-            reference_frame, zero_as_missing=config.preprocess.missing_expression.zero_as_missing
+            reference_frame,
+            zero_as_missing=config.preprocess.expression.missing_expression.zero_as_missing,
         )
     return (
         pl.DataFrame(species_rows, schema=_CV_SPECIES_EVIDENCE_SCHEMA).sort(
@@ -1315,14 +1317,16 @@ class ExpressionMatrixBuilder:
         self._species_col = config.data.species_col
         self._feature_col = config.data.feature_col
         self._value_col = config.data.value_col
-        self._max_pivot_cells = int(config.preprocess.max_pivot_cells)
+        self._max_pivot_cells = MAX_PIVOT_CELLS
         if absent_feature_fill is None:
             absent_feature_fill = (
-                config.preprocess.absent_feature_fill if isinstance(config, AppConfig) else 0
+                config.preprocess.expression.absent_feature_fill
+                if isinstance(config, AppConfig)
+                else 0
             )
         if absent_feature_fill != 0 and absent_feature_fill != "nan":
             raise CVError(
-                "Unsupported preprocess.absent_feature_fill: "
+                "Unsupported preprocess.expression.absent_feature_fill: "
                 f"{absent_feature_fill}"
             )
         self._absent_feature_fill_value = (
@@ -1784,8 +1788,7 @@ class RunExpressionCache:
             config.data.species_col,
             config.data.feature_col,
             config.data.value_col,
-            config.preprocess.absent_feature_fill,
-            config.preprocess.max_pivot_cells,
+            config.preprocess.expression.absent_feature_fill,
         )
         if self._builder is None:
             self._builder = ExpressionMatrixBuilder(config)
@@ -1989,7 +1992,7 @@ def _apply_ranked_feature_filter(
     collect_score_rows: bool = True,
     train_rows: np.ndarray | None = None,
 ) -> RankedFeatureFilterResult:
-    filter_config = config.preprocess.ranked_feature_filter
+    filter_config = config.preprocess.expression.ranked_feature_filter
     method = filter_config.method
     higher_in_trait = filter_config.higher_in_trait
     candidate_count = int(selected.size)
@@ -2289,7 +2292,7 @@ def _build_inner_sparse_count_cache(
     labels: np.ndarray,
     splits: list[tuple[np.ndarray, np.ndarray, str]],
 ) -> _InnerSparseCountCache | None:
-    sparse_filter = config.preprocess.sparse_feature_filter
+    sparse_filter = config.preprocess.expression.sparse_feature_filter
     if not sparse_filter.enabled or len(splits) <= 3 or sparse_filter.min_nonzero_fraction is None:
         return None
     n_rows, n_features = matrix.shape
@@ -2371,7 +2374,7 @@ def _sparse_feature_indices(
     train_rows: np.ndarray | None = None,
 ) -> np.ndarray:
     """Screen transformed columns with bounded temporary masks and train-only counts."""
-    filter_config = config.preprocess.sparse_feature_filter
+    filter_config = config.preprocess.expression.sparse_feature_filter
     n_samples, n_features = x_train_expr.shape
     if train_rows is not None:
         n_samples = train_rows.size
@@ -2476,9 +2479,9 @@ def _select_feature_indices_with_counts(
     # Both predicates are column-local on the already transformed matrix. Keep
     # the historical neutral validation even when the sparse screen is empty.
     if (
-        config.preprocess.missing_expression.method == "neutral"
+        config.preprocess.expression.missing_expression.method == "neutral"
         and y_train is not None
-        and config.preprocess.ranked_feature_filter.method == "pair_aware"
+        and config.preprocess.expression.ranked_feature_filter.method == "pair_aware"
         and groups_train is None
     ):
         raise CVError("Pair-aware neutral preprocessing requires contrast groups")
@@ -2486,7 +2489,7 @@ def _select_feature_indices_with_counts(
         _sparse_feature_indices(config, x_train_expr, y_train, train_rows=train_rows)
         if sparse_selected is None else sparse_selected
     )
-    if config.preprocess.missing_expression.method == "neutral":
+    if config.preprocess.expression.missing_expression.method == "neutral":
         eligible = np.empty(selected.size, dtype=bool)
         n_train = x_train_expr.shape[0] if train_rows is None else train_rows.size
         block_size = max(1, _NEUTRAL_FILTER_BLOCK_CELLS // max(1, n_train))
@@ -2501,10 +2504,14 @@ def _select_feature_indices_with_counts(
             observations = np.count_nonzero(np.isfinite(neutral_values), axis=0)[:width]
             variance = _column_nan_variance(neutral_values, ddof=0)[:width]
             block_eligible = (observations >= 2) & np.isfinite(variance) & (variance > 0)
-            if y_train is not None and config.preprocess.ranked_feature_filter.method in {
-                "pair_aware",
-                "unpaired",
-            }:
+            if (
+                y_train is not None
+                and config.preprocess.expression.ranked_feature_filter.method
+                in {
+                    "pair_aware",
+                    "unpaired",
+                }
+            ):
                 observed_in_both = np.all(
                     [
                         np.any(np.isfinite(neutral_values[np.asarray(y_train) == label]), axis=0)
@@ -2516,7 +2523,10 @@ def _select_feature_indices_with_counts(
             eligible[start:stop] = block_eligible
             del neutral_values, observations, variance
         selected = selected[eligible]
-        if y_train is not None and config.preprocess.ranked_feature_filter.method == "pair_aware":
+        if (
+            y_train is not None
+            and config.preprocess.expression.ranked_feature_filter.method == "pair_aware"
+        ):
             if groups_train is None:
                 raise CVError("Pair-aware neutral preprocessing requires contrast groups")
             contrasts = _pair_group_contrasts(
@@ -2524,14 +2534,15 @@ def _select_feature_indices_with_counts(
             )
             counts_per_feature = np.count_nonzero(np.isfinite(contrasts), axis=0)
             selected = selected[
-                counts_per_feature >= config.preprocess.ranked_feature_filter.min_contrast_pairs
+                counts_per_feature
+                >= config.preprocess.expression.ranked_feature_filter.min_contrast_pairs
             ]
 
     # This count has always included neutral eligibility as well as sparsity.
     n_features_after_sparse_feature_filter = int(selected.size)
 
-    if config.preprocess.low_variance_filter.enabled:
-        min_variance = config.preprocess.low_variance_filter.min_variance
+    if config.preprocess.expression.low_variance_filter.enabled:
+        min_variance = config.preprocess.expression.low_variance_filter.min_variance
         if min_variance is None:
             raise CVError("low_variance_filter is enabled but min_variance is missing")
         variances = _column_nan_variance(
@@ -2556,7 +2567,7 @@ def _select_feature_indices_with_counts(
         ranked_feature_score_rows.extend(ranked_result.score_rows)
     n_features_after_ranked_feature_filter = int(selected.size)
 
-    if config.preprocess.correlation_filter.enabled and selected.size > 1:
+    if config.preprocess.expression.correlation_filter.enabled and selected.size > 1:
         selected = _apply_correlation_filter(
             config,
             x_train_expr,
@@ -2607,14 +2618,14 @@ def _apply_correlation_filter(
     *,
     train_rows: np.ndarray | None = None,
 ) -> np.ndarray:
-    max_abs_corr = config.preprocess.correlation_filter.max_abs_correlation
+    max_abs_corr = config.preprocess.expression.correlation_filter.max_abs_correlation
     if max_abs_corr is None:
         raise CVError("correlation_filter is enabled but max_abs_correlation is missing")
     if priority_scores is not None and priority_scores.shape[0] != selected.size:
         raise CVError("ranked feature priority scores must align with the selected feature set")
 
     train_selected = _feature_values(x_train_log, selected, train_rows)
-    method = config.preprocess.correlation_filter.method
+    method = config.preprocess.expression.correlation_filter.method
     feature_count = train_selected.shape[1]
     if np.isfinite(train_selected).all():
         if method == "spearman":
@@ -4347,7 +4358,7 @@ def _fold_ids(split_manifest: pl.DataFrame) -> list[str]:
 def _with_contrast_group_column(config: AppConfig, split_manifest: pl.DataFrame) -> pl.DataFrame:
     if "contrast_group_id" in split_manifest.columns:
         return split_manifest
-    if config.preprocess.ranked_feature_filter.method == "pair_aware":
+    if config.preprocess.expression.ranked_feature_filter.method == "pair_aware":
         raise CVError(
             "split_manifest is missing contrast_group_id required by "
             "ranked_feature_filter method pair_aware"
@@ -4445,7 +4456,7 @@ def _build_outer_cv_matrix_cache(
     inference_row_start = len(cv_species)
     raw_inference_view = matrix[inference_row_start:, :]
     transform_method = _validate_expression_transform_method(
-        config.preprocess.expression_transform.method
+        config.preprocess.expression.expression_transform.method
     )
     inference_transform_applied = bool(
         inference_species and transform_method in _CONTEXTUAL_EXPRESSION_TRANSFORMS
@@ -4792,7 +4803,7 @@ def _transform_target_for_selected_features(
     return apply_feature_scaling(
         x_target_selected,
         scaler,
-        config.preprocess.feature_scaling.method,
+        config.preprocess.expression.feature_scaling.method,
     )
 
 
@@ -4814,11 +4825,11 @@ def _predict_final_refit_targets(
 
 def _final_refit_can_prune_target_matrix(config: AppConfig) -> bool:
     transform_method = _validate_expression_transform_method(
-        config.preprocess.expression_transform.method
+        config.preprocess.expression.expression_transform.method
     )
     if transform_method not in {"none", "log1p"}:
         return False
-    sparse_filter = config.preprocess.sparse_feature_filter
+    sparse_filter = config.preprocess.expression.sparse_feature_filter
     min_fraction = sparse_filter.min_nonzero_fraction
     return bool(sparse_filter.enabled and min_fraction is not None and float(min_fraction) > 0.0)
 
@@ -4875,7 +4886,7 @@ def _annotate_prediction_abstention(
         matrix=matrix,
         feature_names=feature_names,
         model_coefficients=[(entry.feature_names, entry.model.coef_) for entry in entries],
-        zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
+        zero_as_missing=config.preprocess.expression.missing_expression.zero_as_missing,
         threshold=config.abstention.threshold,
         top_features=config.figures.top_features,
     )
@@ -4961,7 +4972,7 @@ def _fit_outer_sample_set(
         x_inference = apply_feature_scaling(
             x_inference_selected,
             scaler,
-            config.preprocess.feature_scaling.method,
+            config.preprocess.expression.feature_scaling.method,
         )
         if timing_recorder is not None and inference_started is not None:
             timing_recorder.record_since(
@@ -5428,7 +5439,7 @@ def _run_final_refit_impl(
     contrast_groups_train: np.ndarray | None = None
     if (
         config.data.contrast_pair_col is not None
-        or config.preprocess.ranked_feature_filter.method == "pair_aware"
+        or config.preprocess.expression.ranked_feature_filter.method == "pair_aware"
     ):
         contrast_values = train_pool.select("contrast_group_id").to_series().to_list()
         contrast_groups_train = np.array(contrast_values, dtype=object)
@@ -5871,10 +5882,10 @@ def _run_final_refit_impl(
             schema={"species": pl.String, "feature": pl.String, "tpm": pl.Float64}
         )
 
-    if config.preprocess.missing_expression.method == "neutral":
+    if config.preprocess.expression.missing_expression.method == "neutral":
         top_feature_expression_external = mark_expression_observations(
             top_feature_expression_external,
-            zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
+            zero_as_missing=config.preprocess.expression.missing_expression.zero_as_missing,
         )
     model_selection_selected: pl.DataFrame | None = None
     if model_selection_selected_rows:
@@ -6006,7 +6017,7 @@ def _run_outer_fold(
     contrast_groups_train: np.ndarray | None = None
     if (
         config.data.contrast_pair_col is not None
-        or config.preprocess.ranked_feature_filter.method == "pair_aware"
+        or config.preprocess.expression.ranked_feature_filter.method == "pair_aware"
     ):
         contrast_values = train_df.select("contrast_group_id").to_series().to_list()
         contrast_groups_train = np.array(contrast_values, dtype=object)
@@ -6613,7 +6624,7 @@ def _can_defer_outer_inference(config: AppConfig) -> bool:
     # Rank transforms depend on the entire original feature row. Keep their
     # existing full-row transform path until a separate equivalent projection
     # strategy is available.
-    return config.preprocess.expression_transform.method in {"none", "log1p"}
+    return config.preprocess.expression.expression_transform.method in {"none", "log1p"}
 
 
 def _predict_outer_inference_plan(
@@ -6633,7 +6644,7 @@ def _predict_outer_inference_plan(
         indices = np.array([feature_index[name] for name in sample.feature_names], dtype=int)
         selected = _apply_expression_transform_for_config(config, raw_matrix[:, indices])
         transformed = apply_feature_scaling(
-            selected, sample.scaler, config.preprocess.feature_scaling.method
+            selected, sample.scaler, config.preprocess.expression.feature_scaling.method
         )
         recorder.record_since(
             preprocess_started, scope="outer_fold", stage="inference_preprocessing",
@@ -7035,10 +7046,10 @@ def _run_outer_cv_impl(
                 feature_limit=config.figures.top_features,
             ),
         ])
-    if config.preprocess.missing_expression.method == "neutral":
+    if config.preprocess.expression.missing_expression.method == "neutral":
         top_feature_expression = mark_expression_observations(
             top_feature_expression,
-            zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
+            zero_as_missing=config.preprocess.expression.missing_expression.zero_as_missing,
         )
     recorder.record_since(
         postprocess_started,

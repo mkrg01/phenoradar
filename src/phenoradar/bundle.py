@@ -264,8 +264,8 @@ def _validate_scaler_state(
 
 
 def _preprocess_transform_label(config: AppConfig) -> str:
-    expression_transform = config.preprocess.expression_transform.method
-    feature_scaling = config.preprocess.feature_scaling.method
+    expression_transform = config.preprocess.expression.expression_transform.method
+    feature_scaling = config.preprocess.expression.feature_scaling.method
     if expression_transform == "log1p" and feature_scaling == "standard":
         return "log1p_then_standard_scaler"
     return f"{expression_transform}_then_{feature_scaling}"
@@ -359,10 +359,10 @@ def export_model_bundle(
             "transform_feature_names": transform_feature_schema,
             "scaler": final_refit_artifacts.scaler,
             "transform": _preprocess_transform_label(config),
-            "expression_transform": config.preprocess.expression_transform.method,
-            "feature_scaling": config.preprocess.feature_scaling.method,
-            "absent_feature_fill": config.preprocess.absent_feature_fill,
-            "missing_expression": config.preprocess.missing_expression.model_dump(),
+            "expression_transform": config.preprocess.expression.expression_transform.method,
+            "feature_scaling": config.preprocess.expression.feature_scaling.method,
+            "absent_feature_fill": config.preprocess.expression.absent_feature_fill,
+            "missing_expression": config.preprocess.expression.missing_expression.model_dump(),
             "abstention": config.abstention.model_dump(),
             "abstention_top_features": config.figures.top_features,
             "model_preprocess": [
@@ -433,7 +433,7 @@ def export_model_bundle(
         "calibration": _calibration_for_model(config.model.name),
         "ensemble_size": final_refit_artifacts.ensemble_size,
         "ensemble_probability_aggregation": config.ensemble.probability_aggregation,
-        "absent_feature_fill": config.preprocess.absent_feature_fill,
+        "absent_feature_fill": config.preprocess.expression.absent_feature_fill,
         "threshold_fixed": threshold_fixed,
         "threshold_name": FIXED_PROBABILITY_THRESHOLD_NAME,
         "threshold_policy": FIXED_PROBABILITY_THRESHOLD_POLICY,

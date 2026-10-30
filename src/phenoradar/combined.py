@@ -101,7 +101,7 @@ class ExpressionTransform:
         observed = np.isfinite(values)
         return (
             apply_feature_scaling(
-                values, self.scaler, self.config.preprocess.feature_scaling.method
+                values, self.scaler, self.config.preprocess.expression.feature_scaling.method
             ),
             observed,
         )

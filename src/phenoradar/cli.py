@@ -230,13 +230,13 @@ def _prepare_run_inputs(
 
 def _feature_filter_funnel_stage_order(config: AppConfig) -> list[str]:
     stages = ["n_features_before"]
-    if config.preprocess.sparse_feature_filter.enabled:
+    if config.preprocess.expression.sparse_feature_filter.enabled:
         stages.append("n_features_after_sparse_feature_filter")
-    if config.preprocess.low_variance_filter.enabled:
+    if config.preprocess.expression.low_variance_filter.enabled:
         stages.append("n_features_after_low_variance")
-    if config.preprocess.ranked_feature_filter.method != "none":
+    if config.preprocess.expression.ranked_feature_filter.method != "none":
         stages.append("n_features_after_ranked_feature_filter")
-    if config.preprocess.correlation_filter.enabled:
+    if config.preprocess.expression.correlation_filter.enabled:
         stages.append("n_features_after_correlation")
     return stages
 
@@ -1839,8 +1839,9 @@ def _run_single(
             if tree_path is not None and contrast_pair_col is not None:
                 try:
                     tree_warnings = write_run_tree_prediction_artifacts(
-                        preserve_missing=resolved.preprocess.missing_expression.method == "neutral",
-                        zero_as_missing=resolved.preprocess.missing_expression.zero_as_missing,
+                        preserve_missing=resolved.preprocess.expression.missing_expression.method
+                        == "neutral",
+                        zero_as_missing=resolved.preprocess.expression.missing_expression.zero_as_missing,
                         run_dir=run_dir,
                         tree_path=Path(tree_path),
                         metadata_path=Path(resolved.data.metadata_path),

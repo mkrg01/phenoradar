@@ -233,9 +233,9 @@ def _reference_expression(
         "tpm": raw.reshape(-1),
         "log2_tpm_plus1": np.log2(raw.reshape(-1) + 1.0),
     }, schema=_REFERENCE_SCHEMA).sort(["feature", "label", "species"])
-    if config.preprocess.missing_expression.method == "neutral":
+    if config.preprocess.expression.missing_expression.method == "neutral":
         table = mark_expression_observations(
-            table, zero_as_missing=config.preprocess.missing_expression.zero_as_missing
+            table, zero_as_missing=config.preprocess.expression.missing_expression.zero_as_missing
         )
     return table
 
@@ -313,7 +313,7 @@ def build_candidate_evidence_artifacts(
             + ", ".join(missing_model_features[:10])
         )
 
-    if config.preprocess.expression_transform.method in {"none", "log1p"}:
+    if config.preprocess.expression.expression_transform.method in {"none", "log1p"}:
         transform_features = model_features
         transform_index = {feature: idx for idx, feature in enumerate(transform_features)}
 
@@ -326,8 +326,8 @@ def build_candidate_evidence_artifacts(
         )
         candidate_transformed = apply_expression_transform(
             candidate_raw,
-            config.preprocess.expression_transform.method,
-            zero_as_missing=config.preprocess.missing_expression.zero_as_missing,
+            config.preprocess.expression.expression_transform.method,
+            zero_as_missing=config.preprocess.expression.missing_expression.zero_as_missing,
         )
     except CVError as exc:
         raise CandidateEvidenceError(str(exc)) from exc
@@ -335,10 +335,14 @@ def build_candidate_evidence_artifacts(
     feature_rows: list[dict[str, Any]] = []
     selected_features: set[str] = set()
     for candidate_idx, contributions in iter_top_contributions(
-        candidate_transformed, transform_features, rows=np.arange(len(candidate_species)),
+        candidate_transformed,
+        transform_features,
+        rows=np.arange(len(candidate_species)),
         model_features=[entry.feature_names for entry in entries],
-        scalers=[entry.scaler for entry in entries], coefficients=coefficients,
-        scaling_method=config.preprocess.feature_scaling.method, top_features=top_features,
+        scalers=[entry.scaler for entry in entries],
+        coefficients=coefficients,
+        scaling_method=config.preprocess.expression.feature_scaling.method,
+        top_features=top_features,
     ):
         species = candidate_species[candidate_idx]
         if not contributions:

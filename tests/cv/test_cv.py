@@ -374,7 +374,8 @@ sampling:
   max_samples_per_label_per_group: null
   sampled_set_count: 1
 preprocess:
-  absent_feature_fill: nan
+  expression:
+    absent_feature_fill: nan
 model:
   name: random_forest
 model_selection:
@@ -444,8 +445,9 @@ def test_outer_cv_inference_matrix_is_a_shared_read_only_view(
                 tpm,
                 extra=f"""
 preprocess:
-  expression_transform:
-    method: {method}
+  expression:
+    expression_transform:
+      method: {method}
 runtime:
   execution_stage: full_run
 """.strip(),
@@ -492,13 +494,14 @@ def test_outer_cv_avoids_full_inference_transform_per_fold(
                 tpm,
                 extra="""
 preprocess:
-  expression_transform:
-    method: {method}
-  sparse_feature_filter:
-    enabled: false
-  ranked_feature_filter:
-    method: variance
-    max_features: 1
+  expression:
+    expression_transform:
+      method: {method}
+    sparse_feature_filter:
+      enabled: false
+    ranked_feature_filter:
+      method: variance
+      max_features: 1
 runtime:
   n_jobs: 2
   execution_stage: full_run
@@ -742,7 +745,10 @@ def test_expression_matrix_builder_coordinate_fill_preserves_pivot_semantics() -
     ]
 
 
-def test_run_outer_cv_with_small_max_pivot_cells_uses_feature_chunking(tmp_path: Path) -> None:
+def test_run_outer_cv_with_small_max_pivot_cells_uses_feature_chunking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("phenoradar.cv.MAX_PIVOT_CELLS", 2)
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config(
         [
@@ -751,8 +757,7 @@ def test_run_outer_cv_with_small_max_pivot_cells_uses_feature_chunking(tmp_path:
                 metadata,
                 tpm,
                 extra="""
-preprocess:
-  max_pivot_cells: 2
+preprocess: {}
 """.strip(),
             )
         ]
@@ -1823,10 +1828,11 @@ def test_apply_correlation_filter_drops_highly_correlated_feature_pearson(
                 tpm,
                 extra="""
 preprocess:
-  correlation_filter:
-    enabled: true
-    method: pearson
-    max_abs_correlation: 0.9
+  expression:
+    correlation_filter:
+      enabled: true
+      method: pearson
+      max_abs_correlation: 0.9
 """.strip(),
             )
         ]
@@ -1863,10 +1869,11 @@ def test_apply_correlation_filter_drops_highly_correlated_feature_spearman(
                 tpm,
                 extra="""
 preprocess:
-  correlation_filter:
-    enabled: true
-    method: spearman
-    max_abs_correlation: 0.9
+  expression:
+    correlation_filter:
+      enabled: true
+      method: spearman
+      max_abs_correlation: 0.9
 """.strip(),
             )
         ]
@@ -1953,9 +1960,10 @@ def test_select_feature_indices_raises_when_filters_remove_all_features(
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: true
-    min_nonzero_fraction: 0.5
+  expression:
+    sparse_feature_filter:
+      enabled: true
+      min_nonzero_fraction: 0.5
 """.strip(),
             )
         ]
@@ -2090,7 +2098,9 @@ def test_expression_matrix_builder_build_matrix_respects_feature_order_and_zero_
 def test_expression_matrix_builder_can_fill_absent_coordinates_with_nan(
     tmp_path: Path,
     max_pivot_cells: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("phenoradar.cv.MAX_PIVOT_CELLS", max_pivot_cells)
     metadata, _ = _write_fixture(tmp_path)
     tpm = _write(
         tmp_path / "missing_coordinates_tpm.tsv",
@@ -2110,10 +2120,10 @@ def test_expression_matrix_builder_can_fill_absent_coordinates_with_nan(
                 tmp_path,
                 metadata,
                 tpm,
-                extra=f"""
+                extra="""
 preprocess:
-  max_pivot_cells: {max_pivot_cells}
-  absent_feature_fill: nan
+  expression:
+    absent_feature_fill: nan
 model:
   name: random_forest
 """.strip(),
@@ -2328,7 +2338,10 @@ def test_expression_matrix_builder_rejects_invalid_tpm_beyond_inference_window(
         ExpressionMatrixBuilder(config).build_matrix(["sp1"])
 
 
-def test_expression_matrix_builder_chunking_rejects_invalid_tpm(tmp_path: Path) -> None:
+def test_expression_matrix_builder_chunking_rejects_invalid_tpm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("phenoradar.cv.MAX_PIVOT_CELLS", 1)
     metadata, _ = _write_fixture(tmp_path)
     tpm = _write(
         tmp_path / "chunked_invalid_tpm.tsv",
@@ -2348,8 +2361,7 @@ def test_expression_matrix_builder_chunking_rejects_invalid_tpm(tmp_path: Path) 
                 metadata,
                 tpm,
                 extra="""
-preprocess:
-  max_pivot_cells: 1
+preprocess: {}
 """.strip(),
             )
         ]
@@ -2502,12 +2514,13 @@ def test_preprocess_train_and_target_can_disable_feature_scaling(tmp_path: Path)
                 tpm,
                 """
 preprocess:
-  expression_transform:
-    method: sample_percentile_rank
-  sparse_feature_filter:
-    enabled: false
-  feature_scaling:
-    method: none
+  expression:
+    expression_transform:
+      method: sample_percentile_rank
+    sparse_feature_filter:
+      enabled: false
+    feature_scaling:
+      method: none
 """,
             )
         ]
@@ -2870,7 +2883,8 @@ def test_random_forest_fit_and_prediction_accept_nan_features(tmp_path: Path) ->
                 tpm,
                 extra="""
 preprocess:
-  absent_feature_fill: nan
+  expression:
+    absent_feature_fill: nan
 model:
   name: random_forest
 """.strip(),
@@ -2980,10 +2994,11 @@ def test_inner_cv_preprocessing_applies_row_local_expression_transform_once(
                 tpm,
                 extra=f"""
 preprocess:
-  expression_transform:
-    method: {method}
-  sparse_feature_filter:
-    enabled: false
+  expression:
+    expression_transform:
+      method: {method}
+    sparse_feature_filter:
+      enabled: false
 model_selection:
   selected_candidate_count: 1
   inner_cv_strategy: logo
@@ -4294,7 +4309,9 @@ def test_expression_matrix_builder_rejects_empty_matrix_for_selected_species(
 
 def test_expression_matrix_builder_chunking_single_feature_returns_single_chunk(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("phenoradar.cv.MAX_PIVOT_CELLS", 1)
     metadata = _write(
         tmp_path / "species_metadata.tsv",
         "\n".join(
@@ -4324,8 +4341,7 @@ def test_expression_matrix_builder_chunking_single_feature_returns_single_chunk(
                 metadata,
                 tpm,
                 extra="""
-preprocess:
-  max_pivot_cells: 1
+preprocess: {}
 """.strip(),
             )
         ]
@@ -4343,20 +4359,9 @@ def test_select_feature_indices_rejects_missing_sparse_feature_threshold_when_mu
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
-    config_bad = config.model_copy(
-        update={
-            "preprocess": config.preprocess.model_copy(
-                update={
-                    "sparse_feature_filter": config.preprocess.sparse_feature_filter.model_copy(
-                        update={
-                            "enabled": True,
-                            "min_nonzero_fraction": None,
-                        }
-                    )
-                }
-            )
-        }
-    )
+    config_bad = config.model_copy(deep=True)
+    config_bad.preprocess.expression.sparse_feature_filter.enabled = True
+    config_bad.preprocess.expression.sparse_feature_filter.min_nonzero_fraction = None
 
     with pytest.raises(CVError, match="min_nonzero_fraction is missing"):
         _select_feature_indices(
@@ -4408,9 +4413,10 @@ def test_select_feature_indices_sparse_feature_filter_can_target_one_trait(
                 tpm,
                 extra=f"""
 preprocess:
-  sparse_feature_filter:
-    min_nonzero_fraction: 0.8
-    scope: {scope}
+  expression:
+    sparse_feature_filter:
+      min_nonzero_fraction: 0.8
+      scope: {scope}
 """.strip(),
             )
         ]
@@ -4448,8 +4454,9 @@ def test_sparse_feature_filter_rejects_target_trait_missing_from_training_rows(
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    scope: trait_1
+  expression:
+    sparse_feature_filter:
+      scope: trait_1
 """.strip(),
             )
         ]
@@ -4469,20 +4476,10 @@ def test_select_feature_indices_rejects_missing_low_variance_threshold_when_muta
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
-    config_bad = config.model_copy(
-        update={
-            "preprocess": config.preprocess.model_copy(
-                update={
-                    "sparse_feature_filter": config.preprocess.sparse_feature_filter.model_copy(
-                        update={"enabled": False}
-                    ),
-                    "low_variance_filter": config.preprocess.low_variance_filter.model_copy(
-                        update={"enabled": True, "min_variance": None}
-                    ),
-                }
-            )
-        }
-    )
+    config_bad = config.model_copy(deep=True)
+    config_bad.preprocess.expression.sparse_feature_filter.enabled = False
+    config_bad.preprocess.expression.low_variance_filter.enabled = True
+    config_bad.preprocess.expression.low_variance_filter.min_variance = None
 
     with pytest.raises(CVError, match="min_variance is missing"):
         _select_feature_indices(
@@ -4502,11 +4499,12 @@ def test_select_feature_indices_applies_low_variance_filter(tmp_path: Path) -> N
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: false
-  low_variance_filter:
-    enabled: true
-    min_variance: 0.01
+  expression:
+    sparse_feature_filter:
+      enabled: false
+    low_variance_filter:
+      enabled: true
+      min_variance: 0.01
 """.strip(),
             )
         ]
@@ -4539,11 +4537,12 @@ def test_select_feature_indices_pair_aware_filter_prefers_consistent_signal(
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: false
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: 1
+  expression:
+    sparse_feature_filter:
+      enabled: false
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: 1
 """.strip(),
             )
         ]
@@ -4587,12 +4586,13 @@ def test_pair_aware_filter_higher_in_trait_1_excludes_trait_0_signal(
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: false
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: 2
-    higher_in_trait: 1
+  expression:
+    sparse_feature_filter:
+      enabled: false
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: 2
+      higher_in_trait: 1
 """.strip(),
             )
         ]
@@ -4630,11 +4630,12 @@ def test_pair_aware_filter_breaks_score_ties_by_feature_name(
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: false
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: 2
+  expression:
+    sparse_feature_filter:
+      enabled: false
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: 2
 """.strip(),
             )
         ]
@@ -4664,12 +4665,13 @@ def test_select_feature_indices_pair_aware_filter_uses_available_valid_contrast_
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: false
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: 1
-    min_contrast_pairs: 2
+  expression:
+    sparse_feature_filter:
+      enabled: false
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: 1
+      min_contrast_pairs: 2
 """.strip(),
             )
         ]
@@ -4711,11 +4713,12 @@ def test_select_feature_indices_pair_aware_filter_uses_single_valid_pair_by_defa
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: false
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: 1
+  expression:
+    sparse_feature_filter:
+      enabled: false
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: 1
 """.strip(),
             )
         ]
@@ -4753,12 +4756,13 @@ def test_select_feature_indices_pair_aware_filter_skips_when_too_few_groups(
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: false
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: 1
-    min_contrast_pairs: 2
+  expression:
+    sparse_feature_filter:
+      enabled: false
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: 1
+      min_contrast_pairs: 2
 """.strip(),
             )
         ]
@@ -4796,13 +4800,14 @@ def test_pair_aware_higher_in_trait_fails_closed_when_too_few_groups(
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: false
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: 1
-    min_contrast_pairs: 2
-    higher_in_trait: 1
+  expression:
+    sparse_feature_filter:
+      enabled: false
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: 1
+      min_contrast_pairs: 2
+      higher_in_trait: 1
 """.strip(),
             )
         ]
@@ -4831,11 +4836,12 @@ def test_ranked_feature_filter_unpaired_uses_label_difference(
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: false
-  ranked_feature_filter:
-    method: unpaired
-    max_features: 1
+  expression:
+    sparse_feature_filter:
+      enabled: false
+    ranked_feature_filter:
+      method: unpaired
+      max_features: 1
 """.strip(),
             )
         ]
@@ -4877,12 +4883,13 @@ def test_ranked_feature_filter_higher_in_trait_1_excludes_stronger_trait_0_signa
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: false
-  ranked_feature_filter:
-    method: unpaired
-    max_features: 2
-    higher_in_trait: 1
+  expression:
+    sparse_feature_filter:
+      enabled: false
+    ranked_feature_filter:
+      method: unpaired
+      max_features: 2
+      higher_in_trait: 1
 """.strip(),
             )
         ]
@@ -4938,12 +4945,13 @@ def test_ranked_feature_filter_can_retain_features_higher_in_trait_0(
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: false
-  ranked_feature_filter:
-    method: unpaired
-    max_features: 2
-    higher_in_trait: 0
+  expression:
+    sparse_feature_filter:
+      enabled: false
+    ranked_feature_filter:
+      method: unpaired
+      max_features: 2
+      higher_in_trait: 0
 """.strip(),
             )
         ]
@@ -4979,12 +4987,13 @@ def test_ranked_feature_filter_higher_in_trait_fails_closed_when_no_feature_matc
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: false
-  ranked_feature_filter:
-    method: unpaired
-    max_features: 2
-    higher_in_trait: 1
+  expression:
+    sparse_feature_filter:
+      enabled: false
+    ranked_feature_filter:
+      method: unpaired
+      max_features: 2
+      higher_in_trait: 1
 """.strip(),
             )
         ]
@@ -5017,11 +5026,12 @@ def test_ranked_feature_filter_variance_is_label_independent(tmp_path: Path) -> 
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: false
-  ranked_feature_filter:
-    method: variance
-    max_features: 1
+  expression:
+    sparse_feature_filter:
+      enabled: false
+    ranked_feature_filter:
+      method: variance
+      max_features: 1
 """.strip(),
             )
         ]
@@ -5054,15 +5064,16 @@ def test_low_variance_and_ranked_filters_use_observed_nan_values(tmp_path: Path)
                 tpm,
                 extra="""
 preprocess:
-  absent_feature_fill: nan
-  sparse_feature_filter:
-    enabled: false
-  low_variance_filter:
-    enabled: true
-    min_variance: 0.1
-  ranked_feature_filter:
-    method: variance
-    max_features: 1
+  expression:
+    absent_feature_fill: nan
+    sparse_feature_filter:
+      enabled: false
+    low_variance_filter:
+      enabled: true
+      min_variance: 0.1
+    ranked_feature_filter:
+      method: variance
+      max_features: 1
 model:
   name: random_forest
 """.strip(),
@@ -5097,11 +5108,12 @@ def test_ranked_feature_filter_none_keeps_all_candidates(tmp_path: Path) -> None
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: false
-  ranked_feature_filter:
-    method: none
-    max_features: 1
+  expression:
+    sparse_feature_filter:
+      enabled: false
+    ranked_feature_filter:
+      method: none
+      max_features: 1
 """.strip(),
             )
         ]
@@ -5132,11 +5144,12 @@ def test_select_feature_indices_calls_correlation_filter_when_enabled(
                 tpm,
                 extra="""
 preprocess:
-  sparse_feature_filter:
-    enabled: false
-  correlation_filter:
-    enabled: true
-    max_abs_correlation: 0.9
+  expression:
+    sparse_feature_filter:
+      enabled: false
+    correlation_filter:
+      enabled: true
+      max_abs_correlation: 0.9
 """.strip(),
             )
         ]
@@ -5170,9 +5183,10 @@ def test_apply_correlation_filter_prefers_pair_aware_priority_when_provided(
                 tpm,
                 extra="""
 preprocess:
-  correlation_filter:
-    enabled: true
-    max_abs_correlation: 0.9
+  expression:
+    correlation_filter:
+      enabled: true
+      max_abs_correlation: 0.9
 """.strip(),
             )
         ]
@@ -5209,10 +5223,11 @@ def test_apply_correlation_filter_uses_pairwise_complete_nan_observations(
                 tpm,
                 extra="""
 preprocess:
-  absent_feature_fill: nan
-  correlation_filter:
-    enabled: true
-    max_abs_correlation: 0.9
+  expression:
+    absent_feature_fill: nan
+    correlation_filter:
+      enabled: true
+      max_abs_correlation: 0.9
 model:
   name: random_forest
 """.strip(),
@@ -5241,17 +5256,9 @@ model:
 def test_apply_correlation_filter_rejects_missing_threshold_when_mutated(tmp_path: Path) -> None:
     metadata, tpm = _write_fixture(tmp_path)
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
-    config_bad = config.model_copy(
-        update={
-            "preprocess": config.preprocess.model_copy(
-                update={
-                    "correlation_filter": config.preprocess.correlation_filter.model_copy(
-                        update={"enabled": True, "max_abs_correlation": None}
-                    )
-                }
-            )
-        }
-    )
+    config_bad = config.model_copy(deep=True)
+    config_bad.preprocess.expression.correlation_filter.enabled = True
+    config_bad.preprocess.expression.correlation_filter.max_abs_correlation = None
 
     with pytest.raises(CVError, match="max_abs_correlation is missing"):
         _apply_correlation_filter(

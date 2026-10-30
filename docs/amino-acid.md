@@ -18,15 +18,16 @@ data:
   feature_mode: amino_acid
   metadata_path: data/species_metadata.tsv
   alignment_dir: data/alignments
-amino_acid:
-  aggregation: aa_frequency
+preprocess:
+  amino_acid:
+    aggregation: aa_frequency
 ```
 
 ```bash
 phenoradar run -c sequence.yml
 ```
 
-Expression `data.tpm_path` and `preprocess` transforms/filters are inactive in
+Expression `data.tpm_path` and `preprocess.expression` settings are inactive in
 sequence-only mode. Metadata follows the usual [training format](data-format.md#metadata-tsv).
 
 ## Inputs
@@ -37,8 +38,7 @@ must have unique IDs and equal alignment lengths.
 
 The FASTA ID is the first header token. It must match an exact metadata species
 ID or that ID followed by `_` and a gene suffix. Ambiguous matches fail.
-Explicit sequence maps are unsupported; legacy `sequence_map_path: null` is
-accepted.
+Explicit sequence maps are unsupported.
 
 Canonical residues are `ACDEFGHIKLMNPQRSTVWY`; `-` and `.` are gaps. Other
 letters and `*` are unknown: preserved for coordinates, excluded from frequency
@@ -47,7 +47,7 @@ species/OG combinations remain unknown, not evidence of gene absence.
 
 ### Aggregation
 
-| `amino_acid.aggregation` | Species-level representation |
+| `preprocess.amino_acid.aggregation` | Species-level representation |
 | --- | --- |
 | `aa_frequency` (default) | Equal-gene canonical-residue frequencies at each site |
 | `best_covered` | One gene per species/OG, chosen on training-frozen quality-filtered columns |
@@ -58,8 +58,9 @@ Weighted mode additionally requires:
 ```yaml
 data:
   sequence_tpm_path: data/sequence_tpm.tsv.gz
-amino_acid:
-  aggregation: tpm_weighted_frequency
+preprocess:
+  amino_acid:
+    aggregation: tpm_weighted_frequency
 ```
 
 The TSV (optionally gzip-compressed) has `species`, `sequence_id`, `tpm`.
@@ -85,11 +86,11 @@ never determine them.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `amino_acid.site_filter.min_sample_fraction` | `0.8` | Fraction in `(0, 1]` of all training species callable at a site |
-| `amino_acid.site_filter.min_residue_states` | `2` | Required distinct canonical states, from 2 to 20 |
-| `amino_acid.ranked_site_filter.method` | `none` | `none`, `pair_aware`, or `unpaired` |
-| `amino_acid.ranked_site_filter.max_sites` | `2000` | Positive retained-site limit |
-| `amino_acid.ranked_site_filter.min_contrast_pairs` | `2` | Positive valid-pair minimum for pair-aware ranking |
+| `preprocess.amino_acid.site_filter.min_sample_fraction` | `0.8` | Fraction in `(0, 1]` of all training species callable at a site |
+| `preprocess.amino_acid.site_filter.min_residue_states` | `2` | Required distinct canonical states, from 2 to 20 |
+| `preprocess.amino_acid.ranked_site_filter.method` | `none` | `none`, `pair_aware`, or `unpaired` |
+| `preprocess.amino_acid.ranked_site_filter.max_sites` | `2000` | Positive retained-site limit |
+| `preprocess.amino_acid.ranked_site_filter.min_contrast_pairs` | `2` | Positive valid-pair minimum for pair-aware ranking |
 
 Processing order:
 
@@ -112,8 +113,7 @@ Processing order:
 Sequence features are centered without variance scaling. `best_covered` uses the
 same representatives for ranking and fitting, even after sites are removed.
 Validation/prediction selects its genes on the training-frozen scoring columns.
-Retired minor-sample/group thresholds are ignored with warnings; their counts
-remain descriptive QC fields.
+Minor-sample/group counts remain descriptive QC fields, without filtering sites.
 
 ## Joint expression and amino-acid mode
 
@@ -127,13 +127,14 @@ data:
   tpm_path: data/tpm.tsv
   alignment_dir: data/alignments
 preprocess:
-  absent_feature_fill: nan
-  missing_expression:
-    method: neutral
-  expression_transform:
-    method: log1p
-  feature_scaling:
-    method: standard
+  expression:
+    absent_feature_fill: nan
+    missing_expression:
+      method: neutral
+    expression_transform:
+      method: log1p
+    feature_scaling:
+      method: standard
 model_selection:
   selected_candidate_count: 1
   inner_cv_strategy: logo
@@ -143,7 +144,7 @@ model_selection:
     amino_acid_penalty_ratio: [0.1, 0.3, 1, 3, 10]
 ```
 
-`preprocess` controls expression; `amino_acid` controls sequence. All three
+`preprocess.expression` controls expression; `preprocess.amino_acid` controls sequence. All three
 sequence aggregations are supported. Both blocks share species, sampling,
 weights, and splits, with filters/scalers/representatives fitted separately in
 each training fold. OGs need not occur in both modalities. Every training species

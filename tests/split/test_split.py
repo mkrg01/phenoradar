@@ -177,9 +177,10 @@ data:
 split:
   group_col: order
 preprocess:
-  ranked_feature_filter:
-    method: pair_aware
-    max_features: 1
+  expression:
+    ranked_feature_filter:
+      method: pair_aware
+      max_features: 1
 """.strip()
         + "\n",
     )

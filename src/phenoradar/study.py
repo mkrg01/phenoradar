@@ -44,8 +44,8 @@ _METRIC_LABELS = {
     "log_loss": "Log Loss",
 }
 _COMPLETED_RUN_STATUSES = {"cv_completed", "full_run_completed"}
-_RANKED_METHOD_PATH = "preprocess.ranked_feature_filter.method"
-_RANKED_MAX_FEATURES_PATH = "preprocess.ranked_feature_filter.max_features"
+_RANKED_METHOD_PATH = "preprocess.expression.ranked_feature_filter.method"
+_RANKED_MAX_FEATURES_PATH = "preprocess.expression.ranked_feature_filter.max_features"
 _TRAINING_GROUP_COUNT_PATH = "sampling.training_group_count"
 _GROUP_SUBSAMPLE_REPEAT_INDEX_PATH = "sampling.group_subsample_repeat_index"
 

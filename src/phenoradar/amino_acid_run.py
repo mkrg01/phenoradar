@@ -153,7 +153,7 @@ def _select(
             fitted = fit_amino_acid(
                 store,
                 [species[i] for i in train],
-                config.amino_acid,
+                config.preprocess.amino_acid,
                 y=y[train],
                 groups=groups[train],
                 contrast_groups=pairs[train],
@@ -297,7 +297,7 @@ def fit_scope(
         fitted = fit_amino_acid(
             store,
             train_species,
-            config.amino_acid,
+            config.preprocess.amino_acid,
             y=y[indices],
             groups=groups[indices],
             contrast_groups=pairs[indices],
@@ -439,7 +439,7 @@ def _combined_coefficients(member: AAMember) -> Iterable[dict[str, Any]]:
                 coefficient if is_expression else
                 coefficient * member.aa_standard_deviation[j - n]
             ),
-            "original_unit": expression.config.preprocess.expression_transform.method
+            "original_unit": expression.config.preprocess.expression.expression_transform.method
             if is_expression else "residue_frequency",
             "penalty_factor": 1.0 if is_expression else ratio,
         }
@@ -802,7 +802,7 @@ def run_amino_acid(
     coordinate_members: list[AAMember] = []
     if progress:
         progress("Import alignment bytes and packed observation masks.")
-    weighted = config.amino_acid.aggregation == "tpm_weighted_frequency"
+    weighted = config.preprocess.amino_acid.aggregation == "tpm_weighted_frequency"
     tpm_path = config.data.sequence_tpm_path if weighted else None
     tpm_cache = (
         Path(config.data.sequence_tpm_cache_dir) if config.data.sequence_tpm_cache_dir else None
@@ -1084,7 +1084,7 @@ def run_amino_acid(
         metadata_out = {
             "run_id": run_dir.name,
             "feature_mode": config.data.feature_mode,
-            "aggregation": config.amino_acid.aggregation,
+            "aggregation": config.preprocess.amino_acid.aggregation,
             "status": "full_run_completed"
             if config.runtime.execution_stage == "full_run"
             else "cv_completed",
@@ -1121,7 +1121,7 @@ def _save_bundle(
     write_resolved_config(config, destination / "resolved_config.yml")
     needed = {s.orthogroup for member in members for s in member.transform.sites}
     payload_files = ["model_state.joblib", "resolved_config.yml"]
-    weighted = config.amino_acid.aggregation == "tpm_weighted_frequency"
+    weighted = config.preprocess.amino_acid.aggregation == "tpm_weighted_frequency"
     if weighted:
         with gzip.open(
             destination / "sequence_tpm.tsv.gz", "wt", encoding="utf-8", newline=""
@@ -1159,7 +1159,7 @@ def _save_bundle(
             "quality_filtered_sites"
             if any(member.transform.representative_columns is not None for member in members)
             else "retained_sites"
-            if config.amino_acid.aggregation == "best_covered"
+            if config.preprocess.amino_acid.aggregation == "best_covered"
             else None
         ),
         "species": species,
@@ -1211,7 +1211,7 @@ def predict_amino_acid(
         if not combined:
             raise AlignmentError("OG expression input requires a combined model bundle")
         config.data.tpm_path = str(tpm_path)
-    weighted = config.amino_acid.aggregation == "tpm_weighted_frequency"
+    weighted = config.preprocess.amino_acid.aggregation == "tpm_weighted_frequency"
     if weighted and "sequence_tpm.tsv.gz" not in manifest["files"]:
         raise AlignmentError("Weighted bundle is missing its sequence TPM payload")
     if sequence_tpm_path is not None and not weighted:

@@ -30,32 +30,41 @@ sampling:
   weighting: group_label_inverse  # choices: none, group_label_inverse
 
 preprocess:
-  max_pivot_cells: 50000000
-  absent_feature_fill: nan  # choices: 0, nan; nan supports random_forest or neutral LR
-  missing_expression:
-    method: neutral  # choices: none, neutral; neutral requires logistic_elasticnet/log1p/standard
-    zero_as_missing: true  # choices: true, false; explicit TPM=0 is unknown; raw TPM is retained in evidence
-  expression_transform:
-    method: log1p  # choices: none, log1p, sample_rank, sample_percentile_rank
-  sparse_feature_filter:
-    enabled: true  # choices: true, false
-    min_nonzero_fraction: 0.9  # type: number or null
-    scope: all_samples  # choices: all_samples, any_trait, trait_0, trait_1
-  low_variance_filter:
-    enabled: false  # choices: true, false
-    min_variance: null  # type: number or null
-  ranked_feature_filter:
-    method: pair_aware  # choices: none, pair_aware, unpaired, variance
-    max_features: 200  # type: integer or null
-    min_contrast_pairs: 1
-    higher_in_trait: 1  # choices: 0, 1, null; null keeps either direction
-  correlation_filter:
-    enabled: false  # choices: true, false
-    method: pearson  # choices: pearson, spearman
-    max_abs_correlation: null  # type: number or null
-  feature_scaling:
-    method: standard  # choices: none, standard
+  expression:
+    absent_feature_fill: nan  # choices: 0, nan; nan supports random_forest or neutral LR
+    missing_expression:
+      method: neutral  # choices: none, neutral; neutral requires logistic_elasticnet/log1p/standard
+      zero_as_missing: true  # choices: true, false; explicit TPM=0 is unknown; raw TPM is retained in evidence
+    expression_transform:
+      method: log1p  # choices: none, log1p, sample_rank, sample_percentile_rank
+    sparse_feature_filter:
+      enabled: true  # choices: true, false
+      min_nonzero_fraction: 0.9  # type: number or null
+      scope: all_samples  # choices: all_samples, any_trait, trait_0, trait_1
+    low_variance_filter:
+      enabled: false  # choices: true, false
+      min_variance: null  # type: number or null
+    ranked_feature_filter:
+      method: pair_aware  # choices: none, pair_aware, unpaired, variance
+      max_features: 200  # type: integer or null
+      min_contrast_pairs: 1
+      higher_in_trait: 1  # choices: 0, 1, null; null keeps either direction
+    correlation_filter:
+      enabled: false  # choices: true, false
+      method: pearson  # choices: pearson, spearman
+      max_abs_correlation: null  # type: number or null
+    feature_scaling:
+      method: standard  # choices: none, standard
 
+  amino_acid:
+    aggregation: aa_frequency  # choices: best_covered, aa_frequency, tpm_weighted_frequency
+    site_filter:
+      min_sample_fraction: 0.8
+      min_residue_states: 2
+    ranked_site_filter:
+      method: none  # choices: none, pair_aware, unpaired
+      max_sites: 2000
+      min_contrast_pairs: 2
 model:
   name: logistic_elasticnet  # choices: logistic_elasticnet, linear_svm, random_forest
 
@@ -113,14 +122,3 @@ runtime:
   seed: 42
   n_jobs: 32
   execution_stage: cv_only  # choices: cv_only, full_run
-
-# Optional amino-acid preprocessing; active for feature_mode: amino_acid or combined.
-amino_acid:
-  aggregation: aa_frequency  # choices: best_covered, aa_frequency, tpm_weighted_frequency
-  site_filter:
-    min_sample_fraction: 0.8
-    min_residue_states: 2
-  ranked_site_filter:
-    method: none  # choices: none, pair_aware, unpaired
-    max_sites: 2000
-    min_contrast_pairs: 2

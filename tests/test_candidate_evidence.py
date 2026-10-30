@@ -64,8 +64,9 @@ data:
   metadata_path: {metadata}
   tpm_path: {tpm}
 preprocess:
-  ranked_feature_filter:
-    method: none
+  expression:
+    ranked_feature_filter:
+      method: none
 """.strip()
         + "\n",
     )

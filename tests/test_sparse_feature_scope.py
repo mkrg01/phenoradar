@@ -15,7 +15,9 @@ from phenoradar.cv import CVError, _preprocess_train_and_target, _select_feature
 
 
 def _config(**settings: object) -> AppConfig:
-    return AppConfig.model_validate({"preprocess": {"sparse_feature_filter": settings}})
+    return AppConfig.model_validate(
+        {"preprocess": {"expression": {"sparse_feature_filter": settings}}}
+    )
 
 
 @pytest.mark.parametrize("invalid", [None, True, 0, "all", "both_traits"])
@@ -27,14 +29,24 @@ def test_scope_rejects_ambiguous_or_unsupported_values(invalid: object) -> None:
 def test_scope_comparison_uses_scope_dimension(tmp_path: Path) -> None:
     path = tmp_path / "config.yml"
     path.write_text(
-        "preprocess:\n  sparse_feature_filter:\n"
-        "    scope: [all_samples, any_trait, trait_0, trait_1]\n"
+        """preprocess:
+  expression:
+    sparse_feature_filter:
+      scope: [all_samples, any_trait, trait_0, trait_1]
+"""
     )
     assert has_condition_dimensions([path])
     conditions = load_config_conditions([path])
-    assert conditions.dimensions[0].dotted_path == "preprocess.sparse_feature_filter.scope"
-    assert [c.config.preprocess.sparse_feature_filter.scope for c in conditions.conditions] == [
-        "all_samples", "any_trait", "trait_0", "trait_1",
+    assert (
+        conditions.dimensions[0].dotted_path == "preprocess.expression.sparse_feature_filter.scope"
+    )
+    assert [
+        c.config.preprocess.expression.sparse_feature_filter.scope for c in conditions.conditions
+    ] == [
+        "all_samples",
+        "any_trait",
+        "trait_0",
+        "trait_1",
     ]
 
 
@@ -78,11 +90,11 @@ def test_scope_uses_species_denominators_with_imbalanced_classes_and_missing_val
 def test_all_samples_filters_before_neutralization_without_using_target_values() -> None:
     config = AppConfig.model_validate(
         {
-            "preprocess": {
+            "preprocess": {"expression": {
                 "absent_feature_fill": "nan",
                 "missing_expression": {"method": "neutral", "zero_as_missing": True},
                 "sparse_feature_filter": {"scope": "all_samples", "min_nonzero_fraction": 0.75},
-            }
+            }}
         }
     )
     train = np.array([[1, 1], [2, 2], [3, 0], [0, np.nan]], dtype=float)

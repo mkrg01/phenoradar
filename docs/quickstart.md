@@ -84,9 +84,10 @@ list in your config:
 
 ```yaml
 preprocess:
-  ranked_feature_filter:
-    method: [none, pair_aware, unpaired, variance]
-    max_features: 100
+  expression:
+    ranked_feature_filter:
+      method: [none, pair_aware, unpaired, variance]
+      max_features: 100
 ```
 
 Run as usual. Results appear under `runs/<timestamp>_study_<id>/`, with one run
