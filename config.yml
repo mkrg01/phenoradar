@@ -1,6 +1,6 @@
 data:
   metadata_path: c4_dataset/species_metadata.tsv
-  tpm_path: c4_dataset/tpm.tsv
+  tpm_path: c4_dataset/tpm.tsv  # TSV or gzip-compressed TSV (.tsv.gz)
   tree_path: c4_dataset/ncbi_tree.nwk  # type: string or null
   orthogroup_annotation_path: c4_dataset/odb12v2_OGs.tab.gz  # type: string or null
   species_col: species

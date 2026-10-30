@@ -70,7 +70,17 @@ Sequence bundles have [additional target restrictions](amino-acid.md#prediction)
 
 ## Expression TSV
 
-Set `data.tpm_path` to a long-format TSV:
+Set `data.tpm_path` to a long-format TSV, either uncompressed (`.tsv`) or
+gzip-compressed (`.tsv.gz`). Compression is detected automatically; no separate
+option or manual extraction is needed. Training, combined mode, and prediction
+accept both formats, including prediction via `--tpm-path`.
+
+```yaml
+data:
+  tpm_path: data/tpm.tsv.gz
+```
+
+The decompressed table has this format:
 
 ```tsv
 species	orthogroup	tpm

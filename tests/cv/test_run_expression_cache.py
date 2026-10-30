@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 from dataclasses import fields
 from pathlib import Path
 
@@ -154,6 +155,39 @@ def test_shared_cache_matches_independent_cv_and_refit(
         assert a.feature_names == b.feature_names
         np.testing.assert_allclose(a.model.coef_, b.model.coef_, rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(a.model.intercept_, b.model.intercept_, rtol=1e-12, atol=1e-14)
+
+
+@pytest.mark.parametrize("neutral", [False, True])
+def test_gzip_matches_plain_cv_refit_and_shared_cache(tmp_path: Path, neutral: bool) -> None:
+    config = _config(tmp_path)
+    if neutral:
+        config.preprocess.expression.absent_feature_fill = "nan"
+        config.preprocess.expression.missing_expression.method = "neutral"
+        config.preprocess.expression.missing_expression.zero_as_missing = True
+        config.abstention.enabled = True
+    split = build_split_artifacts(config).split_manifest
+    with RunExpressionCache() as cache:
+        expected_cv = run_outer_cv(config, split, expression_cache=cache)
+        expected_refit = run_final_refit(config, split, expression_cache=cache)
+
+    plain = Path(config.data.tpm_path)
+    compressed = tmp_path / "tpm.tsv.gz"
+    with gzip.open(compressed, "wb") as handle:
+        handle.write(plain.read_bytes())
+    plain.unlink()
+    config.data.tpm_path = str(compressed)
+    with RunExpressionCache() as cache:
+        actual_cv = run_outer_cv(config, split, expression_cache=cache)
+        actual_refit = run_final_refit(config, split, expression_cache=cache)
+
+    _assert_tables_equal(expected_cv, actual_cv)
+    _assert_tables_equal(expected_refit, actual_refit)
+    for expected, actual in zip(
+        expected_refit.model_entries, actual_refit.model_entries, strict=True
+    ):
+        assert expected.feature_names == actual.feature_names
+        np.testing.assert_allclose(expected.model.coef_, actual.model.coef_, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(expected.model.intercept_, actual.model.intercept_, atol=1e-12)
 
 
 def test_cv_only_cache_does_not_consume_target_rows(tmp_path: Path) -> None:

@@ -2373,7 +2373,7 @@ def predict(
             exists=True,
             dir_okay=False,
             readable=True,
-            help="TPM TSV. Defaults to data.tpm_path in the optional config.",
+            help="TPM TSV[.gz]. Defaults to data.tpm_path in the optional config.",
         ),
     ] = None,
     metadata_path: Annotated[

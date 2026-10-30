@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 from pathlib import Path
 
 import numpy as np
@@ -2263,8 +2264,10 @@ def test_expression_matrix_builder_rejects_invalid_tpm_rows_before_pivot(
     assert f"({reason})" in message
 
 
+@pytest.mark.parametrize("compressed", [False, True])
 def test_expression_matrix_builder_rejects_negative_duplicate_before_sum(
     tmp_path: Path,
+    compressed: bool,
 ) -> None:
     metadata, _ = _write_fixture(tmp_path)
     tpm = _write(
@@ -2278,6 +2281,12 @@ def test_expression_matrix_builder_rejects_negative_duplicate_before_sum(
         )
         + "\n",
     )
+    if compressed:
+        compressed_tpm = tmp_path / "negative_duplicate_tpm.tsv.gz"
+        with gzip.open(compressed_tpm, "wb") as handle:
+            handle.write(tpm.read_bytes())
+        tpm.unlink()
+        tpm = compressed_tpm
     config = load_and_resolve_config([_config_path(tmp_path, metadata, tpm)])
 
     with pytest.raises(CVError, match=r"first_invalid_line=2.*\(negative\)"):

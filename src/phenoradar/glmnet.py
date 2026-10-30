@@ -95,7 +95,7 @@ class GlmnetLogisticRegression(ClassifierMixin, BaseEstimator):  # type: ignore[
 
     def decision_function(self, X: Any) -> np.ndarray:
         check_is_fitted(self, ["coef_", "intercept_", "n_features_in_"])
-        x = check_array(X, accept_sparse="csc", dtype=np.float64)
+        x = check_array(X, accept_sparse="csc", dtype=np.float64, ensure_min_features=0)
         if x.shape[1] != self.n_features_in_:
             raise ValueError(f"Expected {self.n_features_in_} features, got {x.shape[1]}")
         return np.asarray(x @ self.coef_ + self.intercept_, dtype=float).reshape(-1)

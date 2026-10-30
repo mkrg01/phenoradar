@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import shutil
 from pathlib import Path
@@ -61,17 +62,24 @@ def trained_bundle(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path
 
 
 @pytest.mark.parametrize("use_config", [False, True])
+@pytest.mark.parametrize("compressed", [False, True])
 def test_predict_all_tpm_species_without_metadata_or_training(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     trained_bundle: tuple[Path, Path, Path],
     use_config: bool,
+    compressed: bool,
 ) -> None:
     bundle_dir, tpm, metadata = trained_bundle
     expected, _ = predict_with_bundle(
         AppConfig.model_validate({"data": {"metadata_path": str(metadata), "tpm_path": str(tpm)}}),
         load_model_bundle(bundle_dir),
     )
+    if compressed:
+        compressed_tpm = tmp_path / "tpm.tsv.gz"
+        with gzip.open(compressed_tpm, "wb") as handle:
+            handle.write(tpm.read_bytes())
+        tpm = compressed_tpm
     monkeypatch.chdir(tmp_path)
 
     def no_training(*_args: object, **_kwargs: object) -> None:
@@ -93,6 +101,7 @@ def test_predict_all_tpm_species_without_metadata_or_training(
     assert actual["species"].to_list() == expected["species"].to_list()
     np.testing.assert_allclose(actual["prob"], expected["prob"], atol=1e-8)
     resolved = yaml.safe_load((run / "resolved_config.yml").read_text())
+    assert resolved["data"]["tpm_path"] == str(tpm)
     assert resolved["data"]["metadata_path"] is None
     assert resolved["runtime"] == {"n_jobs": 2}
     assert "model" not in resolved and "split" not in resolved

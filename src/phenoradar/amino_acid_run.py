@@ -8,9 +8,9 @@ import json
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from contextlib import ExitStack
-from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from itertools import chain
 from pathlib import Path
 from typing import Any
 
@@ -31,8 +31,9 @@ from phenoradar.amino_acid import (
 from phenoradar.amino_acid_outputs import (
     write_frequency_figure,
     write_site_scores,
-    write_site_stability,
 )
+from phenoradar.amino_acid_prediction import prediction_members
+from phenoradar.amino_acid_reporting import AAReportWriter
 from phenoradar.combined import ExpressionInput, ExpressionTransform, fit_expression
 from phenoradar.config import AppConfig
 from phenoradar.config.io import write_resolved_config
@@ -61,14 +62,8 @@ from phenoradar.cv import (
     _tpe_trial_params,
     _with_native_thread_limit,
 )
-from phenoradar.feature_stability import build_feature_stability_tables
 from phenoradar.glmnet import GlmnetLogisticRegression
 from phenoradar.group_bootstrap import run_oof_group_bootstrap
-from phenoradar.interpret import (
-    InterpretationArtifacts,
-    ModelFeatureEntry,
-    build_interpretation_tables,
-)
 from phenoradar.metrics import (
     binary_log_loss,
     binary_probability_metrics,
@@ -145,11 +140,15 @@ def _select(
     sample_set_id: int,
     warnings: list[str],
     expression: ExpressionInput | None = None,
+    *,
+    progress: Callable[[str], None] | None = None,
 ) -> tuple[list[SelectedCandidate], list[dict[str, Any]]]:
     species, y, groups, pairs = _arrays(rows)
     prepared = []
     if _selection_is_active(config):
         for train, valid, fold in _inner_cv_splits(config, y, groups):
+            if progress:
+                progress(f"{scope}: prepare inner fold {fold}.")
             fitted = fit_amino_acid(
                 store,
                 [species[i] for i in train],
@@ -158,8 +157,14 @@ def _select(
                 groups=groups[train],
                 contrast_groups=pairs[train],
             )
-            x_train, _, _ = fitted.transform(store, [species[i] for i in train])
-            x_valid, _, _ = fitted.transform(store, [species[i] for i in valid])
+            x_train = fitted.matrix(store, [species[i] for i in train])
+            x_valid = fitted.matrix(store, [species[i] for i in valid])
+            if progress:
+                progress(
+                    f"{scope}: inner fold {fold} ready "
+                    f"({len(train)} train, {len(valid)} validation, "
+                    f"{x_train.shape[1]} AA features)."
+                )
             n_expression = None
             if expression is not None:
                 expr, xe, _, _ = fit_expression(
@@ -182,14 +187,20 @@ def _select(
                 )
             )
 
+    def selection_progress(event: str, detail: str | None) -> None:
+        if progress:
+            progress(f"{scope}: {detail or event}")
+
     def score(candidates: list[Candidate]) -> list[tuple[float, list[dict[str, Any]]]]:
+        if progress:
+            progress(f"{scope}: score {len(candidates)} candidates along glmnet paths.")
         return _score_glmnet_paths(
             config=config,
             training_scope_id=scope,
             source_sample_set_id=sample_set_id,
             candidates=candidates,
             preprocessed_folds=prepared,
-            progress_callback=None,
+            progress_callback=selection_progress,
             timing_recorder=None,
         )
 
@@ -266,6 +277,8 @@ def fit_scope(
     tables: Path,
     warnings: list[str],
     expression: ExpressionInput | None = None,
+    *,
+    progress: Callable[[str], None] | None = None,
 ) -> list[AAMember]:
     species, y, groups, pairs = _arrays(rows)
     selection = _select_training_groups(config, y, groups, scope=scope, fold_id=scope)
@@ -278,7 +291,7 @@ def fit_scope(
         if source_id not in source_results:
             selected, trials = _select(
                 config, store, rows[sampled[source_id].tolist()], scope, source_id, warnings,
-                expression,
+                expression, progress=progress,
             )
             source_results[source_id] = selected
             _write(
@@ -294,6 +307,8 @@ def fit_scope(
             )
         selected = source_results[source_id]
         train_species = [species[i] for i in indices]
+        if progress:
+            progress(f"{scope}: prepare refit features for sample set {sample_set_id}.")
         fitted = fit_amino_acid(
             store,
             train_species,
@@ -339,14 +354,12 @@ def fit_scope(
                 for site in fitted.sites
             ),
         )
-        schema = fitted.schema().to_dicts()
+        schema = fitted.schema_rows()
         if expr is not None:
-            schema = expr.schema() + [{**row, "modality": "amino_acid"} for row in schema]
-            # Use one stable column order for both feature blocks.
-            schema = [{key: row.get(key) for key in
-                       ["feature", "modality", "orthogroup", "alignment_pos_1based", "residue",
-                        "aggregation", "training_mean"]}
-                      for row in schema]
+            keys = ["feature", "modality", "orthogroup", "alignment_pos_1based", "residue",
+                    "aggregation", "training_mean"]
+            schema = ({key: row.get(key) for key in keys}
+                      for row in chain(expr.schema(), schema))
         _write(tables / "feature_schema.tsv", ({**context, **row} for row in schema))
         _write(tables / "representative_sequences.tsv", ({**context, **r} for r in representatives))
         if fitted.representative_columns is not None:
@@ -366,8 +379,14 @@ def fit_scope(
             if expr is not None:
                 _, ratio = _glmnet_candidate_params(config, result.candidate.params)
                 model.penalty_factor = np.concatenate((
-                    np.ones(len(expr.features)), np.full(len(fitted.features), ratio),
+                    np.ones(len(expr.features)),
+                    np.full(matrix.shape[1] - len(expr.features), ratio),
                 ))
+            if progress:
+                progress(
+                    f"{scope}: fit selected candidate {result.candidate.candidate_index} "
+                    f"({matrix.shape[0]} species, {matrix.shape[1]} features)."
+                )
             _with_native_thread_limit(
                 config.runtime.n_jobs,
                 model.fit,
@@ -419,9 +438,10 @@ def _combined_coefficients(member: AAMember) -> Iterable[dict[str, Any]]:
     _, ratio = _glmnet_candidate_params(expression.config, member.candidate.params)
     assert expression.scaler is not None
     expression_scale = np.asarray(expression.scaler.scale_, dtype=float)
-    for j, (feature, coefficient) in enumerate(
-        zip(member.features, member.model.coef_, strict=True)
-    ):
+    names = chain(expression.features, (
+        site.feature(int(a)) for site in member.transform.sites for a in np.flatnonzero(site.active)
+    ))
+    for j, (feature, coefficient) in enumerate(zip(names, member.model.coef_, strict=True)):
         is_expression = j < n
         og = expression.orthogroups[j] if is_expression else json.loads(feature)[0]
         yield {
@@ -445,36 +465,15 @@ def _combined_coefficients(member: AAMember) -> Iterable[dict[str, Any]]:
         }
 
 
-def _combined_interpretation(
-    destination: Path, members: list[AAMember]
-) -> InterpretationArtifacts:
-    """Normalize importance within each modality, never across unlike units."""
-    outputs: dict[str, list[pl.DataFrame]] = defaultdict(list)
-    for modality in ["expression", "amino_acid"]:
-        entries = []
-        for member in members:
-            n = member.expression_width
-            columns = slice(0, n) if modality == "expression" else slice(n, None)
-            view = copy(member.model)
-            view.coef_ = member.model.coef_[columns]
-            entries.append(ModelFeatureEntry(member.features[columns], view,
-                                             member.scope.removeprefix("outer_fold_")))
-        result = build_interpretation_tables(entries)
-        for name in ["feature_importance", "coefficients", "feature_importance_by_fold",
-                     "coefficients_by_fold"]:
-            frame = getattr(result, name).with_columns(pl.lit(modality).alias("modality"))
-            frame.write_csv(destination / f"{modality}_{name}.tsv", separator="\t")
-            outputs[name].append(frame)
-    return InterpretationArtifacts(
-        **{name: pl.concat(frames) for name, frames in outputs.items()}, warnings=[]
-    )
-
-
 def _site_effects(member: AAMember, matrix: np.ndarray) -> Iterable[dict[str, Any]]:
     offset = member.expression_width
-    for site, beta in zip(member.transform.sites, _site_coefficients(member), strict=True):
+    for site in member.transform.sites:
         count = int(np.sum(site.active))
-        contribution = matrix[:, offset : offset + count] @ beta[site.active]
+        beta = np.zeros(20)
+        beta[site.active] = member.model.coef_[offset:offset + count]
+        mean_contribution = (float(np.mean(np.abs(
+            matrix[:, offset:offset + count] @ beta[site.active]
+        ))) if np.any(beta) else 0.0)
         offset += count
         reference = int(np.argmax(site.mean))
         for state in np.flatnonzero(site.known):
@@ -489,7 +488,7 @@ def _site_effects(member: AAMember, matrix: np.ndarray) -> Iterable[dict[str, An
                 "reference_residue": ALPHABET[reference],
                 "effect_vs_reference": float(beta[state] - beta[reference]),
                 "site_effect_range": _effect_range(site.known, beta),
-                "mean_abs_site_contribution": float(np.mean(np.abs(contribution))),
+                "mean_abs_site_contribution": mean_contribution,
             }
 
 
@@ -502,6 +501,9 @@ def predict_members(
     tables: Path | None = None,
     expression: ExpressionInput | None = None,
 ) -> pl.DataFrame:
+    members = prediction_members(
+        members, padding_sites=config.figures.top_features if tables is not None else 0
+    )
     output = []
     size = PREDICTION_BATCH_SIZE
     for start in range(0, len(species), size):
@@ -676,6 +678,7 @@ def predict_members(
 def _coordinate_rows(
     store: AlignmentStore, members: list[AAMember], species: list[str]
 ) -> Iterable[dict[str, Any]]:
+    members = prediction_members(members)
     seen = set()
     for member in members:
         key = id(member.transform)
@@ -796,8 +799,6 @@ def run_amino_acid(
     oof = []
     metrics = []
     losses = []
-    entries = []
-    retained: list[dict[str, Any]] = []
     fold_values = []
     coordinate_members: list[AAMember] = []
     if progress:
@@ -808,6 +809,7 @@ def run_amino_acid(
         Path(config.data.sequence_tpm_cache_dir) if config.data.sequence_tpm_cache_dir else None
     )
     with ExitStack() as stack:
+        reports = stack.enter_context(AAReportWriter(tables))
         expression = (
             stack.enter_context(ExpressionInput(config, all_species, training_species))
             if config.data.feature_mode == "combined" else None
@@ -820,6 +822,7 @@ def run_amino_acid(
                 Path(config.data.alignment_dir or ""),
                 all_species,
                 cache_species=training_species,
+                cache_frequencies=True,
                 sequence_tpm_path=tpm_path,
                 sequence_tpm_cache_dir=tpm_cache,
                 progress=progress,
@@ -853,11 +856,15 @@ def run_amino_acid(
             valid = manifest.filter((pl.col("fold_id") == fold) & (pl.col("pool") == "validation"))
             members = fit_scope(
                 config, store, train.sort("species"), f"outer_fold_{fold}", tables, warnings,
-                expression,
+                expression, progress=progress,
             )
-            coordinate_members.extend(members)
+            reports.add(members)
+            compact = prediction_members(
+                members, padding_sites=config.figures.top_features
+            )
+            coordinate_members.extend(compact)
             pred = predict_members(
-                config, store, valid["species"].to_list(), members, tables=tables,
+                config, store, valid["species"].to_list(), compact, tables=tables,
                 expression=expression,
             )
             pred = pred.join(
@@ -876,17 +883,7 @@ def run_amino_acid(
                     "metric_value": values["log_loss"],
                 }
             )
-            for member in members:
-                entries.append(ModelFeatureEntry(member.features, member.model, fold))
-                retained.extend(
-                    {
-                        "scope": "outer_fold",
-                        "fold_id": fold,
-                        "sample_set_id": member.sample_set_id,
-                        "feature": feature,
-                    }
-                    for feature in member.features
-                )
+            del members
         predictions = pl.concat(oof).sort("species")
         predictions.write_csv(tables / "prediction_cv.tsv", separator="\t")
         micro = _metrics(predictions["label"].to_numpy(), predictions["prob"].to_numpy())
@@ -910,39 +907,15 @@ def run_amino_acid(
             )
         _metrics_dataframe(metrics).write_csv(tables / "metrics_cv.tsv", separator="\t")
         _write(tables / "loss_by_split_cv.tsv", losses)
-        interpretation = (
-            _combined_interpretation(tables, coordinate_members)
-            if expression is not None else build_interpretation_tables(entries)
+        if progress:
+            progress("Finalize disk-backed feature and site interpretation tables.")
+        importance = reports.finalize(
+            combined=expression is not None, top_features=config.figures.top_features
         )
-        for name in [
-            "feature_importance",
-            "coefficients",
-            "feature_importance_by_fold",
-            "coefficients_by_fold",
-        ]:
-            getattr(interpretation, name).write_csv(tables / f"{name}.tsv", separator="\t")
-        retained_frame = pl.DataFrame(retained).unique()
-        retained_frame.write_csv(tables / "retained_features.tsv", separator="\t")
-        stability = build_feature_stability_tables(
-            feature_importance_by_fold=interpretation.feature_importance_by_fold,
-            coefficients_by_fold=interpretation.coefficients_by_fold,
-            retained_features=retained_frame,
-        )
-        for name in ["by_feature", "by_fold_pair", "summary"]:
-            getattr(stability, name).write_csv(
-                tables / f"feature_stability_{name}.tsv", separator="\t"
-            )
-        write_site_scores(tables, coordinate_members)
-        write_site_stability(tables, coordinate_members)
         write_frequency_figure(
-            run_dir / "cv/figures",
-            store,
-            manifest,
-            coordinate_members,
-            interpretation.feature_importance.filter(pl.col("feature").is_in(
-                {f for member in coordinate_members for f in member.transform.features}
-            )),
-            config.figures.top_features,
+            run_dir / "cv/figures", store, manifest,
+            reports.frequency_members(coordinate_members, importance),
+            importance, config.figures.top_features,
         )
         _write(
             tables / "selected_site_sequence_map.tsv",
@@ -968,9 +941,12 @@ def run_amino_acid(
                 .unique(subset="species")
                 .sort("species")
             )
-            final = fit_scope(config, store, train, "final_refit", model_dir, warnings, expression)
+            final = fit_scope(
+                config, store, train, "final_refit", model_dir, warnings,
+                expression, progress=progress,
+            )
             write_site_scores(model_dir, final)
-            needed = {s.orthogroup for member in final for s in member.transform.sites}
+            needed = _prediction_orthogroups(config, final)
             target_species = (
                 sorted(set(all_species) - set(training_species))
                 if weighted
@@ -1107,6 +1083,11 @@ def run_amino_acid(
     return run_dir
 
 
+def _prediction_orthogroups(config: AppConfig, members: list[AAMember]) -> set[str]:
+    compact = prediction_members(members, padding_sites=config.figures.top_features)
+    return {site.orthogroup for member in compact for site in member.transform.sites}
+
+
 def _save_bundle(
     config: AppConfig,
     destination: Path,
@@ -1119,7 +1100,7 @@ def _save_bundle(
     destination.mkdir(parents=True, exist_ok=True)
     joblib.dump(members, destination / "model_state.joblib")
     write_resolved_config(config, destination / "resolved_config.yml")
-    needed = {s.orthogroup for member in members for s in member.transform.sites}
+    needed = _prediction_orthogroups(config, members)
     payload_files = ["model_state.joblib", "resolved_config.yml"]
     weighted = config.preprocess.amino_acid.aggregation == "tpm_weighted_frequency"
     if weighted:
@@ -1220,6 +1201,9 @@ def predict_amino_acid(
     if n_jobs is not None:
         config.runtime.n_jobs = n_jobs
     members = joblib.load(bundle / "model_state.joblib")
+    required_ogs = _prediction_orthogroups(config, members)
+    if required_ogs - set(manifest["alignment_hashes"]):
+        raise AlignmentError("Frozen bundle is missing required alignment identities")
     species = manifest["species"]
     targets = (
         species
@@ -1247,7 +1231,7 @@ def predict_amino_acid(
                 alignment_dir or Path(config.data.alignment_dir or ""),
                 species,
                 cache_species=targets,
-                only_orthogroups=set(manifest["alignment_hashes"]),
+                only_orthogroups=required_ogs,
                 sequence_tpm_path=str(weights_path) if weights_path is not None else None,
                 sequence_tpm_cache_dir=sequence_tpm_cache_dir,
             )

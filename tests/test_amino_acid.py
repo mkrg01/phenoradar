@@ -182,13 +182,18 @@ def test_gap_screen_precedes_frequency_and_counts_species(tmp_path: Path, monkey
         assert np.isnan(raw[2]).all()
 
 
-def test_training_state_and_values_ignore_held_out_changes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cache_frequencies", [False, True])
+def test_training_state_and_values_ignore_held_out_changes(
+    tmp_path: Path, cache_frequencies: bool,
+) -> None:
     path = alignment(tmp_path / "aa", [("s1_g", "A--"), ("s2_g", "V--"), ("held_g", "WWW")])
     signatures = []
     matrices = []
     for held in ["WWW", "---"]:
         alignment(path, [("s1_g", "A--"), ("s2_g", "V--"), ("held_g", held)])
-        with AlignmentStore(path, ["s1", "s2", "held"]) as store:
+        with AlignmentStore(
+            path, ["s1", "s2", "held"], cache_frequencies=cache_frequencies,
+        ) as store:
             state = fit_amino_acid(
                 store, ["s1", "s2"], settings(), y=np.array([0, 1]), groups=np.array(["a", "b"])
             )
@@ -558,7 +563,10 @@ def test_weighted_tpm_validation(tmp_path: Path, values, message: str, cached: b
             )
 
 
-def test_weighted_selection_uses_weights_and_training_only(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cache_frequencies", [False, True])
+def test_weighted_selection_uses_weights_and_training_only(
+    tmp_path: Path, cache_frequencies: bool,
+) -> None:
     path = alignment(
         tmp_path / "aa",
         [
@@ -584,7 +592,10 @@ def test_weighted_selection_uses_weights_and_training_only(tmp_path: Path) -> No
                 ("held", "held_v", held_weights[1]),
             ],
         )
-        with AlignmentStore(path, ["s1", "s2", "held"], sequence_tpm_path=str(tpm)) as store:
+        with AlignmentStore(
+            path, ["s1", "s2", "held"], sequence_tpm_path=str(tpm),
+            cache_frequencies=cache_frequencies,
+        ) as store:
             state = fit_amino_acid(
                 store,
                 ["s1", "s2"],
@@ -906,3 +917,139 @@ def test_blocked_disk_backed_matrices_preserve_features_and_representatives(
         assert isinstance(actual_raw, np.memmap)
         assert isinstance(actual_x, np.memmap)
         assert isinstance(actual_information, np.memmap)
+
+
+@pytest.mark.parametrize("weighted", [False, True])
+def test_frequency_cache_reuses_columns_across_species_subsets_and_cleans_up(
+    tmp_path: Path, monkeypatch, weighted: bool,
+) -> None:
+    path = alignment(tmp_path / "aa", [
+        ("s1_a", "AA-VX"), ("s1_b", "VVA-*"),
+        ("s2_a", "VVVAA"), ("held_g", "WWWWW"), ("zero_g", "AAAAA"),
+    ])
+    species = ["s1", "s2", "held", "zero", "absent"]
+    tpm = tpm_table(tmp_path / "tpm.tsv", [
+        ("s1", "s1_a", 3), ("s1", "s1_b", 1), ("s2", "s2_a", 5),
+        ("held", "held_g", 2), ("zero", "zero_g", 0),
+    ])
+    with AlignmentStore(
+        path, species, sequence_tpm_path=str(tpm), cache_frequencies=True,
+    ) as store:
+        og = store.ogs["OG1"]
+        compute = store._compute_frequencies
+        calls = []
+
+        def tracked(og, samples, columns, **kwargs):
+            calls.append((list(samples), columns.tolist(), kwargs["weighted"]))
+            return compute(og, samples, columns, **kwargs)
+
+        monkeypatch.setattr(store, "_compute_frequencies", tracked)
+        for samples, columns in [
+            (["s2", "s1"], [2, 0, 2]),
+            (["held", "s1", "absent", "s1", "zero"], [0, 1]),
+            (["s1", "s2"], [2, 1, 0]),
+        ]:
+            columns = np.array(columns)
+            expected = compute(og, samples, columns, weighted=weighted)
+            actual = store.frequencies(og, samples, columns, weighted=weighted)
+            np.testing.assert_array_equal(actual[0], expected[0])
+            np.testing.assert_array_equal(actual[1], expected[1])
+            assert actual[2] == expected[2]
+            actual[0][:] = 99  # Returned arrays cannot modify cached compositions.
+            actual[1][:] = 99
+        assert [c[1] for c in calls] == [[0, 2], [1]]
+        assert all(set(c[0]) == {"s1", "s2", "held", "zero"} for c in calls)
+        cache = store._frequency_caches[("OG1", weighted)]
+        cache_path = cache.path
+        assert cache_path.stat().st_size == 3 * 4 * 21 * 4
+        other = store.frequencies(og, ["s1"], np.array([0]), weighted=not weighted)[0]
+        assert other[0, 0, 0] == pytest.approx(0.5 if weighted else 0.75)
+        assert len(store._frequency_caches) == 2
+    assert not cache_path.exists()
+
+
+def test_prediction_store_computes_only_requested_species_without_frequency_cache(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    path = alignment(tmp_path / "aa", [("s1_a", "AAA"), ("held_a", "VVV")])
+    with AlignmentStore(path, ["s1", "held"]) as store:
+        compute = store._compute_frequencies
+        calls = []
+
+        def tracked(og, samples, columns, **kwargs):
+            calls.append(samples)
+            return compute(og, samples, columns, **kwargs)
+
+        monkeypatch.setattr(store, "_compute_frequencies", tracked)
+        q, _, _ = store.frequencies(store.ogs["OG1"], ["s1"], np.array([0, 1]))
+        assert calls == [["s1"]]
+        assert not store._frequency_caches
+        np.testing.assert_array_equal(q[0, :, 0], [1, 1])
+
+
+def test_block_statistics_match_observed_only_float32_reference() -> None:
+    from phenoradar.amino_acid import _site_statistics
+
+    rng = np.random.default_rng(271)
+    raw = rng.dirichlet(np.ones(20), size=(113, 37)).astype(np.float32)
+    raw[rng.random(raw.shape[:2]) < 0.3] = np.nan
+    raw[:, 0] = np.nan
+    raw[:, 1] = np.eye(20, dtype=np.float32)[0]
+    raw[:, 2] = np.nan
+    raw[0, 2] = np.eye(20, dtype=np.float32)[1]
+    # Include variation near the active-state cutoff.
+    raw[:, 3] = np.eye(20, dtype=np.float32)[0]
+    raw[::2, 3, 0] -= np.float32(2e-6)
+    raw[::2, 3, 1] = np.float32(2e-6)
+    fractions, means, known, active = _site_statistics(raw)
+    for j in range(raw.shape[1]):
+        observed = np.isfinite(raw[:, j, 0])
+        expected_mean = (raw[observed, j].mean(axis=0, dtype=np.float64)
+                         if observed.any() else np.zeros(20))
+        expected_active = (raw[observed, j].var(axis=0) > 1e-12
+                           if observed.any() else np.zeros(20, dtype=bool))
+        assert fractions[j] == np.mean(observed)
+        np.testing.assert_array_equal(means[j], expected_mean)
+        np.testing.assert_array_equal(known[j], np.any(np.nan_to_num(raw[:, j]) > 0, axis=0))
+        np.testing.assert_array_equal(active[j], expected_active)
+
+
+@pytest.mark.parametrize("aggregation", ["best_covered", "aa_frequency", "tpm_weighted_frequency"])
+def test_vectorized_centering_matches_per_site_reference_and_matrix_only(
+    tmp_path: Path, aggregation: str,
+) -> None:
+    records = [
+        ("s1_a", "AAA-V"), ("s1_b", "VV-VA"), ("s2_a", "VVVAA"),
+        ("held_a", "WX-VA"), ("held_b", "AAVVV"),
+    ]
+    path = alignment(tmp_path / "aa", records)
+    (path / "OG2.faa").write_text("".join(f">{name}\n{seq[::-1]}\n" for name, seq in records))
+    tpm = tpm_table(tmp_path / "tpm.tsv", [
+        (name.split("_")[0], name, i + 1) for i, (name, _) in enumerate(records)
+    ])
+    targets = ["held", "s2", "absent", "s1"]
+    with AlignmentStore(
+        path, targets,
+        sequence_tpm_path=str(tpm) if aggregation == "tpm_weighted_frequency" else None,
+    ) as store:
+        fitted = fit_amino_acid(
+            store, ["s1", "s2"], settings(aggregation),
+            y=np.array([0, 1]), groups=np.array(["a", "b"]),
+        )
+        # A manually reordered transform also preserves its exact feature order.
+        fitted.sites = fitted.sites[::2] + fitted.sites[1::2]
+        raw, coverage, reps = fitted.raw(store, targets)
+        expected, expected_information = [], []
+        for j, site in enumerate(fitted.sites):
+            q = np.nan_to_num(raw[:, j], nan=0.0).astype(float)
+            mass = q[:, site.known].sum(axis=1)
+            mass = np.where(np.isclose(mass, 1, rtol=0, atol=1e-7), 1, mass)
+            expected.append((q - mass[:, None] * site.mean)[:, site.active])
+            expected_information.append(coverage[:, j] * mass)
+        actual, information, actual_reps = fitted.transform(store, targets)
+        np.testing.assert_allclose(actual, np.concatenate(expected, axis=1), rtol=0, atol=5e-16)
+        np.testing.assert_allclose(
+            information, np.column_stack(expected_information), rtol=0, atol=5e-16
+        )
+        assert actual_reps == reps
+        np.testing.assert_array_equal(fitted.matrix(store, targets), actual)

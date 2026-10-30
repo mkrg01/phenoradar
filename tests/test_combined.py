@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 
@@ -145,8 +146,22 @@ def test_expression_preprocessing_is_training_only(tmp_path: Path) -> None:
 @pytest.mark.parametrize("aggregation", ["best_covered", "aa_frequency", "tpm_weighted_frequency"])
 def test_combined_full_run_and_frozen_predictions(tmp_path: Path, aggregation: str) -> None:
     config_path = combined_config(tmp_path, aggregation)
+    if aggregation == "tpm_weighted_frequency":
+        payload = yaml.safe_load(config_path.read_text())
+        plain = Path(payload["data"]["tpm_path"])
+        compressed = plain.with_suffix(".tsv.gz")
+        with gzip.open(compressed, "wb") as handle:
+            handle.write(plain.read_bytes())
+        plain.unlink()
+        payload["data"]["tpm_path"] = str(compressed)
+        config_path.write_text(yaml.safe_dump(payload))
     config = load_and_resolve_config([config_path])
-    destination = run_amino_acid(config, tmp_path / "run")
+    messages = []
+    destination = run_amino_acid(config, tmp_path / "run", progress=messages.append)
+    assert any("prepare inner fold" in message for message in messages)
+    assert any("AA features" in message for message in messages)
+    assert any("score" in message and "glmnet paths" in message for message in messages)
+    assert any("fit selected candidate" in message for message in messages)
     bundle = destination / "model_bundle"
     manifest = json.loads((bundle / "bundle_manifest.json").read_text())
     assert manifest["feature_mode"] == "combined"

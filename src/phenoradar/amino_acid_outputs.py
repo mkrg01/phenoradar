@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections import defaultdict
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 import polars as pl
@@ -18,115 +17,20 @@ if TYPE_CHECKING:
 
 
 def write_site_scores(destination: Path, members: list[AAMember]) -> None:
-    """Export PSS and effect range separately, before any cross-model averaging."""
-    from phenoradar.amino_acid_run import _effect_range, _site_coefficients
+    """Write both scores without accumulating all site dictionaries in memory."""
+    from phenoradar.amino_acid_reporting import AAReportWriter
 
-    records: dict[str, list[dict[str, Any]]] = {"pss": [], "effect_range": []}
-    context = ["scope", "sample_set_id", "candidate_index"]
-    for member in members:
-        betas = _site_coefficients(member)
-        scores = {
-            "pss": np.array(
-                [
-                    np.abs(beta[site.known]).sum()
-                    for site, beta in zip(member.transform.sites, betas, strict=True)
-                ]
-            ),
-            "effect_range": np.array(
-                [
-                    _effect_range(site.known, beta)
-                    for site, beta in zip(member.transform.sites, betas, strict=True)
-                ]
-            ),
-        }
-        for metric, values in scores.items():
-            total = float(values.sum())
-            for site, beta, value in zip(member.transform.sites, betas, values, strict=True):
-                records[metric].append(
-                    {
-                        "scope": member.scope,
-                        "sample_set_id": member.sample_set_id,
-                        "candidate_index": member.candidate.candidate_index,
-                        "orthogroup": site.orthogroup,
-                        "alignment_pos_1based": site.column + 1,
-                        "n_known_residue_states": int(np.count_nonzero(site.known)),
-                        "n_nonzero_coefficients": int(np.count_nonzero(beta[site.known])),
-                        metric: float(value),
-                        "normalized_score": float(value / total) if total > 0 else 0.0,
-                    }
-                )
-    destination.mkdir(parents=True, exist_ok=True)
-    for metric, rows in records.items():
-        frame = pl.DataFrame(
-            rows,
-            schema={
-                "scope": pl.String,
-                "sample_set_id": pl.Int64,
-                "candidate_index": pl.Int64,
-                "orthogroup": pl.String,
-                "alignment_pos_1based": pl.Int64,
-                "n_known_residue_states": pl.Int64,
-                "n_nonzero_coefficients": pl.Int64,
-                metric: pl.Float64,
-                "normalized_score": pl.Float64,
-            },
-        ).with_columns(
-            pl.when(pl.col(metric) > 0)
-            .then(pl.col(metric).rank(method="min", descending=True).over(context))
-            .otherwise(None)
-            .alias("rank")
-        )
-        frame.sort(
-            [*context, metric, "orthogroup", "alignment_pos_1based"],
-            descending=[False, False, False, True, False, False],
-        ).write_csv(destination / f"amino_acid_site_{metric}.tsv", separator="\t")
+    with AAReportWriter(destination) as writer:
+        writer.add(members, features=False)
+        writer.write_site_scores()
 
 
 def write_site_stability(destination: Path, members: list[AAMember]) -> None:
-    from phenoradar.amino_acid_run import _effect_range, _site_coefficients
+    from phenoradar.amino_acid_reporting import AAReportWriter
 
-    eligible: dict[tuple[str, int], set[str]] = defaultdict(set)
-    selected: dict[tuple[str, int], set[str]] = defaultdict(set)
-    folds = {member.scope for member in members}
-    og_eligible: dict[str, set[str]] = defaultdict(set)
-    og_selected: dict[str, set[str]] = defaultdict(set)
-    for member in members:
-        for site, beta in zip(member.transform.sites, _site_coefficients(member), strict=True):
-            key = site.orthogroup, site.column + 1
-            if site.active.any():
-                eligible[key].add(member.scope)
-                og_eligible[site.orthogroup].add(member.scope)
-            if _effect_range(site.known, beta) > 1e-12:
-                selected[key].add(member.scope)
-                og_selected[site.orthogroup].add(member.scope)
-    rows = []
-    for (og, position), eligible_folds in sorted(eligible.items()):
-        selected_folds = selected[og, position]
-        rows.append(
-            {
-                "orthogroup": og,
-                "alignment_pos_1based": position,
-                "n_outer_folds": len(folds),
-                "n_eligible_folds": len(eligible_folds),
-                "n_selected_folds": len(selected_folds),
-                "selection_frequency": len(selected_folds) / len(folds),
-                "selection_frequency_when_eligible": len(selected_folds) / len(eligible_folds),
-            }
-        )
-    pl.DataFrame(rows).write_csv(destination / "amino_acid_site_stability.tsv", separator="\t")
-    pl.DataFrame(
-        [
-            {
-                "orthogroup": og,
-                "n_outer_folds": len(folds),
-                "n_eligible_folds": len(eligible_folds),
-                "n_selected_folds": len(og_selected[og]),
-                "selection_frequency": len(og_selected[og]) / len(folds),
-                "selection_frequency_when_eligible": len(og_selected[og]) / len(eligible_folds),
-            }
-            for og, eligible_folds in sorted(og_eligible.items())
-        ]
-    ).write_csv(destination / "amino_acid_og_stability.tsv", separator="\t")
+    with AAReportWriter(destination) as writer:
+        writer.add(members, features=False)
+        writer.write_site_stability()
 
 
 def write_frequency_figure(

@@ -264,7 +264,28 @@ bundles retain pre-ranking scoring masks.
 
 Alignment-byte caches are temporary per run. Frequencies and centering are
 computed in site blocks; large output matrices use temporary disk backing.
+Unweighted and TPM-weighted residue compositions are cached on temporary disk
+once per requested OG/column across the species retained for training. Only
+columns requested after the callability screen are added. These per-species
+compositions contain no fitted filter, phenotype score, or centering mean;
+each training fold still learns those separately. Representative choices remain
+fold-specific. Prediction stores compute only each requested batch and do not
+build this training cache. Inner CV omits observation matrices that model
+selection does not use, and feature-schema rows are written incrementally.
 Set `TMPDIR` to a location with enough space for these caches and matrices.
+CV interpretation is spooled to temporary Parquet parts as each model finishes.
+Full feature eligibility, coefficients, PSS, effect ranges, and stability tables
+are retained; completed folds do not accumulate Python feature dictionaries or
+full fitted transforms in RAM. Score ranking is performed one model context at
+a time. Heatmaps restore each fold's original eligible sites from this audit,
+including sites whose coefficient is zero in that fold.
+
+Prediction constructs only exact nonzero coefficient columns. Zero-score sites
+needed to preserve local-explanation ordering are also observed, and original
+known states, training means, and representative scoring masks are preserved.
+Prediction alignment identities and bundled TPMs cover these required OGs;
+the model's complete training audit remains available. Prediction representative
+tables describe the OGs actually evaluated. All-zero models use their intercept.
 Heatmaps load only the displayed sites. Outer folds run sequentially, while inner
 glmnet paths use `runtime.n_jobs`. Model fitting can still allocate in-memory
 copies; disk backing does not cap total process memory. No sites are removed

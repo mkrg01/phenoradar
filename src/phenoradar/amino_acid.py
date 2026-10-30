@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from phenoradar.amino_acid_frequency_cache import AminoAcidFrequencyCache
 from phenoradar.config.schema import AminoAcidConfig, AminoAcidSiteFilter
 from phenoradar.provenance import file_identity
 from phenoradar.sequence_tpm_cache import SequenceTPMCacheError, read_sequence_tpm_cache
@@ -80,6 +81,7 @@ class AlignmentStore:
         species: list[str],
         *,
         cache_species: list[str] | None = None,
+        cache_frequencies: bool = False,
         only_orthogroups: set[str] | None = None,
         sequence_tpm_path: str | None = None,
         sequence_tpm_cache_dir: Path | None = None,
@@ -89,6 +91,8 @@ class AlignmentStore:
         self.ogs: dict[str, AlignmentOG] = {}
         self.species = set(species)
         self.retained_species = self.species if cache_species is None else set(cache_species)
+        self.cache_frequencies = cache_frequencies
+        self._frequency_caches: dict[tuple[str, bool], AminoAcidFrequencyCache] = {}
         self.tpm_identity: dict[str, Any] | None = None
         try:
             paths = sorted(
@@ -113,6 +117,7 @@ class AlignmentStore:
             raise
 
     def close(self) -> None:
+        self._frequency_caches.clear()
         self._temp.cleanup()
 
     def __enter__(self) -> AlignmentStore:
@@ -409,6 +414,40 @@ class AlignmentStore:
             chosen_rows = self.representatives(
                 og, species, scoring_columns if scoring_columns is not None else columns
             )
+        if (self.cache_frequencies and not representative and len(columns)
+                and any(s in og.species_rows for s in species)):
+            key = og.orthogroup, weighted
+            if key not in self._frequency_caches:
+                self._frequency_caches[key] = AminoAcidFrequencyCache(
+                    Path(self._temp.name) / f"{len(self._frequency_caches)}_frequency.bin",
+                    og.mask_rows,
+                )
+            cache = self._frequency_caches[key]
+            block = min(
+                SITE_BLOCK_SIZE, max(1, MAX_MATRIX_CELLS // max(1, len(cache.species) * 21))
+            )
+
+            def compute(samples: list[str], selected: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+                q, c, _ = self._compute_frequencies(og, samples, selected, weighted=weighted)
+                return q, c
+
+            q, c = cache.get(species, columns, compute, block_size=block)
+            return q, c, [None] * len(species)
+        return self._compute_frequencies(
+            og, species, columns, representative=representative,
+            chosen_rows=chosen_rows, weighted=weighted,
+        )
+
+    def _compute_frequencies(
+        self,
+        og: AlignmentOG,
+        species: list[str],
+        columns: np.ndarray,
+        *,
+        representative: bool = False,
+        chosen_rows: list[int | None] | None = None,
+        weighted: bool = False,
+    ) -> tuple[np.ndarray, np.ndarray, list[str | None]]:
         values = np.full((len(species), len(columns), 20), np.nan, dtype=np.float32)
         coverage = np.zeros((len(species), len(columns)), dtype=np.float32)
         chosen: list[str | None] = []
@@ -423,6 +462,18 @@ class AlignmentStore:
                 selected = None if row is None else og.sequence_ids[row]
             chosen.append(selected)
             if not gene_rows:
+                continue
+            if len(gene_rows) == 1:
+                row = gene_rows[0]
+                if weighted:
+                    assert og.tpm is not None
+                    if og.tpm[row] == 0:
+                        continue
+                codes = _CODE[matrix[row, columns]]
+                observed = codes < 20
+                values[i, observed] = 0
+                values[i, np.flatnonzero(observed), codes[observed]] = 1
+                coverage[i, observed] = 1
                 continue
             weights = np.ones(len(gene_rows), dtype=np.float64)
             if weighted:
@@ -485,10 +536,10 @@ class AATransform:
     def features(self) -> list[str]:
         return [site.feature(int(a)) for site in self.sites for a in np.flatnonzero(site.active)]
 
-    def schema(self) -> pl.DataFrame:
-        return pl.DataFrame(
-            [
-                {
+    def schema_rows(self) -> Iterator[dict[str, Any]]:
+        for site in self.sites:
+            for a in np.flatnonzero(site.active):
+                yield {
                     "feature": site.feature(int(a)),
                     "modality": "amino_acid",
                     "orthogroup": site.orthogroup,
@@ -497,10 +548,9 @@ class AATransform:
                     "aggregation": self.settings.aggregation,
                     "training_mean": float(site.mean[a]),
                 }
-                for site in self.sites
-                for a in np.flatnonzero(site.active)
-            ]
-        )
+
+    def schema(self) -> pl.DataFrame:
+        return pl.DataFrame(self.schema_rows())
 
     def raw_blocks(
         self,
@@ -530,7 +580,8 @@ class AATransform:
                     chosen_rows=chosen_rows,
                     weighted=self.settings.aggregation == "tpm_weighted_frequency",
                 )
-                valid_model += np.isfinite(q[:, :, 0]).sum(axis=1)
+                if representative and representatives is not None:
+                    valid_model += np.isfinite(q[:, :, 0]).sum(axis=1)
                 yield selected, q, c
             if representative and representatives is not None:
                 assert chosen_rows is not None
@@ -564,27 +615,75 @@ class AATransform:
             coverage[:, indices] = c
         return values, coverage, representatives
 
+    def matrix(self, store: AlignmentStore, species: list[str]) -> np.ndarray:
+        """Encode inner-CV data without allocating unused observation outputs."""
+        return self._transform(store, species, with_information=False)[0]
+
     def transform(
         self, store: AlignmentStore, species: list[str]
     ) -> tuple[np.ndarray, np.ndarray, list[dict[str, Any]]]:
-        for site in self.sites:
-            assert site.mean is not None and site.known is not None and site.active is not None
+        matrix, information, representatives = self._transform(
+            store, species, with_information=True
+        )
+        assert information is not None
+        return matrix, information, representatives
+
+    def _transform(
+        self, store: AlignmentStore, species: list[str], *, with_information: bool
+    ) -> tuple[np.ndarray, np.ndarray | None, list[dict[str, Any]]]:
         offsets = np.cumsum([0, *(int(np.sum(site.active)) for site in self.sites)])
         matrix = _matrix((len(species), int(offsets[-1])))
-        information = _matrix((len(species), len(self.sites)))
+        information = _matrix((len(species), len(self.sites))) if with_information else None
         representatives: list[dict[str, Any]] = []
-        for indices, raw, coverage in self.raw_blocks(store, species, representatives):
-            for k, j in enumerate(indices):
-                site = self.sites[j]
-                assert site.mean is not None and site.known is not None and site.active is not None
-                q = np.nan_to_num(raw[:, k], nan=0.0).astype(float)
-                known_mass = q[:, site.known].sum(axis=1)
-                known_mass = np.where(np.isclose(known_mass, 1, rtol=0, atol=1e-7), 1, known_mass)
-                # Missing and novel-residue mass receive the training mean.
-                centered = q - known_mass[:, None] * site.mean
-                matrix[:, offsets[j] : offsets[j + 1]] = centered[:, site.active]
-                information[:, j] = coverage[:, k] * known_mass
+        for indices, raw, coverage in self.raw_blocks(
+            store, species, representatives if with_information else None
+        ):
+            sites = [self.sites[j] for j in indices]
+            means = np.stack([site.mean for site in sites])
+            known = np.stack([site.known for site in sites])
+            active = np.stack([site.active for site in sites])
+            q = np.nan_to_num(raw, nan=0.0).astype(float)
+            known_mass = np.sum(q * known[None, :, :], axis=2)
+            known_mass = np.where(np.isclose(known_mass, 1, rtol=0, atol=1e-7), 1, known_mass)
+            # Missing and novel-residue mass receive the training mean.
+            centered = q - known_mass[:, :, None] * means[None, :, :]
+            values = centered.reshape(len(species), len(sites) * 20)[:, active.ravel()]
+            destination: slice | np.ndarray = slice(offsets[indices[0]], offsets[indices[-1] + 1])
+            if indices[-1] - indices[0] + 1 != len(indices):
+                destination = np.concatenate(
+                    [np.arange(offsets[j], offsets[j + 1]) for j in indices]
+                )
+            matrix[:, destination] = values
+            if information is not None:
+                information[:, indices] = coverage * known_mass
         return matrix, information, representatives
+
+
+def _site_statistics(
+    raw: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Fit all site moments in a block, preserving float32 variance semantics."""
+    observed = np.isfinite(raw[:, :, 0])
+    counts = observed.sum(axis=0)
+    values = np.nan_to_num(raw)
+    means = np.zeros(raw.shape[1:], dtype=np.float64)
+    np.divide(
+        values.sum(axis=0, dtype=np.float64), counts[:, None],
+        out=means, where=counts[:, None] > 0,
+    )
+    mean32 = np.zeros(raw.shape[1:], dtype=np.float32)
+    np.divide(
+        values.sum(axis=0, dtype=np.float32), counts[:, None],
+        out=mean32, where=counts[:, None] > 0,
+    )
+    differences = values - mean32[None, :, :]
+    differences[~observed] = 0
+    variance = np.zeros_like(mean32)
+    np.divide(
+        np.sum(differences * differences, axis=0, dtype=np.float32), counts[:, None],
+        out=variance, where=counts[:, None] > 0,
+    )
+    return counts / raw.shape[0], means, np.any(values > 0, axis=0), variance > 1e-12
 
 
 def _quality_summary(
@@ -746,21 +845,13 @@ def fit_amino_acid(
         }
     fitted = AATransform(settings.model_copy(deep=True), sites, qc, representative_columns)
     for indices, raw, _ in fitted.raw_blocks(store, species):
+        fractions, means, known, active = _site_statistics(raw)
         for k, j in enumerate(indices):
             site = sites[j]
-            observed = np.isfinite(raw[:, k, 0])
-            site.post_aggregation_sample_fraction = float(np.mean(observed))
-            site.mean = (
-                np.asarray(np.mean(raw[observed, k], axis=0, dtype=np.float64))
-                if observed.any()
-                else np.zeros(20)
-            )
-            site.known = np.any(np.nan_to_num(raw[:, k]) > 0, axis=0)
-            site.active = (
-                (np.var(raw[observed, k], axis=0) > 1e-12)
-                if observed.any()
-                else np.zeros(20, dtype=bool)
-            )
+            site.post_aggregation_sample_fraction = float(fractions[k])
+            site.mean = means[k]
+            site.known = known[k]
+            site.active = active[k]
     if not any(np.any(site.active) for site in sites):
         raise AlignmentError("AA aggregation produced no variable features in this training fold")
     return fitted

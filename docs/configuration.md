@@ -31,7 +31,7 @@ Keys in each table are relative to the section heading.
 | Key | Default | Purpose / accepted values |
 | --- | --- | --- |
 | `metadata_path` | `testdata/c4_tiny/species_metadata.tsv` | Species metadata TSV |
-| `tpm_path` | `testdata/c4_tiny/tpm.tsv` | Long-format OG expression TSV |
+| `tpm_path` | `testdata/c4_tiny/tpm.tsv` | Long-format OG expression TSV or gzip-compressed TSV |
 | `species_col` | `species` | Species ID column |
 | `feature_col` | `orthogroup` | Expression feature column |
 | `value_col` | `tpm` | Expression value column |
@@ -402,7 +402,7 @@ metadata are optional. CLI input paths and `--n-jobs` override config values.
 
 | Setting | Prediction default / behavior |
 | --- | --- |
-| `data.tpm_path` | Required expression TSV |
+| `data.tpm_path` | Required expression TSV or gzip-compressed TSV |
 | `data.metadata_path` | `null`; predict all TPM species, or select metadata species |
 | `data.species_col`, `data.feature_col`, `data.value_col` | `species`, `orthogroup`, `tpm` |
 | `data.tree_path`, `data.orthogroup_annotation_path` | `null`; optional tree and labels |
