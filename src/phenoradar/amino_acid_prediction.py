@@ -9,13 +9,17 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from phenoradar.amino_acid import AASiteTable
+
 if TYPE_CHECKING:
     from phenoradar.amino_acid_run import AAMember
 
 
 def site_offsets(member: AAMember) -> np.ndarray:
-    counts = np.fromiter((np.count_nonzero(site.active) for site in member.transform.sites),
-                         dtype=np.int64, count=len(member.transform.sites))
+    sites = member.transform.sites
+    counts = (sites.active.sum(axis=1) if isinstance(sites, AASiteTable)
+              else np.fromiter((np.count_nonzero(site.active) for site in sites),
+                               dtype=np.int64, count=len(sites)))
     return np.cumsum(np.concatenate(([0], counts)))
 
 

@@ -278,7 +278,7 @@ Hyperparameters belong in `model_selection.search_space`:
 
 | Model | Parameters and defaults |
 | --- | --- |
-| `logistic_elasticnet` | `lambda=0.01`, `alpha=0.5`, `maxit=2000000`, `thresh=1e-14` |
+| `logistic_elasticnet` | `lambda=0.01`, `alpha=0.5`, `maxit=2000000`, `thresh=1e-7` |
 | `linear_svm` | `C`, `max_iter` |
 | `random_forest` | `n_estimators`, `max_depth`, `min_samples_split`, `min_samples_leaf` |
 | Combined logistic model | Fixed `alpha=1`; optional positive `amino_acid_penalty_ratio=1` |

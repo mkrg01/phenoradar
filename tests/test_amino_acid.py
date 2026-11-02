@@ -961,7 +961,7 @@ def test_frequency_cache_reuses_columns_across_species_subsets_and_cleans_up(
         assert all(set(c[0]) == {"s1", "s2", "held", "zero"} for c in calls)
         cache = store._frequency_caches[("OG1", weighted)]
         cache_path = cache.path
-        assert cache_path.stat().st_size == 3 * 4 * 21 * 4
+        assert 0 < cache_path.stat().st_size < 3 * 4 * 21 * 4
         other = store.frequencies(og, ["s1"], np.array([0]), weighted=not weighted)[0]
         assert other[0, 0, 0] == pytest.approx(0.5 if weighted else 0.75)
         assert len(store._frequency_caches) == 2

@@ -63,7 +63,7 @@ def coefficient_blocks(
 ) -> Iterator[tuple[list[AASite], np.ndarray, np.ndarray, np.ndarray]]:
     offset = member.expression_width
     for start in range(0, len(member.transform.sites), 512):
-        sites = member.transform.sites[start:start + 512]
+        sites = list(member.transform.sites[start:start + 512])
         active = np.stack([site.active for site in sites])
         known = np.stack([site.known for site in sites])
         count = int(active.sum())

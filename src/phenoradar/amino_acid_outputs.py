@@ -3,17 +3,94 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import polars as pl
 
-from phenoradar.amino_acid import ALPHABET, PREDICTION_BATCH_SIZE, AlignmentStore
+from phenoradar.amino_acid import (
+    ALPHABET,
+    PREDICTION_BATCH_SIZE,
+    AASiteTable,
+    AATransform,
+    AlignmentStore,
+)
 
 if TYPE_CHECKING:
     from phenoradar.amino_acid_run import AAMember
+    from phenoradar.combined import ExpressionTransform
+
+
+def _audit_blocks(fitted: AATransform) -> Iterator[dict[str, Any]]:
+    fields = ["column", "sample_fraction", "minor_samples", "minor_groups", "score",
+              "mean", "active", "post_aggregation_sample_fraction"]
+    sites = fitted.sites
+    for start in range(0, len(sites), 512):
+        stop = start + 512
+        if isinstance(sites, AASiteTable):
+            yield {"orthogroup": sites.orthogroups[start:stop].tolist(),
+                   **{name: getattr(sites, name)[start:stop] for name in fields}}
+        else:
+            block = list(sites[start:stop])
+            yield {"orthogroup": [s.orthogroup for s in block],
+                   **{name: np.array([getattr(s, name) for s in block]) for name in fields}}
+
+
+def _append_frame(path: Path, frame: pl.DataFrame) -> None:
+    if frame.is_empty():
+        return
+    header = not path.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("ab") as handle:
+        frame.write_csv(handle, separator="\t", include_header=header, line_terminator="\r\n")
+
+
+def write_preprocessing_audits(
+    destination: Path,
+    fitted: AATransform,
+    context: dict[str, Any],
+    expression: ExpressionTransform | None = None,
+) -> None:
+    """Write every eligible site and feature without per-residue Python dictionaries."""
+    keys = ["feature", "modality", "orthogroup", "alignment_pos_1based", "residue",
+            "aggregation", "training_mean"]
+    schema_path = destination / "feature_schema.tsv"
+    if expression is not None:
+        _append_frame(schema_path, pl.DataFrame([
+            {**context, **{key: row.get(key) for key in keys}} for row in expression.schema()
+        ]))
+    alphabet = np.array(list(ALPHABET))
+    for block in _audit_blocks(fitted):
+        ogs, columns, active = block["orthogroup"], block["column"] + 1, block["active"]
+        qc = pl.DataFrame({
+            **{key: [value] * len(columns) for key, value in context.items()},
+            "orthogroup": ogs, "alignment_pos_1based": columns,
+            "sample_fraction": block["sample_fraction"],
+            "post_aggregation_sample_fraction": block["post_aggregation_sample_fraction"],
+            "minor_samples": block["minor_samples"], "minor_groups": block["minor_groups"],
+            "score": block["score"], "n_active_states": np.count_nonzero(active, axis=1),
+        })
+        _append_frame(destination / "amino_acid_site_qc.tsv", qc)
+        rows, states = np.nonzero(active)
+        if not len(rows):
+            continue
+        # Encode each OG once per block; residue symbols are canonical ASCII.
+        prefixes = {og: "[" + json.dumps(og) + "," for og in set(ogs)}
+        frame = pl.DataFrame({
+            "_prefix": [prefixes[ogs[i]] for i in rows],
+            "modality": ["amino_acid"] * len(rows),
+            "orthogroup": [ogs[i] for i in rows], "alignment_pos_1based": columns[rows],
+            "residue": alphabet[states], "aggregation": [fitted.settings.aggregation] * len(rows),
+            "training_mean": block["mean"][rows, states],
+        }).with_columns(
+            pl.concat_str([pl.col("_prefix"), pl.col("alignment_pos_1based").cast(pl.String),
+                           pl.lit(',"'), pl.col("residue"), pl.lit('"]')]).alias("feature"),
+            *[pl.lit(value).alias(key) for key, value in context.items()],
+        ).select([*context, *keys])
+        _append_frame(schema_path, frame)
 
 
 def write_site_scores(destination: Path, members: list[AAMember]) -> None:

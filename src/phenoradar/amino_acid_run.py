@@ -30,6 +30,7 @@ from phenoradar.amino_acid import (
 )
 from phenoradar.amino_acid_outputs import (
     write_frequency_figure,
+    write_preprocessing_audits,
     write_site_scores,
 )
 from phenoradar.amino_acid_prediction import prediction_members
@@ -40,11 +41,13 @@ from phenoradar.config.io import write_resolved_config
 from phenoradar.cv import (
     InnerCvPreprocessedFold,
     SelectedCandidate,
+    SourceSelectionResult,
     _aggregate_probabilities,
     _build_estimator,
     _dedupe_ranked_candidates_by_params,
     _deterministic_int_seed,
     _fit_sample_weights,
+    _fit_selected_estimator,
     _glmnet_candidate_params,
     _inner_cv_splits,
     _metric_rows,
@@ -156,7 +159,10 @@ def _select(
                 y=y[train],
                 groups=groups[train],
                 contrast_groups=pairs[train],
+                audit=False,
             )
+            if progress:
+                progress(f"{scope}: inner fold {fold} site statistics ready; encode matrices.")
             x_train = fitted.matrix(store, [species[i] for i in train])
             x_valid = fitted.matrix(store, [species[i] for i in valid])
             if progress:
@@ -284,7 +290,7 @@ def fit_scope(
     selection = _select_training_groups(config, y, groups, scope=scope, fold_id=scope)
     _write(tables / "training_group_subsets.tsv", selection.audit_rows)
     sampled = _sample_training_sets(config, y, groups, scope, warnings, selection.group_ids)
-    source_results: dict[int, list[SelectedCandidate]] = {}
+    source_results: dict[int, SourceSelectionResult] = {}
     members = []
     for sample_set_id, indices in enumerate(sampled):
         source_id = _selection_source_sample_set_id(config, sample_set_id)
@@ -293,7 +299,11 @@ def fit_scope(
                 config, store, rows[sampled[source_id].tolist()], scope, source_id, warnings,
                 expression, progress=progress,
             )
-            source_results[source_id] = selected
+            scored_count = len({row["candidate_index"] for row in trials})
+            source_results[source_id] = SourceSelectionResult(
+                selected, max(scored_count, len(selected)), scored_count,
+                len(selected), len(selected), trials,
+            )
             _write(
                 tables / "model_selection_trials.tsv",
                 (
@@ -305,7 +315,7 @@ def fit_scope(
                     for row in trials
                 ),
             )
-        selected = source_results[source_id]
+        selected = source_results[source_id].selected_candidates
         train_species = [species[i] for i in indices]
         if progress:
             progress(f"{scope}: prepare refit features for sample set {sample_set_id}.")
@@ -317,11 +327,19 @@ def fit_scope(
             groups=groups[indices],
             contrast_groups=pairs[indices],
         )
-        matrix, observed, representatives = fitted.transform(store, train_species)
+        if progress:
+            progress(f"{scope}: refit site statistics ready; encode matrix.")
+        representatives: list[dict[str, Any]]
+        if expression is None and fitted.settings.aggregation != "best_covered":
+            matrix = fitted.matrix(store, train_species)
+            observed, representatives = None, []
+        else:
+            matrix, observed, representatives = fitted.transform(store, train_species)
         context = {"scope": scope, "sample_set_id": sample_set_id}
         expr = None
         aa_std = None
         if expression is not None:
+            assert observed is not None
             scales = []
             offset = 0
             for j, site in enumerate(fitted.sites):
@@ -337,30 +355,9 @@ def fit_scope(
             _write(tables / "expression_ranked_feature_scores.tsv",
                    ({**context, **row} for row in scores))
         _write(tables / "amino_acid_og_qc.tsv", ({**context, **q} for q in fitted.qc))
-        _write(
-            tables / "amino_acid_site_qc.tsv",
-            (
-                {
-                    **context,
-                    "orthogroup": site.orthogroup,
-                    "alignment_pos_1based": site.column + 1,
-                    "sample_fraction": site.sample_fraction,
-                    "post_aggregation_sample_fraction": site.post_aggregation_sample_fraction,
-                    "minor_samples": site.minor_samples,
-                    "minor_groups": site.minor_groups,
-                    "score": site.score,
-                    "n_active_states": int(np.sum(site.active)),
-                }
-                for site in fitted.sites
-            ),
-        )
-        schema = fitted.schema_rows()
-        if expr is not None:
-            keys = ["feature", "modality", "orthogroup", "alignment_pos_1based", "residue",
-                    "aggregation", "training_mean"]
-            schema = ({key: row.get(key) for key in keys}
-                      for row in chain(expr.schema(), schema))
-        _write(tables / "feature_schema.tsv", ({**context, **row} for row in schema))
+        if progress:
+            progress(f"{scope}: refit matrix ready; write preprocessing audits.")
+        write_preprocessing_audits(tables, fitted, context, expr)
         _write(tables / "representative_sequences.tsv", ({**context, **r} for r in representatives))
         if fitted.representative_columns is not None:
             _write(
@@ -389,10 +386,16 @@ def fit_scope(
                 )
             _with_native_thread_limit(
                 config.runtime.n_jobs,
-                model.fit,
+                _fit_selected_estimator,
+                model,
                 matrix,
                 y[indices],
                 sample_weight=_fit_sample_weights(config, y[indices], groups[indices]),
+                source_result=source_results[source_id],
+                amino_acid_penalty_ratio=(
+                    _glmnet_candidate_params(config, result.candidate.params)[1]
+                    if expr is not None else None
+                ),
             )
             members.append(AAMember(fitted, model, scope, sample_set_id, result.candidate,
                                     expr, aa_std))
@@ -823,6 +826,7 @@ def run_amino_acid(
                 all_species,
                 cache_species=training_species,
                 cache_frequencies=True,
+                input_cache_dir=Path("runs/.phenoradar_cache/alignments"),
                 sequence_tpm_path=tpm_path,
                 sequence_tpm_cache_dir=tpm_cache,
                 progress=progress,

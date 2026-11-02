@@ -8,17 +8,19 @@ import hashlib
 import heapq
 import json
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory, TemporaryFile
-from typing import Any
+from typing import Any, Literal, overload
 
 import numpy as np
 import polars as pl
 
 from phenoradar.amino_acid_frequency_cache import AminoAcidFrequencyCache
+from phenoradar.amino_acid_input_cache import AlignmentInputCache
 from phenoradar.config.schema import AminoAcidConfig, AminoAcidSiteFilter
 from phenoradar.provenance import file_identity
 from phenoradar.sequence_tpm_cache import SequenceTPMCacheError, read_sequence_tpm_cache
@@ -37,12 +39,14 @@ class AlignmentError(ValueError):
     """Invalid alignment, correspondence, or sequence preprocessing state."""
 
 
-def _matrix(shape: tuple[int, ...], dtype: Any = np.float64) -> np.ndarray:
+def _matrix(
+    shape: tuple[int, ...], dtype: Any = np.float64, *, order: Literal["C", "F"] = "C",
+) -> np.ndarray:
     """Keep large output matrices on temporary disk; never select fewer sites."""
     if int(np.prod(shape, dtype=np.int64)) <= MAX_MATRIX_CELLS:
-        return np.empty(shape, dtype=dtype)
+        return np.empty(shape, dtype=dtype, order=order)
     with TemporaryFile(prefix="phenoradar_aa_matrix_") as handle:
-        return np.memmap(handle, mode="w+", dtype=dtype, shape=shape)
+        return np.memmap(handle, mode="w+", dtype=dtype, shape=shape, order=order)
 
 
 @dataclass
@@ -82,6 +86,7 @@ class AlignmentStore:
         *,
         cache_species: list[str] | None = None,
         cache_frequencies: bool = False,
+        input_cache_dir: Path | None = None,
         only_orthogroups: set[str] | None = None,
         sequence_tpm_path: str | None = None,
         sequence_tpm_cache_dir: Path | None = None,
@@ -94,6 +99,10 @@ class AlignmentStore:
         self.cache_frequencies = cache_frequencies
         self._frequency_caches: dict[tuple[str, bool], AminoAcidFrequencyCache] = {}
         self.tpm_identity: dict[str, Any] | None = None
+        input_cache = (
+            AlignmentInputCache(input_cache_dir, self.species, self.retained_species)
+            if input_cache_dir is not None else None
+        )
         try:
             paths = sorted(
                 p
@@ -105,11 +114,17 @@ class AlignmentStore:
                     continue
                 if path.stem in self.ogs:
                     raise AlignmentError(f"Duplicate orthogroup filename stem: {path.stem}")
-                self.ogs[path.stem] = self._read(path, len(self.ogs))
+                index = len(self.ogs)
+                self.ogs[path.stem] = (
+                    self._read(path, index) if input_cache is None
+                    else input_cache.read(path, partial(self._read, path, index))
+                )
             if not self.ogs:
                 raise AlignmentError(f"No alignment FASTA files found in {directory}")
             if only_orthogroups is not None and only_orthogroups - self.ogs.keys():
                 raise AlignmentError("Prediction input is missing required orthogroup alignments")
+            if progress and input_cache is not None:
+                progress(f"Reuse {input_cache.hits:,}/{len(self.ogs):,} alignment byte caches.")
             if sequence_tpm_path is not None:
                 self._load_tpm(Path(sequence_tpm_path), sequence_tpm_cache_dir, progress)
         except Exception:
@@ -519,10 +534,64 @@ class AASite:
         )
 
 
+class AASiteTable(Sequence[AASite]):
+    """Columnar fitted sites; materialize small site views only for interpretation."""
+
+    column: np.ndarray
+    sample_fraction: np.ndarray
+    minor_samples: np.ndarray
+    minor_groups: np.ndarray
+    score: np.ndarray
+    mean: np.ndarray
+    known: np.ndarray
+    active: np.ndarray
+    post_aggregation_sample_fraction: np.ndarray
+
+    def __init__(self, blocks: list[dict[str, Any]]) -> None:
+        blocks = sorted(blocks, key=lambda b: (b["orthogroup"], int(b["column"][0])))
+        self.orthogroups = np.concatenate([
+            np.full(len(b["column"]), b["orthogroup"], dtype=object) for b in blocks
+        ])
+        for name in (
+            "column", "sample_fraction", "minor_samples", "minor_groups", "score",
+            "mean", "known", "active", "post_aggregation_sample_fraction",
+        ):
+            setattr(self, name, np.concatenate([b[name] for b in blocks]))
+        boundaries = np.flatnonzero(self.orthogroups[1:] != self.orthogroups[:-1]) + 1
+        starts = np.concatenate(([0], boundaries))
+        ends = np.concatenate((boundaries, [len(self.column)]))
+        self.groups = [(str(self.orthogroups[a]), int(a), int(b))
+                       for a, b in zip(starts, ends, strict=True)]
+
+    def __len__(self) -> int:
+        return len(self.column)
+
+    @overload
+    def __getitem__(self, index: int) -> AASite: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[AASite]: ...
+
+    def __getitem__(self, index: int | slice) -> AASite | list[AASite]:
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        return AASite(
+            str(self.orthogroups[index]), int(self.column[index]),
+            float(self.sample_fraction[index]), int(self.minor_samples[index]),
+            int(self.minor_groups[index]), float(self.score[index]),
+            self.mean[index], self.known[index], self.active[index],
+            float(self.post_aggregation_sample_fraction[index]),
+        )
+
+    def __iter__(self) -> Iterator[AASite]:
+        for i in range(len(self)):
+            yield self[i]
+
+
 @dataclass
 class AATransform:
     settings: AminoAcidConfig
-    sites: list[AASite]
+    sites: Sequence[AASite]
     qc: list[dict[str, Any]]
     # None preserves the retained-site rule when loading pre-aa-3 bundles.
     representative_columns: dict[str, np.ndarray] | None = None
@@ -559,9 +628,14 @@ class AATransform:
         representatives: list[dict[str, Any]] | None = None,
     ) -> Iterator[tuple[list[int], np.ndarray, np.ndarray]]:
         """Read bounded site blocks, choosing each representative once per OG."""
-        grouped: dict[str, list[int]] = defaultdict(list)
-        for j, site in enumerate(self.sites):
-            grouped[site.orthogroup].append(j)
+        grouped: dict[str, Sequence[int]] = {}
+        if isinstance(self.sites, AASiteTable):
+            grouped = {name: range(start, end) for name, start, end in self.sites.groups}
+        else:
+            lists: dict[str, list[int]] = defaultdict(list)
+            for j, site in enumerate(self.sites):
+                lists[site.orthogroup].append(j)
+            grouped.update(lists)
         block = min(SITE_BLOCK_SIZE, max(1, MAX_MATRIX_CELLS // max(1, len(species) * 20)))
         for name, indices in grouped.items():
             representative = self.settings.aggregation == "best_covered"
@@ -571,7 +645,11 @@ class AATransform:
             valid_model = np.zeros(len(species), dtype=int)
             for start in range(0, len(indices), block):
                 selected = indices[start : start + block]
-                columns = np.array([self.sites[j].column for j in selected], dtype=int)
+                columns = (
+                    self.sites.column[selected[0]:selected[-1] + 1]
+                    if isinstance(self.sites, AASiteTable)
+                    else np.array([self.sites[j].column for j in selected], dtype=int)
+                )
                 q, c, _ = store.frequencies(
                     og,
                     species,
@@ -582,7 +660,7 @@ class AATransform:
                 )
                 if representative and representatives is not None:
                     valid_model += np.isfinite(q[:, :, 0]).sum(axis=1)
-                yield selected, q, c
+                yield list(selected), q, c
             if representative and representatives is not None:
                 assert chosen_rows is not None
                 matrix = og.matrix()
@@ -631,23 +709,33 @@ class AATransform:
     def _transform(
         self, store: AlignmentStore, species: list[str], *, with_information: bool
     ) -> tuple[np.ndarray, np.ndarray | None, list[dict[str, Any]]]:
-        offsets = np.cumsum([0, *(int(np.sum(site.active)) for site in self.sites)])
-        matrix = _matrix((len(species), int(offsets[-1])))
+        counts = (self.sites.active.sum(axis=1) if isinstance(self.sites, AASiteTable)
+                  else np.array([np.count_nonzero(site.active) for site in self.sites]))
+        offsets = np.cumsum(np.concatenate(([0], counts)))
+        # Site blocks fill whole columns; native glmnet also consumes column-major input.
+        matrix = _matrix((len(species), int(offsets[-1])), order="F")
         information = _matrix((len(species), len(self.sites))) if with_information else None
         representatives: list[dict[str, Any]] = []
         for indices, raw, coverage in self.raw_blocks(
             store, species, representatives if with_information else None
         ):
-            sites = [self.sites[j] for j in indices]
-            means = np.stack([site.mean for site in sites])
-            known = np.stack([site.known for site in sites])
-            active = np.stack([site.active for site in sites])
-            q = np.nan_to_num(raw, nan=0.0).astype(float)
-            known_mass = np.sum(q * known[None, :, :], axis=2)
+            if isinstance(self.sites, AASiteTable):
+                selected = slice(indices[0], indices[-1] + 1)
+                means = self.sites.mean[selected]
+                known = self.sites.known[selected]
+                active = self.sites.active[selected]
+            else:
+                sites = [self.sites[j] for j in indices]
+                means = np.stack([site.mean for site in sites])
+                known = np.stack([site.known for site in sites])
+                active = np.stack([site.active for site in sites])
+            q = np.nan_to_num(raw, nan=0.0)
+            known_mass = np.sum(q * known[None, :, :], axis=2, dtype=np.float64)
             known_mass = np.where(np.isclose(known_mass, 1, rtol=0, atol=1e-7), 1, known_mass)
             # Missing and novel-residue mass receive the training mean.
-            centered = q - known_mass[:, :, None] * means[None, :, :]
-            values = centered.reshape(len(species), len(sites) * 20)[:, active.ravel()]
+            state_columns = np.flatnonzero(active.ravel())
+            values = q.reshape(len(species), len(indices) * 20)[:, state_columns].astype(float)
+            values -= known_mass[:, state_columns // 20] * means[active][None, :]
             destination: slice | np.ndarray = slice(offsets[indices[0]], offsets[indices[-1] + 1])
             if indices[-1] - indices[0] + 1 != len(indices):
                 destination = np.concatenate(
@@ -687,18 +775,21 @@ def _site_statistics(
 
 
 def _quality_summary(
-    q: np.ndarray, groups: np.ndarray, quality: AminoAcidSiteFilter
+    q: np.ndarray, groups: np.ndarray, quality: AminoAcidSiteFilter, *, audit: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    states = np.any(q > 0, axis=0).sum(axis=1)
+    eligible = states >= quality.min_residue_states
+    if not audit:
+        zeros = np.zeros(q.shape[1], dtype=int)
+        return eligible, zeros, zeros
     values = np.nan_to_num(q)
     major = np.nanmean(q, axis=0).argmax(axis=1)
-    states = np.any(values > 0, axis=0).sum(axis=1)
     minor = values.sum(axis=2) - np.take_along_axis(values, major[None, :, None], axis=2)[:, :, 0]
     minor_present = minor > 1e-7
     support_groups = np.zeros(q.shape[1], dtype=int)
     for group in np.unique(groups):
         support_groups += np.any(minor_present[groups == group], axis=0)
     # Major-relative counts are descriptive QC, never site-selection criteria.
-    eligible = states >= quality.min_residue_states
     return eligible, minor_present.sum(axis=0), support_groups
 
 
@@ -710,6 +801,7 @@ def fit_amino_acid(
     y: np.ndarray,
     groups: np.ndarray,
     contrast_groups: np.ndarray | None = None,
+    audit: bool = True,
 ) -> AATransform:
     """Every reduction and decision below uses exactly these training species."""
     if len(species) != len(y) or len(groups) != len(y) or not species:
@@ -718,6 +810,7 @@ def fit_amino_acid(
     ranked = settings.ranked_site_filter
     required = int(np.ceil(quality.min_sample_fraction * len(species)))
     heap: list[tuple[float, int, AASite]] = []
+    blocks: list[dict[str, Any]] = []
     qc = []
     ordinal = 0
     representative = settings.aggregation == "best_covered"
@@ -746,7 +839,7 @@ def fit_amino_acid(
             for start in range(0, len(columns), block):
                 selected = columns[start : start + block]
                 q, _, _ = store.frequencies(og, species, selected)
-                eligible, _, _ = _quality_summary(q, groups, quality)
+                eligible, _, _ = _quality_summary(q, groups, quality, audit=False)
                 parts.append(selected[eligible])
             scoring = np.concatenate(parts) if parts else np.empty(0, dtype=int)
             counts["n_representative_scoring_sites"] = len(scoring)
@@ -772,7 +865,9 @@ def fit_amino_acid(
                 chosen_rows=chosen_rows,
                 weighted=weighted,
             )
-            eligible, minor_samples, minor_groups = _quality_summary(q, groups, quality)
+            eligible, minor_samples, minor_groups = _quality_summary(
+                q, groups, quality, audit=audit
+            )
             scores = np.zeros(len(selected))
             if ranked.method == "unpaired":
                 both = np.any(np.isfinite(q[y == 0, :, 0]), axis=0) & np.any(
@@ -803,6 +898,22 @@ def fit_amino_acid(
                     n_pairs += valid
                 scores = np.linalg.norm(sums / np.maximum(n_pairs[:, None], 1), axis=1)
                 eligible &= n_pairs >= ranked.min_contrast_pairs
+            if ranked.method == "none":
+                variant_count += int(np.count_nonzero(eligible))
+                if np.any(eligible):
+                    fractions, means, known, active = _site_statistics(q)
+                    blocks.append({
+                        "orthogroup": og.orthogroup,
+                        "column": selected[eligible],
+                        "sample_fraction": calls[selected[eligible]] / len(species),
+                        "minor_samples": minor_samples[eligible],
+                        "minor_groups": minor_groups[eligible],
+                        "score": scores[eligible],
+                        "mean": means[eligible], "known": known[eligible],
+                        "active": active[eligible],
+                        "post_aggregation_sample_fraction": fractions[eligible],
+                    })
+                continue
             for raw_j in np.flatnonzero(eligible):
                 j = int(raw_j)
                 variant_count += 1
@@ -816,9 +927,7 @@ def fit_amino_acid(
                 )
                 entry = (site.score, -ordinal, site)
                 ordinal += 1
-                if ranked.method == "none":
-                    heap.append(entry)
-                elif len(heap) < ranked.max_sites:
+                if len(heap) < ranked.max_sites:
                     heapq.heappush(heap, entry)
                 else:
                     heapq.heappushpop(heap, entry)
@@ -833,7 +942,10 @@ def fit_amino_acid(
             for name in list(representative_columns):
                 if name not in needed:
                     del representative_columns[name]
-    sites = sorted((item[2] for item in heap), key=lambda s: (s.orthogroup, s.column))
+    sites: Sequence[AASite] = (
+        AASiteTable(blocks) if blocks
+        else sorted((item[2] for item in heap), key=lambda s: (s.orthogroup, s.column))
+    )
     if not sites:
         raise AlignmentError(
             "AA preprocessing removed all sites; inspect training coverage/filters"
@@ -844,6 +956,12 @@ def fit_amino_acid(
             name: columns for name, columns in representative_columns.items() if name in needed
         }
     fitted = AATransform(settings.model_copy(deep=True), sites, qc, representative_columns)
+    if isinstance(sites, AASiteTable):
+        if not np.any(sites.active):
+            raise AlignmentError(
+                "AA aggregation produced no variable features in this training fold"
+            )
+        return fitted
     for indices, raw, _ in fitted.raw_blocks(store, species):
         fractions, means, known, active = _site_statistics(raw)
         for k, j in enumerate(indices):

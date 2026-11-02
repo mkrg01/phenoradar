@@ -18,7 +18,7 @@ from sklearn.utils.validation import check_array, check_is_fitted, check_X_y
 
 DEFAULT_LAMBDA = 0.01
 DEFAULT_ALPHA = 0.5
-DEFAULT_THRESH = 1e-14
+DEFAULT_THRESH = 1e-7
 DEFAULT_MAXIT = 2_000_000
 
 # Nearby solutions keep warm starts and the native strong screening rule useful.
@@ -153,7 +153,8 @@ def fit_glmnet_path(
     ):
         raise GlmnetError("sample_weight must be finite, nonnegative, and have positive total")
     positive = weights > 0
-    x, y, weights = x[positive], y[positive], weights[positive]
+    if not np.all(positive):
+        x, y, weights = x[positive], y[positive], weights[positive]
     if not np.array_equal(np.unique(y), [0, 1]):
         raise GlmnetError("Both classes must have positive sample weight")
     # Normalizing first prevents overflow when forming the weighted responses.

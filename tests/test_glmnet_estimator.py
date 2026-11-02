@@ -197,7 +197,9 @@ def test_explicit_irregular_path_matches_independent_fits_without_mutating_input
     original_weights = weights.copy()
     # Neither geometric spacing nor request order may change the fitted lambda.
     lambdas = [0.017, 0.1, 0.043, 0.017]
-    models = fit_glmnet_path(matrix, y, lambdas, alpha=0.7, sample_weight=weights)
+    models = fit_glmnet_path(
+        matrix, y, lambdas, alpha=0.7, sample_weight=weights, thresh=1e-14
+    )
     assert [model.lambda_ for model in models] == lambdas
     assert len({id(model) for model in models}) == len(lambdas)
     assert all(model.path_length_ == 3 for model in models)
@@ -206,7 +208,9 @@ def test_explicit_irregular_path_matches_independent_fits_without_mutating_input
     np.testing.assert_array_equal(matrix.toarray() if sparse_input else matrix, x)
     np.testing.assert_array_equal(weights, original_weights)
     for model in models:
-        independent = GlmnetLogisticRegression(lambda_=model.lambda_, alpha=0.7).fit(
+        independent = GlmnetLogisticRegression(
+            lambda_=model.lambda_, alpha=0.7, thresh=1e-14
+        ).fit(
             x, y, sample_weight=weights
         )
         np.testing.assert_allclose(

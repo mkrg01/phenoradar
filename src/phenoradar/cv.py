@@ -3116,6 +3116,8 @@ def _glmnet_fit_diagnostic(estimator: GlmnetLogisticRegression) -> EstimatorFitD
 def _selected_glmnet_lambda_path(
     estimator: GlmnetLogisticRegression,
     source_result: SourceSelectionResult,
+    *,
+    amino_acid_penalty_ratio: float | None = None,
 ) -> list[float]:
     """Recover the selected candidate's descending prefix without changing its lambda.
 
@@ -3137,7 +3139,11 @@ def _selected_glmnet_lambda_path(
             int(params.get("maxit", DEFAULT_MAXIT)),
         )
         strength = float(params.get("lambda", DEFAULT_LAMBDA))
-        if key == path_key and strength >= target:
+        ratio_matches = (
+            amino_acid_penalty_ratio is None
+            or float(params.get("amino_acid_penalty_ratio", 1.0)) == amino_acid_penalty_ratio
+        )
+        if key == path_key and ratio_matches and strength >= target:
             lambdas.add(strength)
     return sorted(lambdas, reverse=True)
 
@@ -3148,11 +3154,15 @@ def _fit_selected_estimator(
     y_train: np.ndarray,
     sample_weight: np.ndarray | None,
     source_result: SourceSelectionResult,
+    *,
+    amino_acid_penalty_ratio: float | None = None,
 ) -> EstimatorFitDiagnostic:
     """Refit a selected model using only this training set's preprocessed arrays."""
     if not isinstance(estimator, GlmnetLogisticRegression):
         return _fit_estimator(estimator, x_train, y_train, sample_weight)
-    lambdas = _selected_glmnet_lambda_path(estimator, source_result)
+    lambdas = _selected_glmnet_lambda_path(
+        estimator, source_result, amino_acid_penalty_ratio=amino_acid_penalty_ratio
+    )
     if len(lambdas) == 1:
         return _fit_estimator(estimator, x_train, y_train, sample_weight)
     try:
@@ -3164,6 +3174,7 @@ def _fit_selected_estimator(
             thresh=estimator.thresh,
             maxit=estimator.maxit,
             sample_weight=sample_weight,
+            penalty_factor=estimator.penalty_factor,
         )[-1]
     except GlmnetError as exc:
         raise CVError(str(exc)) from exc

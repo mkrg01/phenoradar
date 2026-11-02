@@ -120,13 +120,16 @@ def test_selected_fit_matches_exact_reference_path_and_preserves_inputs(weighted
     x, y, weights = _weighted_problem()
     sample_weight = weights if weighted else None
     originals = [array.copy() for array in (x, y, weights)]
-    estimator = GlmnetLogisticRegression(lambda_=0.017, alpha=0.7)
+    estimator = GlmnetLogisticRegression(lambda_=0.017, alpha=0.7, thresh=1e-14)
     params_before = estimator.get_params()
     source = _source(
-        [{"lambda": 0.017, "alpha": 0.7}],
-        [{"lambda": strength, "alpha": 0.7} for strength in [0.001, 0.043, 0.2]],
+        [{"lambda": 0.017, "alpha": 0.7, "thresh": 1e-14}],
+        [{"lambda": strength, "alpha": 0.7, "thresh": 1e-14}
+         for strength in [0.001, 0.043, 0.2]],
     )
-    reference = fit_glmnet_path(x, y, [0.2, 0.043, 0.017], alpha=0.7, sample_weight=sample_weight)[
+    reference = fit_glmnet_path(
+        x, y, [0.2, 0.043, 0.017], alpha=0.7, sample_weight=sample_weight, thresh=1e-14
+    )[
         -1
     ]
 

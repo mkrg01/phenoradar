@@ -37,7 +37,9 @@ def test_coarse_candidates_use_close_native_warm_starts_only(
     monkeypatch.setattr(glmnet, native_name, tracked)
     targets = [10.0 ** (-1 - 0.5 * i) for i in range(9)]
     requested = targets[::-1] + [targets[3]]
-    models = glmnet.fit_glmnet_path(matrix, y, requested, alpha=0.7, sample_weight=weights)
+    models = glmnet.fit_glmnet_path(
+        matrix, y, requested, alpha=0.7, sample_weight=weights, thresh=1e-14
+    )
 
     assert len(calls) == 1
     path, count = calls[0]
@@ -87,8 +89,12 @@ def test_unregularized_endpoint_is_fitted_exactly_after_internal_points(
 ) -> None:
     x, y, weights = _problem()
     matrix = sparse.csc_matrix(x) if sparse_input else x
-    models = glmnet.fit_glmnet_path(matrix, y, [0.01, 0, 0.1], sample_weight=weights)
-    reference = glmnet.fit_glmnet_path(matrix, y, [0], sample_weight=weights)[0]
+    models = glmnet.fit_glmnet_path(
+        matrix, y, [0.01, 0, 0.1], sample_weight=weights, thresh=1e-14
+    )
+    reference = glmnet.fit_glmnet_path(
+        matrix, y, [0], sample_weight=weights, thresh=1e-14
+    )[0]
     assert [m.lambda_ for m in models] == [0.01, 0, 0.1]
     assert models[1].path_length_ == 3
     assert models[1].native_path_length_ == 22

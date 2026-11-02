@@ -262,17 +262,32 @@ bundles retain pre-ranking scoring masks.
 
 ## Caching and memory
 
-Alignment-byte caches are temporary per run. Frequencies and centering are
+Prediction byte caches are temporary per run. Frequencies and centering are
 computed in site blocks; large output matrices use temporary disk backing.
 Unweighted and TPM-weighted residue compositions are cached on temporary disk
 once per requested OG/column across the species retained for training. Only
-columns requested after the callability screen are added. These per-species
+columns requested after the callability screen are added. Only states present
+in those raw compositions occupy disk; zero and missing frequencies are restored
+exactly. This changes storage, not site or state selection. These per-species
 compositions contain no fitted filter, phenotype score, or centering mean;
 each training fold still learns those separately. Representative choices remain
 fold-specific. Prediction stores compute only each requested batch and do not
-build this training cache. Inner CV omits observation matrices that model
-selection does not use, and feature-schema rows are written incrementally.
-Set `TMPDIR` to a location with enough space for these caches and matrices.
+build this training cache. Inner CV and frequency-mode AA-only refits omit
+unused observation matrices; audit tables are written in columnar batches.
+Matrices use column-major storage for block writes and glmnet input.
+Set `TMPDIR` to a location with enough space for temporary caches and matrices.
+Validated training alignment bytes and presence masks are reused across runs
+under `runs/.phenoradar_cache/alignments`. Source changes, changed species ID
+resolution, changed retained species, or changed cache files invalidate entries.
+These caches contain no learned filters or means. Source alignments must remain
+available; deleting the cache safely forces rebuilding.
+Unranked preprocessing keeps fitted site statistics in columnar arrays and
+computes quality and moments in the same pass. Filters and means remain
+training-only. The default glmnet convergence threshold is `1e-7`.
+Inner selection skips unused major-relative QC counts; full outer/final audit
+tables retain them. Centering expands only model columns to float64.
+Selected models refit along matching stronger lambdas on their own training
+data, retaining the selected lambda and modality penalty factors.
 CV interpretation is spooled to temporary Parquet parts as each model finishes.
 Full feature eligibility, coefficients, PSS, effect ranges, and stability tables
 are retained; completed folds do not accumulate Python feature dictionaries or
