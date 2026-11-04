@@ -84,10 +84,12 @@ def initialize(payload: dict[str, Any], n_jobs: int) -> None:
     caches = {}
     for index, (key, original) in enumerate(store._frequency_caches.items()):
         cached = copy(original)
-        # Copy-on-write detachment is per OG and only when a new site is needed.
+        # OG threads can preallocate an empty entry without creating its file.
+        # Only populated caches are shared; empty entries start private in each worker.
         destination = Path(store._temp.name) / f"{index}_frequency.bin"
-        os.symlink(cached.path, destination)
-        cached.path, cached.shared = destination, True
+        if cached.length:
+            os.symlink(cached.path, destination)
+        cached.path, cached.shared = destination, bool(cached.length)
         caches[key] = cached
     store._frequency_caches = caches
     expression = None

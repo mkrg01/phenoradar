@@ -24,14 +24,35 @@ def test_process_outer_folds_match_serial_and_render_common_figures(
     path = (combined_config(tmp_path, aggregation) if combined
             else fixture_config(tmp_path, aggregation))
     config = load_and_resolve_config([path])
+    config.preprocess.amino_acid.ranked_site_filter.method = "none"
     alignments = Path(config.data.alignment_dir)
     (alignments / "OG2.faa").write_text((alignments / "OG1.faa").read_text())
+    # This OG fails coverage in the pilot (g0 held out), but passes in later folds.
+    # OG threads allocate its cache entry before its data file has been created.
+    records = (alignments / "OG1.faa").read_text().split(">")[1:]
+    (alignments / "OG_later.faa").write_text("".join(
+        ">" + record for record in records if record.split("_", 1)[0] in {"s0", "s1", "s2"}
+    ))
     # Keep this integration test small; the complete output tables are compared.
     config.figures.top_features = 3
     first = run_amino_acid(config, tmp_path / "serial")
     config.runtime.n_jobs = 4
     monkeypatch.setattr(parallel, "fold_workers", lambda *args: 2)
+    original_snapshot = parallel.snapshot
+
+    def snapshot_with_empty_cache(store, expression):
+        payload = original_snapshot(store, expression)
+        key = ("OG_later", aggregation == "tpm_weighted_frequency")
+        if aggregation != "best_covered":
+            assert payload["store"]["_frequency_caches"][key].length == 0
+        return payload
+
+    monkeypatch.setattr(parallel, "snapshot", snapshot_with_empty_cache)
     second = run_amino_acid(config, tmp_path / "parallel")
+    later_sites = pl.read_csv(
+        second / "cv/tables/amino_acid_site_pss.tsv", separator="\t",
+    ).filter(pl.col("orthogroup") == "OG_later")
+    assert later_sites["scope"].n_unique() == 2
     for stage, names in {
         "cv": ["prediction_cv", "model_selection_trials", "model_selection_selected",
                "feature_importance", "coefficients", "coefficients_by_fold", "amino_acid_site_pss",
@@ -54,3 +75,69 @@ def test_process_outer_folds_match_serial_and_render_common_figures(
         pl.read_csv(first / "cv/tables/prediction_cv.tsv", separator="\t")["prob"],
         pl.read_csv(second / "cv/tables/prediction_cv.tsv", separator="\t")["prob"],
     )
+
+
+@pytest.mark.parametrize("empty_file_exists", [False, True])
+def test_worker_initializes_empty_caches_privately_and_populated_caches_copy_on_write(
+    tmp_path: Path, monkeypatch, empty_file_exists: bool,
+) -> None:
+    import phenoradar.amino_acid_parallel as parallel
+    from phenoradar.amino_acid_frequency_cache import AminoAcidFrequencyCache
+
+    monkeypatch.setattr(parallel, "_WORKER", None)
+    monkeypatch.setenv("POLARS_MAX_THREADS", "1")
+    species = ["a", "b"]
+
+    def compute(samples, columns):
+        values = np.zeros((len(samples), len(columns), 20), dtype=np.float32)
+        for row, sample in enumerate(samples):
+            values[row, np.arange(len(columns)), (columns + species.index(sample)) % 20] = 1
+        return values, np.ones(values.shape[:2], dtype=np.float32)
+
+    empty = AminoAcidFrequencyCache(tmp_path / "empty.bin", {s: i for i, s in enumerate(species)})
+    populated = AminoAcidFrequencyCache(
+        tmp_path / "populated.bin", {s: i for i, s in enumerate(species)},
+    )
+    if empty_file_exists:
+        empty.path.touch()
+    populated.get(species, np.array([0]), compute, block_size=1)
+    original_bytes = populated.path.read_bytes()
+    original_columns = populated.columns.copy()
+    parent_caches = {("empty", True): empty, ("populated", True): populated}
+    payload = {"store": {"ogs": {}, "species": set(species), "retained_species": set(species),
+                         "cache_frequencies": True, "_frequency_caches": parent_caches,
+                         "tpm_identity": None}, "expression": None}
+    parallel.initialize(payload, 1)
+    worker = parallel._WORKER[0]
+    try:
+        fresh = worker._frequency_caches[("empty", True)]
+        shared = worker._frequency_caches[("populated", True)]
+        assert not fresh.shared and not fresh.path.is_symlink()
+        assert not fresh.path.exists()
+        assert shared.shared and shared.path.is_symlink()
+        assert shared.path.resolve() == populated.path
+        # Existing columns reuse the shared data without recomputing or copying it.
+        def unexpected_compute(*args):
+            pytest.fail("A cached site must not be recomputed")
+
+        values, coverage = shared.get(species, np.array([0]), unexpected_compute, block_size=1)
+        expected, expected_coverage = compute(species, np.array([0]))
+        np.testing.assert_array_equal(values, expected)
+        np.testing.assert_array_equal(coverage, expected_coverage)
+        assert shared.shared and shared.path.is_symlink()
+        # New columns detach populated data; the empty entry creates a new private file.
+        for cache in [fresh, shared]:
+            values, coverage = cache.get(species, np.array([0, 1]), compute, block_size=1)
+            expected, expected_coverage = compute(species, np.array([0, 1]))
+            np.testing.assert_array_equal(values, expected)
+            np.testing.assert_array_equal(coverage, expected_coverage)
+            assert not cache.shared and cache.path.is_file() and not cache.path.is_symlink()
+        assert empty.path.exists() == empty_file_exists
+        if empty_file_exists:
+            assert empty.path.stat().st_size == 0
+        assert empty.length == 0 and empty.columns.size == 0
+        assert populated.path.read_bytes() == original_bytes
+        np.testing.assert_array_equal(populated.columns, original_columns)
+    finally:
+        worker.close()
+    assert parent_caches == {("empty", True): empty, ("populated", True): populated}
