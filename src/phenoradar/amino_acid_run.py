@@ -10,7 +10,6 @@ from collections.abc import Callable, Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from itertools import chain
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +18,7 @@ import numpy as np
 import optuna
 import polars as pl
 from optuna.samplers import TPESampler
+from scipy import sparse
 
 from phenoradar.amino_acid import (
     ALPHABET,
@@ -26,16 +26,17 @@ from phenoradar.amino_acid import (
     AATransform,
     AlignmentError,
     AlignmentStore,
-    fit_amino_acid,
 )
-from phenoradar.amino_acid_encoding import fit_encoded
 from phenoradar.amino_acid_outputs import (
+    write_combined_coefficients,
     write_frequency_figure,
     write_preprocessing_audits,
+    write_site_effects,
     write_site_scores,
 )
 from phenoradar.amino_acid_prediction import prediction_members
 from phenoradar.amino_acid_reporting import AAReportWriter
+from phenoradar.amino_acid_sparse import fit_sparse_encoded, training_information
 from phenoradar.combined import ExpressionInput, ExpressionTransform, fit_expression
 from phenoradar.config import AppConfig
 from phenoradar.config.io import write_resolved_config
@@ -154,10 +155,10 @@ def _select(
                 progress(f"{scope}: prepare inner fold {fold}.")
             train_species = [species[i] for i in train]
             valid_species = [species[i] for i in valid]
-            fitted, matrices = fit_encoded(
+            fitted, matrices, _ = fit_sparse_encoded(
                 store, train_species, config.preprocess.amino_acid,
                 [train_species, valid_species], y=y[train], groups=groups[train],
-                contrast_groups=pairs[train], audit=False,
+                contrast_groups=pairs[train], audit=False, n_jobs=config.runtime.n_jobs,
             )
             x_train, x_valid = matrices
             del matrices
@@ -175,8 +176,8 @@ def _select(
                 )
                 xv, _ = expr.transform(expression, [species[i] for i in valid])
                 n_expression = xe.shape[1]
-                x_train = np.column_stack((xe, x_train))
-                x_valid = np.column_stack((xv, x_valid))
+                x_train = sparse.hstack((xe, x_train), format="csc")
+                x_valid = sparse.hstack((xv, x_valid), format="csc")
             yield InnerCvPreprocessedFold(
                     fold,
                     x_train,
@@ -333,36 +334,28 @@ def fit_scope(
         train_species = [species[i] for i in indices]
         if progress:
             progress(f"{scope}: prepare refit features for sample set {sample_set_id}.")
-        representatives: list[dict[str, Any]]
-        if expression is None and config.preprocess.amino_acid.aggregation != "best_covered":
-            fitted, matrices = fit_encoded(
-                store, train_species, config.preprocess.amino_acid, [train_species],
-                y=y[indices], groups=groups[indices], contrast_groups=pairs[indices],
-            )
-            matrix = matrices[0]
-            observed, representatives = None, []
-        else:
-            fitted = fit_amino_acid(
-                store, train_species, config.preprocess.amino_acid,
-                y=y[indices], groups=groups[indices], contrast_groups=pairs[indices],
-            )
-            matrix, observed, representatives = fitted.transform(store, train_species)
+        fitted, matrices, shift = fit_sparse_encoded(
+            store, train_species, config.preprocess.amino_acid, [train_species],
+            y=y[indices], groups=groups[indices], contrast_groups=pairs[indices],
+            n_jobs=config.runtime.n_jobs,
+        )
+        matrix = matrices[0]
+        del matrices
         context = {"scope": scope, "sample_set_id": sample_set_id}
         expr = None
         aa_std = None
+        representatives: list[dict[str, Any]] = []
+        if expression is not None or config.preprocess.amino_acid.aggregation == "best_covered":
+            aa_std, representatives = training_information(
+                fitted, store, train_species, matrix, shift,
+                standard_deviation=expression is not None,
+            )
         if expression is not None:
-            assert observed is not None
-            scales = []
-            offset = 0
-            for j, site in enumerate(fitted.sites):
-                count = int(np.sum(site.active))
-                scales.extend(np.std(matrix[observed[:, j] > 0, offset:offset + count], axis=0))
-                offset += count
-            aa_std = np.asarray(scales)
             expr, xe, counts, scores = fit_expression(
                 config, expression, train_species, y[indices], pairs[indices], warnings
             )
-            matrix = np.column_stack((xe, matrix))
+            matrix = sparse.hstack((xe, matrix), format="csc")
+            shift = np.r_[np.zeros(xe.shape[1]), shift]
             _write(tables / "expression_feature_filter_counts.tsv", [{**context, **counts}])
             _write(tables / "expression_ranked_feature_scores.tsv",
                    ({**context, **row} for row in scores))
@@ -409,6 +402,8 @@ def fit_scope(
                     if expr is not None else None
                 ),
             )
+            # Native fitting uses Z=X+c; all saved models and reports use X.
+            model.intercept_ += float(shift @ model.coef_)
             members.append(AAMember(fitted, model, scope, sample_set_id, result.candidate,
                                     expr, aa_std))
             _write(
@@ -424,9 +419,9 @@ def fit_scope(
                     }
                 ],
             )
-            _write(tables / "amino_acid_site_effects.tsv", _site_effects(members[-1], matrix))
+            write_site_effects(tables, members[-1], matrix, shift)
             if expr is not None:
-                _write(tables / "combined_coefficients.tsv", _combined_coefficients(members[-1]))
+                write_combined_coefficients(tables, members[-1])
     return members
 
 
@@ -444,67 +439,6 @@ def _site_coefficients(member: AAMember) -> list[np.ndarray]:
 
 def _effect_range(known: np.ndarray, beta: np.ndarray) -> float:
     return float(np.ptp(beta[known])) if np.count_nonzero(known) > 1 else 0.0
-
-
-def _combined_coefficients(member: AAMember) -> Iterable[dict[str, Any]]:
-    expression = member.expression
-    assert expression is not None and member.aa_standard_deviation is not None
-    n = member.expression_width
-    _, ratio = _glmnet_candidate_params(expression.config, member.candidate.params)
-    assert expression.scaler is not None
-    expression_scale = np.asarray(expression.scaler.scale_, dtype=float)
-    names = chain(expression.features, (
-        site.feature(int(a)) for site in member.transform.sites for a in np.flatnonzero(site.active)
-    ))
-    for j, (feature, coefficient) in enumerate(zip(names, member.model.coef_, strict=True)):
-        is_expression = j < n
-        og = expression.orthogroups[j] if is_expression else json.loads(feature)[0]
-        yield {
-            "scope": member.scope,
-            "sample_set_id": member.sample_set_id,
-            "candidate_index": member.candidate.candidate_index,
-            "feature": feature,
-            "modality": "expression" if is_expression else "amino_acid",
-            "orthogroup": og,
-            "coefficient": float(coefficient),
-            "coefficient_original_unit": float(
-                coefficient / expression_scale[j] if is_expression else coefficient
-            ),
-            "coefficient_standardized": float(
-                coefficient if is_expression else
-                coefficient * member.aa_standard_deviation[j - n]
-            ),
-            "original_unit": expression.config.preprocess.expression.expression_transform.method
-            if is_expression else "residue_frequency",
-            "penalty_factor": 1.0 if is_expression else ratio,
-        }
-
-
-def _site_effects(member: AAMember, matrix: np.ndarray) -> Iterable[dict[str, Any]]:
-    offset = member.expression_width
-    for site in member.transform.sites:
-        count = int(np.sum(site.active))
-        beta = np.zeros(20)
-        beta[site.active] = member.model.coef_[offset:offset + count]
-        mean_contribution = (float(np.mean(np.abs(
-            matrix[:, offset:offset + count] @ beta[site.active]
-        ))) if np.any(beta) else 0.0)
-        offset += count
-        reference = int(np.argmax(site.mean))
-        for state in np.flatnonzero(site.known):
-            yield {
-                "scope": member.scope,
-                "sample_set_id": member.sample_set_id,
-                "candidate_index": member.candidate.candidate_index,
-                "orthogroup": site.orthogroup,
-                "alignment_pos_1based": site.column + 1,
-                "residue": ALPHABET[state],
-                "coefficient": float(beta[state]),
-                "reference_residue": ALPHABET[reference],
-                "effect_vs_reference": float(beta[state] - beta[reference]),
-                "site_effect_range": _effect_range(site.known, beta),
-                "mean_abs_site_contribution": mean_contribution,
-            }
 
 
 def predict_members(
@@ -1249,8 +1183,8 @@ def predict_amino_acid(
         tables.mkdir(parents=True, exist_ok=True)
         write_site_scores(tables, members)
         if expression is not None:
-            _write(tables / "combined_coefficients.tsv",
-                   (row for member in members for row in _combined_coefficients(member)))
+            for member in members:
+                write_combined_coefficients(tables, member)
             _write(tables / "expression_input.tsv", [file_identity(Path(config.data.tpm_path))])
         if store.tpm_identity:
             _write(

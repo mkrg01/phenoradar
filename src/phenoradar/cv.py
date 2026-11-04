@@ -20,6 +20,7 @@ import numpy as np
 import optuna
 import polars as pl
 from optuna.samplers import TPESampler
+from scipy import sparse
 from scipy.stats import rankdata
 from sklearn import get_config
 from sklearn.calibration import CalibratedClassifierCV
@@ -201,8 +202,8 @@ class InnerCvPreprocessedFold:
     """One inner-CV split with train-only preprocessing already applied."""
 
     inner_fold_id: str
-    x_train: np.ndarray
-    x_valid: np.ndarray
+    x_train: np.ndarray | sparse.csc_matrix
+    x_valid: np.ndarray | sparse.csc_matrix
     y_train: np.ndarray
     y_valid: np.ndarray
     sample_weight: np.ndarray | None
@@ -4041,6 +4042,7 @@ def _score_glmnet_paths(
                 sample_weight=fold.sample_weight,
                 compute_kkt=False,
                 copy_x=not (consume_training_matrix and len(paths) == 1
+                            and isinstance(fold.x_train, np.ndarray)
                             and fold.x_train.flags.f_contiguous),
                 **penalty_options,
             )

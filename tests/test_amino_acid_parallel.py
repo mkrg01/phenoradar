@@ -24,17 +24,19 @@ def test_process_outer_folds_match_serial_and_render_common_figures(
     path = (combined_config(tmp_path, aggregation) if combined
             else fixture_config(tmp_path, aggregation))
     config = load_and_resolve_config([path])
+    alignments = Path(config.data.alignment_dir)
+    (alignments / "OG2.faa").write_text((alignments / "OG1.faa").read_text())
     # Keep this integration test small; the complete output tables are compared.
     config.figures.top_features = 3
     first = run_amino_acid(config, tmp_path / "serial")
-    config.runtime.n_jobs = 2
+    config.runtime.n_jobs = 4
     monkeypatch.setattr(parallel, "fold_workers", lambda *args: 2)
     second = run_amino_acid(config, tmp_path / "parallel")
     for stage, names in {
         "cv": ["prediction_cv", "model_selection_trials", "model_selection_selected",
-               "feature_importance", "coefficients", "amino_acid_site_pss",
+               "feature_importance", "coefficients", "coefficients_by_fold", "amino_acid_site_pss",
                "amino_acid_site_effect_range", "amino_acid_site_stability",
-               "selected_site_sequence_map"],
+               "selected_site_sequence_map", "amino_acid_site_effects"],
         "external_test": ["pred_external_test"], "inference": ["pred_inference"],
     }.items():
         for name in names:

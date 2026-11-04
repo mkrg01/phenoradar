@@ -24,6 +24,7 @@ DEFAULT_MAXIT = 2_000_000
 # Nearby solutions keep warm starts and the native strong screening rule useful.
 # A half-decade candidate grid is expanded to ten intervals between candidates.
 _MAX_LOG_LAMBDA_STEP = 0.05 * np.log(10.0)
+_SPARSE_PATH_CAPACITY = 4096
 
 
 class GlmnetError(ValueError):
@@ -177,9 +178,13 @@ def fit_glmnet_path(
         raise GlmnetError("penalty_factor mean must be finite and positive")
     path = np.unique(requested)[::-1].copy()
     if sparse.issparse(x):
-        x = sparse.csc_matrix(x, copy=True)
-        x.sum_duplicates()
-        x.sort_indices()
+        x = sparse.csc_matrix(x, copy=False)
+        if not x.has_canonical_format:
+            x = x.copy()
+            x.sum_duplicates()
+            x.sort_indices()
+        if max(*x.shape, x.nnz) >= np.iinfo(np.int32).max:
+            raise GlmnetError("Sparse matrix exceeds native glmnet's 32-bit index limit")
         variable = np.any(x.max(axis=0).toarray() != x.min(axis=0).toarray())
     else:
         variable = np.any(np.ptp(x, axis=0) > 0)
@@ -204,30 +209,21 @@ def fit_glmnet_path(
         bounds = np.array([np.full(p, -np.inf), np.full(p, np.inf)], order="F")
         options = dict(ne=p + 1, nlam=native_path_length, isd=0, intr=1, maxit=int(maxit), kopt=0)
         if sparse.issparse(x):
-            result = splognet(
-                alpha,
-                n,
-                p,
-                1,
-                x.data.copy(),
-                x.indptr + 1,
-                x.indices + 1,
-                response,
-                offset,
-                excluded,
-                penalties,
-                bounds,
-                p + 1,
-                p,
-                1.0,
-                native_path,
-                thresh,
-                nlam=native_path_length,
-                isd=0,
-                intr=1,
-                maxit=int(maxit),
-                kopt=0,
-            )
+            # nx bounds the compressed coefficient buffer, never the search space.
+            # Retry from fresh response/offset arrays if the native active set fills it.
+            capacity = min(p, _SPARSE_PATH_CAPACITY)
+            indptr, indices = x.indptr + 1, x.indices + 1
+            while True:
+                result = splognet(
+                    alpha, n, p, 1, x.data, indptr, indices,
+                    response.copy(order="F"), offset.copy(order="F"),
+                    excluded, penalties, bounds, p + 1, capacity, 1.0, native_path, thresh,
+                    nlam=native_path_length, isd=0, intr=1, maxit=int(maxit), kopt=0,
+                )
+                if result[-1] >= -10000 or capacity == p:
+                    break
+                capacity = min(p, max(capacity + 1, capacity * 2))
+                del result
         else:
             result = lognet(
                 alpha,

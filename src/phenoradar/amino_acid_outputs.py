@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -14,29 +13,14 @@ import polars as pl
 from phenoradar.amino_acid import (
     ALPHABET,
     PREDICTION_BATCH_SIZE,
-    AASiteTable,
     AATransform,
     AlignmentStore,
 )
+from phenoradar.amino_acid_blocks import coefficient_blocks, feature_axes, site_blocks
 
 if TYPE_CHECKING:
     from phenoradar.amino_acid_run import AAMember
     from phenoradar.combined import ExpressionTransform
-
-
-def _audit_blocks(fitted: AATransform) -> Iterator[dict[str, Any]]:
-    fields = ["column", "sample_fraction", "minor_samples", "minor_groups", "score",
-              "mean", "active", "post_aggregation_sample_fraction"]
-    sites = fitted.sites
-    for start in range(0, len(sites), 512):
-        stop = start + 512
-        if isinstance(sites, AASiteTable):
-            yield {"orthogroup": sites.orthogroups[start:stop].tolist(),
-                   **{name: getattr(sites, name)[start:stop] for name in fields}}
-        else:
-            block = list(sites[start:stop])
-            yield {"orthogroup": [s.orthogroup for s in block],
-                   **{name: np.array([getattr(s, name) for s in block]) for name in fields}}
 
 
 def _append_frame(path: Path, frame: pl.DataFrame) -> None:
@@ -62,8 +46,7 @@ def write_preprocessing_audits(
         _append_frame(schema_path, pl.DataFrame([
             {**context, **{key: row.get(key) for key in keys}} for row in expression.schema()
         ]))
-    alphabet = np.array(list(ALPHABET))
-    for block in _audit_blocks(fitted):
+    for block in site_blocks(fitted.sites):
         ogs, columns, active = block["orthogroup"], block["column"] + 1, block["active"]
         qc = pl.DataFrame({
             **{key: [value] * len(columns) for key, value in context.items()},
@@ -77,20 +60,102 @@ def write_preprocessing_audits(
         rows, states = np.nonzero(active)
         if not len(rows):
             continue
-        # Encode each OG once per block; residue symbols are canonical ASCII.
-        prefixes = {og: "[" + json.dumps(og) + "," for og in set(ogs)}
-        frame = pl.DataFrame({
-            "_prefix": [prefixes[ogs[i]] for i in rows],
-            "modality": ["amino_acid"] * len(rows),
-            "orthogroup": [ogs[i] for i in rows], "alignment_pos_1based": columns[rows],
-            "residue": alphabet[states], "aggregation": [fitted.settings.aggregation] * len(rows),
-            "training_mean": block["mean"][rows, states],
-        }).with_columns(
-            pl.concat_str([pl.col("_prefix"), pl.col("alignment_pos_1based").cast(pl.String),
-                           pl.lit(',"'), pl.col("residue"), pl.lit('"]')]).alias("feature"),
+        frame = feature_axes(block, active).with_columns(
+            pl.lit("amino_acid").alias("modality"),
+            pl.lit(fitted.settings.aggregation).alias("aggregation"),
+            pl.Series("training_mean", block["mean"][rows, states]),
             *[pl.lit(value).alias(key) for key, value in context.items()],
         ).select([*context, *keys])
         _append_frame(schema_path, frame)
+
+
+def _member_context(member: AAMember) -> list[pl.Expr]:
+    return [pl.lit(member.scope).alias("scope"),
+            pl.lit(member.sample_set_id).alias("sample_set_id"),
+            pl.lit(member.candidate.candidate_index).alias("candidate_index")]
+
+
+def write_site_effects(
+    destination: Path, member: AAMember, matrix: Any, shift: np.ndarray | None = None,
+) -> None:
+    """Retain all known states, computing each site's effect and contribution once."""
+    alphabet = np.array(list(ALPHABET))
+    keys = ["scope", "sample_set_id", "candidate_index", "orthogroup",
+            "alignment_pos_1based", "residue", "coefficient", "reference_residue",
+            "effect_vs_reference", "site_effect_range", "mean_abs_site_contribution"]
+    for block, beta, offset in coefficient_blocks(
+        member.transform.sites, member.model.coef_, member.expression_width,
+    ):
+        known, active = block["known"], block["active"]
+        rows, states = np.nonzero(known)
+        if not len(rows):
+            continue
+        reference = np.argmax(block["mean"], axis=1)
+        effect = (np.max(np.where(known, beta, -np.inf), axis=1)
+                  - np.min(np.where(known, beta, np.inf), axis=1))
+        effect[known.sum(axis=1) < 2] = 0
+        contribution = np.zeros(len(beta))
+        columns = np.r_[0, np.cumsum(active.sum(axis=1))]
+        # Keep each nonzero site's original dot-product order exactly.
+        for local in np.flatnonzero(np.any(beta, axis=1)):
+            left, right = offset + columns[local], offset + columns[local + 1]
+            values = matrix[:, left:right]
+            if shift is not None:
+                values = values.toarray() - shift[left:right]
+            contribution[local] = float(np.mean(np.abs(
+                values @ beta[local, active[local]]
+            )))
+        frame = feature_axes(block, known, names=False).with_columns(
+            *_member_context(member),
+            pl.Series("coefficient", beta[rows, states]),
+            pl.Series("reference_residue", alphabet[reference[rows]]),
+            pl.Series("effect_vs_reference", beta[rows, states] - beta[rows, reference[rows]]),
+            pl.Series("site_effect_range", effect[rows]),
+            pl.Series("mean_abs_site_contribution", contribution[rows]),
+        ).select(keys)
+        _append_frame(destination / "amino_acid_site_effects.tsv", frame)
+
+
+def write_combined_coefficients(destination: Path, member: AAMember) -> None:
+    from phenoradar.cv import _glmnet_candidate_params
+
+    expression = member.expression
+    assert expression is not None and expression.scaler is not None
+    assert member.aa_standard_deviation is not None
+    _, ratio = _glmnet_candidate_params(expression.config, member.candidate.params)
+    n = member.expression_width
+    coefficient = member.model.coef_[:n]
+    frame = pl.DataFrame({
+        "feature": expression.features, "modality": ["expression"] * n,
+        "orthogroup": expression.orthogroups, "coefficient": coefficient,
+        "coefficient_original_unit": coefficient / np.asarray(
+            expression.scaler.scale_, dtype=float
+        ),
+        "coefficient_standardized": coefficient,
+        "original_unit": [expression.config.preprocess.expression.expression_transform.method] * n,
+        "penalty_factor": np.ones(n),
+    })
+    keys = ["scope", "sample_set_id", "candidate_index", "feature", "modality", "orthogroup",
+            "coefficient", "coefficient_original_unit", "coefficient_standardized",
+            "original_unit", "penalty_factor"]
+    _append_frame(destination / "combined_coefficients.tsv",
+                  frame.with_columns(*_member_context(member)).select(keys))
+    for block, beta, offset in coefficient_blocks(member.transform.sites, member.model.coef_, n):
+        active = block["active"]
+        coefficient = beta[active]
+        if not len(coefficient):
+            continue
+        frame = feature_axes(block, active).with_columns(
+            *_member_context(member), pl.lit("amino_acid").alias("modality"),
+            pl.Series("coefficient", coefficient),
+            pl.Series("coefficient_original_unit", coefficient),
+            pl.Series("coefficient_standardized", coefficient * member.aa_standard_deviation[
+                offset - n:offset - n + len(coefficient)
+            ]),
+            pl.lit("residue_frequency").alias("original_unit"),
+            pl.lit(ratio).alias("penalty_factor"),
+        ).select(keys)
+        _append_frame(destination / "combined_coefficients.tsv", frame)
 
 
 def write_site_scores(destination: Path, members: list[AAMember]) -> None:

@@ -824,11 +824,23 @@ def fit_amino_acid(
     groups: np.ndarray,
     contrast_groups: np.ndarray | None = None,
     audit: bool = True,
+    n_jobs: int = 1,
     _encoding: FoldEncoding | None = None,
+    _allow_empty: bool = False,
 ) -> AATransform:
     """Every reduction and decision below uses exactly these training species."""
     if len(species) != len(y) or len(groups) != len(y) or not species:
         raise AlignmentError("Invalid AA training sample schema")
+    if n_jobs > 1 and len(store.ogs) > 1 and settings.ranked_site_filter.method == "none":
+        weighted = settings.aggregation == "tpm_weighted_frequency"
+        warm = any(c.length for (_, is_weighted), c in store._frequency_caches.items()
+                   if is_weighted == weighted)
+        # Cold cache creation avoids the per-OG assembly overhead.
+        if not store.cache_frequencies or warm:
+            from phenoradar.amino_acid_og_parallel import fit_orthogroups
+
+            return fit_orthogroups(store, species, settings, n_jobs=n_jobs, encoding=_encoding,
+                                   y=y, groups=groups, contrast_groups=contrast_groups, audit=audit)
     quality = settings.site_filter
     ranked = settings.ranked_site_filter
     required = int(np.ceil(quality.min_sample_fraction * len(species)))
@@ -999,7 +1011,7 @@ def fit_amino_acid(
         AASiteTable(blocks) if blocks
         else sorted((item[2] for item in heap), key=lambda s: (s.orthogroup, s.column))
     )
-    if not sites:
+    if not sites and not _allow_empty:
         raise AlignmentError(
             "AA preprocessing removed all sites; inspect training coverage/filters"
         )
@@ -1010,7 +1022,7 @@ def fit_amino_acid(
         }
     fitted = AATransform(settings.model_copy(deep=True), sites, qc, representative_columns)
     if isinstance(sites, AASiteTable):
-        if not np.any(sites.active):
+        if not np.any(sites.active) and not _allow_empty:
             raise AlignmentError(
                 "AA aggregation produced no variable features in this training fold"
             )
@@ -1023,6 +1035,6 @@ def fit_amino_acid(
             site.mean = means[k]
             site.known = known[k]
             site.active = active[k]
-    if not any(np.any(site.active) for site in sites):
+    if not _allow_empty and not any(np.any(site.active) for site in sites):
         raise AlignmentError("AA aggregation produced no variable features in this training fold")
     return fitted

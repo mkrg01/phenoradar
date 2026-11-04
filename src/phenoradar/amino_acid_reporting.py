@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import shutil
 from collections import defaultdict
-from collections.abc import Iterator
 from dataclasses import replace
 from itertools import combinations
 from pathlib import Path
@@ -16,6 +15,7 @@ import joblib
 import numpy as np
 import polars as pl
 
+from phenoradar.amino_acid_blocks import coefficient_blocks, feature_axes
 from phenoradar.feature_stability import (
     _BY_FEATURE_SCHEMA,
     _BY_FOLD_PAIR_SCHEMA,
@@ -25,7 +25,6 @@ from phenoradar.feature_stability import (
 )
 
 if TYPE_CHECKING:
-    from phenoradar.amino_acid import AASite
     from phenoradar.amino_acid_run import AAMember
 
 REPORT_BLOCK_ROWS = 65_536
@@ -56,21 +55,6 @@ class _Spool:
     def scan(self) -> pl.LazyFrame:
         self.flush()
         return pl.scan_parquet(self.directory / "*.parquet")
-
-
-def coefficient_blocks(
-    member: AAMember,
-) -> Iterator[tuple[list[AASite], np.ndarray, np.ndarray, np.ndarray]]:
-    offset = member.expression_width
-    for start in range(0, len(member.transform.sites), 512):
-        sites = list(member.transform.sites[start:start + 512])
-        active = np.stack([site.active for site in sites])
-        known = np.stack([site.known for site in sites])
-        count = int(active.sum())
-        beta = np.zeros(active.shape)
-        beta[active] = member.model.coef_[offset:offset + count]
-        offset += count
-        yield sites, beta, known, active
 
 
 def _sink(frame: pl.LazyFrame, path: Path) -> None:
@@ -140,10 +124,12 @@ class AAReportWriter:
                 total = float(np.abs(coefficient).sum())
                 self._features(expression.features, coefficient, total, "expression",
                                model_index, fold, member.sample_set_id)
-            for sites, beta, known, active in coefficient_blocks(member):
+            for block, beta, _ in coefficient_blocks(
+                member.transform.sites, member.model.coef_, n,
+            ):
+                known, active = block["known"], block["active"]
                 if features:
-                    names = [site.feature(int(a)) for site in sites
-                             for a in np.flatnonzero(site.active)]
+                    names = feature_axes(block, active)["feature"]
                     self._features(names, beta[active], aa_total, "amino_acid",
                                    model_index, fold, member.sample_set_id)
                 n_known = known.sum(axis=1)
@@ -151,8 +137,8 @@ class AAReportWriter:
                           - np.min(np.where(known, beta, np.inf), axis=1))
                 effect[n_known < 2] = 0
                 self.sites.add(pl.DataFrame({
-                    "orthogroup": [s.orthogroup for s in sites],
-                    "alignment_pos_1based": [s.column + 1 for s in sites],
+                    "orthogroup": block["orthogroup"],
+                    "alignment_pos_1based": block["column"] + 1,
                     "n_known_residue_states": n_known.astype(np.int64),
                     "n_nonzero_coefficients": np.count_nonzero(beta * known, axis=1),
                     "pss": np.sum(np.abs(beta) * known, axis=1),
@@ -168,7 +154,7 @@ class AAReportWriter:
         """Move worker spools without transferring full fold models through IPC."""
         self.features.flush()
         self.sites.flush()
-        shutil.copytree(self.path, destination)
+        shutil.move(str(self.path), destination)
         transforms = {key: (index, None if path is None else path.name)
                       for key, (index, path) in self.transforms.items()}
         joblib.dump((self.models, self.contexts, transforms), destination / "index.joblib")
@@ -222,9 +208,9 @@ class AAReportWriter:
             result.append(replace(member, transform=transform))
         return result
 
-    def _features(self, names: list[str], coefficient: np.ndarray, total: float,
+    def _features(self, names: list[str] | pl.Series, coefficient: np.ndarray, total: float,
                   modality: str, model: int, fold: str, sample: int) -> None:
-        if not names:
+        if not len(names):
             return
         importance = np.abs(coefficient) / total if not np.isclose(total, 0) else coefficient * 0
         self.features.add(pl.DataFrame({

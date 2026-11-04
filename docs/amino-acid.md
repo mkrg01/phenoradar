@@ -5,6 +5,14 @@ All modes share `config.yml`, grouped CV, sampling, weights, model selection,
 and mean/median ensembles. Sequence and combined modes require
 `model.name: logistic_elasticnet`.
 
+Training encodes AA blocks as disk-backed CSC sparse matrices. An exact column
+mode learned from training rows is shifted to zero; the unpenalized intercept
+is converted back to the original centered basis before saving and reporting.
+Missing/novel-residue handling, feature filters, penalties and lambda paths are
+unchanged. Different floating-point calculations can change coefficients or
+selected sites, especially with weak regularization. No configuration is needed.
+Combined models keep the expression preprocessing and its separate penalty.
+
 ## Start a sequence run
 
 Generate a config, then set the sequence inputs:
@@ -301,9 +309,8 @@ known states, training means, and representative scoring masks are preserved.
 Prediction alignment identities and bundled TPMs cover these required OGs;
 the model's complete training audit remains available. Prediction representative
 tables describe the OGs actually evaluated. All-zero models use their intercept.
-Heatmaps load only the displayed sites. Outer folds run sequentially, while inner
-glmnet paths use `runtime.n_jobs`. Model fitting can still allocate in-memory
-copies; disk backing does not cap total process memory. No sites are removed
+Heatmaps load only the displayed sites. Model fitting can still allocate
+in-memory copies; disk backing does not cap total process memory. No sites are removed
 to meet an internal matrix-size threshold.
 
 Weighted mode converts sequence TPM once into compressed Parquet parts under
@@ -336,7 +343,15 @@ the original site/residue order. Wide-path scoring checks the full validation
 matrix once, then uses the exact nonzero coefficient columns (floating-point
 roundoff can differ from dense prediction).
 
-One fold's encoded matrices stay in RAM when the allocation has enough memory;
-the encoder spills to temporary disk if its bounded buffer would be exceeded.
+Encoded fold matrices use disk-backed CSC arrays with bounded dense arithmetic
+blocks. Sparse native fitting avoids input copies; its coefficient-path buffer
+grows only if the active set needs more space, restarting the same complete path.
 The first-fold resource estimate limits outer-fold concurrency. Inner ratio paths
 run sequentially within each AA worker, avoiding simultaneous full-matrix copies.
+
+Unranked preprocessing also distributes independent OGs across the CPUs assigned
+to each fold, using up to four threads. Initial composition-cache creation stays
+serial; cached folds use parallel OG processing. Results are assembled in their original order; training reductions
+and representative choices are unchanged. Per-OG buffers are bounded and spill
+to temporary disk when necessary. Audit and interpretation tables use columnar
+blocks, including zero coefficients and all eligible sites.
