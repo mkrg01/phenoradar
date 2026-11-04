@@ -118,6 +118,8 @@ def fit_glmnet_path(
     maxit: int = DEFAULT_MAXIT,
     sample_weight: np.ndarray | None = None,
     penalty_factor: np.ndarray | None = None,
+    compute_kkt: bool = True,
+    copy_x: bool = True,
 ) -> list[GlmnetLogisticRegression]:
     """Fit one descending path; return independent models in requested order.
 
@@ -127,6 +129,8 @@ def fit_glmnet_path(
     Intermediate positive lambdas improve warm starts on coarse candidate grids;
     only exact requested models are extracted, scored, or returned.
     """
+    if compute_kkt and not copy_x:
+        raise GlmnetError("KKT diagnostics require an unmodified training matrix")
     requested = np.asarray(lambdas, dtype=float)
     if (
         requested.ndim != 1
@@ -228,7 +232,8 @@ def fit_glmnet_path(
             result = lognet(
                 alpha,
                 1,
-                np.array(x, dtype=float, order="F", copy=True),
+                (np.array(x, dtype=float, order="F", copy=True) if copy_x
+                 else np.asfortranarray(x, dtype=float)),
                 response,
                 offset,
                 excluded,
@@ -274,16 +279,40 @@ def fit_glmnet_path(
         model.path_length_ = len(path)
         model.native_path_length_ = native_path_length
         model.converged_ = True
-        residual = weights * (expit(x @ model.coef_ + model.intercept_) - y)
-        gradient = (
-            np.asarray(x.T @ residual).reshape(-1)
-            + strength * (1 - alpha) * factors * model.coef_
-        )
-        active = model.coef_ != 0
-        subgradient = np.maximum(np.abs(gradient) - strength * alpha * factors, 0)
-        subgradient[active] = np.abs(
-            gradient[active] + strength * alpha * factors[active] * np.sign(model.coef_[active])
-        )
-        model.kkt_residual_ = float(subgradient.sum() + abs(residual.sum()))
+        if compute_kkt:
+            residual = weights * (expit(x @ model.coef_ + model.intercept_) - y)
+            gradient = (
+                np.asarray(x.T @ residual).reshape(-1)
+                + strength * (1 - alpha) * factors * model.coef_
+            )
+            active = model.coef_ != 0
+            subgradient = np.maximum(np.abs(gradient) - strength * alpha * factors, 0)
+            subgradient[active] = np.abs(
+                gradient[active] + strength * alpha * factors[active] * np.sign(model.coef_[active])
+            )
+            model.kkt_residual_ = float(subgradient.sum() + abs(residual.sum()))
         models.append(model)
     return models
+
+
+def predict_glmnet_path(
+    models: Sequence[GlmnetLogisticRegression], x: Any,
+) -> list[np.ndarray]:
+    """Validate once and skip exact-zero columns when scoring a wide fitted path."""
+    if not models:
+        return []
+    p = models[0].n_features_in_
+    if p < 100_000:
+        return [model.predict_proba(x)[:, 1] for model in models]
+    values = check_array(x, accept_sparse="csc", dtype=np.float64, ensure_min_features=0)
+    if values.shape[1] != p or any(m.n_features_in_ != p for m in models):
+        raise ValueError("glmnet path prediction feature counts do not match")
+    active = np.zeros(p, dtype=bool)
+    for model in models:
+        active |= model.coef_ != 0
+    columns = np.flatnonzero(active)
+    if len(columns) > p // 4:
+        return [expit(np.asarray(values @ m.coef_).reshape(-1) + m.intercept_) for m in models]
+    selected = values[:, columns]
+    return [expit(np.asarray(selected @ m.coef_[columns]).reshape(-1) + m.intercept_)
+            for m in models]

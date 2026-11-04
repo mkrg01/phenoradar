@@ -195,3 +195,9 @@ def write_frequency_figure(
     destination.mkdir(parents=True, exist_ok=True)
     figure.savefig(destination / "amino_acid_frequency_heatmap.svg")
     plt.close(figure)
+
+    table = pl.DataFrame({
+        "species": np.repeat(species, len(features)),
+        "feature": features * len(species), "frequency": values.ravel(),
+    })
+    table.write_csv(destination.parent / "tables/top_amino_acid_frequencies.tsv", separator="\t")

@@ -14,16 +14,22 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory, TemporaryFile
-from typing import Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import numpy as np
 import polars as pl
 
-from phenoradar.amino_acid_frequency_cache import AminoAcidFrequencyCache
+from phenoradar.amino_acid_frequency_cache import (
+    AminoAcidFrequencyCache,
+    release_frequency_maps,
+)
 from phenoradar.amino_acid_input_cache import AlignmentInputCache
 from phenoradar.config.schema import AminoAcidConfig, AminoAcidSiteFilter
 from phenoradar.provenance import file_identity
 from phenoradar.sequence_tpm_cache import SequenceTPMCacheError, read_sequence_tpm_cache
+
+if TYPE_CHECKING:
+    from phenoradar.amino_acid_encoding import FoldEncoding
 
 ALPHABET = "ACDEFGHIKLMNPQRSTVWY"
 SITE_BLOCK_SIZE = 512
@@ -132,6 +138,7 @@ class AlignmentStore:
             raise
 
     def close(self) -> None:
+        release_frequency_maps(Path(self._temp.name))
         self._frequency_caches.clear()
         self._temp.cleanup()
 
@@ -379,9 +386,13 @@ class AlignmentStore:
         if cache is None:
             raise AlignmentError("Weighted AA features require sequence TPM input")
         packed = np.load(cache, mmap_mode="r", allow_pickle=False)
-        for sample in species:
-            if sample in og.mask_rows:
-                counts += np.unpackbits(packed[og.mask_rows[sample]], count=og.width)
+        rows = np.array([og.mask_rows[s] for s in species if s in og.mask_rows], dtype=int)
+        # Bounded column blocks avoid one Python/unpack call per species.
+        for start in range(0, packed.shape[1], max(1, 1_000_000 // max(1, len(rows)))):
+            end = min(packed.shape[1], start + max(1, 1_000_000 // max(1, len(rows))))
+            bits = np.unpackbits(packed[rows, start:end], axis=1)
+            stop = min(og.width, end * 8)
+            counts[start * 8:stop] = bits[:, :stop - start * 8].sum(axis=0, dtype=np.int32)
         return counts
 
     @property
@@ -431,27 +442,38 @@ class AlignmentStore:
             )
         if (self.cache_frequencies and not representative and len(columns)
                 and any(s in og.species_rows for s in species)):
-            key = og.orthogroup, weighted
-            if key not in self._frequency_caches:
-                self._frequency_caches[key] = AminoAcidFrequencyCache(
-                    Path(self._temp.name) / f"{len(self._frequency_caches)}_frequency.bin",
-                    og.mask_rows,
-                )
-            cache = self._frequency_caches[key]
-            block = min(
-                SITE_BLOCK_SIZE, max(1, MAX_MATRIX_CELLS // max(1, len(cache.species) * 21))
-            )
-
-            def compute(samples: list[str], selected: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-                q, c, _ = self._compute_frequencies(og, samples, selected, weighted=weighted)
-                return q, c
-
+            cache, compute, block = self._frequency_cache(og, weighted)
             q, c = cache.get(species, columns, compute, block_size=block)
             return q, c, [None] * len(species)
         return self._compute_frequencies(
             og, species, columns, representative=representative,
             chosen_rows=chosen_rows, weighted=weighted,
         )
+
+    def _frequency_cache(
+        self, og: AlignmentOG, weighted: bool,
+    ) -> tuple[AminoAcidFrequencyCache,
+               Callable[[list[str], np.ndarray], tuple[np.ndarray, np.ndarray]], int]:
+        key = og.orthogroup, weighted
+        if key not in self._frequency_caches:
+            self._frequency_caches[key] = AminoAcidFrequencyCache(
+                Path(self._temp.name) / f"{len(self._frequency_caches)}_frequency.bin",
+                og.mask_rows,
+            )
+        cache = self._frequency_caches[key]
+        block = min(SITE_BLOCK_SIZE, max(1, MAX_MATRIX_CELLS // max(1, len(cache.species) * 21)))
+
+        def compute(samples: list[str], selected: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            q, c, _ = self._compute_frequencies(og, samples, selected, weighted=weighted)
+            return q, c
+
+        return cache, compute, block
+
+    def compact_frequencies(
+        self, og: AlignmentOG, species: list[str], columns: np.ndarray, *, weighted: bool,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        cache, compute, block = self._frequency_cache(og, weighted)
+        return cache.get_compact(species, columns, compute, block_size=block)
 
     def _compute_frequencies(
         self,
@@ -802,6 +824,7 @@ def fit_amino_acid(
     groups: np.ndarray,
     contrast_groups: np.ndarray | None = None,
     audit: bool = True,
+    _encoding: FoldEncoding | None = None,
 ) -> AATransform:
     """Every reduction and decision below uses exactly these training species."""
     if len(species) != len(y) or len(groups) != len(y) or not species:
@@ -855,16 +878,43 @@ def fit_amino_acid(
             columns = scoring[calls[scoring] >= required]
         counts["n_after_call_filter"] = len(columns)
         variant_count = 0
+        samples = species if _encoding is None else _encoding.species
+        block_choices = chosen_rows
+        if _encoding is not None and representative:
+            block_choices = store.representatives(og, samples, scoring)
+        sample_index = {s: i for i, s in enumerate(samples)}
+        training_rows = [sample_index[s] for s in species]
         for start in range(0, len(columns), block):
             selected = columns[start : start + block]
-            q, _, _ = store.frequencies(
-                og,
-                species,
-                selected,
-                representative=representative,
-                chosen_rows=chosen_rows,
-                weighted=weighted,
+            if _encoding is not None and not representative and store.cache_frequencies:
+                from phenoradar.amino_acid_encoding import compact_statistics
+
+                values, _, observed, state_sites, residues = store.compact_frequencies(
+                    og, samples, selected, weighted=weighted,
+                )
+                eligible, minor_samples, minor_groups, fractions, means, known, active = (
+                    compact_statistics(values[training_rows], observed[training_rows],
+                                       state_sites, residues, groups, quality, audit=audit)
+                )
+                variant_count += int(eligible.sum())
+                if eligible.any():
+                    _encoding.add_compact(values, state_sites, residues, eligible,
+                                          means, known, active)
+                    blocks.append({
+                        "orthogroup": og.orthogroup, "column": selected[eligible],
+                        "sample_fraction": calls[selected[eligible]] / len(species),
+                        "minor_samples": minor_samples[eligible],
+                        "minor_groups": minor_groups[eligible],
+                        "score": np.zeros(int(eligible.sum())), "mean": means[eligible],
+                        "known": known[eligible], "active": active[eligible],
+                        "post_aggregation_sample_fraction": fractions[eligible],
+                    })
+                continue
+            raw, _, _ = store.frequencies(
+                og, samples, selected, representative=representative,
+                chosen_rows=block_choices, weighted=weighted,
             )
+            q = raw if _encoding is None else raw[training_rows]
             eligible, minor_samples, minor_groups = _quality_summary(
                 q, groups, quality, audit=audit
             )
@@ -902,6 +952,9 @@ def fit_amino_acid(
                 variant_count += int(np.count_nonzero(eligible))
                 if np.any(eligible):
                     fractions, means, known, active = _site_statistics(q)
+                    if _encoding is not None:
+                        _encoding.add(raw[:, eligible], means[eligible], known[eligible],
+                                      active[eligible])
                     blocks.append({
                         "orthogroup": og.orthogroup,
                         "column": selected[eligible],

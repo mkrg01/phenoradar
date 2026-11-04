@@ -313,3 +313,30 @@ and can be reused across metadata/CV changes. Changed sources or incomplete part
 are rebuilt; source files must remain available. Delete cache directories to
 reclaim space or force rebuilding. Cache hits and paths appear in
 `sequence_tpm_input.tsv`; no cache setting is needed.
+
+
+AA grid/random selection streams one inner fold at a time. With no site ranking,
+training statistics and train/validation encoding share one residue-frequency
+read. Filters, means and representative choices still use training species only.
+Outer folds use independent processes, sized from the first fold's feature count,
+`runtime.n_jobs` and available allocation memory. Tables are merged in fold order.
+No sites, candidates or CV folds are removed to reduce resource use.
+
+AA runs also write the shared evaluation, model-selection, coefficient,
+importance and stability SVGs under each stage's `figures/` directory.
+`amino_acid_site_pss_top.svg` and `amino_acid_site_effect_range_top.svg` show
+separate site scores. Frequency plots use raw residue frequencies (0–1), with
+unavailable values excluded from the confusion-group distributions.
+The site-filter funnel counts alignment sites, rather than residue features.
+
+Temporary arithmetic skips canonical states absent from the cached compositions.
+Training means, known states and the float32 variance threshold remain unchanged;
+known-residue mass uses the original 20-state reduction. Encoded columns retain
+the original site/residue order. Wide-path scoring checks the full validation
+matrix once, then uses the exact nonzero coefficient columns (floating-point
+roundoff can differ from dense prediction).
+
+One fold's encoded matrices stay in RAM when the allocation has enough memory;
+the encoder spills to temporary disk if its bounded buffer would be exceeded.
+The first-fold resource estimate limits outer-fold concurrency. Inner ratio paths
+run sequentially within each AA worker, avoiding simultaneous full-matrix copies.

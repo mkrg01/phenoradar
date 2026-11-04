@@ -48,6 +48,7 @@ from phenoradar.glmnet import (
     GlmnetError,
     GlmnetLogisticRegression,
     fit_glmnet_path,
+    predict_glmnet_path,
 )
 from phenoradar.interpret import (
     InterpretationError,
@@ -3984,6 +3985,8 @@ def _score_glmnet_paths(
     preprocessed_folds: list[InnerCvPreprocessedFold],
     progress_callback: Callable[[str, str | None], None] | None,
     timing_recorder: TimingRecorder | None,
+    consume_training_matrix: bool = False,
+    max_path_workers: int | None = None,
 ) -> list[tuple[float, list[dict[str, Any]]]]:
     """Fit one native lambda path per fold and combination of other parameters."""
     paths: dict[tuple[float, float, int, float], list[Candidate]] = {}
@@ -4004,6 +4007,9 @@ def _score_glmnet_paths(
         for fold_index, fold in enumerate(preprocessed_folds)
     ]
     worker_count, estimator_n_jobs = _selection_parallel_plan(config, len(tasks))
+    if max_path_workers is not None:
+        worker_count = max(1, min(worker_count, max_path_workers))
+        estimator_n_jobs = max(1, _runtime_n_jobs(config) // worker_count)
     by_candidate: dict[int, dict[int, tuple[float, list[dict[str, Any]]]]] = {
         candidate.candidate_index: {} for candidate in candidates
     }
@@ -4033,13 +4039,18 @@ def _score_glmnet_paths(
                 thresh=float(params.get("thresh", DEFAULT_THRESH)),
                 maxit=int(params.get("maxit", DEFAULT_MAXIT)),
                 sample_weight=fold.sample_weight,
+                compute_kkt=False,
+                copy_x=not (consume_training_matrix and len(paths) == 1
+                            and fold.x_train.flags.f_contiguous),
                 **penalty_options,
             )
         except GlmnetError as exc:
             raise CVError(f"Inner fold {fold.inner_fold_id}: {exc}") from exc
         results = []
-        for candidate, model in zip(path, models, strict=True):
-            prob = _predict_positive_probability(model, fold.x_valid)
+        probabilities = (predict_glmnet_path(models, fold.x_valid)
+                         if fold.x_valid.shape[1] >= 100_000 else
+                         [_predict_positive_probability(m, fold.x_valid) for m in models])
+        for candidate, model, prob in zip(path, models, probabilities, strict=True):
             score = _selection_metric_from_probability(config, fold.y_valid, prob)
             rows = [{
                 "candidate_index": candidate.candidate_index,

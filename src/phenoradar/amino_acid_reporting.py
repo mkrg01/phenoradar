@@ -89,7 +89,8 @@ def _concat_csv(parts: list[Path], destination: Path) -> None:
 class AAReportWriter:
     """Spool each model once; retain no full feature names or fitted fold models."""
 
-    def __init__(self, destination: Path) -> None:
+    def __init__(self, destination: Path, *, model_base: int = 0) -> None:
+        self.model_base = model_base
         self.destination = destination
         destination.mkdir(parents=True, exist_ok=True)
         self._temp = TemporaryDirectory(prefix="phenoradar_aa_reports_")
@@ -112,7 +113,7 @@ class AAReportWriter:
     def add(self, members: list[AAMember], *, features: bool = True) -> None:
         transforms: dict[int, tuple[int, Path | None]] = {}
         for member in members:
-            model_index = len(self.models)
+            model_index = self.model_base + len(self.models)
             fold = member.scope.removeprefix("outer_fold_")
             self.models.append((fold, member.scope, member.sample_set_id))
             context = member.scope, member.sample_set_id, member.candidate.candidate_index
@@ -162,6 +163,32 @@ class AAReportWriter:
                     pl.lit(member.sample_set_id).alias("sample_set_id"),
                     pl.lit(member.candidate.candidate_index).alias("candidate_index"),
                 ))
+
+    def export(self, destination: Path) -> None:
+        """Move worker spools without transferring full fold models through IPC."""
+        self.features.flush()
+        self.sites.flush()
+        shutil.copytree(self.path, destination)
+        transforms = {key: (index, None if path is None else path.name)
+                      for key, (index, path) in self.transforms.items()}
+        joblib.dump((self.models, self.contexts, transforms), destination / "index.joblib")
+
+    def merge(self, source: Path) -> None:
+        models, contexts, transforms = joblib.load(source / "index.joblib")
+        self.models.extend(models)
+        self.contexts.update(contexts)
+        for key, (index, filename) in transforms.items():
+            path = None
+            if filename is not None:
+                path = self.path / f"scoring_{index}.joblib"
+                if not path.exists():
+                    shutil.copyfile(source / filename, path)
+            self.transforms[key] = index, path
+        for name, spool in [("features", self.features), ("sites", self.sites)]:
+            spool.flush()
+            for path in sorted((source / name).glob("*.parquet")):
+                shutil.move(path, spool.directory / f"{spool.parts:06d}.parquet")
+                spool.parts += 1
 
     def frequency_members(
         self, members: list[AAMember], importance: pl.DataFrame,

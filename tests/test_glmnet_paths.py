@@ -135,3 +135,40 @@ def test_native_paths_are_batched_by_fold_and_alpha(monkeypatch: pytest.MonkeyPa
         )
         assert score == pytest.approx(selected.score, abs=1e-6)
         assert all(row["fit_diagnostic"].converged for row in rows)
+
+
+def test_consumed_training_matrix_preserves_the_native_path() -> None:
+    from phenoradar.glmnet import fit_glmnet_path
+
+    rng = np.random.default_rng(119)
+    x = np.asfortranarray(rng.normal(size=(60, 120)))
+    y = np.tile([0, 1], 30)
+    lambdas = [.1, .03, .01]
+    reference = fit_glmnet_path(x, y, lambdas)
+    consumed = fit_glmnet_path(x.copy(order="F"), y, lambdas, compute_kkt=False, copy_x=False)
+    for left, right in zip(reference, consumed, strict=True):
+        np.testing.assert_array_equal(left.coef_, right.coef_)
+        assert left.intercept_ == right.intercept_
+        assert left.n_iter_ == right.n_iter_
+        assert not hasattr(right, "kkt_residual_")
+
+
+def test_wide_path_prediction_only_uses_exact_nonzero_columns() -> None:
+    from phenoradar.glmnet import predict_glmnet_path
+
+    rng = np.random.default_rng(793)
+    values = rng.normal(size=(12, 100_003))
+    models = []
+    for size in [0, 3, 13]:
+        m = GlmnetLogisticRegression()
+        m.coef_ = np.zeros(values.shape[1])
+        m.coef_[np.arange(size) * 71] = rng.normal(size=size)
+        m.intercept_ = -.2
+        m.n_features_in_ = values.shape[1]
+        models.append(m)
+    expected = [m.predict_proba(values)[:, 1] for m in models]
+    actual = predict_glmnet_path(models, values)
+    np.testing.assert_allclose(actual, expected, atol=5e-15, rtol=5e-15)
+    values[0, -1] = np.nan  # Invalid inputs are rejected even in a coefficient-zero column.
+    with pytest.raises(ValueError, match="NaN"):
+        predict_glmnet_path(models, values)

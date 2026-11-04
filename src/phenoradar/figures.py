@@ -130,6 +130,9 @@ _FEATURE_FILTER_FIGURE_DEFAULT_STAGE_ORDER = (
     "n_features_after_all",
 )
 _FEATURE_FILTER_FIGURE_STAGE_LABELS = {
+    "alignment_sites": "Alignment sites",
+    "observed_sites": "Callable sites",
+    "variable_sites": "Variable sites",
     "n_features_before": "Input",
     "n_features_after_sparse_feature_filter": "Sparse feature",
     "n_features_after_low_variance": "Low variance",
@@ -235,7 +238,8 @@ def _feature_label_row_height_px(labels: list[str]) -> int:
 
 
 def _feature_label_axis_title(_labels: list[str]) -> str:
-    return "Orthogroup"
+    return ("Feature" if any(re.search(r":\d+ [A-Z]$", label) for label in _labels)
+            else "Orthogroup")
 
 
 def _orthogroup_annotation_lookup(
@@ -275,7 +279,17 @@ def _feature_axis_labels(
     for feature in features:
         annotation = annotation_lookup.get(feature)
         if annotation is None:
-            labels.append(feature)
+            try:
+                address = json.loads(feature)
+            except (ValueError, TypeError):
+                address = None
+            if (isinstance(address, list) and len(address) == 3
+                    and isinstance(address[1], int)):
+                labels.append(f"{address[0]}:{address[1]} {address[2]}")
+            elif isinstance(address, list) and len(address) == 2 and address[0] == "expression":
+                labels.append(f"{address[1]} (expression)")
+            else:
+                labels.append(feature)
             continue
         labels.append(textwrap.fill(f"{' '.join(annotation.split())} ({feature})", width=48))
     return labels
@@ -4133,8 +4147,12 @@ def _feature_filter_funnel(
         [_FEATURE_FILTER_FIGURE_STAGE_LABELS[stage] for stage in stage_order],
         fontsize=_TICK_FONTSIZE,
     )
-    ax.set_xlabel("Feature selection step", fontsize=_LABEL_FONTSIZE)
-    ax.set_ylabel("Number of selected features", fontsize=_LABEL_FONTSIZE)
+    site_units = any(stage in {"alignment_sites", "observed_sites", "variable_sites"}
+                     for stage in stage_order)
+    ax.set_xlabel("Site filtering step" if site_units else "Feature selection step",
+                  fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel("Number of sites" if site_units else "Number of selected features",
+                  fontsize=_LABEL_FONTSIZE)
     ax.margins(y=0.15)
     ax.set_ylim(bottom=0.0)
     ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
