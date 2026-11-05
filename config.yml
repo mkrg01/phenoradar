@@ -45,10 +45,10 @@ preprocess:
       enabled: false  # choices: true, false
       min_variance: null  # type: number or null
     ranked_feature_filter:
-      method: pair_aware  # choices: none, pair_aware, unpaired, variance
-      max_features: 200  # type: integer or null
+      method: none  # choices: none, pair_aware, unpaired, variance
+      max_features: null  # type: integer or null
       min_contrast_pairs: 1
-      higher_in_trait: 1  # choices: 0, 1, null; null keeps either direction
+      higher_in_trait: null  # choices: 0, 1, null; null keeps either direction
     correlation_filter:
       enabled: false  # choices: true, false
       method: pearson  # choices: pearson, spearman
