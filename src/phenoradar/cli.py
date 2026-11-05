@@ -981,7 +981,9 @@ def _run_single(
         stage="fingerprint_generation",
     )
 
-    with RunExpressionCache() as expression_cache:
+    with RunExpressionCache(
+        cache_directory=Path("runs/.phenoradar_cache/expression"),
+    ) as expression_cache:
         if resolved.runtime.execution_stage == "full_run":
             _log("Prepare shared expression input for CV and final refit.")
             input_started = timing_recorder.start()
@@ -989,6 +991,7 @@ def _run_single(
                 expression_cache.prepare(
                     resolved, split_artifacts.split_manifest, timing_recorder
                 )
+                expression_cache.validate_input_identity(input_files)
             except CVError as exc:
                 raise typer.BadParameter(str(exc)) from exc
             timing_recorder.record_since(
@@ -1008,6 +1011,7 @@ def _run_single(
                 timing_recorder=timing_recorder,
                 expression_cache=expression_cache,
             )
+            expression_cache.validate_input_identity(input_files)
         except CVError as exc:
             raise typer.BadParameter(str(exc)) from exc
         timing_recorder.record_since(
@@ -1082,6 +1086,7 @@ def _run_single(
             _log("Final refit completed.")
         else:
             _log("Skip final refit stage (execution_stage=cv_only).")
+        expression_builder = expression_cache.prepared_builder
 
     _log("Create run directory and write core tabular artifacts.")
     artifact_writing_started = timing_recorder.start()
@@ -1274,6 +1279,7 @@ def _run_single(
                 ),
                 top_features=resolved.figures.top_features,
                 include_model_reference=True,
+                expression_builder=expression_builder,
             )
         except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
             raise typer.BadParameter(str(exc)) from exc

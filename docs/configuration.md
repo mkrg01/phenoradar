@@ -46,7 +46,11 @@ Keys in each table are relative to the section heading.
 See [data format](data-format.md) for input validation and
 [amino-acid and combined modes](amino-acid.md) for sequence-specific behavior.
 Cache paths and matrix-construction chunk sizes are managed internally and
-omitted from generated user configs.
+omitted from generated user configs. Expression runs reuse validated normalized
+TPM under `runs/.phenoradar_cache/expression/`. Input contents, selected species,
+column names, normalization code, and Polars version determine cache identity;
+changed or damaged entries are rebuilt. Filters and scaling are fitted within
+each training scope. Delete the cache directory between runs to reclaim disk space.
 
 ## `split`
 

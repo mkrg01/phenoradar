@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import warnings as warning_control
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -37,6 +37,12 @@ from sklearn.utils.validation import has_fit_parameter
 
 from phenoradar.abstention import annotate_abstention
 from phenoradar.config import AppConfig, PredictConfig
+from phenoradar.expression_input_cache import (
+    ExpressionCacheError,
+    ExpressionSource,
+    normalized_cache,
+    source_signature,
+)
 from phenoradar.feature_stability import (
     FeatureStabilityError,
     build_feature_stability_tables,
@@ -1311,8 +1317,12 @@ class ExpressionMatrixBuilder:
     _MISSING_FEATURE_SENTINEL = "__phenoradar_missing_feature__"
 
     def __init__(
-        self, config: AppConfig | PredictConfig, *, absent_feature_fill: int | str | None = None
+        self, config: AppConfig | PredictConfig, *, absent_feature_fill: int | str | None = None,
+        cache_directory: Path | None = None, cache_source: ExpressionSource | None = None,
     ) -> None:
+        self._persistent_cache_directory = cache_directory
+        self._cache_source = cache_source
+        self._cache_workers = max(1, min(4, int(config.runtime.n_jobs)))
         self._timing_recorder: TimingRecorder | None = None
         self._timing_scope = "expression_input"
         self._tpm_path = Path(config.data.tpm_path)
@@ -1337,6 +1347,7 @@ class ExpressionMatrixBuilder:
         self._cache_tempdir: TemporaryDirectory[str] | None = None
         self._cached_long_path: Path | None = None
         self._cached_species: set[str] | None = None
+        self._cached_catalog: dict[str, Any] | None = None
 
         try:
             schema_scan = pl.scan_csv(self._tpm_path, separator="\t")
@@ -1394,7 +1405,7 @@ class ExpressionMatrixBuilder:
         finally:
             self._record_timing(started, stage)
 
-    def _raw_long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
+    def _normalized_rows_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
         raw_value = pl.col(self._value_col).cast(pl.String, strict=False).str.strip_chars()
         feature_value = pl.col(self._feature_col).cast(pl.String, strict=False).str.strip_chars()
         parsed_value = raw_value.cast(pl.Float64, strict=False)
@@ -1454,6 +1465,10 @@ class ExpressionMatrixBuilder:
             .otherwise(None)
             .alias("__invalid_line"),
         )
+        return normalized
+
+    @staticmethod
+    def _aggregate_normalized_rows(normalized: pl.LazyFrame) -> pl.LazyFrame:
         aggregated = normalized.group_by(["__species", "__feature"]).agg(
             pl.col("__value").sum(),
             pl.col("__invalid_count").sum(),
@@ -1476,6 +1491,9 @@ class ExpressionMatrixBuilder:
             .otherwise(pl.col("__invalid_reason_mask"))
             .alias("__invalid_reason_mask"),
         ).drop("__group_first_line")
+
+    def _raw_long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
+        return self._aggregate_normalized_rows(self._normalized_rows_for_species(unique_species))
 
     @classmethod
     def _raise_invalid_tpm_values(cls, invalid_rows: pl.DataFrame, total: int) -> None:
@@ -1529,16 +1547,23 @@ class ExpressionMatrixBuilder:
         )
         self._raise_invalid_tpm_values(invalid_rows, total)
 
+    def _check_cache_source(self) -> None:
+        if self._cache_source is not None and source_signature(self._tpm_path) != (
+            self._cache_source.signature
+        ):
+            raise CVError(f"Expression input changed while its cache was in use: {self._tpm_path}")
+
     def _long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
+        self._check_cache_source()
         requested_species = set(unique_species)
         if (
             self._cached_long_path is not None
             and self._cached_species is not None
             and requested_species.issubset(self._cached_species)
         ):
-            return pl.scan_parquet(self._cached_long_path).filter(
-                pl.col("__species").is_in(unique_species)
-            )
+            cache_path = self._cached_long_path
+            source = str(cache_path / "part-*.parquet") if cache_path.is_dir() else str(cache_path)
+            return pl.scan_parquet(source).filter(pl.col("__species").is_in(unique_species))
         return self._raw_long_scan_for_species(unique_species)
 
     def cache_species(self, species_order: list[str]) -> None:
@@ -1548,11 +1573,31 @@ class ExpressionMatrixBuilder:
             raise CVError("No species were provided for matrix construction")
         unique_species = list(dict.fromkeys(species_order))
         requested_species = set(unique_species)
+        self._check_cache_source()
         if (
             self._cached_long_path is not None
             and self._cached_species is not None
             and requested_species.issubset(self._cached_species)
         ):
+            return
+
+        if self._persistent_cache_directory is not None:
+            started = self._start_timing()
+            hit = False
+            try:
+                entry, hit, source_identity = normalized_cache(
+                    self._persistent_cache_directory, self._tpm_path, unique_species,
+                    (self._species_col, self._feature_col, self._value_col),
+                    source=self._cache_source, workers=self._cache_workers,
+                )
+            except (ExpressionCacheError, OSError) as exc:
+                raise CVError(str(exc)) from exc
+            finally:
+                self._record_timing(started, "input_cache_hit" if hit else "input_normalize_cache")
+            self._cached_long_path = entry
+            self._cached_species = requested_species
+            self._cache_source = source_identity
+            self._cached_catalog = json.loads((entry / "catalog.json").read_text())
             return
 
         cache_tempdir = TemporaryDirectory(prefix="phenoradar-expression-")
@@ -1583,8 +1628,12 @@ class ExpressionMatrixBuilder:
         if self._cache_tempdir is not None:
             self._cache_tempdir.cleanup()
         self._cache_tempdir = None
-        self._cached_long_path = None
-        self._cached_species = None
+        # Persistent entries own no open readers or temporary files. Borrowers
+        # may continue reading their verified raw input during artifact generation.
+        if self._persistent_cache_directory is None:
+            self._cached_long_path = None
+            self._cached_species = None
+            self._cached_catalog = None
 
     @staticmethod
     def _normalize_feature_order(feature_order: list[str]) -> list[str]:
@@ -1641,6 +1690,71 @@ class ExpressionMatrixBuilder:
         )
         return matrix[ordered_rows, :]
 
+    def _present_species(
+        self, unique_species: list[str], long_scan: pl.LazyFrame,
+    ) -> set[str]:
+        if (
+            self._cached_catalog is not None and self._cached_species is not None
+            and set(unique_species).issubset(self._cached_species)
+        ):
+            return set(unique_species).intersection(self._cached_catalog["species"])
+        return {
+            str(value)
+            for value in self._collect_expression(long_scan.select("__species").unique())
+            .to_series().to_list()
+        }
+
+    def _cached_feature_names(self, unique_species: list[str]) -> list[str] | None:
+        if (
+            self._cached_catalog is not None and self._cached_long_path is not None
+            and set(unique_species) == self._cached_species
+        ):
+            return [
+                str(value) for value in
+                pl.read_parquet(self._cached_long_path / "features.parquet").to_series().to_list()
+            ]
+        return None
+
+    def _partitioned_matrix(
+        self, species_order: list[str], feature_names: list[str],
+    ) -> tuple[np.ndarray, list[str]]:
+        assert self._cached_catalog is not None and self._cached_long_path is not None
+        started = self._start_timing()
+        matrix = np.full(
+            (len(species_order), len(feature_names)), self._absent_feature_fill_value, dtype=float,
+        )
+        self._record_timing(started, "input_dense_assembly")
+        requested = set(species_order)
+        for name, part_species in self._cached_catalog["part_species"].items():
+            selected = requested.intersection(part_species)
+            if not selected:
+                continue
+            row_indices = [
+                index for index, species in enumerate(species_order) if species in selected
+            ]
+            part_order = [species_order[index] for index in row_indices]
+            ordering = pl.DataFrame({
+                "__species": part_order, "__row_idx": list(range(len(part_order))),
+            })
+            scan = pl.scan_parquet(self._cached_long_path / name).filter(
+                pl.col("__species").is_in(sorted(selected))
+            )
+            width = max(1, self._max_pivot_cells // max(1, len(part_order)))
+            for start in range(0, len(feature_names), width):
+                stop = min(len(feature_names), start + width)
+                features = feature_names[start:stop]
+                frame = self._collect_expression(
+                    scan.filter(pl.col("__feature").is_in(features)), stage="input_matrix_read",
+                )
+                started = self._start_timing()
+                block = self._matrix_from_long_df(
+                    frame, ordering, features, self._absent_feature_fill_value,
+                )
+                matrix[row_indices, start:stop] = block
+                self._record_timing(started, "input_dense_assembly")
+                del frame, block
+        return matrix, feature_names
+
     def feature_names_for_species(self, species_order: list[str]) -> list[str]:
         """Return sorted feature names available for the selected species."""
 
@@ -1649,12 +1763,7 @@ class ExpressionMatrixBuilder:
 
         unique_species = list(dict.fromkeys(species_order))
         long_scan = self._long_scan_for_species(unique_species)
-        present_species = {
-            str(value)
-            for value in self._collect_expression(long_scan.select("__species").unique())
-            .to_series()
-            .to_list()
-        }
+        present_species = self._present_species(unique_species, long_scan)
         if not present_species:
             raise CVError("Expression matrix is empty for the selected species")
         missing_species = sorted(set(unique_species) - set(str(v) for v in present_species))
@@ -1662,14 +1771,16 @@ class ExpressionMatrixBuilder:
             preview = ", ".join(missing_species[:10])
             raise CVError(f"Expression data is missing selected species: {preview}")
 
-        feature_names = [
-            str(value)
-            for value in (
-                self._collect_expression(long_scan.select("__feature").unique().sort("__feature"))
-                .to_series()
-                .to_list()
-            )
-        ]
+        feature_names = self._cached_feature_names(unique_species)
+        if feature_names is None:
+            feature_names = [
+                str(value)
+                for value in (
+                    self._collect_expression(long_scan.select("__feature").unique().sort("__feature"))
+                    .to_series()
+                    .to_list()
+                )
+            ]
         if not feature_names:
             raise CVError("No features were available after pivoting expression data")
         return feature_names
@@ -1688,12 +1799,7 @@ class ExpressionMatrixBuilder:
         )
         long_scan = self._long_scan_for_species(unique_species)
 
-        present_species = {
-            str(value)
-            for value in self._collect_expression(long_scan.select("__species").unique())
-            .to_series()
-            .to_list()
-        }
+        present_species = self._present_species(unique_species, long_scan)
         if not present_species:
             raise CVError("Expression matrix is empty for the selected species")
         missing_species = sorted(set(unique_species) - set(str(v) for v in present_species))
@@ -1702,16 +1808,18 @@ class ExpressionMatrixBuilder:
             raise CVError(f"Expression data is missing selected species: {preview}")
 
         if feature_order is None:
-            feature_names = [
-                str(value)
-                for value in (
-                    self._collect_expression(
-                        long_scan.select("__feature").unique().sort("__feature")
+            feature_names = self._cached_feature_names(unique_species)
+            if feature_names is None:
+                feature_names = [
+                    str(value)
+                    for value in (
+                        self._collect_expression(
+                            long_scan.select("__feature").unique().sort("__feature")
+                        )
+                        .to_series()
+                        .to_list()
                     )
-                    .to_series()
-                    .to_list()
-                )
-            ]
+                ]
         else:
             feature_names = self._normalize_feature_order(feature_order)
             # Validate every consumed row for the requested species, including
@@ -1721,6 +1829,9 @@ class ExpressionMatrixBuilder:
             long_scan = long_scan.filter(pl.col("__feature").is_in(feature_names))
         if not feature_names:
             raise CVError("No features were available after pivoting expression data")
+
+        if uses_validated_cache and self._cached_catalog is not None and len(unique_species) > 128:
+            return self._partitioned_matrix(species_order, feature_names)
 
         ordering_df = pl.DataFrame(
             {"__species": species_order, "__row_idx": list(range(len(species_order)))}
@@ -1780,9 +1891,18 @@ class RunExpressionCache:
     scaling, and model fitting remain local to their existing training scopes.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, cache_directory: Path | None = None, cache_source: ExpressionSource | None = None,
+    ) -> None:
+        self._cache_directory = cache_directory
+        self._cache_source = cache_source
         self._builder: ExpressionMatrixBuilder | None = None
         self._signature: tuple[object, ...] | None = None
+
+    @property
+    def prepared_builder(self) -> ExpressionMatrixBuilder | None:
+        """Return the raw-input builder already used by training, if any."""
+        return self._builder
 
     def get_builder(self, config: AppConfig) -> ExpressionMatrixBuilder:
         signature = (
@@ -1793,11 +1913,26 @@ class RunExpressionCache:
             config.preprocess.expression.absent_feature_fill,
         )
         if self._builder is None:
-            self._builder = ExpressionMatrixBuilder(config)
+            self._builder = ExpressionMatrixBuilder(
+                config, cache_directory=self._cache_directory, cache_source=self._cache_source,
+            )
             self._signature = signature
         elif signature != self._signature:
             raise CVError("Run expression cache cannot be reused with different input settings")
         return self._builder
+
+    def validate_input_identity(self, input_files: Sequence[Mapping[str, Any]]) -> None:
+        """Require the normalized snapshot to match the input recorded for this run."""
+        if self._builder is None or self._builder._cache_source is None:
+            return
+        self._builder._check_cache_source()
+        target = self._builder._tpm_path.resolve()
+        for record in input_files:
+            raw_path = record.get("path")
+            if isinstance(raw_path, str) and Path(raw_path).resolve() == target:
+                if record.get("sha256") != self._builder._cache_source.digest:
+                    raise CVError("Expression input differs from the recorded input SHA-256")
+                return
 
     def close(self) -> None:
         if self._builder is not None:
