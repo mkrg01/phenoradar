@@ -272,20 +272,32 @@ class AAReportWriter:
         for fold, _, _ in self.models:
             counts[fold] = counts.get(fold, 0) + 1
         folds = sorted(counts, key=_fold_sort_key)
-        count_frame = pl.DataFrame({"fold_id": list(counts), "_count": list(counts.values())})
-        means = raw.group_by("fold_id", "feature", "modality").agg(
-            pl.col("coefficient").sum(), pl.col("importance").sum(),
-        ).join(count_frame.lazy(), on="fold_id").with_columns(
-            (pl.col("coefficient") / pl.col("_count")).alias("coefficient"),
-            (pl.col("importance") / pl.col("_count")).alias("importance"),
-        ).drop("_count")
-        means.sink_parquet(self.path / "means.parquet", engine="streaming")
-        means = pl.scan_parquet(self.path / "means.parquet")
+        means_directory = self.path / "means"
+        means_directory.mkdir(exist_ok=True)
+        means_parts = []
+        retained_path = self.destination / "retained_features.tsv"
+        # A fold's feature keys need not coexist with every other fold's keys.
+        # Preserve every input coefficient and the original fold denominators.
+        with retained_path.open("wb") as retained_output:
+            for index, fold in enumerate(sorted(counts)):
+                local = raw.filter(pl.col("fold_id") == fold)
+                means = local.group_by("fold_id", "feature", "modality").agg(
+                    pl.col("coefficient").sum(), pl.col("importance").sum(),
+                ).with_columns(
+                    (pl.col("coefficient") / counts[fold]).alias("coefficient"),
+                    (pl.col("importance") / counts[fold]).alias("importance"),
+                )
+                path = means_directory / f"{index:06d}.parquet"
+                means.sink_parquet(path, engine="streaming")
+                means_parts.append(path)
+                local.select(pl.lit("outer_fold").alias("scope"), "fold_id", "sample_set_id",
+                             "feature").unique().sink_csv(
+                    retained_output, separator="\t", engine="streaming", include_header=index == 0,
+                )
+        means = pl.scan_parquet(means_parts)
         union = means.select("feature", "modality").unique()
         union.sink_parquet(self.path / "union.parquet", engine="streaming")
         union = pl.scan_parquet(self.path / "union.parquet")
-        _sink(raw.select(pl.lit("outer_fold").alias("scope"), "fold_id", "sample_set_id",
-                         "feature").unique(), self.destination / "retained_features.tsv")
         modalities = ["expression", "amino_acid"] if combined else ["amino_acid"]
         for modality in modalities:
             self._interpret(means.filter(pl.col("modality") == modality),
@@ -323,6 +335,9 @@ class AAReportWriter:
                   * (n - pl.col("_k")) / n) / n).sqrt().alias(f"{col}_std"),
             ]
         ))
+        stats_path = self.path / f"{prefix}feature_statistics.parquet"
+        stats.sink_parquet(stats_path, engine="streaming")
+        stats = pl.scan_parquet(stats_path)
         for kind, col in [("feature_importance", "importance"), ("coefficients", "coefficient")]:
             coefficient = col == "coefficient"
             label = "coef" if coefficient else "importance"

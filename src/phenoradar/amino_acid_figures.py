@@ -92,7 +92,7 @@ def write_amino_acid_figures(
         }
         means = None
     else:
-        means = pl.scan_parquet(report.path / "means.parquet")
+        means = pl.scan_parquet(report.path / "means" / "*.parquet")
         fold_model_counts: dict[str, int] = {}
         for fold, _, _ in report.models:
             fold_model_counts[fold] = fold_model_counts.get(fold, 0) + 1

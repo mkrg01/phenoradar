@@ -1,11 +1,14 @@
 """Memory-bounded outer folds with private caches and deterministic table merging."""
 from __future__ import annotations
 
+import json
 import multiprocessing
 import os
 import shutil
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
+from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -16,21 +19,36 @@ import polars as pl
 from phenoradar.amino_acid import AlignmentStore
 from phenoradar.amino_acid_presence import SpeciesPresenceCache
 from phenoradar.amino_acid_reporting import AAReportWriter
+from phenoradar.amino_acid_resources import (
+    MAX_MATRIX_BUFFER,
+    SparseUsage,
+    process_peak_rss,
+    worker_bytes,
+)
 from phenoradar.combined import ExpressionInput
 from phenoradar.config import AppConfig
-from phenoradar.model_selection import active_search_space
 from phenoradar.resource_budget import memory_budget
 
 
-def fold_workers(config: AppConfig, n_species: int, n_features: int, n_folds: int) -> int:
-    # One streamed training/validation pair, native workspaces and refit/metadata,
-    # plus headroom for fold-specific schema variation and shared file cache.
-    one_path = all(isinstance(value, list) and len(value) == 1
-                   for name, value in active_search_space(config).items() if name != "lambda")
-    factor = 2.5 if config.data.feature_mode == "amino_acid" and one_path else 3.5
-    if config.model_selection.search_strategy == "tpe":
-        factor = 8.0
-    per_worker = max(1, int(n_species * n_features * 8 * factor) + 1024**3)
+@contextmanager
+def _worker_threads(n_jobs: int) -> Iterator[None]:
+    # Spawned imports may initialize Polars before the pool initializer runs.
+    previous = os.environ.get("POLARS_MAX_THREADS")
+    os.environ["POLARS_MAX_THREADS"] = str(n_jobs)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("POLARS_MAX_THREADS", None)
+        else:
+            os.environ["POLARS_MAX_THREADS"] = previous
+
+
+def fold_workers(config: AppConfig, n_species: int, n_features: int, n_folds: int,
+                 usage: SparseUsage | None = None) -> int:
+    retained = ((config.model_selection.inner_cv_n_splits or n_species)
+                if config.model_selection.search_strategy == "tpe" else 1)
+    per_worker = worker_bytes(usage or SparseUsage(), n_species, n_features, retained)
     return max(1, min(config.runtime.n_jobs, n_folds, int(memory_budget() * .7) // per_worker))
 
 
@@ -69,6 +87,9 @@ def run_fold(config: AppConfig, store: AlignmentStore, expression: ExpressionInp
                                  tables=tables, expression=expression)
     prediction = prediction.join(valid.select("species", "label", "group_id"), on="species")
     prediction = prediction.with_columns(pl.lit(fold).alias("fold_id"))
+    usage = getattr(store, "_sparse_usage", SparseUsage())
+    usage.peak_rss_bytes = max(usage.peak_rss_bytes, process_peak_rss())
+    (directory / "resources.json").write_text(json.dumps(asdict(usage)))
     joblib.dump((compact, prediction, warnings, features), directory / "result.joblib")
     return directory
 
@@ -76,13 +97,17 @@ def run_fold(config: AppConfig, store: AlignmentStore, expression: ExpressionInp
 _WORKER: tuple[AlignmentStore, ExpressionInput | None] | None = None
 
 
-def initialize(payload: dict[str, Any], n_jobs: int) -> None:
+def initialize(payload: dict[str, Any], n_jobs: int,
+               matrix_buffer_bytes: int | None = None) -> None:
     global _WORKER
     # Bound Polars as well as BLAS; each process has its own native thread limits.
     os.environ["POLARS_MAX_THREADS"] = str(n_jobs)
     store = object.__new__(AlignmentStore)
     store.__dict__.update(payload["store"])
     store._temp = TemporaryDirectory(prefix="phenoradar_aa_worker_")
+    store._sparse_usage = SparseUsage()
+    if matrix_buffer_bytes is not None:
+        store._matrix_buffer_bytes = matrix_buffer_bytes
     store._site_presence = SpeciesPresenceCache(
         Path(store._temp.name) / "species_presence.bin", payload["store"]["_site_presence"],
     )
@@ -120,9 +145,15 @@ def outer_folds(config: AppConfig, store: AlignmentStore, expression: Expression
             return
         _, _, _, features = joblib.load(first / "result.joblib")
         n = manifest.filter(pl.col("pool").is_in(["train", "validation"]))["species"].n_unique()
-        workers = fold_workers(config, n, features, len(folds) - 1)
+        usage_path = first / "resources.json"
+        usage = SparseUsage(**json.loads(usage_path.read_text())) if usage_path.exists() else None
+        workers = fold_workers(config, n, features, len(folds) - 1, usage)
+        matrix_buffer = min(MAX_MATRIX_BUFFER, max(1,
+            int(memory_budget() * .7) // (3 * workers)))
         if progress:
-            progress(f"AA outer folds: {workers} workers; pilot had {features:,} features.")
+            progress(f"AA outer folds: {workers} workers; pilot had {features:,} features; "
+                     f"CSC pair {(usage.matrix_bytes if usage else 0) / 1024**3:.2f} GiB; "
+                     f"matrix buffer {matrix_buffer / 1024**3:.2f} GiB/worker.")
         child = config.model_copy(deep=True)
         child.runtime.n_jobs = max(1, config.runtime.n_jobs // workers)
         if workers == 1:
@@ -130,9 +161,10 @@ def outer_folds(config: AppConfig, store: AlignmentStore, expression: Expression
                 yield run_fold(child, store, expression, manifest, fold, root / fold,
                                i * 1_000_000, progress)
             return
-        with ProcessPoolExecutor(
+        with _worker_threads(child.runtime.n_jobs), ProcessPoolExecutor(
             max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
-            initializer=initialize, initargs=(snapshot(store, expression), child.runtime.n_jobs),
+            initializer=initialize,
+            initargs=(snapshot(store, expression), child.runtime.n_jobs, matrix_buffer),
         ) as executor:
             # Queue the remaining small tasks so a free worker never waits for
             # an earlier fold's result. Only paths cross IPC; merge in fold order.

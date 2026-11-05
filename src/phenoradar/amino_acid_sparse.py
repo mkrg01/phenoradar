@@ -1,4 +1,4 @@
-"""Training-only affine shifts and disk-backed CSC encoding for AA models."""
+"""Training-only affine shifts and memory-bounded CSC encoding for AA models."""
 from __future__ import annotations
 
 from contextlib import ExitStack
@@ -10,6 +10,7 @@ from scipy import sparse
 
 from phenoradar.amino_acid import AATransform, AlignmentStore, fit_amino_acid
 from phenoradar.amino_acid_encoding import EncodedBlock, FoldEncoding
+from phenoradar.amino_acid_resources import matrix_buffer_limit, record_sparse_usage
 from phenoradar.config.schema import AminoAcidConfig
 
 
@@ -108,12 +109,12 @@ class SparseFoldEncoding(FoldEncoding):
     def append(self, values: np.ndarray) -> None:
         if not values.shape[1]:
             return
-        shift = modal_shift(values[self.training])
+        shift = modal_shift(self._selected(values, self.training))
         self.shifts.append(shift)
         for i, rows in enumerate(self.rows):
             # Transposed blocks enumerate nonzeros in CSC order directly, without
             # a COO conversion, column sort, or whole-OG dense assembly.
-            shifted = (values[rows] + shift).T
+            shifted = (self._selected(values, rows) + shift).T
             columns, indices = np.nonzero(shifted)
             ends = np.cumsum(np.bincount(columns, minlength=values.shape[1]), dtype=np.int64)
             self._append_csc(i, shifted[columns, indices], indices, ends)
@@ -136,6 +137,7 @@ class SparseFoldEncoding(FoldEncoding):
                 data, indices, ends = [np.concatenate([chunk[j] for chunk in chunks])
                                        for j in range(3)]
                 self._buffered_chunks[i] = []
+                del chunks
             else:
                 assert handles is not None
                 for handle in handles:
@@ -153,14 +155,16 @@ def fit_sparse_encoded(
     store: AlignmentStore, training: list[str], settings: AminoAcidConfig,
     targets: list[list[str]], **kwargs: Any,
 ) -> tuple[AATransform, list[Any], np.ndarray]:
-    encoding = SparseFoldEncoding(targets, training)
+    encoding = SparseFoldEncoding(targets, training, buffer_bytes=matrix_buffer_limit(store))
     try:
         if settings.ranked_site_filter.method == "none":
             fitted = fit_amino_acid(store, training, settings, _encoding=encoding, **kwargs)
         else:
             fitted = fit_amino_acid(store, training, settings, **kwargs)
             encoding.append(fitted.matrix(store, encoding.species))
-        return fitted, encoding.matrices(), encoding.shift
+        matrices = encoding.matrices()
+        record_sparse_usage(store, fitted, matrices)
+        return fitted, matrices, encoding.shift
     finally:
         encoding.close()
 

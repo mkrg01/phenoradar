@@ -25,6 +25,7 @@ from phenoradar.amino_acid_frequency_cache import (
 )
 from phenoradar.amino_acid_input_cache import AlignmentInputCache
 from phenoradar.amino_acid_presence import SpeciesPresenceCache
+from phenoradar.amino_acid_resources import SparseUsage
 from phenoradar.config.schema import AminoAcidConfig, AminoAcidSiteFilter
 from phenoradar.provenance import file_identity
 from phenoradar.sequence_tpm_cache import SequenceTPMCacheError, read_sequence_tpm_cache
@@ -86,6 +87,9 @@ class AlignmentStore:
     metadata species list, independently of training labels and CV membership.
     """
 
+    _sparse_usage: SparseUsage
+    _matrix_buffer_bytes: int
+
     def __init__(
         self,
         directory: Path,
@@ -104,6 +108,7 @@ class AlignmentStore:
         self.species = set(species)
         self.retained_species = self.species if cache_species is None else set(cache_species)
         self.cache_frequencies = cache_frequencies
+        self._sparse_usage = SparseUsage()
         self._frequency_caches: dict[tuple[str, bool], AminoAcidFrequencyCache] = {}
         self._site_presence = SpeciesPresenceCache(Path(self._temp.name) / "species_presence.bin")
         self.tpm_identity: dict[str, Any] | None = None
@@ -918,7 +923,8 @@ def fit_amino_acid(
                     og, samples, selected, weighted=weighted,
                 )
                 eligible, minor_samples, minor_groups, fractions, means, known, active = (
-                    compact_statistics(values[training_rows], observed[training_rows],
+                    compact_statistics(_encoding._selected(values, np.asarray(training_rows)),
+                                       _encoding._selected(observed, np.asarray(training_rows)),
                                        state_sites, residues, groups, quality, audit=audit)
                 )
                 variant_count += int(eligible.sum())

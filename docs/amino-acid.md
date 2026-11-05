@@ -304,8 +304,11 @@ data, retaining the selected lambda and modality penalty factors.
 CV interpretation is spooled to temporary Parquet parts as each model finishes.
 Full feature eligibility, coefficients, PSS, effect ranges, and stability tables
 are retained; completed folds do not accumulate Python feature dictionaries or
-full fitted transforms in RAM. Score ranking is performed one model context at
-a time. Heatmaps restore each fold's original eligible sites from this audit,
+full fitted transforms in RAM. Fold means and feature eligibility are aggregated
+one fold at a time; shared feature statistics are computed once for coefficient
+and importance outputs. Summary aggregates can differ at float64 roundoff.
+Score ranking is performed one model context at a time. Heatmaps restore each
+fold's original eligible sites from this audit,
 including sites whose coefficient is zero in that fold.
 
 Prediction constructs only exact nonzero coefficient columns. Zero-score sites
@@ -345,17 +348,19 @@ The site-filter funnel counts alignment sites, rather than residue features.
 
 Temporary arithmetic skips canonical states absent from the cached compositions.
 Training means, known states and the float32 variance threshold remain unchanged;
-known-residue mass uses the original 20-state reduction. Encoded columns retain
+known-residue mass keeps the original 20-state reduction for partial sums and
+rounding boundaries; provably clipped zero/one sums use compact arithmetic. Encoded columns retain
 the original site/residue order. Wide-path scoring checks the full validation
 matrix once, then uses the exact nonzero coefficient columns (floating-point
 roundoff can differ from dense prediction).
 Strict-majority modes skip sorting; unresolved modes retain the original sorting
 and tie rules, including signed-zero handling.
 
-Encoded fold matrices use disk-backed CSC arrays with bounded dense arithmetic
-blocks. Sparse native fitting avoids input copies; its coefficient-path buffer
+Encoded fold matrices use RAM-buffered CSC arrays within an automatic process
+budget and spill to temporary disk when that budget is exceeded. Sparse native fitting avoids input copies; its coefficient-path buffer
 grows only if the active set needs more space, restarting the same complete path.
-The first-fold resource estimate limits outer-fold concurrency. Inner ratio paths
+The first-fold CSC sizes, site metadata and observed process peak size
+outer-fold concurrency. Each worker has its own matrix-buffer budget. Inner ratio paths
 run sequentially within each AA worker, avoiding simultaneous full-matrix copies.
 
 Unranked preprocessing also distributes independent OGs across the CPUs assigned

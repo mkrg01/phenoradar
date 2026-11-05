@@ -23,6 +23,34 @@ class EncodedBlock:
     shift: np.ndarray | None = None
 
 
+def _compact_mass(values: np.ndarray, sites: np.ndarray, residues: np.ndarray,
+                  n_sites: int) -> np.ndarray:
+    """Keep the original 20-slot sum except for provably clipped 0/1 masses."""
+    result = np.zeros((len(values), n_sites), dtype=float)
+    if not n_sites:
+        return result
+    counts = np.bincount(sites, minlength=n_sites)
+    ordered = np.all((np.diff(sites) > 0) | ((np.diff(sites) == 0)
+                                          & (np.diff(residues) > 0)))
+    fallback = np.ones(n_sites, dtype=bool)
+    if (np.all(counts > 0) and ordered and np.all((values >= 0) & (values <= 1))):
+        offsets = np.r_[0, np.cumsum(counts)]
+        approximate = np.add.reduceat(values, offsets[:-1], axis=1, dtype=np.float64)
+        # At most 20 nonnegative float32 terms: this guard exceeds the float64
+        # summation error. Boundary and partial masses use the original sum.
+        clipped = np.abs(approximate - 1) < 1e-7 - 64 * np.finfo(float).eps
+        fallback = np.any(~clipped & (approximate != 0), axis=0)
+        result[clipped] = 1
+    if fallback.any():
+        local = np.cumsum(fallback) - 1
+        keep = fallback[sites]
+        dense = np.zeros((len(values), int(fallback.sum()), 20), dtype=np.float32)
+        dense[:, local[sites[keep]], residues[keep]] = values[:, keep]
+        mass = np.sum(dense, axis=2, dtype=np.float64)
+        result[:, fallback] = np.where(np.isclose(mass, 1, rtol=0, atol=1e-7), 1, mass)
+    return result
+
+
 class FoldEncoding:
     """Append whole F-order column blocks; validation never determines the schema."""
 
@@ -65,14 +93,11 @@ class FoldEncoding:
                     active: np.ndarray) -> None:
         keep = eligible[sites]
         local = np.cumsum(eligible) - 1
-        q = np.zeros((len(self.species), int(eligible.sum()), 20), dtype=np.float32)
-        q[:, local[sites[keep]], residues[keep]] = (
-            np.nan_to_num(values[:, keep]) * known[sites[keep], residues[keep]][None, :]
-        )
-        mass = np.sum(q, axis=2, dtype=np.float64)
-        mass = np.where(np.isclose(mass, 1, rtol=0, atol=1e-7), 1, mass)
+        q = (np.nan_to_num(values[:, keep], copy=False)
+             * known[sites[keep], residues[keep]][None, :]).astype(np.float32, copy=False)
+        mass = _compact_mass(q, local[sites[keep]], residues[keep], int(eligible.sum()))
         selected = keep & active[sites, residues]
-        encoded = np.nan_to_num(values[:, selected]).astype(float)
+        encoded = np.nan_to_num(values[:, selected], copy=False).astype(float)
         encoded -= mass[:, local[sites[selected]]] * mean[sites[selected], residues[selected]]
         self.append(encoded)
 
@@ -194,10 +219,11 @@ def compact_statistics(
         mean32 = np.zeros(data.shape[1], dtype=np.float32)
         np.divide(data.sum(axis=0, dtype=np.float32), denominator, out=mean32,
                   where=denominator > 0)
-        differences = data - mean32
-        differences[~observed[:, state_sites]] = 0
+        data -= mean32
+        data[~observed[:, state_sites]] = 0
+        np.square(data, out=data)
         variance = np.zeros_like(mean32)
-        np.divide(np.sum(differences * differences, axis=0, dtype=np.float32), denominator,
+        np.divide(np.sum(data, axis=0, dtype=np.float32), denominator,
                   out=variance, where=denominator > 0)
         means[state_sites, aa] = mean
         active[state_sites, aa] = variance > 1e-12

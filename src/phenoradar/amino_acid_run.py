@@ -36,6 +36,7 @@ from phenoradar.amino_acid_outputs import (
 )
 from phenoradar.amino_acid_prediction import prediction_members
 from phenoradar.amino_acid_reporting import AAReportWriter
+from phenoradar.amino_acid_resources import record_sparse_usage
 from phenoradar.amino_acid_sparse import fit_sparse_encoded, training_information
 from phenoradar.combined import ExpressionInput, ExpressionTransform, fit_expression
 from phenoradar.config import AppConfig
@@ -178,6 +179,7 @@ def _select(
                 n_expression = xe.shape[1]
                 x_train = sparse.hstack((xe, x_train), format="csc")
                 x_valid = sparse.hstack((xv, x_valid), format="csc")
+                record_sparse_usage(store, fitted, [x_train, x_valid])
             yield InnerCvPreprocessedFold(
                     fold,
                     x_train,
@@ -355,6 +357,7 @@ def fit_scope(
                 config, expression, train_species, y[indices], pairs[indices], warnings
             )
             matrix = sparse.hstack((xe, matrix), format="csc")
+            record_sparse_usage(store, fitted, [matrix])
             shift = np.r_[np.zeros(xe.shape[1]), shift]
             _write(tables / "expression_feature_filter_counts.tsv", [{**context, **counts}])
             _write(tables / "expression_ranked_feature_scores.tsv",

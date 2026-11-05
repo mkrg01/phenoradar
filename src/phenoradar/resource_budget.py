@@ -32,7 +32,11 @@ def memory_budget() -> int:
                         lines = (scope / "memory.stat").read_text().splitlines()
                         stats = dict(row.split() for row in lines)
                         current = int((scope / "memory.current").read_text())
-                        available = int(limit) - current + int(stats.get("inactive_file", 0))
+                        inactive = max(0, int(stats.get("inactive_file", 0)))
+                        # Kernel counters can be sampled at different instants.
+                        # Reclaimable pages cannot exceed total file/current pages.
+                        reclaimable = min(inactive, current, int(stats.get("file", inactive)))
+                        available = int(limit) - current + max(0, reclaimable)
                         budget = min(budget, max(0, available))
                     except (OSError, ValueError):
                         continue
