@@ -327,6 +327,8 @@ training statistics and train/validation encoding share one residue-frequency
 read. Filters, means and representative choices still use training species only.
 Outer folds use independent processes, sized from the first fold's feature count,
 `runtime.n_jobs` and available allocation memory. Tables are merged in fold order.
+Remaining folds are queued together so available workers continue immediately,
+even while an earlier fold's output is waiting to be merged.
 No sites, candidates or CV folds are removed to reduce resource use.
 
 AA runs also write the shared evaluation, model-selection, coefficient,
@@ -351,7 +353,10 @@ run sequentially within each AA worker, avoiding simultaneous full-matrix copies
 
 Unranked preprocessing also distributes independent OGs across the CPUs assigned
 to each fold, using up to four threads. Initial composition-cache creation stays
-serial; cached folds use parallel OG processing. Results are assembled in their original order; training reductions
-and representative choices are unchanged. Per-OG buffers are bounded and spill
-to temporary disk when necessary. Audit and interpretation tables use columnar
+serial; cached folds use parallel OG processing. Sparse OG workers build CSC blocks
+directly, without assembling a dense matrix for the entire OG. Small blocks stay
+in memory and larger blocks spill to temporary disk; the parent joins CSC arrays
+without recomputing their training-only shifts. Results retain the original
+OG/site/residue order; training reductions and representative choices are unchanged.
+Audit and interpretation tables use columnar
 blocks, including zero coefficients and all eligible sites.

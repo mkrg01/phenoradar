@@ -141,3 +141,45 @@ def test_worker_initializes_empty_caches_privately_and_populated_caches_copy_on_
     finally:
         worker.close()
     assert parent_caches == {("empty", True): empty, ("populated", True): populated}
+
+
+def test_later_fold_starts_while_earlier_result_is_waiting(tmp_path: Path, monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    import joblib
+
+    import phenoradar.amino_acid_parallel as parallel
+    from phenoradar.config import AppConfig
+
+    started, released = Event(), Event()
+
+    class Executor(ThreadPoolExecutor):
+        def __init__(self, max_workers, **kwargs):
+            super().__init__(max_workers=max_workers)
+
+    def pilot(config, store, expression, manifest, fold, directory, model_base, progress):
+        directory.mkdir()
+        joblib.dump((None, None, None, 2), directory / "result.joblib")
+        return directory
+
+    def worker(config, manifest, fold, directory, model_base):
+        assert model_base == (int(fold) - 1) * 1_000_000
+        if fold == "2":
+            started.set()
+            assert released.wait(5), "A free worker must start fold 4 before fold 2 finishes"
+        elif fold == "3":
+            assert started.wait(5)
+        elif fold == "4":
+            released.set()
+        return directory
+
+    monkeypatch.setattr(parallel, "ProcessPoolExecutor", Executor)
+    monkeypatch.setattr(parallel, "run_fold", pilot)
+    monkeypatch.setattr(parallel, "worker", worker)
+    monkeypatch.setattr(parallel, "fold_workers", lambda *args: 2)
+    monkeypatch.setattr(parallel, "snapshot", lambda *args: {})
+    manifest = pl.DataFrame({"species": ["a", "b"], "pool": ["train", "validation"]})
+    config = AppConfig()
+    paths = list(parallel.outer_folds(config, None, None, manifest, ["1", "2", "3", "4"], None))
+    assert [p.name for p in paths] == ["1", "2", "3", "4"]

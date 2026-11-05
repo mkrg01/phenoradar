@@ -16,7 +16,7 @@ from phenoradar.amino_acid import (
     AlignmentStore,
     fit_amino_acid,
 )
-from phenoradar.amino_acid_encoding import FoldEncoding
+from phenoradar.amino_acid_encoding import EncodedBlock, FoldEncoding
 from phenoradar.config.schema import AminoAcidConfig
 from phenoradar.resource_budget import memory_budget
 
@@ -35,17 +35,17 @@ def fit_orthogroups(
         return fit_amino_acid(store, species, settings, _encoding=encoding, **kwargs)
     buffer = min(OG_BUFFER_BYTES, max(1, memory_budget() // (workers * 8)))
 
-    def fit(og: AlignmentOG) -> tuple[AATransform, np.ndarray | None]:
+    def fit(og: AlignmentOG) -> tuple[AATransform, EncodedBlock | None]:
         local = copy(store)
         local.ogs = {og.orthogroup: og}
-        encoder = FoldEncoding([encoding.species]) if encoding is not None else None
+        encoder = encoding.fork() if encoding is not None else None
         if encoder is not None:
             encoder.memory_limit = buffer
         try:
             fitted = fit_amino_acid(local, species, settings, _encoding=encoder,
                                     _allow_empty=True, **kwargs)
-            matrix = encoder.matrices()[0] if encoder is not None else None
-            return fitted, matrix
+            block = encoder.block() if encoder is not None else None
+            return fitted, block
         finally:
             if encoder is not None:
                 encoder.close()
@@ -57,7 +57,7 @@ def fit_orthogroups(
     )
     orthogroups = iter(store.ogs.values())
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        pending: deque[Future[tuple[AATransform, np.ndarray | None]]] = deque()
+        pending: deque[Future[tuple[AATransform, EncodedBlock | None]]] = deque()
 
         def submit() -> bool:
             og = next(orthogroups, None)
@@ -73,7 +73,7 @@ def fit_orthogroups(
             if not submit():
                 break
         while pending:
-            fitted, matrix = pending.popleft().result()
+            fitted, block = pending.popleft().result()
             qc.extend(fitted.qc)
             if isinstance(fitted.sites, AASiteTable):
                 sites = fitted.sites
@@ -85,10 +85,9 @@ def fit_orthogroups(
                 }})
             if representatives is not None:
                 representatives.update(fitted.representative_columns or {})
-            if encoding is not None and matrix is not None:
-                for start in range(0, matrix.shape[1], 4096):
-                    encoding.append(matrix[:, start:start + 4096])
-            del fitted, matrix
+            if encoding is not None and block is not None:
+                encoding.extend(block)
+            del fitted, block
             submit()
     if not blocks:
         raise AlignmentError(

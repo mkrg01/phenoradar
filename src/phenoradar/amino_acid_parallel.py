@@ -133,16 +133,18 @@ def outer_folds(config: AppConfig, store: AlignmentStore, expression: Expression
             max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
             initializer=initialize, initargs=(snapshot(store, expression), child.runtime.n_jobs),
         ) as executor:
-            # At most one queued task per worker. Consume in the original fold order.
-            pending = {}
-            for i, fold in enumerate(folds[1:], 1):
-                pending[i] = executor.submit(worker, child, manifest, fold, root / fold,
-                                             i * 1_000_000)
-                if len(pending) == workers:
-                    index = min(pending)
-                    yield pending.pop(index).result()
-            for index in sorted(pending):
-                yield pending[index].result()
+            # Queue the remaining small tasks so a free worker never waits for
+            # an earlier fold's result. Only paths cross IPC; merge in fold order.
+            pending = [
+                executor.submit(worker, child, manifest, fold, root / fold, i * 1_000_000)
+                for i, fold in enumerate(folds[1:], 1)
+            ]
+            try:
+                for future in pending:
+                    yield future.result()
+            finally:
+                for future in pending:
+                    future.cancel()
 
 
 def merge_tables(source: Path, destination: Path) -> None:

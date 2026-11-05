@@ -18,8 +18,9 @@ from phenoradar.glmnet import fit_glmnet_path
 @pytest.mark.parametrize("aggregation", ["best_covered", "aa_frequency", "tpm_weighted_frequency"])
 @pytest.mark.parametrize("method", ["none", "unpaired", "pair_aware"])
 @pytest.mark.parametrize("jobs", [1, 3])
+@pytest.mark.parametrize("cache_frequencies", [False, True])
 def test_sparse_encoding_preserves_filters_missing_novel_and_duplicate_rows(
-    tmp_path: Path, aggregation: str, method: str, jobs: int,
+    tmp_path: Path, aggregation: str, method: str, jobs: int, cache_frequencies: bool,
 ) -> None:
     records = [("a_1", "AC-DVAX"), ("a_2", "ADDDVAX"), ("b_1", "ADCEVAX"),
                ("c_1", "ADCDAAX"), ("d_1", "ACCEAAX"), ("held_1", "W-XWWVX")]
@@ -36,7 +37,7 @@ def test_sparse_encoding_preserves_filters_missing_novel_and_duplicate_rows(
     kwargs = dict(y=np.array([0, 1, 0, 1, 0]), groups=np.array(["1", "1", "2", "2", "1"]),
                   contrast_groups=np.array(["1", "1", "2", "2", "1"]))
     with AlignmentStore(path, ["a", "b", "c", "d", "held", "absent"],
-                        cache_frequencies=True, sequence_tpm_path=str(tpm)) as store:
+                        cache_frequencies=cache_frequencies, sequence_tpm_path=str(tpm)) as store:
         expected = fit_amino_acid(store, training, cfg, **kwargs)
         fitted, matrices, shift = fit_sparse_encoded(store, training, cfg, targets,
                                                     n_jobs=jobs, **kwargs)
@@ -125,3 +126,60 @@ def test_sparse_path_capacity_retries_and_keeps_readonly_input(
         assert a.intercept_ == b.intercept_ and a.n_iter_ == b.n_iter_
     for a, b in zip([x.data, x.indices, x.indptr], originals, strict=True):
         np.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.parametrize("buffer_bytes", [1, 1024**2])
+def test_sparse_og_blocks_merge_without_dense_reconstruction_and_survive_close(
+    buffer_bytes: int,
+) -> None:
+    training = ["b", "a", "b"]
+    targets = [["b", "a", "b"], ["held", "a"], []]
+    encoder = SparseFoldEncoding(targets, training)
+    values = np.array([[0, 1, 0, .3], [1, 0, 0, .9], [999, -999, 0, .1]])
+    try:
+        for selected in [slice(0, 2), slice(2, 4)]:
+            child = encoder.fork()
+            child.memory_limit = buffer_bytes
+            try:
+                child.append(values[:, selected])
+                block = child.block()
+            finally:
+                child.close()
+            encoder.extend(block)
+        actual, shift = encoder.matrices(), encoder.shift
+    finally:
+        encoder.close()
+    expected_shift = modal_shift(values[[0, 1, 0]])
+    np.testing.assert_array_equal(shift, expected_shift)
+    for rows, matrix in zip([[0, 1, 0], [2, 1], []], actual, strict=True):
+        expected = sparse.csc_matrix(values[rows] + shift)
+        assert matrix.has_canonical_format
+        for name in ["data", "indices", "indptr"]:
+            np.testing.assert_array_equal(getattr(matrix, name), getattr(expected, name))
+
+
+@pytest.mark.parametrize("spill", [False, True])
+def test_parallel_sparse_encoding_does_not_build_dense_og_matrices(
+    tmp_path: Path, monkeypatch, spill: bool,
+):
+    from phenoradar.amino_acid_encoding import FoldEncoding
+
+    if spill:
+        monkeypatch.setattr("phenoradar.amino_acid_og_parallel.OG_BUFFER_BYTES", 1)
+    path = alignment(tmp_path / "aa", [("a_1", "AC-D"), ("b_1", "ADCE"), ("held_1", "W-XW")])
+    (path / "OG2.faa").write_text((path / "OG1.faa").read_text())
+    cfg = settings("aa_frequency")
+    kwargs = dict(y=np.array([0, 1]), groups=np.array(["a", "b"]))
+    with AlignmentStore(path, ["a", "b", "held"], cache_frequencies=True) as store:
+        expected = fit_amino_acid(store, ["a", "b"], cfg, **kwargs)
+        dense = expected.matrix(store, ["a", "b", "held"])
+
+        def forbidden(*args):
+            pytest.fail("Sparse OG preprocessing must not assemble a dense OG matrix")
+
+        monkeypatch.setattr(FoldEncoding, "matrices", forbidden)
+        fitted, matrices, shift = fit_sparse_encoded(
+            store, ["a", "b"], cfg, [["a", "b", "held"]], n_jobs=3, **kwargs,
+        )
+        assert fitted.features == expected.features
+        np.testing.assert_array_equal(matrices[0].toarray(), dense + shift)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+from dataclasses import dataclass
 from tempfile import TemporaryFile
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +15,12 @@ ENCODING_MEMORY_LIMIT_BYTES = 8 * 1024**3
 if TYPE_CHECKING:
     from phenoradar.amino_acid import AATransform, AlignmentStore
     from phenoradar.config.schema import AminoAcidConfig, AminoAcidSiteFilter
+
+
+@dataclass
+class EncodedBlock:
+    matrices: list[Any]
+    shift: np.ndarray | None = None
 
 
 class FoldEncoding:
@@ -31,6 +38,17 @@ class FoldEncoding:
         self.memory_limit = min(ENCODING_MEMORY_LIMIT_BYTES, memory_budget() // 4)
         self.chunks: list[list[np.ndarray]] = [[] for _ in groups]
         self.spilled = False
+
+    def fork(self) -> FoldEncoding:
+        return FoldEncoding([self.species])
+
+    def block(self) -> EncodedBlock:
+        return EncodedBlock(self.matrices())
+
+    def extend(self, block: EncodedBlock) -> None:
+        matrix = block.matrices[0]
+        for start in range(0, matrix.shape[1], 4096):
+            self.append(matrix[:, start:start + 4096])
 
     def add(self, raw: np.ndarray, mean: np.ndarray,
             known: np.ndarray, active: np.ndarray) -> None:
