@@ -18,7 +18,6 @@ import numpy as np
 import optuna
 import polars as pl
 from optuna.samplers import TPESampler
-from scipy import sparse
 
 from phenoradar.amino_acid import (
     ALPHABET,
@@ -36,7 +35,6 @@ from phenoradar.amino_acid_outputs import (
 )
 from phenoradar.amino_acid_prediction import prediction_members
 from phenoradar.amino_acid_reporting import AAReportWriter
-from phenoradar.amino_acid_resources import record_sparse_usage
 from phenoradar.amino_acid_sparse import fit_sparse_encoded, training_information
 from phenoradar.combined import ExpressionInput, ExpressionTransform, fit_expression
 from phenoradar.config import AppConfig
@@ -67,6 +65,8 @@ from phenoradar.cv import (
     _selection_source_sample_set_id,
     _tpe_trial_params,
     _with_native_thread_limit,
+    expression_input_species,
+    iter_inner_cv_preprocessed_folds,
 )
 from phenoradar.glmnet import GlmnetLogisticRegression
 from phenoradar.group_bootstrap import run_oof_group_bootstrap
@@ -151,15 +151,28 @@ def _select(
 ) -> tuple[list[SelectedCandidate], list[dict[str, Any]]]:
     species, y, groups, pairs = _arrays(rows)
     def prepare() -> Iterable[InnerCvPreprocessedFold]:
+        expression_folds = (None if expression is None else iter_inner_cv_preprocessed_folds(
+            config=config, x_source_raw=expression.matrix(species), y_source=y,
+            groups_source=groups, contrast_groups_source=pairs,
+            feature_names=expression.features, warnings=warnings,
+        ))
         for train, valid, fold in _inner_cv_splits(config, y, groups):
             if progress:
                 progress(f"{scope}: prepare inner fold {fold}.")
             train_species = [species[i] for i in train]
             valid_species = [species[i] for i in valid]
+            expression_fold = (None if expression_folds is None else _with_native_thread_limit(
+                config.runtime.n_jobs, next, expression_folds,
+            ))
+            if expression_fold is not None:
+                assert expression_fold.inner_fold_id == fold
             fitted, matrices, _ = fit_sparse_encoded(
                 store, train_species, config.preprocess.amino_acid,
                 [train_species, valid_species], y=y[train], groups=groups[train],
                 contrast_groups=pairs[train], audit=False, n_jobs=config.runtime.n_jobs,
+                prefix=(None if expression_fold is None else
+                        [np.asarray(expression_fold.x_train),
+                         np.asarray(expression_fold.x_valid)]),
             )
             x_train, x_valid = matrices
             del matrices
@@ -169,17 +182,7 @@ def _select(
                     f"({len(train)} train, {len(valid)} validation, "
                     f"{x_train.shape[1]} AA features)."
                 )
-            n_expression = None
-            if expression is not None:
-                expr, xe, _, _ = fit_expression(
-                    config, expression, [species[i] for i in train],
-                    y[train], pairs[train], warnings,
-                )
-                xv, _ = expr.transform(expression, [species[i] for i in valid])
-                n_expression = xe.shape[1]
-                x_train = sparse.hstack((xe, x_train), format="csc")
-                x_valid = sparse.hstack((xv, x_valid), format="csc")
-                record_sparse_usage(store, fitted, [x_train, x_valid])
+            n_expression = (None if expression_fold is None else expression_fold.x_train.shape[1])
             yield InnerCvPreprocessedFold(
                     fold,
                     x_train,
@@ -336,32 +339,33 @@ def fit_scope(
         train_species = [species[i] for i in indices]
         if progress:
             progress(f"{scope}: prepare refit features for sample set {sample_set_id}.")
+        expr = None
+        prefix = None
+        if expression is not None:
+            expr, xe, counts, scores = fit_expression(
+                config, expression, train_species, y[indices], pairs[indices], warnings
+            )
+            prefix = [xe]
+            context = {"scope": scope, "sample_set_id": sample_set_id}
+            _write(tables / "expression_feature_filter_counts.tsv", [{**context, **counts}])
+            _write(tables / "expression_ranked_feature_scores.tsv",
+                   ({**context, **row} for row in scores))
         fitted, matrices, shift = fit_sparse_encoded(
             store, train_species, config.preprocess.amino_acid, [train_species],
             y=y[indices], groups=groups[indices], contrast_groups=pairs[indices],
-            n_jobs=config.runtime.n_jobs,
+            n_jobs=config.runtime.n_jobs, prefix=prefix,
         )
         matrix = matrices[0]
         del matrices
         context = {"scope": scope, "sample_set_id": sample_set_id}
-        expr = None
         aa_std = None
         representatives: list[dict[str, Any]] = []
         if expression is not None or config.preprocess.amino_acid.aggregation == "best_covered":
             aa_std, representatives = training_information(
                 fitted, store, train_species, matrix, shift,
                 standard_deviation=expression is not None,
+                offset=0 if expr is None else len(expr.features),
             )
-        if expression is not None:
-            expr, xe, counts, scores = fit_expression(
-                config, expression, train_species, y[indices], pairs[indices], warnings
-            )
-            matrix = sparse.hstack((xe, matrix), format="csc")
-            record_sparse_usage(store, fitted, [matrix])
-            shift = np.r_[np.zeros(xe.shape[1]), shift]
-            _write(tables / "expression_feature_filter_counts.tsv", [{**context, **counts}])
-            _write(tables / "expression_ranked_feature_scores.tsv",
-                   ({**context, **row} for row in scores))
         _write(tables / "amino_acid_og_qc.tsv", ({**context, **q} for q in fitted.qc))
         if progress:
             progress(f"{scope}: refit matrix ready; write preprocessing audits.")
@@ -763,7 +767,10 @@ def run_amino_acid(
     with ExitStack() as stack:
         reports = stack.enter_context(AAReportWriter(tables))
         expression = (
-            stack.enter_context(ExpressionInput(config, all_species, training_species))
+            stack.enter_context(ExpressionInput(
+                config, all_species, training_species,
+                cache_species=expression_input_species(config, manifest),
+            ))
             if config.data.feature_mode == "combined" else None
         )
         expression_identity = file_identity(Path(config.data.tpm_path)) if expression else None

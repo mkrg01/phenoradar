@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import warnings as warning_control
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -1574,9 +1574,12 @@ class ExpressionMatrixBuilder:
         except CVError:
             cache_tempdir.cleanup()
             raise
+        previous = self._cache_tempdir
         self._cache_tempdir = cache_tempdir
         self._cached_long_path = cache_path
         self._cached_species = requested_species
+        if previous is not None:
+            previous.cleanup()
 
     def close(self) -> None:
         """Release the normalized-expression cache owned by this builder."""
@@ -1812,13 +1815,14 @@ class RunExpressionCache:
         timing_recorder: TimingRecorder | None = None,
     ) -> None:
         """Prepare the raw input shared by the full-run stages, before their timers."""
-        pools = ["train", "validation"]
-        if config.runtime.execution_stage == "full_run":
-            pools.extend(["external_test", "discovery_inference"])
-        species = (
-            split_manifest.filter(pl.col("pool").is_in(pools))
-            .get_column("species").unique().sort().to_list()
-        )
+        self.prepare_species(config, expression_input_species(config, split_manifest),
+                             timing_recorder)
+
+    def prepare_species(
+        self, config: AppConfig, species: list[str],
+        timing_recorder: TimingRecorder | None = None,
+    ) -> None:
+        """Normalize only the species consumed by the requested execution stage."""
         builder = self.get_builder(config)
         builder.configure_timing(timing_recorder, scope="expression_input")
         _with_native_thread_limit_for_config(config, builder.cache_species, species)
@@ -1828,6 +1832,15 @@ class RunExpressionCache:
 
     def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
         self.close()
+
+
+def expression_input_species(config: AppConfig, split_manifest: pl.DataFrame) -> list[str]:
+    """Use the same input pool for expression-only and joint expression runs."""
+    pools = ["train", "validation"]
+    if config.runtime.execution_stage == "full_run":
+        pools.extend(["external_test", "discovery_inference"])
+    return (split_manifest.filter(pl.col("pool").is_in(pools)).get_column("species")
+            .unique().sort().to_list())
 
 
 def _column_nan_mean(values: np.ndarray) -> np.ndarray:
@@ -3645,49 +3658,62 @@ def _build_inner_cv_preprocessed_folds(
     feature_names: list[str],
     warnings: list[str] | None = None,
 ) -> list[InnerCvPreprocessedFold]:
-    def _build() -> list[InnerCvPreprocessedFold]:
-        preprocessed_folds: list[InnerCvPreprocessedFold] = []
-        x_source_expr = _apply_expression_transform_for_config(config, x_source_raw)
-        splits = _inner_cv_splits(config, y_source, groups_source)
-        sparse_counts = _build_inner_sparse_count_cache(config, x_source_expr, y_source, splits)
-        for train_idx, valid_idx, inner_fold_id in splits:
-            y_train = y_source[train_idx]
-            y_valid = y_source[valid_idx]
-            groups_train = groups_source[train_idx]
-            contrast_groups_train = (
-                None if contrast_groups_source is None else contrast_groups_source[train_idx]
-            )
+    return _with_native_thread_limit_for_config(config, lambda: list(
+        iter_inner_cv_preprocessed_folds(
+            config=config, x_source_raw=x_source_raw, y_source=y_source,
+            groups_source=groups_source, contrast_groups_source=contrast_groups_source,
+            feature_names=feature_names, warnings=warnings,
+        )
+    ))
 
-            x_train, x_valid, _selected, _counts, _scaler = (
-                _preprocess_transformed_fold_with_counts(
-                    config,
-                    x_source_expr,
-                    x_source_expr,
-                    feature_names,
-                    y_train=y_train,
-                    groups_train=contrast_groups_train,
-                    warnings=warnings,
-                    train_rows=train_idx,
-                    valid_rows=valid_idx,
-                    sparse_selected=(
-                        None if sparse_counts is None else sparse_counts.select(valid_idx)
-                    ),
-                )
-            )
-            sample_weight = _fit_sample_weights(config, y_train, groups_train)
-            preprocessed_folds.append(
-                InnerCvPreprocessedFold(
-                    inner_fold_id=inner_fold_id,
-                    x_train=x_train,
-                    x_valid=x_valid,
-                    y_train=y_train,
-                    y_valid=y_valid,
-                    sample_weight=sample_weight,
-                )
-            )
-        return preprocessed_folds
 
-    return _with_native_thread_limit_for_config(config, _build)
+def iter_inner_cv_preprocessed_folds(
+    *, config: AppConfig, x_source_raw: np.ndarray, y_source: np.ndarray,
+    groups_source: np.ndarray, contrast_groups_source: np.ndarray | None,
+    feature_names: list[str], warnings: list[str] | None = None,
+) -> Iterator[InnerCvPreprocessedFold]:
+    """Share train-only filters and indexed folds without retaining every matrix.
+
+    Raw expression is transformed once per sampled source. Complementary-fold
+    sparse counts are reused, including repeated sampling rows. Joint callers
+    consume each fold before constructing the next amino-acid design.
+    """
+    x_source_expr = _apply_expression_transform_for_config(config, x_source_raw)
+    splits = _inner_cv_splits(config, y_source, groups_source)
+    sparse_counts = _build_inner_sparse_count_cache(config, x_source_expr, y_source, splits)
+    for train_idx, valid_idx, inner_fold_id in splits:
+        y_train = y_source[train_idx]
+        y_valid = y_source[valid_idx]
+        groups_train = groups_source[train_idx]
+        contrast_groups_train = (
+            None if contrast_groups_source is None else contrast_groups_source[train_idx]
+        )
+
+        x_train, x_valid, _selected, _counts, _scaler = (
+            _preprocess_transformed_fold_with_counts(
+                config,
+                x_source_expr,
+                x_source_expr,
+                feature_names,
+                y_train=y_train,
+                groups_train=contrast_groups_train,
+                warnings=warnings,
+                train_rows=train_idx,
+                valid_rows=valid_idx,
+                sparse_selected=(
+                    None if sparse_counts is None else sparse_counts.select(valid_idx)
+                ),
+            )
+        )
+        sample_weight = _fit_sample_weights(config, y_train, groups_train)
+        yield InnerCvPreprocessedFold(
+            inner_fold_id=inner_fold_id,
+            x_train=x_train,
+            x_valid=x_valid,
+            y_train=y_train,
+            y_valid=y_valid,
+            sample_weight=sample_weight,
+        )
 
 
 def _score_candidate_inner_cv(
@@ -4443,17 +4469,7 @@ def _build_outer_cv_matrix_cache(
     if expression_cache is not None and config.runtime.execution_stage == "full_run":
         # Normalize the union once for CV and final refit. The CV feature schema
         # below still comes exclusively from the train/validation pool.
-        cache_species = (
-            split_manifest.filter(
-                pl.col("pool").is_in(
-                    ["train", "validation", "external_test", "discovery_inference"]
-                )
-            )
-            .get_column("species")
-            .unique()
-            .sort()
-            .to_list()
-        )
+        cache_species = expression_input_species(config, split_manifest)
     _with_native_thread_limit_for_config(
         config,
         matrix_builder.cache_species,

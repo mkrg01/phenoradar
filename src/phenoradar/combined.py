@@ -11,8 +11,8 @@ import numpy as np
 from phenoradar.config import AppConfig
 from phenoradar.cv import (
     CVError,
-    ExpressionMatrixBuilder,
     FeatureScaler,
+    RunExpressionCache,
     _apply_expression_transform_for_config,
     _preprocess_fold_with_counts,
     apply_feature_scaling,
@@ -26,15 +26,20 @@ class ExpressionInput:
     are materialized later, with the union of fitted expression features.
     """
 
-    def __init__(self, config: AppConfig, all_species: list[str], training: list[str]) -> None:
-        self.builder = ExpressionMatrixBuilder(config)
+    def __init__(self, config: AppConfig, all_species: list[str], training: list[str], *,
+                 cache_species: list[str] | None = None) -> None:
+        self.cache = RunExpressionCache()
+        self.builder = self.cache.get_builder(config)
         self.caches: list[tuple[dict[str, int], dict[str, int], np.ndarray]] = []
         self.features: list[str] = []
         try:
-            self.builder.cache_species(all_species)
+            consumed = (cache_species if cache_species is not None else
+                        all_species if not training or config.runtime.execution_stage == "full_run"
+                        else training)
+            self.cache.prepare_species(config, consumed)
             self.present = set(
                 self.builder._collect_expression(
-                    self.builder._long_scan_for_species(all_species).select("__species").unique()
+                    self.builder._long_scan_for_species(consumed).select("__species").unique()
                 )["__species"].to_list()
             )
             missing = sorted(set(training) - self.present)
@@ -74,7 +79,7 @@ class ExpressionInput:
         return result
 
     def close(self) -> None:
-        self.builder.close()
+        self.cache.close()
 
     def __enter__(self) -> ExpressionInput:
         return self

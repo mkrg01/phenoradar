@@ -170,6 +170,11 @@ def write_amino_acid_figures(
         _site_bar(top, metric, path)
     _frequency_by_confusion(run_dir, oof, limit)
     _site_filter_funnel(run_dir)
+    if config.data.feature_mode == "combined":
+        from phenoradar.combined_figures import write_combined_figures
+
+        write_combined_figures(run_dir, limit, final_importance=final_importance,
+                               final_coefficients=final_coefficients)
     return warnings
 
 
@@ -205,9 +210,19 @@ def _site_filter_funnel(run_dir: Path) -> None:
         pl.col("n_columns").sum(), pl.col("n_after_call_filter").sum(),
         pl.col("n_after_variant_filter").sum(),
     ).collect(engine="streaming")
-    stages = ["alignment_sites", "observed_sites", "variable_sites"]
+    path = cv / "amino_acid_site_qc.tsv"
+    if path.exists():
+        retained = _scan(cv, "amino_acid_site_qc").group_by("scope", "sample_set_id").agg(
+            pl.len().alias("n_retained_sites")
+        ).collect(engine="streaming")
+        raw = raw.join(retained, on=["scope", "sample_set_id"], how="left").with_columns(
+            pl.col("n_retained_sites").fill_null(0))
+    else:
+        raw = raw.with_columns(pl.lit(0).alias("n_retained_sites"))
+    stages = ["alignment_sites", "observed_sites", "variable_sites", "retained_sites"]
     rows = []
-    for stage, column in zip(stages, ["n_columns", "n_after_call_filter", "n_after_variant_filter"],
+    for stage, column in zip(stages, ["n_columns", "n_after_call_filter", "n_after_variant_filter",
+                                      "n_retained_sites"],
                              strict=True):
         values = raw[column].to_numpy()
         quantiles = np.quantile(values, [0, .25, .5, .75, 1])

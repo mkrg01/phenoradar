@@ -153,10 +153,26 @@ class SparseFoldEncoding(FoldEncoding):
 
 def fit_sparse_encoded(
     store: AlignmentStore, training: list[str], settings: AminoAcidConfig,
-    targets: list[list[str]], **kwargs: Any,
+    targets: list[list[str]], *, prefix: list[np.ndarray] | None = None, **kwargs: Any,
 ) -> tuple[AATransform, list[Any], np.ndarray]:
+    """Encode both modes with one CSC assembly, optionally starting with expression.
+
+    Prefix columns are already scaled and retain their original basis. Appending
+    AA blocks directly avoids copying the complete AA matrix in a later hstack.
+    """
     encoding = SparseFoldEncoding(targets, training, buffer_bytes=matrix_buffer_limit(store))
     try:
+        if prefix is not None:
+            if len(prefix) != len(targets):
+                raise ValueError("One prefix matrix is required per target group")
+            width = prefix[0].shape[1]
+            for i, (values, species) in enumerate(zip(prefix, targets, strict=True)):
+                if values.shape != (len(species), width):
+                    raise ValueError("Prefix shapes must match target rows and feature width")
+                matrix = sparse.csc_matrix(values, dtype=np.float64)
+                encoding._append_csc(i, matrix.data, matrix.indices, matrix.indptr[1:])
+            encoding.width = width
+            encoding.shifts.append(np.zeros(width))
         if settings.ranked_site_filter.method == "none":
             fitted = fit_amino_acid(store, training, settings, _encoding=encoding, **kwargs)
         else:
@@ -171,12 +187,11 @@ def fit_sparse_encoded(
 
 def training_information(
     fitted: AATransform, store: AlignmentStore, species: list[str],
-    matrix: Any, shift: np.ndarray, *, standard_deviation: bool,
+    matrix: Any, shift: np.ndarray, *, standard_deviation: bool, offset: int = 0,
 ) -> tuple[np.ndarray | None, list[dict[str, Any]]]:
     """Compute optional interpretation metadata in bounded site blocks."""
     representatives: list[dict[str, Any]] = []
     scales = []
-    offset = 0
     for indices, raw, coverage in fitted.raw_blocks(store, species, representatives):
         sites = [fitted.sites[j] for j in indices]
         counts = [int(site.active.sum()) for site in sites]
@@ -185,10 +200,10 @@ def training_information(
             known = np.stack([site.known for site in sites])
             mass = np.asarray(np.sum(np.nan_to_num(raw) * known, axis=2, dtype=np.float64))
             centered = matrix[:, offset:offset + width].toarray() - shift[offset:offset + width]
-            left = 0
-            for j, count in enumerate(counts):
-                scales.extend(np.std(centered[(coverage[:, j] * mass[:, j]) > 0,
-                                               left:left + count], axis=0))
-                left += count
+            columns = np.repeat(np.arange(len(sites)), counts)
+            observed = (coverage * mass) > 0
+            # The same observed-only population SD, reduced once per site block.
+            # This affects interpretation only; model inputs remain unchanged.
+            scales.extend(np.std(centered, axis=0, where=observed[:, columns]))
         offset += width
     return (np.asarray(scales) if standard_deviation else None), representatives

@@ -234,6 +234,19 @@ Combined mode adds:
 | `combined_modality_contributions.tsv` | Expression and AA contributions, intercept, total logit per species/model |
 | `expression_local_contributions.tsv` | Leading local OG expression contributions |
 
+Combined runs also draw separate expression/AA importance and signed-coefficient
+plots, an expression-filter funnel, held-out modality contributions, and selected
+lambda/penalty ratios. The funnel reuses the expression-only summary and plot.
+Contribution plots average each member's log-odds contributions; their sum is not
+the ensemble probability. The plotting inputs are saved as
+`combined_modality_contributions_summary.tsv` and `combined_penalty_selection.tsv`.
+The AA site-filter funnel includes the final retained-site count in both modes.
+
+Expression-only and combined CV share the same streamed, train-only preprocessing,
+including repeated sampling rows and cached sparse-filter counts. CV-only runs
+normalize training/validation expression, without preparing unused target species.
+Joint training writes expression columns directly into the shared AA CSC encoder.
+
 Original expression units are `log1p(TPM)`, not raw TPM. AA standard deviations
 use observed training species and affect reporting only. Expression filter/ranking
 and AA score/representative/coordinate tables are retained. Probabilities are

@@ -187,6 +187,22 @@ def test_combined_full_run_and_frozen_predictions(tmp_path: Path, aggregation: s
                 assert (tables / f"{modality}_feature_importance.tsv").is_file()
     oof = pl.read_csv(destination / "cv/tables/prediction_cv.tsv", separator="\t")
     assert oof.height == 8 and oof["species"].n_unique() == 8
+    for name in ["combined_modality_contributions", "combined_penalty_selection",
+                 "expression_feature_filter_funnel",
+                 "expression_importance_top", "amino_acid_importance_top",
+                 "expression_coefficients_signed_top", "amino_acid_coefficients_signed_top"]:
+        assert (destination / "cv/figures" / f"{name}.svg").is_file(), name
+    summary = pl.read_csv(destination / "cv/tables/combined_modality_contributions_summary.tsv",
+                          separator="\t")
+    assert set(summary["species"]) == set(oof["species"])
+    np.testing.assert_allclose(summary["logit"], summary["expression_contribution"]
+                               + summary["amino_acid_contribution"] + summary["intercept"])
+    funnel = pl.read_csv(destination / "cv/tables/amino_acid_site_filter_counts_summary.tsv",
+                        separator="\t")
+    assert funnel["stage"].to_list()[-1] == "retained_sites"
+    assert "Retained sites" in (
+        destination / "cv/figures/amino_acid_site_filter_funnel.svg"
+    ).read_text()
     for stage, sample in [("external_test", "external"), ("inference", "unknown")]:
         subset = tmp_path / f"{sample}.tsv"
         subset.write_text(f"species\n{sample}\n")
