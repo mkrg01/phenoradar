@@ -78,7 +78,7 @@ def test_process_outer_folds_match_serial_and_render_common_figures(
 
 
 @pytest.mark.parametrize("empty_file_exists", [False, True])
-def test_worker_initializes_empty_caches_privately_and_populated_caches_copy_on_write(
+def test_worker_initializes_empty_caches_privately_and_shares_immutable_extents(
     tmp_path: Path, monkeypatch, empty_file_exists: bool,
 ) -> None:
     import phenoradar.amino_acid_parallel as parallel
@@ -106,16 +106,16 @@ def test_worker_initializes_empty_caches_privately_and_populated_caches_copy_on_
     parent_caches = {("empty", True): empty, ("populated", True): populated}
     payload = {"store": {"ogs": {}, "species": set(species), "retained_species": set(species),
                          "cache_frequencies": True, "_frequency_caches": parent_caches,
-                         "tpm_identity": None}, "expression": None}
+                         "tpm_identity": None, "_site_presence": {}}, "expression": None}
     parallel.initialize(payload, 1)
     worker = parallel._WORKER[0]
     try:
         fresh = worker._frequency_caches[("empty", True)]
         shared = worker._frequency_caches[("populated", True)]
-        assert not fresh.shared and not fresh.path.is_symlink()
+        assert not fresh.path.is_symlink()
         assert not fresh.path.exists()
-        assert shared.shared and shared.path.is_symlink()
-        assert shared.path.resolve() == populated.path
+        assert not shared.path.exists()
+        assert shared._chunks[0].path == populated.path
         # Existing columns reuse the shared data without recomputing or copying it.
         def unexpected_compute(*args):
             pytest.fail("A cached site must not be recomputed")
@@ -124,14 +124,14 @@ def test_worker_initializes_empty_caches_privately_and_populated_caches_copy_on_
         expected, expected_coverage = compute(species, np.array([0]))
         np.testing.assert_array_equal(values, expected)
         np.testing.assert_array_equal(coverage, expected_coverage)
-        assert shared.shared and shared.path.is_symlink()
-        # New columns detach populated data; the empty entry creates a new private file.
+        assert not shared.path.exists()
+        # Only new columns are written privately; shared extents are never copied.
         for cache in [fresh, shared]:
             values, coverage = cache.get(species, np.array([0, 1]), compute, block_size=1)
             expected, expected_coverage = compute(species, np.array([0, 1]))
             np.testing.assert_array_equal(values, expected)
             np.testing.assert_array_equal(coverage, expected_coverage)
-            assert not cache.shared and cache.path.is_file() and not cache.path.is_symlink()
+            assert cache.path.is_file() and not cache.path.is_symlink()
         assert empty.path.exists() == empty_file_exists
         if empty_file_exists:
             assert empty.path.stat().st_size == 0

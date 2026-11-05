@@ -6,7 +6,6 @@ import os
 import shutil
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
-from copy import copy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -15,6 +14,7 @@ import joblib
 import polars as pl
 
 from phenoradar.amino_acid import AlignmentStore
+from phenoradar.amino_acid_presence import SpeciesPresenceCache
 from phenoradar.amino_acid_reporting import AAReportWriter
 from phenoradar.combined import ExpressionInput
 from phenoradar.config import AppConfig
@@ -35,10 +35,12 @@ def fold_workers(config: AppConfig, n_species: int, n_features: int, n_folds: in
 
 
 def snapshot(store: AlignmentStore, expression: ExpressionInput | None) -> dict[str, Any]:
+    state = {name: getattr(store, name) for name in
+             ["ogs", "species", "retained_species", "cache_frequencies",
+              "_frequency_caches", "tpm_identity"]}
+    state["_site_presence"] = store._site_presence.entries
     return {
-        "store": {name: getattr(store, name) for name in
-                  ["ogs", "species", "retained_species", "cache_frequencies",
-                   "_frequency_caches", "tpm_identity"]},
+        "store": state,
         "expression": None if expression is None else
         {name: getattr(expression, name) for name in ["features", "caches", "present"]},
     }
@@ -81,16 +83,15 @@ def initialize(payload: dict[str, Any], n_jobs: int) -> None:
     store = object.__new__(AlignmentStore)
     store.__dict__.update(payload["store"])
     store._temp = TemporaryDirectory(prefix="phenoradar_aa_worker_")
+    store._site_presence = SpeciesPresenceCache(
+        Path(store._temp.name) / "species_presence.bin", payload["store"]["_site_presence"],
+    )
     caches = {}
     for index, (key, original) in enumerate(store._frequency_caches.items()):
-        cached = copy(original)
-        # OG threads can preallocate an empty entry without creating its file.
-        # Only populated caches are shared; empty entries start private in each worker.
+        # Existing extents remain immutable in their original files. Each worker
+        # appends only new columns to its private file; no OG data are copied.
         destination = Path(store._temp.name) / f"{index}_frequency.bin"
-        if cached.length:
-            os.symlink(cached.path, destination)
-        cached.path, cached.shared = destination, bool(cached.length)
-        caches[key] = cached
+        caches[key] = original.fork(destination)
     store._frequency_caches = caches
     expression = None
     if payload["expression"] is not None:

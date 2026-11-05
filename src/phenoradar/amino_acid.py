@@ -24,6 +24,7 @@ from phenoradar.amino_acid_frequency_cache import (
     release_frequency_maps,
 )
 from phenoradar.amino_acid_input_cache import AlignmentInputCache
+from phenoradar.amino_acid_presence import SpeciesPresenceCache
 from phenoradar.config.schema import AminoAcidConfig, AminoAcidSiteFilter
 from phenoradar.provenance import file_identity
 from phenoradar.sequence_tpm_cache import SequenceTPMCacheError, read_sequence_tpm_cache
@@ -104,6 +105,7 @@ class AlignmentStore:
         self.retained_species = self.species if cache_species is None else set(cache_species)
         self.cache_frequencies = cache_frequencies
         self._frequency_caches: dict[tuple[str, bool], AminoAcidFrequencyCache] = {}
+        self._site_presence = SpeciesPresenceCache(Path(self._temp.name) / "species_presence.bin")
         self.tpm_identity: dict[str, Any] | None = None
         input_cache = (
             AlignmentInputCache(input_cache_dir, self.species, self.retained_species)
@@ -140,6 +142,7 @@ class AlignmentStore:
     def close(self) -> None:
         release_frequency_maps(Path(self._temp.name))
         self._frequency_caches.clear()
+        self._site_presence.clear()
         self._temp.cleanup()
 
     def __enter__(self) -> AlignmentStore:
@@ -385,15 +388,10 @@ class AlignmentStore:
         cache = og.tpm_mask_cache if weighted else og.mask_cache
         if cache is None:
             raise AlignmentError("Weighted AA features require sequence TPM input")
-        packed = np.load(cache, mmap_mode="r", allow_pickle=False)
         rows = np.array([og.mask_rows[s] for s in species if s in og.mask_rows], dtype=int)
-        # Bounded column blocks avoid one Python/unpack call per species.
-        for start in range(0, packed.shape[1], max(1, 1_000_000 // max(1, len(rows)))):
-            end = min(packed.shape[1], start + max(1, 1_000_000 // max(1, len(rows))))
-            bits = np.unpackbits(packed[rows, start:end], axis=1)
-            stop = min(og.width, end * 8)
-            counts[start * 8:stop] = bits[:, :stop - start * 8].sum(axis=0, dtype=np.int32)
-        return counts
+        if not len(rows):
+            return counts
+        return self._site_presence.counts((og.orthogroup, weighted), Path(cache), og.width, rows)
 
     @property
     def correspondence(self) -> Any:
@@ -474,6 +472,14 @@ class AlignmentStore:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         cache, compute, block = self._frequency_cache(og, weighted)
         return cache.get_compact(species, columns, compute, block_size=block)
+
+    def frequency_candidates(
+        self, og: AlignmentOG, species: list[str], columns: np.ndarray, *,
+        weighted: bool, min_states: int,
+    ) -> np.ndarray:
+        cache, compute, block = self._frequency_cache(og, weighted)
+        return cache.eligible_columns(species, columns, compute, block_size=block,
+                                      min_states=min_states)
 
     def _compute_frequencies(
         self,
@@ -901,6 +907,13 @@ def fit_amino_acid(
             if _encoding is not None and not representative and store.cache_frequencies:
                 from phenoradar.amino_acid_encoding import compact_statistics
 
+                candidates = store.frequency_candidates(
+                    og, species, selected, weighted=weighted,
+                    min_states=quality.min_residue_states,
+                )
+                selected = selected[candidates]
+                if not len(selected):
+                    continue
                 values, _, observed, state_sites, residues = store.compact_frequencies(
                     og, samples, selected, weighted=weighted,
                 )

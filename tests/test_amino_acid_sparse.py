@@ -183,3 +183,36 @@ def test_parallel_sparse_encoding_does_not_build_dense_og_matrices(
         )
         assert fitted.features == expected.features
         np.testing.assert_array_equal(matrices[0].toarray(), dense + shift)
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 7, 64, 116])
+def test_majority_mode_matches_sorted_reference_bit_for_bit(n: int) -> None:
+    rng = np.random.default_rng(436)
+    values = rng.integers(-2, 3, size=(n, 18)).astype(float)
+    values[:, 0] = -.123
+    values[:, 1] = 0
+    values[:, 2] = -0.0
+    values[::2, 3] = -0.0
+    values[1::2, 3] = 0.0
+    values[:, 4] = np.nextafter(.2, 1)
+    values[n // 2:, 5] = rng.random(n - n // 2)
+    ordered = np.sort(values, axis=0)
+    lengths = np.ones(ordered.shape, dtype=np.int64)
+    for row in range(1, n):
+        lengths[row] = np.where(ordered[row] == ordered[row - 1], lengths[row - 1] + 1, 1)
+    expected = -ordered[np.argmax(lengths, axis=0), np.arange(values.shape[1])]
+    np.testing.assert_array_equal(modal_shift(values).view(np.uint64), expected.view(np.uint64))
+
+
+def test_unique_majority_avoids_sort_but_ties_keep_original_rule(monkeypatch) -> None:
+    original = np.sort
+    shapes = []
+
+    def tracked(values, *args, **kwargs):
+        shapes.append(values.shape)
+        return original(values, *args, **kwargs)
+
+    monkeypatch.setattr(np, "sort", tracked)
+    values = np.array([[.2, 1, 0], [.2, 2, -0.0], [.2, 1, 0], [.8, 2, -0.0]])
+    np.testing.assert_array_equal(modal_shift(values), [-.2, -1, 0])
+    assert shapes == [(4, 2)]

@@ -15,12 +15,26 @@ from phenoradar.config.schema import AminoAcidConfig
 
 def modal_shift(values: np.ndarray) -> np.ndarray:
     """Choose an exact column mode; no rounding, thresholding or label access."""
-    ordered = np.sort(values, axis=0)
-    lengths = np.ones(ordered.shape, dtype=np.int64)
-    for row in range(1, len(ordered)):
-        lengths[row] = np.where(ordered[row] == ordered[row - 1], lengths[row - 1] + 1, 1)
+    result = np.empty(values.shape[1], dtype=values.dtype)
+    majority = np.zeros(values.shape[1], dtype=bool)
+    if len(values):
+        candidate = values[0]
+        # A strict majority is the unique mode. Keep signed-zero columns on the
+        # original sort path so even their zero sign and tie rules are preserved.
+        majority = ((candidate != 0)
+                    & (np.count_nonzero(values == candidate, axis=0) > len(values) // 2))
+        result[majority] = -candidate[majority]
+    if majority.all():
+        return result
+    ordered = np.sort(values[:, ~majority], axis=0)
+    rows = np.arange(len(ordered))[:, None]
+    starts = np.zeros(ordered.shape, dtype=np.int64)
+    starts[1:] = np.where(ordered[1:] != ordered[:-1], rows[1:], 0)
+    np.maximum.accumulate(starts, axis=0, out=starts)
+    lengths = rows - starts + 1
     ends = np.argmax(lengths, axis=0)
-    return np.asarray(-ordered[ends, np.arange(values.shape[1])])
+    result[~majority] = -ordered[ends, np.arange(ordered.shape[1])]
+    return result
 
 
 class SparseFoldEncoding(FoldEncoding):

@@ -283,6 +283,11 @@ fold-specific. Prediction stores compute only each requested batch and do not
 build this training cache. Inner CV and frequency-mode AA-only refits omit
 unused observation matrices; audit tables are written in columnar batches.
 Matrices use column-major storage for block writes and glmnet input.
+
+Callability and positive stored-frequency support use species bitsets; duplicate
+sampling rows retain their multiplicity. Raw frequencies occupy immutable,
+state-major file extents. Fold workers share existing extents and append only
+new columns to private files, without copying an OG's earlier data.
 Set `TMPDIR` to a location with enough space for temporary caches and matrices.
 Validated training alignment bytes and presence masks are reused across runs
 under `runs/.phenoradar_cache/alignments`. Source changes, changed species ID
@@ -344,6 +349,8 @@ known-residue mass uses the original 20-state reduction. Encoded columns retain
 the original site/residue order. Wide-path scoring checks the full validation
 matrix once, then uses the exact nonzero coefficient columns (floating-point
 roundoff can differ from dense prediction).
+Strict-majority modes skip sorting; unresolved modes retain the original sorting
+and tie rules, including signed-zero handling.
 
 Encoded fold matrices use disk-backed CSC arrays with bounded dense arithmetic
 blocks. Sparse native fitting avoids input copies; its coefficient-path buffer
