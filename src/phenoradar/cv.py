@@ -7,6 +7,7 @@ import warnings as warning_control
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import copy
 from dataclasses import dataclass, field
 from hashlib import sha256
 from math import comb
@@ -4957,12 +4958,56 @@ def _transform_target_for_selected_features(
         preview = ", ".join(missing_features[:10])
         raise CVError(f"Target matrix is missing selected feature(s): {preview}")
     selected_indices = np.array([target_index[feature] for feature in selected_features], dtype=int)
-    x_target_expr = _apply_expression_transform_for_config(config, x_target_raw)
-    x_target_selected = x_target_expr[:, selected_indices]
+    if _can_defer_outer_inference(config):
+        x_target_selected = _apply_expression_transform_for_config(
+            config, x_target_raw[:, selected_indices]
+        )
+    else:
+        x_target_expr = _apply_expression_transform_for_config(config, x_target_raw)
+        x_target_selected = x_target_expr[:, selected_indices]
     return apply_feature_scaling(
         x_target_selected,
         scaler,
         config.preprocess.expression.feature_scaling.method,
+    )
+
+
+def _compact_prediction_entry(
+    config: AppConfig,
+    feature_names: list[str],
+    scaler: FeatureScaler,
+    model: FittedEstimator,
+) -> FinalModelEntry:
+    """Drop exact-zero coefficients only in a temporary neutral linear predictor.
+
+    Training state, interpretation and coverage retain their original schema.
+    Row-wise rank transforms and other estimators keep the full prediction path.
+    """
+    original = FinalModelEntry(feature_names, scaler, model)
+    if (
+        config.preprocess.expression.expression_transform.method not in {"none", "log1p"}
+        or config.preprocess.expression.missing_expression.method != "neutral"
+        or not isinstance(scaler, NeutralStandardScaler)
+        or not isinstance(model, GlmnetLogisticRegression)
+    ):
+        return original
+    active = np.flatnonzero(model.coef_ != 0.0)
+    if active.size == len(feature_names) or not feature_names:
+        return original
+    # StandardScaler requires at least one column, including for intercept-only fits.
+    if active.size == 0:
+        active = np.array([0], dtype=int)
+    compact_model = copy(model)
+    compact_model.coef_ = model.coef_[active].copy()
+    compact_model.n_features_in_ = int(active.size)
+    compact_scaler = copy(scaler)
+    compact_scaler.n_features_in_ = int(active.size)
+    for name in ("mean_", "var_", "scale_", "n_samples_seen_", "feature_names_in_"):
+        value = getattr(scaler, name, None)
+        if isinstance(value, np.ndarray) and value.shape == (len(feature_names),):
+            setattr(compact_scaler, name, value[active].copy())
+    return FinalModelEntry(
+        [feature_names[int(index)] for index in active], compact_scaler, compact_model
     )
 
 
@@ -4972,14 +5017,21 @@ def _predict_final_refit_targets(
     x_target_raw: np.ndarray,
     target_feature_names: list[str],
 ) -> list[np.ndarray]:
-    x_target = _transform_target_for_selected_features(
-        config,
-        x_target_raw,
-        target_feature_names,
-        fit_result.selected_features,
-        fit_result.scaler,
-    )
-    return [_predict_positive_probability(model, x_target) for model in fit_result.fitted_models]
+    probabilities: list[np.ndarray] = []
+    transformed_by_features: dict[tuple[str, ...], np.ndarray] = {}
+    for model in fit_result.fitted_models:
+        entry = _compact_prediction_entry(
+            config, fit_result.selected_features, fit_result.scaler, model
+        )
+        key = tuple(entry.feature_names)
+        if key not in transformed_by_features:
+            transformed_by_features[key] = _transform_target_for_selected_features(
+                config, x_target_raw, target_feature_names, entry.feature_names, entry.scaler
+            )
+        probabilities.append(
+            _predict_positive_probability(entry.model, transformed_by_features[key])
+        )
+    return probabilities
 
 
 def _final_refit_can_prune_target_matrix(config: AppConfig) -> bool:
@@ -6799,19 +6851,25 @@ def _predict_outer_inference_plan(
     model_probs: list[np.ndarray] = []
     entries: list[FinalModelEntry] = []
     for sample in plan.sample_sets:
-        preprocess_started = recorder.start()
-        indices = np.array([feature_index[name] for name in sample.feature_names], dtype=int)
-        selected = _apply_expression_transform_for_config(config, raw_matrix[:, indices])
-        transformed = apply_feature_scaling(
-            selected, sample.scaler, config.preprocess.expression.feature_scaling.method
-        )
-        recorder.record_since(
-            preprocess_started, scope="outer_fold", stage="inference_preprocessing",
-            fold_id=plan.fold_id, sample_set_id=sample.sample_set_id,
-        )
+        transformed_by_features: dict[tuple[str, ...], np.ndarray] = {}
         for model, candidate_index in zip(sample.models, sample.candidate_indices, strict=True):
+            preprocess_started = recorder.start()
+            entry = _compact_prediction_entry(config, sample.feature_names, sample.scaler, model)
+            key = tuple(entry.feature_names)
+            if key not in transformed_by_features:
+                indices = np.array([feature_index[name] for name in entry.feature_names], dtype=int)
+                selected = _apply_expression_transform_for_config(config, raw_matrix[:, indices])
+                transformed_by_features[key] = apply_feature_scaling(
+                    selected, entry.scaler, config.preprocess.expression.feature_scaling.method
+                )
+            transformed = transformed_by_features[key]
+            recorder.record_since(
+                preprocess_started, scope="outer_fold", stage="inference_preprocessing",
+                fold_id=plan.fold_id, sample_set_id=sample.sample_set_id,
+                candidate_index=candidate_index,
+            )
             prediction_started = recorder.start()
-            model_probs.append(_predict_positive_probability(model, transformed))
+            model_probs.append(_predict_positive_probability(entry.model, transformed))
             recorder.record_since(
                 prediction_started, scope="outer_fold", stage="inference_prediction",
                 fold_id=plan.fold_id, sample_set_id=sample.sample_set_id,

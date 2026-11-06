@@ -63,7 +63,7 @@ def load_orthogroup_annotations(
                 {str(feature).strip() for feature in feature_names if str(feature).strip()}
             )
             normalized = normalized.filter(pl.col("feature").is_in(requested_features))
-        annotations = normalized.collect()
+        annotations = normalized.collect(engine="streaming")
     except FileNotFoundError as exc:
         raise OrthogroupAnnotationError(f"Orthogroup annotation file not found: {path}") from exc
     except OrthogroupAnnotationError:
