@@ -44,6 +44,7 @@ from phenoradar.expression_input_cache import (
     normalized_cache,
     source_signature,
 )
+from phenoradar.expression_matrix_cache import RawExpressionMatrixCache
 from phenoradar.feature_stability import (
     FeatureStabilityError,
     build_feature_stability_tables,
@@ -1305,6 +1306,9 @@ def _build_cv_species_evidence(
 class ExpressionMatrixBuilder:
     """Build species x orthogroup matrix from long-format expression data."""
 
+    _matrix_cache: RawExpressionMatrixCache | None = None
+    _matrix_cache_signature: tuple[int, int, int, int, int] | None = None
+
     _SOURCE_LINE_COL = "__phenoradar_source_line"
     _INVALID_TPM_PREVIEW_LIMIT = 10
     _INVALID_TPM_REASON_LABELS = (
@@ -1626,6 +1630,9 @@ class ExpressionMatrixBuilder:
 
     def close(self) -> None:
         """Release the normalized-expression cache owned by this builder."""
+        if self._matrix_cache is not None:
+            self._matrix_cache.clear()
+        self._matrix_cache_signature = None
         if self._cache_tempdir is not None:
             self._cache_tempdir.cleanup()
         self._cache_tempdir = None
@@ -1789,6 +1796,47 @@ class ExpressionMatrixBuilder:
     def build_matrix(
         self, species_order: list[str], feature_order: list[str] | None = None
     ) -> tuple[np.ndarray, list[str]]:
+        cache = self._matrix_cache
+        if cache is None or not cache.byte_limit:
+            return self._build_matrix_uncached(species_order, feature_order)
+        if not species_order:
+            raise CVError("No species were provided for matrix construction")
+        self._check_cache_source()
+        signature = source_signature(self._tpm_path)
+        if self._matrix_cache_signature not in (None, signature):
+            cache.clear()
+            raise CVError(
+                f"Expression input changed while its matrices were in use: {self._tpm_path}"
+            )
+        self._matrix_cache_signature = signature
+        features = None if feature_order is None else self._normalize_feature_order(feature_order)
+        started = self._start_timing()
+        hit = cache.get(species_order, features)
+        if hit is not None:
+            self._record_timing(started, "input_matrix_cache_hit")
+            return hit
+        overlap = None if features is None else cache.overlapping_rows(species_order, features)
+        if overlap is None:
+            matrix, names = self._build_matrix_uncached(species_order, features)
+        else:
+            known_rows, known_values = overlap
+            self._record_timing(started, "input_matrix_cache_rows")
+            known = set(known_rows)
+            missing_rows = [i for i in range(len(species_order)) if i not in known]
+            missing, names = self._build_matrix_uncached(
+                [species_order[i] for i in missing_rows], features
+            )
+            started = self._start_timing()
+            matrix = np.empty((len(species_order), len(names)), dtype=float)
+            matrix[known_rows, :] = known_values
+            matrix[missing_rows, :] = missing
+            self._record_timing(started, "input_matrix_cache_assembly")
+        cache.put(species_order, names, matrix, complete_schema=feature_order is None)
+        return matrix, names
+
+    def _build_matrix_uncached(
+        self, species_order: list[str], feature_order: list[str] | None = None
+    ) -> tuple[np.ndarray, list[str]]:
         if not species_order:
             raise CVError("No species were provided for matrix construction")
 
@@ -1894,8 +1942,10 @@ class RunExpressionCache:
 
     def __init__(
         self, *, cache_directory: Path | None = None, cache_source: ExpressionSource | None = None,
+        matrix_cache_bytes: int = 128 * 1024 * 1024,
     ) -> None:
         self._cache_directory = cache_directory
+        self._matrix_cache_bytes = matrix_cache_bytes
         self._cache_source = cache_source
         self._builder: ExpressionMatrixBuilder | None = None
         self._signature: tuple[object, ...] | None = None
@@ -1917,6 +1967,7 @@ class RunExpressionCache:
             self._builder = ExpressionMatrixBuilder(
                 config, cache_directory=self._cache_directory, cache_source=self._cache_source,
             )
+            self._builder._matrix_cache = RawExpressionMatrixCache(self._matrix_cache_bytes)
             self._signature = signature
         elif signature != self._signature:
             raise CVError("Run expression cache cannot be reused with different input settings")
@@ -4699,6 +4750,23 @@ def _slice_outer_cv_matrix(
     return cache.matrix[train_row_idx, :], cache.matrix[valid_row_idx, :]
 
 
+def _top_expression_features(feature_importance: pl.DataFrame, feature_limit: int) -> list[str]:
+    if feature_limit < 1 or feature_importance.height == 0:
+        return []
+    return (
+        feature_importance.drop_nulls(["feature", "importance_mean"])
+        .with_columns(
+            pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("feature"),
+            pl.col("importance_mean").cast(pl.Float64, strict=False).alias("importance_mean"),
+        )
+        .filter(pl.col("feature").is_not_null() & (pl.col("feature") != ""))
+        .sort(["importance_mean", "feature"], descending=[True, False])
+        .head(feature_limit)
+        .get_column("feature")
+        .to_list()
+    )
+
+
 def _build_top_feature_expression_from_matrix(
     *,
     species_order: list[str],
@@ -4713,18 +4781,7 @@ def _build_top_feature_expression_from_matrix(
         return pl.DataFrame(schema=schema)
     if matrix.ndim != 2 or matrix.shape != (len(species_order), len(feature_names)):
         raise CVError("Top-feature expression matrix does not match its species/feature schema")
-    top_features = (
-        feature_importance.drop_nulls(["feature", "importance_mean"])
-        .with_columns(
-            pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("feature"),
-            pl.col("importance_mean").cast(pl.Float64, strict=False).alias("importance_mean"),
-        )
-        .filter(pl.col("feature").is_not_null() & (pl.col("feature") != ""))
-        .sort(["importance_mean", "feature"], descending=[True, False])
-        .head(feature_limit)
-        .get_column("feature")
-        .to_list()
-    )
+    top_features = _top_expression_features(feature_importance, feature_limit)
     if not top_features:
         return pl.DataFrame(schema=schema)
     feature_to_index = {feature: index for index, feature in enumerate(feature_names)}
@@ -5011,6 +5068,19 @@ def _compact_prediction_entry(
     )
 
 
+def _prediction_matrix_features(
+    config: AppConfig, entries: list[FinalModelEntry], feature_importance: pl.DataFrame,
+) -> list[str]:
+    """Keep prediction inputs and every feature required by exported evidence."""
+    required = set(_top_expression_features(feature_importance, config.figures.top_features))
+    for entry in entries:
+        required.update(_compact_prediction_entry(
+            config, entry.feature_names, entry.scaler, entry.model
+        ).feature_names)
+    original_order = dict.fromkeys(feature for entry in entries for feature in entry.feature_names)
+    return [feature for feature in original_order if feature in required]
+
+
 def _predict_final_refit_targets(
     config: AppConfig,
     fit_result: FinalSampleSetFitResult,
@@ -5100,6 +5170,7 @@ def _annotate_prediction_abstention(
         zero_as_missing=config.preprocess.expression.missing_expression.zero_as_missing,
         threshold=config.abstention.threshold,
         top_features=config.figures.top_features,
+        allow_missing_zero_coefficients=True,
     )
     if timing_recorder is not None and started is not None:
         timing_recorder.record_since(
@@ -5866,15 +5937,33 @@ def _run_final_refit_impl(
     selected_features = first_sample_result.selected_features
     scaler = first_sample_result.scaler
 
+    prediction_entries = [
+        FinalModelEntry(result.selected_features, result.scaler, model)
+        for sample_set_id in range(len(sampled_sets))
+        for result in [sample_results[sample_set_id]]
+        for model in result.fitted_models
+    ]
+    interpretation_started = recorder.start()
+    try:
+        (
+            feature_importance,
+            coefficients,
+            feature_importance_by_model,
+            coefficients_by_model,
+            interpretation_warnings,
+        ) = _build_final_refit_interpretation(prediction_entries)
+    except InterpretationError as exc:
+        raise CVError(str(exc)) from exc
+    recorder.record_since(
+        interpretation_started,
+        scope="final_refit",
+        stage="interpretation",
+    )
     target_model_probs_by_sample: dict[int, list[np.ndarray]] = {}
     if prune_target_matrix:
         if target_count > 0:
-            target_feature_union = list(
-                dict.fromkeys(
-                    feature
-                    for sample_set_id in range(len(sampled_sets))
-                    for feature in sample_results[sample_set_id].selected_features
-                )
+            target_feature_union = _prediction_matrix_features(
+                config, prediction_entries, feature_importance
             )
             x_target_pruned, target_feature_names = _with_native_thread_limit_for_config(
                 config,
@@ -6052,22 +6141,6 @@ def _run_final_refit_impl(
             timing_scope="final_refit",
             timing_stage="inference_abstention",
         )
-    interpretation_started = recorder.start()
-    try:
-        (
-            feature_importance,
-            coefficients,
-            feature_importance_by_model,
-            coefficients_by_model,
-            interpretation_warnings,
-        ) = _build_final_refit_interpretation(model_entries)
-    except InterpretationError as exc:
-        raise CVError(str(exc)) from exc
-    recorder.record_since(
-        interpretation_started,
-        scope="final_refit",
-        stage="interpretation",
-    )
     warnings.extend(interpretation_warnings)
 
     if external_count > 0:
@@ -6900,13 +6973,16 @@ def _run_deferred_outer_inference(
     plans: list[OuterInferencePlan],
     species: list[str],
     recorder: TimingRecorder,
+    feature_importance: pl.DataFrame,
 ) -> tuple[list[dict[str, float | str]], np.ndarray, list[str]]:
     builder = cache.deferred_inference_builder
     if builder is None:
         raise CVError("Deferred outer-CV inference requires the validated expression cache")
-    retained = {
-        feature for plan in plans for sample in plan.sample_sets for feature in sample.feature_names
-    }
+    entries = [
+        FinalModelEntry(sample.feature_names, sample.scaler, model)
+        for plan in plans for sample in plan.sample_sets for model in sample.models
+    ]
+    retained = set(_prediction_matrix_features(config, entries, feature_importance))
     # Preserve the original CV feature order, independently of fold completion.
     feature_union = [feature for feature in cache.feature_names if feature in retained]
     matrix_started = recorder.start()
@@ -7097,11 +7173,25 @@ def _run_outer_cv_impl(
     if not oof_rows:
         raise CVError("No out-of-fold predictions were generated")
 
+    interpretation_started = recorder.start()
+    try:
+        interpretation_artifacts = _with_native_thread_limit_for_config(
+            config, build_interpretation_tables, interpretation_entries
+        )
+    except InterpretationError as exc:
+        raise CVError(str(exc)) from exc
+    recorder.record_since(
+        interpretation_started,
+        scope="outer_cv",
+        stage="interpretation",
+    )
+    warnings.extend(interpretation_artifacts.warnings)
+
     if defer_inference:
         _emit_progress("Build retained-feature inference matrix and predict outer folds.")
         deferred_rows, inference_raw, inference_feature_names = _run_deferred_outer_inference(
             config, outer_matrix_cache, [inference_plans[fold_id] for fold_id in fold_ids],
-            inference_species, recorder,
+            inference_species, recorder, interpretation_artifacts.feature_importance,
         )
         inference_prediction_rows.extend(deferred_rows)
         inference_plans.clear()
@@ -7161,20 +7251,6 @@ def _run_outer_cv_impl(
             },
         ]
     ).sort("threshold_name")
-    interpretation_started = recorder.start()
-    try:
-        interpretation_artifacts = _with_native_thread_limit_for_config(
-            config, build_interpretation_tables, interpretation_entries
-        )
-    except InterpretationError as exc:
-        raise CVError(str(exc)) from exc
-    recorder.record_since(
-        interpretation_started,
-        scope="outer_cv",
-        stage="interpretation",
-    )
-    warnings.extend(interpretation_artifacts.warnings)
-
     ensemble_model_probs: pl.DataFrame | None = None
     if max_fold_ensemble_size > 1:
         ensemble_model_probs = pl.DataFrame(ensemble_model_prob_rows).sort(
