@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -72,6 +73,7 @@ def test_corrupt_payload_is_rebuilt(tmp_path: Path) -> None:
     before, _, identity = load(aa, tpm, root, ["s1"])
     payload = next(Path(identity["cache_path"]).glob("part-*.parquet"))
     payload.write_bytes(b"incomplete")
+    shutil.rmtree(root / "aligned")  # Exercise the raw cache, independently of numeric reuse.
     after, _, repaired = load(aa, tpm, root, ["s1"])
     assert repaired["cache_hit"] is False
     np.testing.assert_array_equal(before, after)
@@ -134,6 +136,7 @@ def test_species_index_upgrade_does_not_reread_source(tmp_path: Path, monkeypatc
     before, _, identity = load(aa, tpm, root, ["s1", "s2"])
     path = Path(identity["cache_path"]) / "manifest.json"
     manifest = json.loads(path.read_text())
+    shutil.rmtree(root / "aligned")
     manifest.pop("part_species")
     path.write_text(json.dumps(manifest))
 

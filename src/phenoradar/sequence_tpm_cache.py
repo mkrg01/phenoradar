@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import fcntl
 import gzip
-import hashlib
+import inspect
 import json
 import os
 import shutil
@@ -18,9 +18,11 @@ from typing import Any, Protocol, cast
 
 import polars as pl
 
+from phenoradar.cache_identity import SourceIndex, digest_key
+from phenoradar.cache_identity import signature as _signature
 from phenoradar.provenance import file_identity
 
-_VERSION = 1
+_VERSION = 2
 _COLUMNS = ["species", "sequence_id", "tpm"]
 _CHUNK_BYTES = 32 * 1024 * 1024
 _QUERY_PARTS = 8
@@ -35,22 +37,10 @@ class _Reader(Protocol):
     def readline(self, size: int = -1, /) -> bytes: ...
 
 
-def _signature(path: Path) -> dict[str, Any]:
-    stat = path.stat()
-    return {
-        "path": str(path.resolve()),
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
-        "ctime_ns": stat.st_ctime_ns,
-        "device": stat.st_dev,
-        "inode": stat.st_ino,
-    }
-
-
-def _restore(entry: Path, source: dict[str, Any]) -> dict[str, Any] | None:
+def _restore(entry: Path, digest: str) -> dict[str, Any] | None:
     try:
         manifest = json.loads((entry / "manifest.json").read_text())
-        if manifest["version"] != _VERSION or manifest["source_signature"] != source:
+        if manifest["version"] != _VERSION or manifest["source_identity"]["sha256"] != digest:
             return None
         if manifest["payload_signatures"] != _payload_signatures(entry):
             return None
@@ -68,7 +58,6 @@ def _payload_signatures(entry: Path) -> dict[str, dict[str, Any]]:
     signatures = {}
     for path in sorted(entry.glob("part-*.parquet")):
         stat = _signature(path)
-        stat.pop("path")  # Publishing renames the parent directory only.
         signatures[path.name] = stat
     return signatures
 
@@ -196,12 +185,14 @@ def read_sequence_tpm_cache(
     and atomic publication prevent readers from seeing a partial cache.
     """
     source = _signature(path)
-    key = hashlib.sha256(json.dumps([_VERSION, source], sort_keys=True).encode()).hexdigest()
+    digest = SourceIndex(cache_root).identify(path)
+    key = digest_key([_VERSION, _PARSER_SHA, pl.__version__, digest,
+                      path.suffix.lower() == ".gz"])
     cache_root.mkdir(parents=True, exist_ok=True)
     entry = cache_root / key
     with (cache_root / f"{key}.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        manifest = _restore(entry, source)
+        manifest = _restore(entry, digest)
         hit = manifest is not None
         if progress:
             progress(
@@ -212,7 +203,7 @@ def read_sequence_tpm_cache(
         if manifest is None:
             _build(path, entry, source, progress)
             manifest = json.loads((entry / "manifest.json").read_text())
-        identity = manifest["source_identity"]
+        identity = {**manifest["source_identity"], "path": str(path.resolve())}
         try:
             index = _species_index(entry, manifest)
             by_species = {k[0]: v for k, v in keys.partition_by("species", as_dict=True).items()}
@@ -251,3 +242,6 @@ def read_sequence_tpm_cache(
         if _signature(path) != source:
             raise SequenceTPMCacheError(f"Sequence TPM changed during import: {path}")
     return matches, {**identity, "cache_hit": hit, "cache_path": str(entry)}
+
+
+_PARSER_SHA = digest_key([inspect.getsource(_block), inspect.getsource(_build)])

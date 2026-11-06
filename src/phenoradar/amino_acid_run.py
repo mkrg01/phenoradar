@@ -27,6 +27,7 @@ from phenoradar.amino_acid import (
     AlignmentError,
     AlignmentStore,
 )
+from phenoradar.amino_acid_audits import ColumnarAudits
 from phenoradar.amino_acid_outputs import (
     write_combined_coefficients,
     write_frequency_figure,
@@ -302,6 +303,7 @@ def fit_scope(
     expression: ExpressionInput | None = None,
     *,
     progress: Callable[[str], None] | None = None,
+    audit: ColumnarAudits | None = None,
 ) -> list[AAMember]:
     species, y, groups, pairs = _arrays(rows)
     selection = _select_training_groups(config, y, groups, scope=scope, fold_id=scope)
@@ -365,7 +367,7 @@ def fit_scope(
         _write(tables / "amino_acid_og_qc.tsv", ({**context, **q} for q in fitted.qc))
         if progress:
             progress(f"{scope}: refit matrix ready; write preprocessing audits.")
-        write_preprocessing_audits(tables, fitted, context, expr)
+        write_preprocessing_audits(tables, fitted, context, expr, audit=audit)
         _write(tables / "representative_sequences.tsv", ({**context, **r} for r in representatives))
         if fitted.representative_columns is not None:
             _write(
@@ -422,7 +424,7 @@ def fit_scope(
                     }
                 ],
             )
-            write_site_effects(tables, members[-1], matrix, shift)
+            write_site_effects(tables, members[-1], matrix, shift, audit=audit)
             if expr is not None:
                 write_combined_coefficients(tables, members[-1])
     return members

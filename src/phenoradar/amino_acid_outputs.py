@@ -16,6 +16,7 @@ from phenoradar.amino_acid import (
     AATransform,
     AlignmentStore,
 )
+from phenoradar.amino_acid_audits import ColumnarAudits
 from phenoradar.amino_acid_blocks import coefficient_blocks, feature_axes, site_blocks
 
 if TYPE_CHECKING:
@@ -23,8 +24,11 @@ if TYPE_CHECKING:
     from phenoradar.combined import ExpressionTransform
 
 
-def _append_frame(path: Path, frame: pl.DataFrame) -> None:
+def _append_frame(path: Path, frame: pl.DataFrame, audit: ColumnarAudits | None = None) -> None:
     if frame.is_empty():
+        return
+    if audit is not None:
+        audit.append(path.name, frame)
         return
     header = not path.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -37,6 +41,7 @@ def write_preprocessing_audits(
     fitted: AATransform,
     context: dict[str, Any],
     expression: ExpressionTransform | None = None,
+    *, audit: ColumnarAudits | None = None,
 ) -> None:
     """Write every eligible site and feature without per-residue Python dictionaries."""
     keys = ["feature", "modality", "orthogroup", "alignment_pos_1based", "residue",
@@ -45,7 +50,7 @@ def write_preprocessing_audits(
     if expression is not None:
         _append_frame(schema_path, pl.DataFrame([
             {**context, **{key: row.get(key) for key in keys}} for row in expression.schema()
-        ]))
+        ]), audit)
     for block in site_blocks(fitted.sites):
         ogs, columns, active = block["orthogroup"], block["column"] + 1, block["active"]
         qc = pl.DataFrame({
@@ -56,7 +61,7 @@ def write_preprocessing_audits(
             "minor_samples": block["minor_samples"], "minor_groups": block["minor_groups"],
             "score": block["score"], "n_active_states": np.count_nonzero(active, axis=1),
         })
-        _append_frame(destination / "amino_acid_site_qc.tsv", qc)
+        _append_frame(destination / "amino_acid_site_qc.tsv", qc, audit)
         rows, states = np.nonzero(active)
         if not len(rows):
             continue
@@ -66,7 +71,7 @@ def write_preprocessing_audits(
             pl.Series("training_mean", block["mean"][rows, states]),
             *[pl.lit(value).alias(key) for key, value in context.items()],
         ).select([*context, *keys])
-        _append_frame(schema_path, frame)
+        _append_frame(schema_path, frame, audit)
 
 
 def _member_context(member: AAMember) -> list[pl.Expr]:
@@ -77,6 +82,7 @@ def _member_context(member: AAMember) -> list[pl.Expr]:
 
 def write_site_effects(
     destination: Path, member: AAMember, matrix: Any, shift: np.ndarray | None = None,
+    *, audit: ColumnarAudits | None = None,
 ) -> None:
     """Retain all known states, computing each site's effect and contribution once."""
     alphabet = np.array(list(ALPHABET))
@@ -113,7 +119,7 @@ def write_site_effects(
             pl.Series("site_effect_range", effect[rows]),
             pl.Series("mean_abs_site_contribution", contribution[rows]),
         ).select(keys)
-        _append_frame(destination / "amino_acid_site_effects.tsv", frame)
+        _append_frame(destination / "amino_acid_site_effects.tsv", frame, audit)
 
 
 def write_combined_coefficients(destination: Path, member: AAMember) -> None:

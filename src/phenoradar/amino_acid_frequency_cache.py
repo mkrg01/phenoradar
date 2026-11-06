@@ -1,4 +1,4 @@
-"""Run-local, disk-backed residue compositions shared across training folds."""
+"""Lossless raw compositions with shared extents and optional cross-run reuse."""
 
 from __future__ import annotations
 
@@ -12,19 +12,21 @@ from threading import Lock
 import numpy as np
 
 from phenoradar.amino_acid_presence import any_presence
+from phenoradar.packed_float import encode, take
 
 _MAX_OPEN_MAPS = 64
-_MAPS: OrderedDict[tuple[Path, int], np.ndarray] = OrderedDict()
+_MAPS: OrderedDict[tuple[Path, tuple[int, int, int]], np.ndarray] = OrderedDict()
 _MAP_LOCK = Lock()
 
 
 def _mapped_file(path: Path, length: int) -> np.ndarray:
     # Per-process LRU: one mapping per OG must not exhaust RLIMIT_NOFILE.
-    key = path, length
+    stat = path.stat()
+    key = path, (length, stat.st_dev, stat.st_ino)
     with _MAP_LOCK:
         data = _MAPS.pop(key, None)
         if data is None:
-            data = np.memmap(path, mode="r", dtype=np.float32, shape=(length,))
+            data = np.memmap(path, mode="r", dtype=np.uint8, shape=(length,))
         _MAPS[key] = data
         while len(_MAPS) > _MAX_OPEN_MAPS:
             _MAPS.popitem(last=False)
@@ -46,12 +48,14 @@ class _Chunk:
     columns: int
     offsets: np.ndarray
     positive: np.ndarray
+    packed: bool = False
 
 
 class AminoAcidFrequencyCache:
     """Append immutable state-major extents; forks write only their new columns."""
 
-    def __init__(self, path: Path, species_rows: dict[str, int]) -> None:
+    def __init__(self, path: Path, species_rows: dict[str, int], *,
+                 persistent: Path | None = None) -> None:
         self.path = path
         self.species_rows = species_rows
         self.species = sorted(species_rows, key=species_rows.__getitem__)
@@ -63,6 +67,21 @@ class AminoAcidFrequencyCache:
         self._file_lengths: dict[Path, int] = {}
         self._writer_length = 0
         self.length = 0
+        self.persistent = persistent
+        self._published_length = 0
+        if persistent is not None:
+            from phenoradar.amino_acid_frequency_store import restore
+            restore(self, persistent)
+
+    def persist(self) -> bool:
+        if self.persistent is None:
+            return False
+        from phenoradar.amino_acid_frequency_store import persist
+        try:
+            return persist(self, self.persistent)
+        except (OSError, ValueError):
+            # An optional cache must not turn an otherwise valid fit into a failure.
+            return False
 
     def fork(self, path: Path) -> AminoAcidFrequencyCache:
         result = copy(self)
@@ -70,6 +89,7 @@ class AminoAcidFrequencyCache:
         result._chunks = list(self._chunks)
         result._file_lengths = dict(self._file_lengths)
         result._writer_length = 0
+        result._published_length = 0
         return result
 
     def _ensure(
@@ -94,12 +114,13 @@ class AminoAcidFrequencyCache:
                 offsets = np.r_[0, np.cumsum(present.sum(axis=1))]
                 observed_coverage = np.where(np.isfinite(values[:, :, 0]), coverage, np.nan)
                 data = np.ascontiguousarray(values[:, site, aa].T, dtype=np.float32)
-                np.ascontiguousarray(observed_coverage.T, dtype=np.float32).tofile(handle)
-                data.tofile(handle)
-                size = (len(selected) + len(site)) * len(self.species)
+                encoded, packed = encode(np.concatenate((observed_coverage.T, data), axis=0))
+                encoded.tofile(handle)
+                size = encoded.nbytes
                 self._chunks.append(_Chunk(
                     self.path, self._writer_length, self._writer_length + size,
                     len(selected), offsets, np.packbits(data > 0, axis=1, bitorder="little"),
+                    packed,
                 ))
                 chunk_ids.append(np.full(len(selected), len(self._chunks) - 1, dtype=np.int32))
                 local_rows.append(np.arange(len(selected)))
@@ -176,15 +197,16 @@ class AminoAcidFrequencyCache:
             for chunk, selected, source_rows, features, source_states in parts:
                 data = _mapped_file(chunk.path, self._file_lengths[chunk.path])[
                     chunk.start:chunk.stop
-                ].reshape(-1, len(self.species))
-                raw_coverage = data[np.ix_(source_rows, rows)].T
+                ]
+                decoded = take(data, chunk.columns + int(chunk.offsets[-1]), len(self.species),
+                               np.r_[source_rows, chunk.columns + source_states], rows,
+                               packed=chunk.packed)
+                raw_coverage = decoded[:len(source_rows)].T
                 observed[np.ix_(targets, selected)] = np.isfinite(raw_coverage)
                 coverage[np.ix_(targets, selected)] = np.where(
                     np.isfinite(raw_coverage), raw_coverage, 0,
                 )
-                values[np.ix_(targets, features)] = data[
-                    np.ix_(chunk.columns + source_states, rows)
-                ].T
+                values[np.ix_(targets, features)] = decoded[len(source_rows):].T
         return values, coverage, observed, sites, residues
 
     def get(

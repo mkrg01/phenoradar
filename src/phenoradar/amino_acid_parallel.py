@@ -17,6 +17,7 @@ import joblib
 import polars as pl
 
 from phenoradar.amino_acid import AlignmentStore
+from phenoradar.amino_acid_audits import ColumnarAudits, merge_audits
 from phenoradar.amino_acid_presence import SpeciesPresenceCache
 from phenoradar.amino_acid_reporting import AAReportWriter
 from phenoradar.amino_acid_resources import (
@@ -55,7 +56,7 @@ def fold_workers(config: AppConfig, n_species: int, n_features: int, n_folds: in
 def snapshot(store: AlignmentStore, expression: ExpressionInput | None) -> dict[str, Any]:
     state = {name: getattr(store, name) for name in
              ["ogs", "species", "retained_species", "cache_frequencies",
-              "_frequency_caches", "tpm_identity"]}
+              "_frequency_caches", "tpm_identity", "_frequency_directory"]}
     state["_site_presence"] = store._site_presence.entries
     return {
         "store": state,
@@ -76,8 +77,9 @@ def run_fold(config: AppConfig, store: AlignmentStore, expression: ExpressionInp
     train = manifest.filter((pl.col("fold_id") == fold) & (pl.col("pool") == "train"))
     valid = manifest.filter((pl.col("fold_id") == fold) & (pl.col("pool") == "validation"))
     warnings: list[str] = []
-    members = fit_scope(config, store, train.sort("species"), f"outer_fold_{fold}", tables,
-                        warnings, expression, progress=progress)
+    with ColumnarAudits(tables / ".columnar") as audit:
+        members = fit_scope(config, store, train.sort("species"), f"outer_fold_{fold}", tables,
+                            warnings, expression, progress=progress, audit=audit)
     features = max(len(m.model.coef_) for m in members)
     with AAReportWriter(tables, model_base=model_base) as report:
         report.add(members)
@@ -91,6 +93,7 @@ def run_fold(config: AppConfig, store: AlignmentStore, expression: ExpressionInp
     usage.peak_rss_bytes = max(usage.peak_rss_bytes, process_peak_rss())
     (directory / "resources.json").write_text(json.dumps(asdict(usage)))
     joblib.dump((compact, prediction, warnings, features), directory / "result.joblib")
+    store.flush_frequency_caches()
     return directory
 
 
@@ -181,6 +184,7 @@ def outer_folds(config: AppConfig, store: AlignmentStore, expression: Expression
 
 
 def merge_tables(source: Path, destination: Path) -> None:
+    merge_audits(source / ".columnar", destination)
     for path in sorted(source.glob("*.tsv")):
         target = destination / path.name
         with target.open("ab") as output, path.open("rb") as input_file:
