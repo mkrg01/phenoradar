@@ -25,7 +25,13 @@ def _deep_merge_dicts(base: dict[str, Any], override: Mapping[str, Any]) -> dict
     for key, override_value in override.items():
         base_value = merged.get(key)
         if isinstance(base_value, Mapping) and isinstance(override_value, Mapping):
-            merged[key] = _deep_merge_dicts(dict(base_value), override_value)
+            # Range kinds have different fields. Switching kinds replaces the
+            # specification; partial overrides within one kind still merge.
+            if ("type" in base_value and "type" in override_value
+                    and base_value["type"] != override_value["type"]):
+                merged[key] = dict(override_value)
+            else:
+                merged[key] = _deep_merge_dicts(dict(base_value), override_value)
             continue
         merged[key] = override_value
     return merged

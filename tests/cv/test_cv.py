@@ -3126,6 +3126,8 @@ model_selection:
             )
         ]
     )
+    # Candidate mocks below exercise the explicit absolute-lambda path.
+    config.model_selection.search_space["lambda"] = [0.01]
     monkeypatch.setattr(
         cv_mod,
         "generate_candidates",
@@ -3218,6 +3220,8 @@ model_selection:
             )
         ]
     )
+    # Candidate mocks below exercise the explicit absolute-lambda path.
+    config.model_selection.search_space["lambda"] = [0.01]
     monkeypatch.setattr(
         cv_mod,
         "generate_candidates",
@@ -3267,6 +3271,8 @@ model_selection:
             )
         ]
     )
+    # Candidate mocks below exercise the explicit absolute-lambda path.
+    config.model_selection.search_space["lambda"] = [0.01]
     monkeypatch.setattr(
         cv_mod,
         "generate_candidates",
@@ -3335,6 +3341,8 @@ model_selection:
             )
         ]
     )
+    # Candidate mocks below exercise the explicit absolute-lambda path.
+    config.model_selection.search_space["lambda"] = [0.01]
     monkeypatch.setattr(
         cv_mod,
         "generate_candidates",
@@ -3458,6 +3466,8 @@ model_selection:
             )
         ]
     )
+    # Candidate mocks below exercise the explicit absolute-lambda path.
+    config.model_selection.search_space["lambda"] = [0.01]
     monkeypatch.setattr(
         cv_mod,
         "generate_candidates",
@@ -3519,6 +3529,8 @@ model_selection:
             )
         ]
     )
+    # Candidate mocks below exercise the explicit absolute-lambda path.
+    config.model_selection.search_space["lambda"] = [0.01]
     monkeypatch.setattr(
         cv_mod,
         "generate_candidates",

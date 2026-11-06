@@ -13,6 +13,7 @@ from optuna.samplers import TPESampler
 
 from phenoradar.config import AppConfig
 from phenoradar.config.schema import (
+    AutoLogRangeSpec,
     ContinuousLogRangeSpec,
     ContinuousRangeSpec,
     DiscreteRangeSpec,
@@ -143,10 +144,28 @@ def _search_space_parts(
 
 def active_search_space(config: AppConfig) -> dict[str, SearchSpaceValue]:
     """Keep inactive modality settings in config, but exclude them from search."""
-    return {
+    result = {
         name: value for name, value in config.model_selection.search_space.items()
         if name != "amino_acid_penalty_ratio" or config.data.feature_mode == "combined"
     }
+    spec = auto_lambda_spec(config)
+    if spec is not None:
+        result.pop("lambda", None)
+        result["lambda_fraction"] = np.geomspace(1.0, spec.min_ratio, spec.n_points).tolist()
+    return result
+
+
+def auto_lambda_spec(config: AppConfig) -> AutoLogRangeSpec | None:
+    """Explicit absolute lambda always wins; no-selection and non-grid stay unchanged."""
+    value = config.model_selection.search_space.get("lambda")
+    if isinstance(value, AutoLogRangeSpec):
+        return value
+    if (value is None and config.model.name == "logistic_elasticnet"
+            and config.model_selection.search_strategy == "grid"
+            and (config.model_selection.selected_candidate_count is not None
+                 or config.model_selection.selected_candidate_percent is not None)):
+        return AutoLogRangeSpec()
+    return None
 
 
 def expanded_search_space(

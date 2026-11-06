@@ -124,6 +124,10 @@ def write_amino_acid_figures(
     final_summary = (None if final_trials is None else
                      figures._summarize_model_selection_trials_for_figure(final_trials))
     final_importance, final_coefficients = _final_features(members) if members else (None, None)
+    final_null = final_importance is not None and final_importance.height == 0
+    if final_null:
+        # A valid intercept-only bundle has no feature rows after compaction.
+        final_importance, final_coefficients = None, None
     oof = _read(cv, "prediction_cv")
     assert oof is not None
     coefficient_source = (_scan(cv, "coefficients_by_fold") if means is None else
@@ -150,6 +154,16 @@ def write_amino_acid_figures(
         pred_inference=_read(run_dir / "inference/tables", "pred_inference"),
         trait_name=config.data.trait_col, top_features=limit,
     )
+    if final_null:
+        for name, title in [
+            ("final_refit_feature_importance_top", "Final Refit Feature Importance"),
+            ("final_refit_coefficients_signed_top", "Final Refit Coefficients"),
+        ]:
+            figures._write_message_figure(
+                title=title, message="Intercept-only model: no nonzero features.",
+                out_path=run_dir / "model/figures" / (name + ".svg"),
+                width_px=600, height_px=220,
+            )
     # Site scores are aggregated after filtering zeros; denominator includes all
     # models, including sites absent from individual fitted feature schemas.
     counts = _selection(cv, "model_selection_selected")

@@ -18,6 +18,10 @@
 
 ### Features
 
+* use training-local `lambda_max` grids for logistic selection when lambda is
+  omitted; support bounded lower-end extension in expression, amino-acid and
+  combined modes while retaining explicit absolute lambda search spaces
+
 * reuse successful phylogenetic ASR outputs across runs with identical analysis
   inputs and software; verify cached output integrity, retain source-command
   provenance, and recompute expression comparisons for each run

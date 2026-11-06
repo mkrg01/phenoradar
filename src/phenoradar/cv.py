@@ -36,6 +36,7 @@ from sklearn.svm import LinearSVC
 from sklearn.utils.validation import has_fit_parameter
 
 from phenoradar.abstention import annotate_abstention
+from phenoradar.auto_lambda import AUTO_COLUMNS, fit_null_model, lambda_max, score_auto_paths
 from phenoradar.config import AppConfig, PredictConfig
 from phenoradar.feature_stability import (
     FeatureStabilityError,
@@ -76,6 +77,7 @@ from phenoradar.model_selection import (
     ContinuousSpec,
     ModelSelectionError,
     active_search_space,
+    auto_lambda_spec,
     discrete_candidate_space_size,
     expanded_search_space,
     generate_candidates,
@@ -329,6 +331,7 @@ class EstimatorFitDiagnostic:
     max_iter: int | None
     convergence_warning_count: int
     convergence_warning_messages: tuple[str, ...]
+    lambda_metadata: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -3043,6 +3046,8 @@ def _glmnet_candidate_params(
 ) -> tuple[dict[str, Any], float]:
     """Separate the combined-mode penalty ratio from native estimator parameters."""
     native = dict(params)
+    native.pop("lambda_fraction", None)
+    native.pop("lambda_max", None)
     value = native.pop("amino_acid_penalty_ratio", 1.0)
     ratio = 1.0
     if config.data.feature_mode == "combined":
@@ -3072,12 +3077,15 @@ def _build_estimator(
         _validate_model_params(config.model.name, params)
 
     if config.model.name == "logistic_elasticnet":
-        return GlmnetLogisticRegression(
+        estimator = GlmnetLogisticRegression(
             lambda_=float(params.get("lambda", DEFAULT_LAMBDA)),
             alpha=float(params.get("alpha", DEFAULT_ALPHA)),
             thresh=float(params.get("thresh", DEFAULT_THRESH)),
             maxit=int(params.get("maxit", DEFAULT_MAXIT)),
         )
+        if model_params is not None and "lambda_fraction" in model_params:
+            estimator.lambda_fraction_ = float(model_params["lambda_fraction"])
+        return estimator
 
     if config.model.name == "linear_svm":
         c_value = float(params.get("C", 1.0))
@@ -3125,6 +3133,10 @@ def _glmnet_fit_diagnostic(estimator: GlmnetLogisticRegression) -> EstimatorFitD
         max_iter=int(estimator.maxit),
         convergence_warning_count=0,
         convergence_warning_messages=(),
+        lambda_metadata=(
+            {"lambda_fraction": estimator.lambda_fraction_, "lambda_max": estimator.lambda_max_,
+             "lambda": estimator.lambda_} if hasattr(estimator, "lambda_max_") else None
+        ),
     )
 
 
@@ -3175,6 +3187,41 @@ def _fit_selected_estimator(
     """Refit a selected model using only this training set's preprocessed arrays."""
     if not isinstance(estimator, GlmnetLogisticRegression):
         return _fit_estimator(estimator, x_train, y_train, sample_weight)
+    if hasattr(estimator, "lambda_fraction_"):
+        fraction = estimator.lambda_fraction_
+        maximum = lambda_max(x_train, y_train, sample_weight, alpha=estimator.alpha,
+                             penalty_factor=estimator.penalty_factor)
+        if maximum == 0 or fraction == 1:
+            estimator.lambda_ = maximum*fraction
+            estimator.lambda_max_ = maximum
+            fit_null_model(estimator, x_train, y_train, sample_weight)
+            return _glmnet_fit_diagnostic(estimator)
+        parameters = [item.candidate.params for item in source_result.selected_candidates]
+        parameters.extend(json.loads(value) for value in
+                          {row["params_json"] for row in source_result.trial_rows})
+        fractions = {fraction, 1.0}
+        for params in parameters:
+            if (float(params.get("alpha", estimator.alpha)) == estimator.alpha
+                    and float(params.get("thresh", DEFAULT_THRESH)) == estimator.thresh
+                    and int(params.get("maxit", DEFAULT_MAXIT)) == estimator.maxit
+                    and (amino_acid_penalty_ratio is None or
+                         float(params.get("amino_acid_penalty_ratio", 1)) ==
+                         amino_acid_penalty_ratio)
+                    and float(params.get("lambda_fraction", 0)) >= fraction):
+                fractions.add(float(params["lambda_fraction"]))
+        try:
+            model = fit_glmnet_path(
+                x_train, y_train, [maximum*fraction], alpha=estimator.alpha,
+                thresh=estimator.thresh, maxit=estimator.maxit,
+                sample_weight=sample_weight, penalty_factor=estimator.penalty_factor,
+                warmup_lambdas=[maximum*q for q in fractions],
+            )[0]
+        except GlmnetError as exc:
+            raise CVError(str(exc)) from exc
+        estimator.__dict__.update(model.__dict__)
+        estimator.lambda_fraction_ = fraction
+        estimator.lambda_max_ = maximum
+        return _glmnet_fit_diagnostic(estimator)
     lambdas = _selected_glmnet_lambda_path(
         estimator, source_result, amino_acid_penalty_ratio=amino_acid_penalty_ratio
     )
@@ -3297,6 +3344,9 @@ def _convergence_diagnostic_row(
     model_name: str,
     params_json: str,
 ) -> dict[str, Any]:
+    if diagnostic.lambda_metadata is not None:
+        params_json = json.dumps({**json.loads(params_json), **diagnostic.lambda_metadata},
+                                 sort_keys=True)
     return {
         "training_scope": training_scope,
         "fit_scope": fit_scope,
@@ -3317,6 +3367,18 @@ def _convergence_diagnostic_row(
         "convergence_warning_message": " | ".join(diagnostic.convergence_warning_messages),
         "params_json": params_json,
     }
+
+
+def _realize_selected_rows(
+    selected: list[dict[str, Any]], diagnostics: list[dict[str, Any]],
+) -> None:
+    fitted = {(r["fold_id"], r["sample_set_id"], r["candidate_index"]): r["params_json"]
+              for r in diagnostics if r["fit_scope"] == "selected_model"}
+    for row in selected:
+        if "lambda_fraction" in json.loads(row["params_json"]):
+            key = (row["fold_id"], row["sample_set_id"], row["candidate_index"])
+            if key in fitted:
+                row["params_json"] = fitted[key]
 
 
 def _predict_positive_probability(
@@ -3449,7 +3511,10 @@ def _numeric_candidate_param(candidate: Candidate, name: str, default: float) ->
 
 def _candidate_simplicity_sort_key(candidate: Candidate, model_name: str) -> tuple[float, ...]:
     if model_name == "logistic_elasticnet":
-        strength = _numeric_candidate_param(candidate, "lambda", DEFAULT_LAMBDA)
+        strength = _numeric_candidate_param(
+            candidate, "lambda_fraction" if "lambda_fraction" in candidate.params else "lambda",
+            DEFAULT_LAMBDA,
+        )
         l1_fraction = _numeric_candidate_param(candidate, "alpha", DEFAULT_ALPHA)
         return (-strength, -l1_fraction, float(candidate.candidate_index))
     if model_name == "linear_svm":
@@ -3529,7 +3594,21 @@ def _rank_selected_candidates(
 ) -> list[SelectedCandidate]:
     if config.model_selection.selection_rule == "one_se":
         return _rank_candidates_one_se(scored, config)
-    return _rank_candidates_by_metric(scored, config.model_selection.selection_metric)
+    ranked = _rank_candidates_by_metric(scored, config.model_selection.selection_metric)
+    if auto_lambda_spec(config) is not None:
+        # Group only scores within tolerance of the group's strongest metric;
+        # never change the historical ordering of explicit lambda candidates.
+        result: list[SelectedCandidate] = []
+        while ranked:
+            first = ranked.pop(0)
+            tied = [first]
+            while (ranked and first.score is not None and ranked[0].score is not None
+                   and abs(first.score-ranked[0].score) <= 1e-10):
+                tied.append(ranked.pop(0))
+            result.extend(sorted(tied, key=lambda item: _candidate_simplicity_sort_key(
+                item.candidate, config.model.name)))
+        return result
+    return ranked
 
 
 def _candidate_params_key(candidate: Candidate) -> str:
@@ -4221,70 +4300,61 @@ def _prepare_source_selection(
             f"source_sample_set_id={source_sample_set_id}"
         )
 
-    inner_preprocess_started = None if timing_recorder is None else timing_recorder.start()
-    preprocessed_folds = _build_inner_cv_preprocessed_folds(
-        config=config,
-        x_source_raw=x_source_raw,
-        y_source=y_source,
-        groups_source=groups_source,
-        contrast_groups_source=contrast_groups_source,
-        feature_names=feature_names,
-        warnings=warnings,
-    )
-    if timing_recorder is not None and inner_preprocess_started is not None:
-        timing_scope, timing_fold_id = _selection_timing_location(training_scope_id)
-        timing_recorder.record_since(
-            inner_preprocess_started,
-            scope=timing_scope,
-            stage="inner_cv_preprocessing",
-            fold_id=timing_fold_id,
-            sample_set_id=source_sample_set_id,
-        )
-
-    worker_count, estimator_n_jobs = _selection_parallel_plan(config, available)
     scored: list[SelectedCandidate] = []
     trial_rows: list[dict[str, Any]] = []
-    scored_rows: list[tuple[float, list[dict[str, Any]]]]
-    if config.model.name == "logistic_elasticnet":
-        scored_rows = _score_glmnet_paths(
-            config=config,
-            training_scope_id=training_scope_id,
-            source_sample_set_id=source_sample_set_id,
-            candidates=candidates,
-            preprocessed_folds=preprocessed_folds,
-            progress_callback=progress_callback,
-            timing_recorder=timing_recorder,
+    if auto_lambda_spec(config) is not None:
+        folds = iter_inner_cv_preprocessed_folds(
+            config=config, x_source_raw=x_source_raw, y_source=y_source,
+            groups_source=groups_source, contrast_groups_source=contrast_groups_source,
+            feature_names=feature_names, warnings=warnings,
         )
-    elif worker_count == 1:
-        scored_rows = []
-        for candidate_progress, candidate in enumerate(candidates, start=1):
-            mean_score, rows = _score_candidate_inner_cv(
+        auto = _with_native_thread_limit(
+            config.runtime.n_jobs, score_auto_paths, config, candidates, folds,
+            fit_path=fit_glmnet_path,
+            metric=lambda y, p: _selection_metric_from_probability(
+                config, y, p),
+            diagnostic=_glmnet_fit_diagnostic, warnings=warnings,
+            progress=(None if progress_callback is None else
+                      lambda message: progress_callback("selection_candidate_done", message)),
+        )
+        candidates, scored_rows = auto.candidates, auto.scores
+        available = len(candidates)
+    else:
+        inner_preprocess_started = None if timing_recorder is None else timing_recorder.start()
+        preprocessed_folds = _build_inner_cv_preprocessed_folds(
+            config=config,
+            x_source_raw=x_source_raw,
+            y_source=y_source,
+            groups_source=groups_source,
+            contrast_groups_source=contrast_groups_source,
+            feature_names=feature_names,
+            warnings=warnings,
+        )
+        if timing_recorder is not None and inner_preprocess_started is not None:
+            timing_scope, timing_fold_id = _selection_timing_location(training_scope_id)
+            timing_recorder.record_since(
+                inner_preprocess_started,
+                scope=timing_scope,
+                stage="inner_cv_preprocessing",
+                fold_id=timing_fold_id,
+                sample_set_id=source_sample_set_id,
+            )
+
+        worker_count, estimator_n_jobs = _selection_parallel_plan(config, available)
+        if config.model.name == "logistic_elasticnet":
+            scored_rows = _score_glmnet_paths(
                 config=config,
                 training_scope_id=training_scope_id,
                 source_sample_set_id=source_sample_set_id,
-                candidate=candidate,
+                candidates=candidates,
                 preprocessed_folds=preprocessed_folds,
-                estimator_n_jobs=estimator_n_jobs,
+                progress_callback=progress_callback,
                 timing_recorder=timing_recorder,
             )
-            scored_rows.append((mean_score, rows))
-            if progress_callback is not None:
-                score_repr = "NA" if np.isnan(mean_score) else f"{float(mean_score):.6f}"
-                progress_callback(
-                    "selection_candidate_done",
-                    (
-                        f"source_sample_set_id={source_sample_set_id}, "
-                        f"candidate_index={candidate.candidate_index}, "
-                        f"candidate_progress={candidate_progress}/{available}, "
-                        f"metric_value={score_repr}"
-                    ),
-                )
-    else:
-        scored_rows_by_index: dict[int, tuple[float, list[dict[str, Any]]]] = {}
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {
-                executor.submit(
-                    _score_candidate_inner_cv,
+        elif worker_count == 1:
+            scored_rows = []
+            for candidate_progress, candidate in enumerate(candidates, start=1):
+                mean_score, rows = _score_candidate_inner_cv(
                     config=config,
                     training_scope_id=training_scope_id,
                     source_sample_set_id=source_sample_set_id,
@@ -4292,13 +4362,8 @@ def _prepare_source_selection(
                     preprocessed_folds=preprocessed_folds,
                     estimator_n_jobs=estimator_n_jobs,
                     timing_recorder=timing_recorder,
-                ): candidate
-                for candidate in candidates
-            }
-            for candidate_progress, future in enumerate(as_completed(futures), start=1):
-                candidate = futures[future]
-                mean_score, rows = future.result()
-                scored_rows_by_index[candidate.candidate_index] = (mean_score, rows)
+                )
+                scored_rows.append((mean_score, rows))
                 if progress_callback is not None:
                     score_repr = "NA" if np.isnan(mean_score) else f"{float(mean_score):.6f}"
                     progress_callback(
@@ -4310,7 +4375,39 @@ def _prepare_source_selection(
                             f"metric_value={score_repr}"
                         ),
                     )
-        scored_rows = [scored_rows_by_index[candidate.candidate_index] for candidate in candidates]
+        else:
+            scored_rows_by_index: dict[int, tuple[float, list[dict[str, Any]]]] = {}
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = {
+                    executor.submit(
+                        _score_candidate_inner_cv,
+                        config=config,
+                        training_scope_id=training_scope_id,
+                        source_sample_set_id=source_sample_set_id,
+                        candidate=candidate,
+                        preprocessed_folds=preprocessed_folds,
+                        estimator_n_jobs=estimator_n_jobs,
+                        timing_recorder=timing_recorder,
+                    ): candidate
+                    for candidate in candidates
+                }
+                for candidate_progress, future in enumerate(as_completed(futures), start=1):
+                    candidate = futures[future]
+                    mean_score, rows = future.result()
+                    scored_rows_by_index[candidate.candidate_index] = (mean_score, rows)
+                    if progress_callback is not None:
+                        score_repr = "NA" if np.isnan(mean_score) else f"{float(mean_score):.6f}"
+                        progress_callback(
+                            "selection_candidate_done",
+                            (
+                                f"source_sample_set_id={source_sample_set_id}, "
+                                f"candidate_index={candidate.candidate_index}, "
+                                f"candidate_progress={candidate_progress}/{available}, "
+                                f"metric_value={score_repr}"
+                            ),
+                        )
+            scored_rows = [scored_rows_by_index[candidate.candidate_index]
+                           for candidate in candidates]
 
     for candidate, (mean_score, rows) in zip(candidates, scored_rows, strict=True):
         score_value = None if np.isnan(mean_score) else float(mean_score)
@@ -5571,6 +5668,7 @@ def _run_final_refit_impl(
                         "metric_name": row["metric_name"],
                         "metric_value": row["metric_value"],
                         "params_json": row["params_json"],
+                        **{key: row[key] for key in AUTO_COLUMNS if key in row},
                     }
                 )
                 fit_diagnostic = row.get("fit_diagnostic")
@@ -5928,6 +6026,7 @@ def _run_final_refit_impl(
             zero_as_missing=config.preprocess.expression.missing_expression.zero_as_missing,
         )
     model_selection_selected: pl.DataFrame | None = None
+    _realize_selected_rows(model_selection_selected_rows, convergence_rows)
     if model_selection_selected_rows:
         model_selection_selected = pl.DataFrame(model_selection_selected_rows).sort(
             [
@@ -6225,6 +6324,7 @@ def _run_outer_fold(
                         "metric_name": row["metric_name"],
                         "metric_value": row["metric_value"],
                         "params_json": row["params_json"],
+                        **{key: row[key] for key in AUTO_COLUMNS if key in row},
                     }
                 )
                 fit_diagnostic = row.get("fit_diagnostic")
@@ -6601,6 +6701,7 @@ def _run_outer_fold(
                 fold_id=fold_id,
             ).to_dicts()
 
+    _realize_selected_rows(model_selection_selected_rows, convergence_rows)
     result = OuterFoldResult(
         fold_metrics=fold_metrics,
         metric_rows=metric_rows,
@@ -7033,6 +7134,7 @@ def _run_outer_cv_impl(
             inference_prediction_rows, infer_schema_length=None
         ).sort(["fold_id", "species"])
     model_selection_selected: pl.DataFrame | None = None
+    _realize_selected_rows(model_selection_selected_rows, convergence_rows)
     if model_selection_selected_rows:
         model_selection_selected = pl.DataFrame(model_selection_selected_rows).sort(
             [

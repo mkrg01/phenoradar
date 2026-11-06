@@ -76,7 +76,7 @@ def test_annotated_search_space_preserves_values_and_lists_range_types(
     assert yaml.safe_load(rendered) == config.model_dump(mode="python")
     assert (
         f"type: {spec['type']}  # choices: range, int_range, log_range, "
-        "continuous_range, continuous_log_range"
+        "continuous_range, continuous_log_range, auto_log_range"
     ) in rendered
     if not str(spec["type"]).startswith("continuous"):
         assert "inclusive_end: false  # choices: true, false" in rendered
@@ -1343,3 +1343,21 @@ def test_removed_warm_start_switch_is_rejected(tmp_path: Path) -> None:
     cfg = _write(tmp_path / "removed.yml", "model:\n  logistic_warm_start_path: true\n")
     with pytest.raises(ConfigError, match="logistic_warm_start_path"):
         load_and_resolve_config([cfg])
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_layered_lambda_kind_changes_replace_incompatible_fields(tmp_path: Path, reverse: bool):
+    automatic = {"type": "auto_log_range", "min_ratio": .02, "n_points": 5}
+    absolute = {"type": "log_range", "base": 10, "start_exp": -5,
+                "end_exp": -1, "step_exp": .5}
+    first, second = (absolute, automatic) if reverse else (automatic, absolute)
+    base = tmp_path / "base.yml"
+    override = tmp_path / "override.yml"
+    base.write_text(yaml.safe_dump({"model_selection": {
+        "selected_candidate_count": 1, "inner_cv_strategy": "logo",
+        "search_space": {"lambda": first}}}))
+    override.write_text(yaml.safe_dump({"model_selection": {"search_space": {"lambda": second}}}))
+    resolved = load_and_resolve_config([base, override])
+    value = resolved.model_selection.search_space["lambda"].model_dump()
+    assert all(value[key] == expected for key, expected in second.items())
+    assert AppConfig.model_validate(yaml.safe_load(serialize_resolved_config(resolved))) == resolved

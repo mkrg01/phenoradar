@@ -122,6 +122,16 @@ class ContinuousLogRangeSpec(StrictModel):
         return self
 
 
+class AutoLogRangeSpec(StrictModel):
+    """Training-fold lambda-max-relative path with bounded lower extensions."""
+
+    type: Literal["auto_log_range"] = "auto_log_range"
+    min_ratio: float = Field(default=0.01, gt=0, lt=1, allow_inf_nan=False)
+    n_points: int = Field(default=9, ge=2, le=1_000_000)
+    extend_lower: bool = True
+    max_extensions: int = Field(default=2, ge=0)
+
+
 SearchSpaceValue = (
     list[Any]
     | DiscreteRangeSpec
@@ -129,6 +139,7 @@ SearchSpaceValue = (
     | LogRangeSpec
     | ContinuousRangeSpec
     | ContinuousLogRangeSpec
+    | AutoLogRangeSpec
 )
 
 
@@ -567,6 +578,39 @@ class AppConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_contrast_pair_dependencies(self) -> AppConfig:
+        auto_lambda = self.model_selection.search_space.get("lambda")
+        for name, value in self.model_selection.search_space.items():
+            if isinstance(value, AutoLogRangeSpec) and name != "lambda":
+                raise ValueError("auto_log_range is only supported for lambda")
+        if isinstance(auto_lambda, AutoLogRangeSpec):
+            if self.model.name != "logistic_elasticnet":
+                raise ValueError("auto_log_range requires logistic_elasticnet")
+            if self.model_selection.search_strategy != "grid":
+                raise ValueError("auto_log_range requires grid search")
+            if (self.model_selection.selected_candidate_count is None
+                    and self.model_selection.selected_candidate_percent is None):
+                raise ValueError("auto_log_range requires active inner-CV model selection")
+        default_auto = (
+            self.model.name == "logistic_elasticnet"
+            and self.model_selection.search_strategy == "grid"
+            and "lambda" not in self.model_selection.search_space
+            and (self.model_selection.selected_candidate_count is not None
+                 or self.model_selection.selected_candidate_percent is not None)
+        )
+        if isinstance(auto_lambda, AutoLogRangeSpec) or default_auto:
+            alpha = self.model_selection.search_space.get("alpha", [0.5])
+            if isinstance(alpha, AutoLogRangeSpec):
+                raise ValueError("auto_log_range is only supported for lambda")
+            if isinstance(alpha, list):
+                if any(isinstance(a, bool) or not isinstance(a, (int, float)) for a in alpha):
+                    raise ValueError("auto_log_range requires numeric alpha > 0")
+                lower = min(alpha) if alpha else 0
+            elif isinstance(alpha, (LogRangeSpec, ContinuousLogRangeSpec)):
+                lower = min(alpha.base**alpha.start_exp, alpha.base**alpha.end_exp)
+            else:
+                lower = alpha.start
+            if not isinstance(lower, (int, float)) or not isfinite(lower) or lower <= 0:
+                raise ValueError("auto_log_range requires alpha > 0; ridge needs explicit lambda")
         if self.data.feature_mode in {"amino_acid", "combined"}:
             if not self.data.alignment_dir:
                 raise ValueError("amino_acid mode requires data.alignment_dir")
@@ -654,6 +698,8 @@ class AppConfig(StrictModel):
                         "model_selection.search_strategy=grid does not support continuous "
                         "amino_acid_penalty_ratio ranges"
                     )
+                if isinstance(ratio, AutoLogRangeSpec):
+                    raise ValueError("auto_log_range is only supported for lambda")
                 if isinstance(ratio, list):
                     bounds = ratio
                 elif isinstance(ratio, (LogRangeSpec, ContinuousLogRangeSpec)):

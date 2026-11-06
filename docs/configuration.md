@@ -316,7 +316,9 @@ bundles regenerated. There is no direct conversion from the previous `C` scale.
 
 Selection is enabled only when count or percent is set, and then requires an
 inner-CV strategy. Otherwise candidates are fitted directly as ensemble members.
-An empty search space yields one default candidate; lists cannot be empty.
+With active grid selection, omitted logistic `lambda` uses `auto_log_range`.
+Without selection, an empty search space still yields one default candidate.
+Lists cannot be empty.
 Selected hyperparameter sets are deduplicated.
 
 `one_se` keeps candidates within one standard error of the best score and prefers
@@ -342,6 +344,7 @@ model_selection:
 | List, e.g. `[0.001, 0.01]` | Explicit values | One value fixes a parameter |
 | `range` | `start`, `end`, `step` | Discrete float increments |
 | `int_range` | `start`, `end`, `step` | Discrete integer increments |
+| `auto_log_range` (lambda only) | `min_ratio`, `n_points`, `extend_lower`, `max_extensions` | Training-local relative lambda path; grid selection only |
 | `log_range` | `base`, `start_exp`, `end_exp`, `step_exp` | Discrete `base ** exponent` values |
 | `continuous_range` | `start`, `end` | Uniform sampling in the interval |
 | `continuous_log_range` | `base`, `start_exp`, `end_exp` | Uniform exponent sampling, then exponentiation |
@@ -364,6 +367,48 @@ model_selection:
       inclusive_end: true
     alpha: [1]
 ```
+
+### Automatic lambda paths
+
+The default logistic grid uses:
+
+```yaml
+lambda:
+  type: auto_log_range
+  min_ratio: 0.01
+  n_points: 9
+  extend_lower: true
+  max_extensions: 2
+```
+
+Each inner training fold computes its own `lambda_max` after preprocessing and
+sample weighting. At this upper endpoint every penalized coefficient is zero.
+Candidates share `lambda_fraction = lambda / lambda_max`, from 1 down to
+`min_ratio`, with equal spacing on the log scale. The lower endpoint does not
+promise that all features enter. For combined mode, the maximum includes the
+AA penalty factor, so each AA/expression ratio has its own scale. No validation
+or external labels enter this calculation. Pure ridge (`alpha: [0]`) needs an
+explicit absolute lambda range.
+
+If the best mean inner-CV score is at the current lower endpoint, all paths
+extend one decade. The defaults add four points per extension, up to 17 total
+per path and a minimum fraction of 0.0001. Scores within `1e-10` are tied and
+prefer stronger regularization. Extension decisions use the best mean score
+also under `one_se`; final ranking still follows the configured selection rule.
+A remaining boundary optimum or a failed extension produces a warning. On an
+extension failure, selection retains only previously completed CV rounds.
+
+Preprocessed folds are cached in temporary disk files for extensions. They
+are removed after selection. Solver warm-start prefixes are refitted when
+extending; extension therefore costs additional compute and disk I/O. Each
+selected outer model and final refit recomputes `lambda_max` on its own training
+set. Trial tables record the fraction, maximum, actual lambda, extension round,
+stop reason and block nonzero counts; selected parameter JSON records the actual
+refit lambda too.
+
+Explicit lists, `range`, `log_range`, and continuous absolute lambda ranges keep
+their previous behavior and do not extend. Automatic paths require active
+selection and `grid`; `random` and `tpe` continue to use explicit ranges.
 
 ## Output and runtime settings
 

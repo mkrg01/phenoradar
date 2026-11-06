@@ -6,7 +6,7 @@ NumPy coefficients, so no R runtime, subprocess, or lambda interpolation is need
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
@@ -121,6 +121,8 @@ def fit_glmnet_path(
     penalty_factor: np.ndarray | None = None,
     compute_kkt: bool = True,
     copy_x: bool = True,
+    warmup_lambdas: Sequence[float] | None = None,
+    on_model: Callable[[int, GlmnetLogisticRegression], None] | None = None,
 ) -> list[GlmnetLogisticRegression]:
     """Fit one descending path; return independent models in requested order.
 
@@ -129,6 +131,9 @@ def fit_glmnet_path(
     Explicit lambdas disable automatic path truncation in the glmnet core.
     Intermediate positive lambdas improve warm starts on coarse candidate grids;
     only exact requested models are extracted, scored, or returned.
+    Additional warmup_lambdas join that native path without expanding their
+    coefficients. With on_model, emit one requested solution at a time and
+    return an empty list, keeping coefficient memory independent of path length.
     """
     if compute_kkt and not copy_x:
         raise GlmnetError("KKT diagnostics require an unmodified training matrix")
@@ -177,6 +182,10 @@ def fit_glmnet_path(
     if not np.isfinite(factor_mean) or factor_mean <= 0:
         raise GlmnetError("penalty_factor mean must be finite and positive")
     path = np.unique(requested)[::-1].copy()
+    warmup = np.asarray([] if warmup_lambdas is None else warmup_lambdas, dtype=float)
+    if warmup.ndim != 1 or not np.isfinite(warmup).all() or np.any(warmup < 0):
+        raise GlmnetError("warmup_lambdas must be finite and nonnegative")
+    native_targets = np.unique(np.concatenate((path, warmup)))[::-1].copy()
     if sparse.issparse(x):
         x = sparse.csc_matrix(x, copy=False)
         if not x.has_canonical_format:
@@ -194,11 +203,11 @@ def fit_glmnet_path(
         # an unpenalized intercept with all coefficients zero.
         prevalence = float(weights @ y)
         intercepts = np.full(len(path), np.log(prevalence / (1 - prevalence)))
-        coefficients = np.zeros((p, len(path)))
+        coefficients = np.zeros((p, len(path) if on_model is None else 1))
         passes = 0
         native_path_length = 0
     else:
-        native_path = _native_lambda_path(path) * factor_mean
+        native_path = _native_lambda_path(native_targets) * factor_mean
         if not np.isfinite(native_path).all():
             raise GlmnetError("penalty_factor produces non-finite native lambdas")
         native_path_length = len(native_path)
@@ -253,21 +262,32 @@ def fit_glmnet_path(
             raise GlmnetError("glmnet returned unexpected lambda values")
         target_indices = np.searchsorted(-native_path, -path * factor_mean)
         # Discard auxiliary solutions before expanding compressed coefficients.
-        coefficients = np.asarray(
+        coefficients = (np.asarray(
             lsolns(p, compressed[:, :, target_indices], indices, sizes[target_indices])[:, 0, :]
-        )
+        ) if on_model is None else np.empty((0, 0)))
         intercepts = np.asarray(intercepts_raw[0, target_indices])
     if not np.isfinite(coefficients).all() or not np.isfinite(intercepts).all():
         raise GlmnetError("glmnet returned nonfinite coefficients")
 
     models = []
-    for strength in requested:
+    for requested_index, strength in enumerate(requested):
         index = int(np.flatnonzero(path == strength)[0])
         model = GlmnetLogisticRegression(
             lambda_=float(strength), alpha=alpha, thresh=thresh, maxit=int(maxit),
             penalty_factor=None if penalty_factor is None else factors.copy(),
         )
-        model.coef_ = coefficients[:, index].copy()
+        if on_model is not None:
+            if variable:
+                native_index = target_indices[index:index + 1]
+                model.coef_ = np.asarray(lsolns(
+                    p, compressed[:, :, native_index], indices, sizes[native_index]
+                )[:, 0, 0]).copy()
+            else:
+                model.coef_ = coefficients[:, 0].copy()
+        else:
+            model.coef_ = coefficients[:, index].copy()
+        if not np.isfinite(model.coef_).all():
+            raise GlmnetError("glmnet returned nonfinite coefficients")
         model.intercept_ = float(intercepts[index])
         model.classes_ = np.array([0, 1])
         model.n_features_in_ = p
@@ -287,7 +307,10 @@ def fit_glmnet_path(
                 gradient[active] + strength * alpha * factors[active] * np.sign(model.coef_[active])
             )
             model.kkt_residual_ = float(subgradient.sum() + abs(residual.sum()))
-        models.append(model)
+        if on_model is None:
+            models.append(model)
+        else:
+            on_model(requested_index, model)
     return models
 
 

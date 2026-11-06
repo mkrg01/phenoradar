@@ -36,6 +36,7 @@ from phenoradar.amino_acid_outputs import (
 from phenoradar.amino_acid_prediction import prediction_members
 from phenoradar.amino_acid_reporting import AAReportWriter
 from phenoradar.amino_acid_sparse import fit_sparse_encoded, training_information
+from phenoradar.auto_lambda import realized_params, score_auto_paths
 from phenoradar.combined import ExpressionInput, ExpressionTransform, fit_expression
 from phenoradar.config import AppConfig
 from phenoradar.config.io import write_resolved_config
@@ -50,6 +51,7 @@ from phenoradar.cv import (
     _fit_sample_weights,
     _fit_selected_estimator,
     _glmnet_candidate_params,
+    _glmnet_fit_diagnostic,
     _inner_cv_splits,
     _metric_rows,
     _metrics_dataframe,
@@ -60,6 +62,7 @@ from phenoradar.cv import (
     _score_std_error_from_trial_rows,
     _select_training_groups,
     _selection_is_active,
+    _selection_metric_from_probability,
     _selection_metric_nan_sentinel,
     _selection_metric_optuna_direction,
     _selection_source_sample_set_id,
@@ -68,7 +71,7 @@ from phenoradar.cv import (
     expression_input_species,
     iter_inner_cv_preprocessed_folds,
 )
-from phenoradar.glmnet import GlmnetLogisticRegression
+from phenoradar.glmnet import GlmnetLogisticRegression, fit_glmnet_path
 from phenoradar.group_bootstrap import run_oof_group_bootstrap
 from phenoradar.metrics import (
     binary_log_loss,
@@ -79,6 +82,7 @@ from phenoradar.metrics import (
 from phenoradar.model_selection import (
     Candidate,
     active_search_space,
+    auto_lambda_spec,
     expanded_search_space,
     generate_candidates,
 )
@@ -276,7 +280,18 @@ def _select(
             return _dedupe_ranked_candidates_by_params(
                 [SelectedCandidate(c, None) for c in candidates]
             ), []
-        for candidate, (mean, detail) in zip(candidates, score(candidates), strict=True):
+        if auto_lambda_spec(config) is not None:
+            auto = _with_native_thread_limit(
+                config.runtime.n_jobs, score_auto_paths, config, candidates, prepare(),
+                fit_path=fit_glmnet_path,
+                metric=lambda y, p: _selection_metric_from_probability(
+                    config, y, p),
+                diagnostic=_glmnet_fit_diagnostic, warnings=warnings, progress=progress,
+            )
+            candidates, scores = auto.candidates, auto.scores
+        else:
+            scores = score(candidates)
+        for candidate, (mean, detail) in zip(candidates, scores, strict=True):
             trials.extend(detail)
             scored.append(
                 SelectedCandidate(
@@ -411,15 +426,16 @@ def fit_scope(
             )
             # Native fitting uses Z=X+c; all saved models and reports use X.
             model.intercept_ += float(shift @ model.coef_)
-            members.append(AAMember(fitted, model, scope, sample_set_id, result.candidate,
-                                    expr, aa_std))
+            candidate = Candidate(result.candidate.candidate_index,
+                                  realized_params(result.candidate.params, model))
+            members.append(AAMember(fitted, model, scope, sample_set_id, candidate, expr, aa_std))
             _write(
                 tables / "model_selection_selected.tsv",
                 [
                     {
                         **context,
                         "candidate_index": result.candidate.candidate_index,
-                        "params_json": json.dumps(result.candidate.params, sort_keys=True),
+                        "params_json": json.dumps(candidate.params, sort_keys=True),
                         "score": result.score,
                         "score_std_error": result.score_std_error,
                         "selection_rule": result.selection_rule,
