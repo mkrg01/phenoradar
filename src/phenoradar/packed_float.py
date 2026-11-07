@@ -25,6 +25,11 @@ def take(data: np.ndarray, nrows: int, width: int, rows: np.ndarray,
          columns: np.ndarray, *, packed: bool) -> np.ndarray:
     if not packed:
         return np.asarray(data.view(np.float32).reshape(nrows, width)[np.ix_(rows, columns)])
+    from phenoradar.amino_acid_kernels import decode
+
+    decoded = decode(data, nrows, width, rows, columns)
+    if decoded is not None:
+        return decoded
     nbytes = (width + 7) // 8
     end = nrows * 3 * nbytes
     planes = data[:end].reshape(nrows, 3, nbytes)

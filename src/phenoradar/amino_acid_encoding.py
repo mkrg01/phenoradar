@@ -97,6 +97,15 @@ class FoldEncoding:
              * known[sites[keep], residues[keep]][None, :]).astype(np.float32, copy=False)
         mass = _compact_mass(q, local[sites[keep]], residues[keep], int(eligible.sum()))
         selected = keep & active[sites, residues]
+        from phenoradar.amino_acid_kernels import center, native
+
+        if native is not None and hasattr(self, "_append_csc"):
+            encoded = center(values, np.flatnonzero(selected), local[sites[selected]],
+                             mean[sites[selected], residues[selected]], mass)
+            from phenoradar.amino_acid_kernels import append
+
+            append(self, encoded)
+            return
         encoded = np.nan_to_num(values[:, selected], copy=False).astype(float)
         encoded -= mass[:, local[sites[selected]]] * mean[sites[selected], residues[selected]]
         self.append(encoded)

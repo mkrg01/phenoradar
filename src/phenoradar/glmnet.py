@@ -109,6 +109,35 @@ class GlmnetLogisticRegression(ClassifierMixin, BaseEstimator):  # type: ignore[
         return np.asarray(self.decision_function(X) >= 0, dtype=int)
 
 
+class _CompactGlmnetModel(GlmnetLogisticRegression):
+    """Transient CV solution; expand only when a caller explicitly requests coef_."""
+
+    @property
+    def coef_(self) -> np.ndarray:
+        values = np.zeros(self.n_features_in_)
+        values[self.coefficient_indices_] = self.coefficient_values_
+        return values
+
+    def fit(self, X: Any, y: np.ndarray, sample_weight: np.ndarray | None = None
+            ) -> _CompactGlmnetModel:
+        model = fit_glmnet_path(
+            X, y, [self.lambda_], alpha=self.alpha, thresh=self.thresh, maxit=self.maxit,
+            sample_weight=sample_weight, penalty_factor=self.penalty_factor,
+            compact_coefficients=True, compute_kkt=False,
+        )[0]
+        self.__dict__.update(model.__dict__)
+        return self
+
+    def decision_function(self, X: Any) -> np.ndarray:
+        x = check_array(X, accept_sparse="csc", dtype=np.float64, ensure_min_features=0)
+        if x.shape[1] != self.n_features_in_:
+            raise ValueError(f"Expected {self.n_features_in_} features, got {x.shape[1]}")
+        if self.n_features_in_ < 100_000:
+            return np.asarray(x @ self.coef_ + self.intercept_, dtype=float).reshape(-1)
+        return np.asarray(x[:, self.coefficient_indices_] @ self.coefficient_values_
+                          + self.intercept_, dtype=float).reshape(-1)
+
+
 def fit_glmnet_path(
     x: Any,
     y: np.ndarray,
@@ -121,6 +150,7 @@ def fit_glmnet_path(
     penalty_factor: np.ndarray | None = None,
     compute_kkt: bool = True,
     copy_x: bool = True,
+    compact_coefficients: bool = False,
 ) -> list[GlmnetLogisticRegression]:
     """Fit one descending path; return independent models in requested order.
 
@@ -130,6 +160,8 @@ def fit_glmnet_path(
     Intermediate positive lambdas improve warm starts on coarse candidate grids;
     only exact requested models are extracted, scored, or returned.
     """
+    if compact_coefficients and compute_kkt:
+        raise GlmnetError("Compact CV solutions do not compute KKT diagnostics")
     if compute_kkt and not copy_x:
         raise GlmnetError("KKT diagnostics require an unmodified training matrix")
     requested = np.asarray(lambdas, dtype=float)
@@ -194,7 +226,9 @@ def fit_glmnet_path(
         # an unpenalized intercept with all coefficients zero.
         prevalence = float(weights @ y)
         intercepts = np.full(len(path), np.log(prevalence / (1 - prevalence)))
-        coefficients = np.zeros((p, len(path)))
+        coefficients = (np.empty((0, len(path))) if compact_coefficients
+                        else np.zeros((p, len(path))))
+        compact = [(np.empty(0, dtype=np.int64), np.empty(0)) for _ in path]
         passes = 0
         native_path_length = 0
     else:
@@ -253,21 +287,43 @@ def fit_glmnet_path(
             raise GlmnetError("glmnet returned unexpected lambda values")
         target_indices = np.searchsorted(-native_path, -path * factor_mean)
         # Discard auxiliary solutions before expanding compressed coefficients.
-        coefficients = np.asarray(
-            lsolns(p, compressed[:, :, target_indices], indices, sizes[target_indices])[:, 0, :]
-        )
+        if compact_coefficients:
+            compact = []
+            for target in target_indices:
+                count = int(sizes[target])
+                cols = np.asarray(indices[:count], dtype=np.int64) - 1
+                values = np.asarray(compressed[:count, 0, target])
+                keep = values != 0
+                cols, values = cols[keep], values[keep]
+                order = np.argsort(cols)
+                compact.append((cols[order], values[order]))
+            coefficients = np.empty((0, len(path)))
+        else:
+            coefficients = np.asarray(
+                lsolns(p, compressed[:, :, target_indices], indices, sizes[target_indices])[:, 0, :]
+            )
         intercepts = np.asarray(intercepts_raw[0, target_indices])
     if not np.isfinite(coefficients).all() or not np.isfinite(intercepts).all():
         raise GlmnetError("glmnet returned nonfinite coefficients")
+    if compact_coefficients and any(not np.isfinite(values).all() for _, values in compact):
+        raise GlmnetError("glmnet returned nonfinite coefficients")
 
+    shared_penalties = None
+    if compact_coefficients and penalty_factor is not None:
+        shared_penalties = factors.copy()
+        shared_penalties.flags.writeable = False
     models = []
     for strength in requested:
         index = int(np.flatnonzero(path == strength)[0])
-        model = GlmnetLogisticRegression(
+        model = (_CompactGlmnetModel if compact_coefficients else GlmnetLogisticRegression)(
             lambda_=float(strength), alpha=alpha, thresh=thresh, maxit=int(maxit),
-            penalty_factor=None if penalty_factor is None else factors.copy(),
+            penalty_factor=(shared_penalties if compact_coefficients else
+                            None if penalty_factor is None else factors.copy()),
         )
-        model.coef_ = coefficients[:, index].copy()
+        if compact_coefficients:
+            model.coefficient_indices_, model.coefficient_values_ = compact[index]
+        else:
+            model.coef_ = coefficients[:, index].copy()
         model.intercept_ = float(intercepts[index])
         model.classes_ = np.array([0, 1])
         model.n_features_in_ = p
@@ -300,6 +356,20 @@ def predict_glmnet_path(
     p = models[0].n_features_in_
     if p < 100_000:
         return [model.predict_proba(x)[:, 1] for model in models]
+    if all(isinstance(model, _CompactGlmnetModel) for model in models):
+        values = check_array(x, accept_sparse="csc", dtype=np.float64, ensure_min_features=0)
+        if values.shape[1] != p or any(m.n_features_in_ != p for m in models):
+            raise ValueError("glmnet path prediction feature counts do not match")
+        columns = np.unique(np.concatenate([m.coefficient_indices_ for m in models]))
+        selected = values[:, columns]
+        result = []
+        for model in models:
+            coefficients = np.zeros(len(columns))
+            coefficients[np.searchsorted(columns, model.coefficient_indices_)] = (
+                model.coefficient_values_
+            )
+            result.append(expit(np.asarray(selected @ coefficients).reshape(-1) + model.intercept_))
+        return result
     values = check_array(x, accept_sparse="csc", dtype=np.float64, ensure_min_features=0)
     if values.shape[1] != p or any(m.n_features_in_ != p for m in models):
         raise ValueError("glmnet path prediction feature counts do not match")

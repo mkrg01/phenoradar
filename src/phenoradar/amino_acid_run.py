@@ -6,7 +6,7 @@ import csv
 import gzip
 import json
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Generator, Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -139,6 +139,34 @@ def _arrays(rows: pl.DataFrame) -> tuple[list[str], np.ndarray, np.ndarray, np.n
     )
 
 
+def _prepare_inner_fold(
+    config: AppConfig, store: AlignmentStore, expression: ExpressionInput | None,
+    species: list[str], y: np.ndarray, groups: np.ndarray, pairs: np.ndarray,
+    split: tuple[np.ndarray, np.ndarray, str], warnings: list[str],
+) -> InnerCvPreprocessedFold:
+    train, valid, fold = split
+    train_species = [species[i] for i in train]
+    valid_species = [species[i] for i in valid]
+    fitted, matrices, _ = fit_sparse_encoded(
+        store, train_species, config.preprocess.amino_acid,
+        [train_species, valid_species], y=y[train], groups=groups[train],
+        contrast_groups=pairs[train], audit=False, n_jobs=config.runtime.n_jobs,
+    )
+    x_train, x_valid = matrices
+    n_expression = None
+    if expression is not None:
+        expr, xe, _, _ = fit_expression(config, expression, train_species, y[train],
+                                        pairs[train], warnings)
+        xv, _ = expr.transform(expression, valid_species)
+        n_expression = xe.shape[1]
+        x_train = sparse.hstack((xe, x_train), format="csc")
+        x_valid = sparse.hstack((xv, x_valid), format="csc")
+        record_sparse_usage(store, fitted, [x_train, x_valid])
+    return InnerCvPreprocessedFold(fold, x_train, x_valid, y[train], y[valid],
+                                   _fit_sample_weights(config, y[train], groups[train]),
+                                   n_expression)
+
+
 def _select(
     config: AppConfig,
     store: AlignmentStore,
@@ -151,46 +179,20 @@ def _select(
     progress: Callable[[str], None] | None = None,
 ) -> tuple[list[SelectedCandidate], list[dict[str, Any]]]:
     species, y, groups, pairs = _arrays(rows)
-    def prepare() -> Iterable[InnerCvPreprocessedFold]:
+    def prepare() -> Generator[InnerCvPreprocessedFold, None, None]:
         for train, valid, fold in _inner_cv_splits(config, y, groups):
             if progress:
                 progress(f"{scope}: prepare inner fold {fold}.")
-            train_species = [species[i] for i in train]
-            valid_species = [species[i] for i in valid]
-            fitted, matrices, _ = fit_sparse_encoded(
-                store, train_species, config.preprocess.amino_acid,
-                [train_species, valid_species], y=y[train], groups=groups[train],
-                contrast_groups=pairs[train], audit=False, n_jobs=config.runtime.n_jobs,
-            )
-            x_train, x_valid = matrices
-            del matrices
+            prepared_fold = _prepare_inner_fold(config, store, expression, species, y,
+                                                  groups, pairs, (train, valid, fold), warnings)
             if progress:
                 progress(
                     f"{scope}: inner fold {fold} ready "
                     f"({len(train)} train, {len(valid)} validation, "
-                    f"{x_train.shape[1]} AA features)."
+                    f"{prepared_fold.x_train.shape[1]} AA features)."
                 )
-            n_expression = None
-            if expression is not None:
-                expr, xe, _, _ = fit_expression(
-                    config, expression, [species[i] for i in train],
-                    y[train], pairs[train], warnings,
-                )
-                xv, _ = expr.transform(expression, [species[i] for i in valid])
-                n_expression = xe.shape[1]
-                x_train = sparse.hstack((xe, x_train), format="csc")
-                x_valid = sparse.hstack((xv, x_valid), format="csc")
-                record_sparse_usage(store, fitted, [x_train, x_valid])
-            yield InnerCvPreprocessedFold(
-                    fold,
-                    x_train,
-                    x_valid,
-                    y[train],
-                    y[valid],
-                    _fit_sample_weights(config, y[train], groups[train]),
-                    n_expression,
-            )
-            del fitted, x_train, x_valid
+            yield prepared_fold
+            del prepared_fold
 
 
     # TPE revisits the same folds for successive candidate batches. Grid paths
@@ -212,16 +214,40 @@ def _select(
                 progress_callback=selection_progress, timing_recorder=None, max_path_workers=1,
             )
         collected: list[list[dict[str, Any]]] = [[] for _ in candidates]
-        for fold in prepare():
-            scored = _score_glmnet_paths(
-                config=config, training_scope_id=scope, source_sample_set_id=sample_set_id,
-                candidates=candidates, preprocessed_folds=[fold],
-                progress_callback=None, timing_recorder=None,
-                consume_training_matrix=True, max_path_workers=1,
-            )
+        from phenoradar.amino_acid_inner import inner_workers, score_parallel
+
+        iterator = prepare()
+        first = next(iterator)
+        splits = list(_inner_cv_splits(config, y, groups))[1:]
+        workers = inner_workers(config, store, first, len(splits))
+
+        pending_first = [first]
+
+        def serial_scores() -> Iterable[list[tuple[float, list[dict[str, Any]]]]]:
+            while True:
+                fold = pending_first.pop() if pending_first else next(iterator, None)
+                if fold is None:
+                    return
+                yield _score_glmnet_paths(
+                    config=config, training_scope_id=scope, source_sample_set_id=sample_set_id,
+                    candidates=candidates, preprocessed_folds=[fold],
+                    progress_callback=None, timing_recorder=None,
+                    consume_training_matrix=True, max_path_workers=1,
+                )
+                del fold
+
+        scores = (score_parallel(config, store, expression, scope, sample_set_id, candidates,
+                                 species, y, groups, pairs, first, splits, workers,
+                                 warnings, progress)
+                  if workers > 1 else serial_scores())
+        if workers > 1:
+            pending_first.clear()
+            iterator.close()
+        del first
+        for scored in scores:
             for rows, (_, trials) in zip(collected, scored, strict=True):
                 rows.extend(trials)
-            del fold, scored
+            del scored
         result = []
         for rows in collected:
             values = [row["metric_value"] for row in rows if not np.isnan(row["metric_value"])]

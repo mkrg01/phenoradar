@@ -92,6 +92,7 @@ class AlignmentStore:
     metadata species list, independently of training labels and CV membership.
     """
 
+    _inner_parallel_disabled: bool = False
     _sparse_usage: SparseUsage
     _matrix_buffer_bytes: int
 

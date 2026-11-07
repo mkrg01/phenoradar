@@ -109,6 +109,8 @@ def initialize(payload: dict[str, Any], n_jobs: int,
     store.__dict__.update(payload["store"])
     store._temp = TemporaryDirectory(prefix="phenoradar_aa_worker_")
     store._sparse_usage = SparseUsage()
+    # Outer-fold workers already consume the shared CPU/memory allocation.
+    store._inner_parallel_disabled = True
     if matrix_buffer_bytes is not None:
         store._matrix_buffer_bytes = matrix_buffer_bytes
     store._site_presence = SpeciesPresenceCache(

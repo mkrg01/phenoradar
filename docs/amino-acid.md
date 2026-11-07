@@ -13,6 +13,11 @@ unchanged. Different floating-point calculations can change coefficients or
 selected sites, especially with weak regularization. No configuration is needed.
 Combined models keep the expression preprocessing and its separate penalty.
 
+Grid-search inner folds use independent processes within the available memory
+budget when no outer-fold workers are active. Source installs build optional
+C kernels when a C compiler is available; otherwise the NumPy implementation
+is used. Neither optimization needs configuration or changes the lambda path.
+
 ## Start a sequence run
 
 Generate a config, then set the sequence inputs:

@@ -4209,6 +4209,8 @@ def _score_glmnet_paths(
         started = None if timing_recorder is None else timing_recorder.start()
         params, ratio = _glmnet_candidate_params(config, path[0].params)
         penalty_options: dict[str, Any] = {}
+        if config.data.feature_mode in {"amino_acid", "combined"}:
+            penalty_options["compact_coefficients"] = True
         if config.data.feature_mode == "combined":
             if fold.n_expression_features is None:
                 raise CVError("Combined inner fold is missing its feature block boundary")
