@@ -34,8 +34,9 @@ def model(beta: np.ndarray) -> GlmnetLogisticRegression:
 
 @pytest.mark.parametrize("combined", [False, True])
 @pytest.mark.parametrize("zero", [False, True])
+@pytest.mark.parametrize("isolated", [False, True])
 def test_streamed_interpretation_matches_full_tables(
-    tmp_path: Path, monkeypatch, combined: bool, zero: bool,
+    tmp_path: Path, monkeypatch, combined: bool, zero: bool, isolated: bool,
 ) -> None:
     import phenoradar.amino_acid_reporting as reporting
 
@@ -94,7 +95,8 @@ def test_streamed_interpretation_matches_full_tables(
     with AAReportWriter(tmp_path) as writer:
         for member in members:
             writer.add([member])
-        top = writer.finalize(combined=combined, top_features=3)
+        top = (writer.finalize_isolated(combined=combined, top_features=3, n_jobs=2)
+               if isolated else writer.finalize(combined=combined, top_features=3))
         assert not writer.features.frames and not writer.sites.frames
         temp = writer.path
     assert not temp.exists()

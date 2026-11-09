@@ -387,7 +387,8 @@ The group bootstrap resamples `split.group_col` from pooled out-of-fold (OOF)
 predictions without refitting. Its seed derives from `runtime.seed`.
 
 Training parallelism shares the `n_jobs` budget across folds, candidates, and
-supported model threads; sequence outer folds run sequentially to bound memory.
+supported model threads. Sequence grid CV uses a shared inner-fold queue and
+separate refit processes within the available memory budget.
 The CLI initializes Polars threads from this value unless `POLARS_MAX_THREADS`
 is already set. Native BLAS/OpenMP threads are limited during execution. Direct
 Python invocations must set Polars limits before import when a strict cap matters.

@@ -31,6 +31,12 @@ if TYPE_CHECKING:
 REPORT_BLOCK_ROWS = 65_536
 
 
+def _finalize_worker(state: dict[str, Any], combined: bool, top_features: int) -> pl.DataFrame:
+    writer = object.__new__(AAReportWriter)
+    writer.__dict__.update(state)
+    return writer.finalize(combined=combined, top_features=top_features)
+
+
 class _Spool:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
@@ -315,6 +321,22 @@ class AAReportWriter:
         return pl.scan_csv(path, separator="\t").sort(
             ["importance_mean", "feature"], descending=[True, False]
         ).head(top_features).collect(engine="streaming")
+
+    def finalize_isolated(self, *, combined: bool, top_features: int,
+                          n_jobs: int) -> pl.DataFrame:
+        """Release Polars sort/hash arenas when aggregation finishes."""
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+
+        from phenoradar.amino_acid_parallel import _worker_threads
+
+        self.features.flush()
+        self.sites.flush()
+        state = {key: value for key, value in self.__dict__.items() if key != "_temp"}
+        with _worker_threads(n_jobs), ProcessPoolExecutor(
+            max_workers=1, mp_context=multiprocessing.get_context("spawn"),
+        ) as executor:
+            return executor.submit(_finalize_worker, state, combined, top_features).result()
 
     def _interpret(self, means: pl.LazyFrame, union: pl.LazyFrame, counts: dict[str, int],
                    *, prefix: str, combined: bool) -> None:

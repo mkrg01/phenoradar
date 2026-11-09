@@ -31,6 +31,18 @@ class GlmnetError(ValueError):
     """Raised when glmnet cannot return the complete requested path."""
 
 
+def _sparse_has_variation(x: Any) -> bool:
+    # This is an existence check, not a per-feature filter. Wide AA designs
+    # almost always establish variation in the first few columns. Keep the full
+    # check for constant prefixes, implicit/explicit zeros and arbitrary inputs.
+    probe = x[:, :64] if x.shape[1] > 64 else x
+    if np.any(probe.max(axis=0).toarray() != probe.min(axis=0).toarray()):
+        return True
+    return bool(x.shape[1] > 64 and np.any(
+        x.max(axis=0).toarray() != x.min(axis=0).toarray()
+    ))
+
+
 def _native_lambda_path(targets: np.ndarray) -> np.ndarray:
     """Bridge descending positive targets without rounding or inventing targets.
 
@@ -217,9 +229,9 @@ def fit_glmnet_path(
             x.sort_indices()
         if max(*x.shape, x.nnz) >= np.iinfo(np.int32).max:
             raise GlmnetError("Sparse matrix exceeds native glmnet's 32-bit index limit")
-        variable = np.any(x.max(axis=0).toarray() != x.min(axis=0).toarray())
+        variable = _sparse_has_variation(x)
     else:
-        variable = np.any(np.ptp(x, axis=0) > 0)
+        variable = bool(np.any(np.ptp(x, axis=0) > 0))
 
     if not variable:
         # The native solver rejects all-constant designs; the exact optimum is

@@ -310,13 +310,18 @@ def _select(
                     config.model_selection.selection_rule,
                 )
             )
+    return _selected_from_scores(config, scored), trials
+
+
+def _selected_from_scores(config: AppConfig, scored: list[SelectedCandidate]
+                          ) -> list[SelectedCandidate]:
     ranked = _dedupe_ranked_candidates_by_params(_rank_selected_candidates(scored, config))
     if not any(item.score is not None and np.isfinite(item.score) for item in ranked):
         raise AlignmentError("No finite inner-CV scores for amino-acid candidate selection")
     count = _requested_selected_candidate_count(
         config=config, available_unique_candidates=len(ranked)
     )
-    return ranked[:count], trials
+    return ranked[:count]
 
 
 def fit_scope(
@@ -330,6 +335,8 @@ def fit_scope(
     *,
     progress: Callable[[str], None] | None = None,
     audit: ColumnarAudits | None = None,
+    selections: dict[int, tuple[list[SelectedCandidate], list[dict[str, Any]], list[str]]]
+    | None = None,
 ) -> list[AAMember]:
     species, y, groups, pairs = _arrays(rows)
     selection = _select_training_groups(config, y, groups, scope=scope, fold_id=scope)
@@ -340,10 +347,14 @@ def fit_scope(
     for sample_set_id, indices in enumerate(sampled):
         source_id = _selection_source_sample_set_id(config, sample_set_id)
         if source_id not in source_results:
-            selected, trials = _select(
-                config, store, rows[sampled[source_id].tolist()], scope, source_id, warnings,
-                expression, progress=progress,
-            )
+            if selections is None:
+                selected, trials = _select(
+                    config, store, rows[sampled[source_id].tolist()], scope, source_id, warnings,
+                    expression, progress=progress,
+                )
+            else:
+                selected, trials, messages = selections[source_id]
+                warnings.extend(messages)
             scored_count = len({row["candidate_index"] for row in trials})
             source_results[source_id] = SourceSelectionResult(
                 selected, max(scored_count, len(selected)), scored_count,
@@ -826,14 +837,23 @@ def run_amino_acid(
                 [{"scope": "training_pool", **store.tpm_identity}],
             )
         from phenoradar.amino_acid_parallel import merge_tables, outer_folds
+        from phenoradar.amino_acid_queue import enabled, grid_scopes
 
         folds = sorted(
             manifest.filter(pl.col("pool").is_in(["train", "validation"]))["fold_id"]
             .unique().to_list(), key=int,
         )
-        for fold, directory in zip(
-            folds, outer_folds(config, store, expression, manifest, folds, progress), strict=True,
-        ):
+        scopes = (grid_scopes(config, store, expression, manifest, folds, progress)
+                  if enabled(config) else zip(
+                      folds, outer_folds(config, store, expression, manifest, folds, progress),
+                      strict=True))
+        final = None
+        final_messages: list[str] = []
+        for fold, directory in scopes:
+            if fold == "final_refit":
+                final, final_messages = joblib.load(directory / "members.joblib")
+                merge_tables(directory / "tables", model_dir)
+                continue
             compact, pred, fold_warnings, _ = joblib.load(directory / "result.joblib")
             reports.merge(directory / "reports")
             merge_tables(directory / "tables", tables)
@@ -873,9 +893,12 @@ def run_amino_acid(
         _write(tables / "loss_by_split_cv.tsv", losses)
         if progress:
             progress("Finalize disk-backed feature and site interpretation tables.")
-        importance = reports.finalize(
-            combined=expression is not None, top_features=config.figures.top_features
-        )
+        importance = (reports.finalize_isolated(
+            combined=expression is not None, top_features=config.figures.top_features,
+            n_jobs=config.runtime.n_jobs,
+        ) if config.runtime.n_jobs >= 3 else reports.finalize(
+            combined=expression is not None, top_features=config.figures.top_features,
+        ))
         write_frequency_figure(
             run_dir / "cv/figures", store, manifest,
             reports.frequency_members(coordinate_members, importance),
@@ -905,11 +928,14 @@ def run_amino_acid(
                 .unique(subset="species")
                 .sort("species")
             )
-            final = fit_scope(
-                config, store, train, "final_refit", model_dir, warnings,
-                expression, progress=progress,
-            )
-            write_site_scores(model_dir, final)
+            if final is None:
+                final = fit_scope(
+                    config, store, train, "final_refit", model_dir, warnings,
+                    expression, progress=progress,
+                )
+                write_site_scores(model_dir, final)
+            else:
+                warnings.extend(final_messages)
             needed = _prediction_orthogroups(config, final)
             target_species = (
                 sorted(set(all_species) - set(training_species))

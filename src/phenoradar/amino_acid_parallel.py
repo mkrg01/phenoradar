@@ -28,6 +28,7 @@ from phenoradar.amino_acid_resources import (
 )
 from phenoradar.combined import ExpressionInput
 from phenoradar.config import AppConfig
+from phenoradar.cv import SelectedCandidate
 from phenoradar.resource_budget import memory_budget
 
 
@@ -67,7 +68,9 @@ def snapshot(store: AlignmentStore, expression: ExpressionInput | None) -> dict[
 
 def run_fold(config: AppConfig, store: AlignmentStore, expression: ExpressionInput | None,
              manifest: pl.DataFrame, fold: str, directory: Path, model_base: int,
-             progress: Callable[[str], None] | None = None) -> Path:
+             progress: Callable[[str], None] | None = None,
+             selections: dict[int, tuple[list[SelectedCandidate], list[dict[str, Any]], list[str]]]
+             | None = None) -> Path:
     from phenoradar.amino_acid_prediction import prediction_members
     from phenoradar.amino_acid_run import fit_scope, predict_members
 
@@ -79,7 +82,8 @@ def run_fold(config: AppConfig, store: AlignmentStore, expression: ExpressionInp
     warnings: list[str] = []
     with ColumnarAudits(tables / ".columnar") as audit:
         members = fit_scope(config, store, train.sort("species"), f"outer_fold_{fold}", tables,
-                            warnings, expression, progress=progress, audit=audit)
+                            warnings, expression, progress=progress, audit=audit,
+                            selections=selections)
     features = max(len(m.model.coef_) for m in members)
     with AAReportWriter(tables, model_base=model_base) as report:
         report.add(members)

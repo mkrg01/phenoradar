@@ -5,16 +5,19 @@ All modes share `config.yml`, grouped CV, sampling, weights, model selection,
 and mean/median ensembles. Sequence and combined modes require
 `model.name: logistic_elasticnet`.
 
-Training encodes AA blocks as disk-backed CSC sparse matrices. An exact column
-mode learned from training rows is shifted to zero; the unpenalized intercept
+Training encodes AA blocks as RAM-buffered CSC sparse matrices, spilling to
+temporary disk when needed. An exact column mode learned from training rows is
+shifted to zero; the unpenalized intercept
 is converted back to the original centered basis before saving and reporting.
 Missing/novel-residue handling, feature filters, penalties and lambda paths are
 unchanged. Different floating-point calculations can change coefficients or
 selected sites, especially with weak regularization. No configuration is needed.
 Combined models keep the expression preprocessing and its separate penalty.
 
-Grid-search inner folds use independent processes within the available memory
-budget when no outer-fold workers are active. Source installs build optional
+Grid-search inner folds share a memory-bounded process queue across outer scopes.
+Refits use separate short-lived processes; final selection can overlap outer CV.
+Scores and reports retain their original fold/candidate order. TPE retains its
+sequential candidate dependencies. Source installs build optional
 C kernels when a C compiler is available; otherwise the NumPy implementation
 is used. Neither optimization needs configuration or changes the lambda path.
 
@@ -358,13 +361,15 @@ errors and zero TPM is retained. Content-identical relocated TPM inputs can
 reuse both layers after identity verification.
 
 
-AA grid/random selection streams one inner fold at a time. With no site ranking,
-training statistics and train/validation encoding share one residue-frequency
-read. Filters, means and representative choices still use training species only.
-Outer folds use independent processes, sized from the first fold's feature count,
-`runtime.n_jobs` and available allocation memory. Tables are merged in fold order.
-Remaining folds are queued together so available workers continue immediately,
-even while an earlier fold's output is waiting to be merged.
+AA grid selection consumes each inner fold once. With no site ranking, training
+statistics and train/validation encoding share one residue-frequency read. Filters,
+means and representative choices still use training species only. The first
+inner fold sizes the shared scoring queue and refit budget from actual CSC sizes.
+Completed scopes can refit while other scopes score; when scoring finishes, its
+processes exit and available memory can support more refits. Random/TPE selection
+retains the outer-fold scheduling path. Tables and warnings merge in fold order.
+Interpretation aggregation runs in a separate process so its allocation arenas
+are released before prediction and plotting.
 No sites, candidates or CV folds are removed to reduce resource use.
 
 AA runs also write the shared evaluation, model-selection, coefficient,
@@ -387,8 +392,9 @@ and tie rules, including signed-zero handling.
 Encoded fold matrices use RAM-buffered CSC arrays within an automatic process
 budget and spill to temporary disk when that budget is exceeded. Sparse native fitting avoids input copies; its coefficient-path buffer
 grows only if the active set needs more space, restarting the same complete path.
-The first-fold CSC sizes, site metadata and observed process peak size
-outer-fold concurrency. Each worker has its own matrix-buffer budget. Inner ratio paths
+CSC sizes and site metadata bound process concurrency. Each worker has its own
+matrix-buffer budget. Buffered CSC arrays grow incrementally without a full
+end-of-fold data/index concatenation. Inner ratio paths
 run sequentially within each AA worker, avoiding simultaneous full-matrix copies.
 
 Unranked preprocessing also distributes independent OGs across the CPUs assigned
