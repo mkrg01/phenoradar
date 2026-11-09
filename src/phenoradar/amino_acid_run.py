@@ -6,7 +6,7 @@ import csv
 import gzip
 import json
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Generator, Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,6 +26,7 @@ from phenoradar.amino_acid import (
     AlignmentError,
     AlignmentStore,
 )
+from phenoradar.amino_acid_audits import ColumnarAudits
 from phenoradar.amino_acid_outputs import (
     write_combined_coefficients,
     write_frequency_figure,
@@ -142,6 +143,41 @@ def _arrays(rows: pl.DataFrame) -> tuple[list[str], np.ndarray, np.ndarray, np.n
     )
 
 
+def _prepare_inner_fold(
+    config: AppConfig, store: AlignmentStore, expression: ExpressionInput | None,
+    species: list[str], y: np.ndarray, groups: np.ndarray, pairs: np.ndarray,
+    split: tuple[np.ndarray, np.ndarray, str], warnings: list[str],
+    *, expression_fold: InnerCvPreprocessedFold | None = None,
+) -> InnerCvPreprocessedFold:
+    train, valid, fold = split
+    train_species = [species[i] for i in train]
+    valid_species = [species[i] for i in valid]
+    if expression is not None and expression_fold is None:
+        from phenoradar.cv import _preprocess_fold_with_counts
+
+        raw = expression.matrix(species)
+        xe, xv, *_ = _preprocess_fold_with_counts(
+            config, raw[train], raw[valid], expression.features,
+            y_train=y[train], groups_train=pairs[train], warnings=warnings,
+        )
+        expression_fold = InnerCvPreprocessedFold(
+            fold, xe, xv, y[train], y[valid],
+            _fit_sample_weights(config, y[train], groups[train]),
+        )
+    _, matrices, _ = fit_sparse_encoded(
+        store, train_species, config.preprocess.amino_acid,
+        [train_species, valid_species], y=y[train], groups=groups[train],
+        contrast_groups=pairs[train], audit=False, n_jobs=config.runtime.n_jobs,
+        prefix=(None if expression_fold is None else
+                [np.asarray(expression_fold.x_train), np.asarray(expression_fold.x_valid)]),
+    )
+    x_train, x_valid = matrices
+    n_expression = None if expression_fold is None else expression_fold.x_train.shape[1]
+    return InnerCvPreprocessedFold(fold, x_train, x_valid, y[train], y[valid],
+                                   _fit_sample_weights(config, y[train], groups[train]),
+                                   n_expression)
+
+
 def _select(
     config: AppConfig,
     store: AlignmentStore,
@@ -154,7 +190,7 @@ def _select(
     progress: Callable[[str], None] | None = None,
 ) -> tuple[list[SelectedCandidate], list[dict[str, Any]]]:
     species, y, groups, pairs = _arrays(rows)
-    def prepare() -> Iterable[InnerCvPreprocessedFold]:
+    def prepare() -> Generator[InnerCvPreprocessedFold, None, None]:
         expression_folds = (None if expression is None else iter_inner_cv_preprocessed_folds(
             config=config, x_source_raw=expression.matrix(species), y_source=y,
             groups_source=groups, contrast_groups_source=pairs,
@@ -163,40 +199,23 @@ def _select(
         for train, valid, fold in _inner_cv_splits(config, y, groups):
             if progress:
                 progress(f"{scope}: prepare inner fold {fold}.")
-            train_species = [species[i] for i in train]
-            valid_species = [species[i] for i in valid]
-            expression_fold = (None if expression_folds is None else _with_native_thread_limit(
-                config.runtime.n_jobs, next, expression_folds,
-            ))
+            expression_fold = (None if expression_folds is None else
+                               _with_native_thread_limit(config.runtime.n_jobs, next,
+                                                         expression_folds))
             if expression_fold is not None:
                 assert expression_fold.inner_fold_id == fold
-            fitted, matrices, _ = fit_sparse_encoded(
-                store, train_species, config.preprocess.amino_acid,
-                [train_species, valid_species], y=y[train], groups=groups[train],
-                contrast_groups=pairs[train], audit=False, n_jobs=config.runtime.n_jobs,
-                prefix=(None if expression_fold is None else
-                        [np.asarray(expression_fold.x_train),
-                         np.asarray(expression_fold.x_valid)]),
+            prepared_fold = _prepare_inner_fold(
+                config, store, expression, species, y, groups, pairs,
+                (train, valid, fold), warnings, expression_fold=expression_fold,
             )
-            x_train, x_valid = matrices
-            del matrices
             if progress:
                 progress(
                     f"{scope}: inner fold {fold} ready "
                     f"({len(train)} train, {len(valid)} validation, "
-                    f"{x_train.shape[1]} AA features)."
+                    f"{prepared_fold.x_train.shape[1]} AA features)."
                 )
-            n_expression = (None if expression_fold is None else expression_fold.x_train.shape[1])
-            yield InnerCvPreprocessedFold(
-                    fold,
-                    x_train,
-                    x_valid,
-                    y[train],
-                    y[valid],
-                    _fit_sample_weights(config, y[train], groups[train]),
-                    n_expression,
-            )
-            del fitted, x_train, x_valid
+            yield prepared_fold
+            del prepared_fold
 
 
     # TPE revisits the same folds for successive candidate batches. Grid paths
@@ -218,16 +237,40 @@ def _select(
                 progress_callback=selection_progress, timing_recorder=None, max_path_workers=1,
             )
         collected: list[list[dict[str, Any]]] = [[] for _ in candidates]
-        for fold in prepare():
-            scored = _score_glmnet_paths(
-                config=config, training_scope_id=scope, source_sample_set_id=sample_set_id,
-                candidates=candidates, preprocessed_folds=[fold],
-                progress_callback=None, timing_recorder=None,
-                consume_training_matrix=True, max_path_workers=1,
-            )
+        from phenoradar.amino_acid_inner import inner_workers, score_parallel
+
+        iterator = prepare()
+        first = next(iterator)
+        splits = list(_inner_cv_splits(config, y, groups))[1:]
+        workers = inner_workers(config, store, first, len(splits))
+
+        pending_first = [first]
+
+        def serial_scores() -> Iterable[list[tuple[float, list[dict[str, Any]]]]]:
+            while True:
+                fold = pending_first.pop() if pending_first else next(iterator, None)
+                if fold is None:
+                    return
+                yield _score_glmnet_paths(
+                    config=config, training_scope_id=scope, source_sample_set_id=sample_set_id,
+                    candidates=candidates, preprocessed_folds=[fold],
+                    progress_callback=None, timing_recorder=None,
+                    consume_training_matrix=True, max_path_workers=1,
+                )
+                del fold
+
+        scores = (score_parallel(config, store, expression, scope, sample_set_id, candidates,
+                                 species, y, groups, pairs, first, splits, workers,
+                                 warnings, progress)
+                  if workers > 1 else serial_scores())
+        if workers > 1:
+            pending_first.clear()
+            iterator.close()
+        del first
+        for scored in scores:
             for rows, (_, trials) in zip(collected, scored, strict=True):
                 rows.extend(trials)
-            del fold, scored
+            del scored
         result = []
         for rows in collected:
             values = [row["metric_value"] for row in rows if not np.isnan(row["metric_value"])]
@@ -301,13 +344,18 @@ def _select(
                     config.model_selection.selection_rule,
                 )
             )
+    return _selected_from_scores(config, scored), trials
+
+
+def _selected_from_scores(config: AppConfig, scored: list[SelectedCandidate]
+                          ) -> list[SelectedCandidate]:
     ranked = _dedupe_ranked_candidates_by_params(_rank_selected_candidates(scored, config))
     if not any(item.score is not None and np.isfinite(item.score) for item in ranked):
         raise AlignmentError("No finite inner-CV scores for amino-acid candidate selection")
     count = _requested_selected_candidate_count(
         config=config, available_unique_candidates=len(ranked)
     )
-    return ranked[:count], trials
+    return ranked[:count]
 
 
 def fit_scope(
@@ -320,6 +368,9 @@ def fit_scope(
     expression: ExpressionInput | None = None,
     *,
     progress: Callable[[str], None] | None = None,
+    audit: ColumnarAudits | None = None,
+    selections: dict[int, tuple[list[SelectedCandidate], list[dict[str, Any]], list[str]]]
+    | None = None,
 ) -> list[AAMember]:
     species, y, groups, pairs = _arrays(rows)
     selection = _select_training_groups(config, y, groups, scope=scope, fold_id=scope)
@@ -330,10 +381,14 @@ def fit_scope(
     for sample_set_id, indices in enumerate(sampled):
         source_id = _selection_source_sample_set_id(config, sample_set_id)
         if source_id not in source_results:
-            selected, trials = _select(
-                config, store, rows[sampled[source_id].tolist()], scope, source_id, warnings,
-                expression, progress=progress,
-            )
+            if selections is None:
+                selected, trials = _select(
+                    config, store, rows[sampled[source_id].tolist()], scope, source_id, warnings,
+                    expression, progress=progress,
+                )
+            else:
+                selected, trials, messages = selections[source_id]
+                warnings.extend(messages)
             scored_count = len({row["candidate_index"] for row in trials})
             source_results[source_id] = SourceSelectionResult(
                 selected, max(scored_count, len(selected)), scored_count,
@@ -384,7 +439,7 @@ def fit_scope(
         _write(tables / "amino_acid_og_qc.tsv", ({**context, **q} for q in fitted.qc))
         if progress:
             progress(f"{scope}: refit matrix ready; write preprocessing audits.")
-        write_preprocessing_audits(tables, fitted, context, expr)
+        write_preprocessing_audits(tables, fitted, context, expr, audit=audit)
         _write(tables / "representative_sequences.tsv", ({**context, **r} for r in representatives))
         if fitted.representative_columns is not None:
             _write(
@@ -442,7 +497,7 @@ def fit_scope(
                     }
                 ],
             )
-            write_site_effects(tables, members[-1], matrix, shift)
+            write_site_effects(tables, members[-1], matrix, shift, audit=audit)
             if expr is not None:
                 write_combined_coefficients(tables, members[-1])
     return members
@@ -821,14 +876,23 @@ def run_amino_acid(
                 [{"scope": "training_pool", **store.tpm_identity}],
             )
         from phenoradar.amino_acid_parallel import merge_tables, outer_folds
+        from phenoradar.amino_acid_queue import enabled, grid_scopes
 
         folds = sorted(
             manifest.filter(pl.col("pool").is_in(["train", "validation"]))["fold_id"]
             .unique().to_list(), key=int,
         )
-        for fold, directory in zip(
-            folds, outer_folds(config, store, expression, manifest, folds, progress), strict=True,
-        ):
+        scopes = (grid_scopes(config, store, expression, manifest, folds, progress)
+                  if enabled(config) else zip(
+                      folds, outer_folds(config, store, expression, manifest, folds, progress),
+                      strict=True))
+        final = None
+        final_messages: list[str] = []
+        for fold, directory in scopes:
+            if fold == "final_refit":
+                final, final_messages = joblib.load(directory / "members.joblib")
+                merge_tables(directory / "tables", model_dir)
+                continue
             compact, pred, fold_warnings, _ = joblib.load(directory / "result.joblib")
             reports.merge(directory / "reports")
             merge_tables(directory / "tables", tables)
@@ -868,9 +932,12 @@ def run_amino_acid(
         _write(tables / "loss_by_split_cv.tsv", losses)
         if progress:
             progress("Finalize disk-backed feature and site interpretation tables.")
-        importance = reports.finalize(
-            combined=expression is not None, top_features=config.figures.top_features
-        )
+        importance = (reports.finalize_isolated(
+            combined=expression is not None, top_features=config.figures.top_features,
+            n_jobs=config.runtime.n_jobs,
+        ) if config.runtime.n_jobs >= 3 else reports.finalize(
+            combined=expression is not None, top_features=config.figures.top_features,
+        ))
         write_frequency_figure(
             run_dir / "cv/figures", store, manifest,
             reports.frequency_members(coordinate_members, importance),
@@ -900,11 +967,14 @@ def run_amino_acid(
                 .unique(subset="species")
                 .sort("species")
             )
-            final = fit_scope(
-                config, store, train, "final_refit", model_dir, warnings,
-                expression, progress=progress,
-            )
-            write_site_scores(model_dir, final)
+            if final is None:
+                final = fit_scope(
+                    config, store, train, "final_refit", model_dir, warnings,
+                    expression, progress=progress,
+                )
+                write_site_scores(model_dir, final)
+            else:
+                warnings.extend(final_messages)
             needed = _prediction_orthogroups(config, final)
             target_species = (
                 sorted(set(all_species) - set(training_species))

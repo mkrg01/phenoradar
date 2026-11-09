@@ -248,6 +248,7 @@ def build_candidate_evidence_artifacts(
     cross_fold_predictions: pl.DataFrame | None,
     top_features: int,
     include_model_reference: bool = False,
+    expression_builder: ExpressionMatrixBuilder | None = None,
 ) -> CandidateEvidenceArtifacts:
     """Build candidate-local contributions and known-trait expression references."""
     if top_features < 1:
@@ -285,7 +286,8 @@ def build_candidate_evidence_artifacts(
     if positive.height == 0:
         try:
             reference = _reference_expression(
-                config, ExpressionMatrixBuilder(config), _known_species(split_manifest),
+                config, expression_builder or ExpressionMatrixBuilder(config),
+                _known_species(split_manifest),
                 active_features,
             )
         except CVError as exc:
@@ -318,7 +320,7 @@ def build_candidate_evidence_artifacts(
         transform_index = {feature: idx for idx, feature in enumerate(transform_features)}
 
     try:
-        matrix_builder = ExpressionMatrixBuilder(config)
+        matrix_builder = expression_builder or ExpressionMatrixBuilder(config)
         matrix_builder.cache_species([*known_species, *candidate_species])
         candidate_raw, _ = matrix_builder.build_matrix(
             candidate_species,

@@ -53,6 +53,7 @@ def annotate_abstention(
     zero_as_missing: bool,
     threshold: float,
     top_features: int = 30,
+    allow_missing_zero_coefficients: bool = False,
 ) -> pl.DataFrame:
     """Attach coverage from the original observation mask, aligned by species.
 
@@ -80,8 +81,15 @@ def annotate_abstention(
             continue
         normalized = coef / maximum
         normalized /= normalized.sum()
-        indices = [index[name] for name in names]
-        weights[indices] += normalized / len(model_coefficients)
+        if allow_missing_zero_coefficients:
+            present = np.asarray([name in index for name in names], dtype=bool)
+            if np.any((~present) & (coef != 0.0)):
+                raise ValueError("Abstention matrix is missing a nonzero-coefficient feature")
+            indices = [index[name] for name in names if name in index]
+            weights[indices] += normalized[present] / len(model_coefficients)
+        else:
+            indices = [index[name] for name in names]
+            weights[indices] += normalized / len(model_coefficients)
     active = np.flatnonzero(weights > 0)
     active_weights = weights[active]
     active_names = [feature_names[int(j)] for j in active]

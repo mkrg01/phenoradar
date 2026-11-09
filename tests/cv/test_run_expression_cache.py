@@ -521,3 +521,53 @@ def test_input_timing_separates_preparation_from_matrix_work(
         )
         assert "input_normalize_cache" not in artifact.timing["stage"]
     assert cv.timing["started_at_sec"].min() >= preparation["ended_at_sec"].max()
+
+
+@pytest.mark.parametrize("intercept_only", [False, True])
+@pytest.mark.parametrize("aggregation", ["mean", "median"])
+def test_prediction_matrix_projection_and_reuse_match_full_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, intercept_only: bool, aggregation: str,
+) -> None:
+    config = _config(tmp_path)
+    config.figures.top_features = 1
+    config.ensemble.probability_aggregation = aggregation
+    config.preprocess.expression.absent_feature_fill = "nan"
+    config.preprocess.expression.missing_expression.method = "neutral"
+    config.preprocess.expression.missing_expression.zero_as_missing = True
+    config.abstention.enabled = True
+    config.model_selection.selected_candidate_count = 2
+    config.model_selection.search_space = {"lambda": [1e6, 2e6] if intercept_only else [.01, .1]}
+    split = build_split_artifacts(config).split_manifest
+    with monkeypatch.context() as reference:
+        reference.setattr(cv_mod, "_prediction_matrix_features", lambda _c, entries, _i: list(
+            dict.fromkeys(feature for entry in entries for feature in entry.feature_names)
+        ))
+        with RunExpressionCache(matrix_cache_bytes=0) as cache:
+            cache.prepare(config, split)
+            expected_cv = run_outer_cv(config, split, expression_cache=cache)
+            expected_final = run_final_refit(config, split, expression_cache=cache)
+    builds = []
+    build = cv_mod.ExpressionMatrixBuilder._build_matrix_uncached
+
+    def tracked(self, species_order, feature_order=None):
+        builds.append((self._timing_scope, tuple(species_order), feature_order))
+        return build(self, species_order, feature_order)
+
+    monkeypatch.setattr(cv_mod.ExpressionMatrixBuilder, "_build_matrix_uncached", tracked)
+    with RunExpressionCache() as cache:
+        cache.prepare(config, split)
+        actual_cv = run_outer_cv(config, split, expression_cache=cache)
+        actual_final = run_final_refit(config, split, expression_cache=cache)
+        builder = cache.prepared_builder
+        assert builder is not None and builder._matrix_cache is not None
+        assert builder._matrix_cache.nbytes <= 128 * 1024 * 1024
+    _assert_tables_equal(expected_cv, actual_cv)
+    _assert_tables_equal(expected_final, actual_final)
+    assert "input_matrix_cache_hit" in actual_final.timing["stage"]
+    assert not any(scope == "final_refit" and columns is None for scope, _rows, columns in builds)
+    if intercept_only:
+        prediction_builds = [columns for _scope, rows, columns in builds if "inference" in rows]
+        assert prediction_builds and all(
+            columns is not None and len(columns) == 1 for columns in prediction_builds
+        )
+    assert builder._matrix_cache.nbytes == 0

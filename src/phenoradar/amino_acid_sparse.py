@@ -56,8 +56,8 @@ class SparseFoldEncoding(FoldEncoding):
         self.stack = ExitStack()
         self.handles: list[list[Any] | None] = [None for _ in groups]
         self.memory_limit = buffer_bytes
-        self._buffered_chunks: list[list[list[np.ndarray]]] | None = (
-            [[] for _ in groups] if buffer_bytes else None
+        self._buffers: list[list[bytearray]] | None = (
+            [[bytearray() for _ in range(3)] for _ in groups] if buffer_bytes else None
         )
         self._buffered_bytes = 0
         self.nonzero = [0] * len(groups)
@@ -86,17 +86,26 @@ class SparseFoldEncoding(FoldEncoding):
             raise ValueError("AA sparse matrix exceeds glmnet's 32-bit nonzero limit")
         arrays = [data, np.asarray(rows, dtype=np.int32),
                   np.asarray(ends + self.nonzero[index], dtype=np.int32)]
-        size = sum(array.nbytes for array in arrays)
-        if self._buffered_chunks is not None and self._buffered_bytes + size > self.memory_limit:
-            for i, blocks in enumerate(self._buffered_chunks):
-                for block in blocks:
-                    self._write_arrays(i, block)
-            self._buffered_chunks = None
-        if self._buffered_chunks is None:
+        if self._buffers is not None:
+            buffers = self._buffers[index]
+            projected = self._buffered_bytes + sum(
+                max(buf.__alloc__(), (len(buf) + a.nbytes) * 9 // 8 + 16) - buf.__alloc__()
+                for buf, a in zip(buffers, arrays, strict=True)
+            )
+            if projected > self.memory_limit:
+                for i, existing in enumerate(self._buffers):
+                    self._write_arrays(i, [np.frombuffer(buf, dtype=dtype) for buf, dtype
+                                          in zip(existing, [np.float64, np.int32, np.int32],
+                                                 strict=True)])
+                self._buffers = None
+        if self._buffers is None:
             self._write_arrays(index, arrays)
         else:
-            self._buffered_chunks[index].append(arrays)
-            self._buffered_bytes += size
+            buffers = self._buffers[index]
+            before = sum(buf.__alloc__() for buf in buffers)
+            for buf, array in zip(buffers, arrays, strict=True):
+                buf.extend(memoryview(np.ascontiguousarray(array)).cast("B"))
+            self._buffered_bytes += sum(buf.__alloc__() for buf in buffers) - before
         self.nonzero[index] = count
 
     def extend(self, block: EncodedBlock) -> None:
@@ -132,12 +141,11 @@ class SparseFoldEncoding(FoldEncoding):
             if not count:
                 result.append(sparse.csc_matrix((len(rows), self.width)))
                 continue
-            if self._buffered_chunks is not None:
-                chunks = self._buffered_chunks[i]
-                data, indices, ends = [np.concatenate([chunk[j] for chunk in chunks])
-                                       for j in range(3)]
-                self._buffered_chunks[i] = []
-                del chunks
+            if self._buffers is not None:
+                data, indices, ends = [np.frombuffer(buf, dtype=dtype) for buf, dtype
+                                      in zip(self._buffers[i], [np.float64, np.int32, np.int32],
+                                             strict=True)]
+                self._buffers[i] = [bytearray() for _ in range(3)]
             else:
                 assert handles is not None
                 for handle in handles:

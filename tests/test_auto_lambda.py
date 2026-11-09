@@ -241,8 +241,9 @@ def test_validation_values_do_not_set_scale_and_refit_recomputes_scale():
 
 @pytest.mark.parametrize("null_selection", [False, True])
 @pytest.mark.parametrize("mode", ["expression", "amino_acid", "combined"])
+@pytest.mark.parametrize("n_jobs", [1, 4])
 def test_auto_nested_cv_and_final_refit_all_modes(
-    tmp_path: Path, monkeypatch, mode, null_selection
+    tmp_path: Path, monkeypatch, mode, null_selection, n_jobs
 ):
     if null_selection:
         import phenoradar.amino_acid_run as aa
@@ -259,6 +260,7 @@ def test_auto_nested_cv_and_final_refit_all_modes(
     }
     path.write_text(yaml.safe_dump(raw))
     c = load_and_resolve_config([path])
+    c.runtime.n_jobs = n_jobs
     if mode == "expression":
         manifest = build_split_artifacts(c).split_manifest
         outer = cv.run_outer_cv(c, manifest)
@@ -286,6 +288,35 @@ def test_auto_nested_cv_and_final_refit_all_modes(
             assert p["lambda_fraction"] == 1
         assert p["lambda"] == pytest.approx(p["lambda_fraction"] * p["lambda_max"])
     assert np.all(np.isfinite(trials["lambda_max"].to_numpy()))
+
+
+def test_aa_auto_scoring_uses_compact_coefficients_without_dense_expansion(monkeypatch):
+    import phenoradar.glmnet as glmnet
+
+    c = config(n_points=5, max_extensions=1)
+    c.data.feature_mode = "amino_acid"
+
+    def dense(*args, **kwargs):
+        kwargs["compact_coefficients"] = False
+        return fit_glmnet_path(*args, **kwargs)
+
+    options = dict(metric=lambda y, p: float(-np.mean((p - .5) ** 2)),
+                   diagnostic=cv._glmnet_fit_diagnostic, warnings=[])
+    expected = score_auto_paths(c, candidates(c), [fold()], fit_path=dense, **options)
+
+    def unexpected(*args):
+        pytest.fail("Automatic AA CV expanded dense coefficients")
+
+    monkeypatch.setattr(glmnet._CompactGlmnetModel, "coef_", property(unexpected))
+    actual = score_auto_paths(c, candidates(c), [fold()], fit_path=fit_glmnet_path, **options)
+    assert actual.candidates == expected.candidates
+    for (a, ar), (b, br) in zip(actual.scores, expected.scores, strict=True):
+        assert a == pytest.approx(b, abs=1e-15)
+        for left, right in zip(ar, br, strict=True):
+            for key in ["lambda_actual", "lambda_max", "nonzero_expression",
+                        "nonzero_amino_acid", "lambda_extension_round",
+                        "lambda_path_stop_reason", "lambda_path_min_fraction"]:
+                assert left[key] == right[key]
 
 
 def test_combined_penalty_families_share_one_gradient_scan(monkeypatch):

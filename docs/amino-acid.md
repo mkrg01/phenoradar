@@ -5,13 +5,21 @@ All modes share `config.yml`, grouped CV, sampling, weights, model selection,
 and mean/median ensembles. Sequence and combined modes require
 `model.name: logistic_elasticnet`.
 
-Training encodes AA blocks as disk-backed CSC sparse matrices. An exact column
-mode learned from training rows is shifted to zero; the unpenalized intercept
+Training encodes AA blocks as RAM-buffered CSC sparse matrices, spilling to
+temporary disk when needed. An exact column mode learned from training rows is
+shifted to zero; the unpenalized intercept
 is converted back to the original centered basis before saving and reporting.
 Missing/novel-residue handling, feature filters, penalties and lambda paths are
 unchanged. Different floating-point calculations can change coefficients or
 selected sites, especially with weak regularization. No configuration is needed.
 Combined models keep the expression preprocessing and its separate penalty.
+
+Explicit-lambda grid-search inner folds share a memory-bounded process queue across outer scopes.
+Refits use separate short-lived processes; final selection can overlap outer CV.
+Scores and reports retain their original fold/candidate order. TPE retains its
+sequential candidate dependencies. Source installs build optional
+C kernels when a C compiler is available; otherwise the NumPy implementation
+is used. Neither optimization needs configuration or changes the lambda path.
 
 ## Start a sequence run
 
@@ -285,8 +293,11 @@ bundles retain pre-ranking scoring masks.
 
 Prediction byte caches are temporary per run. Frequencies and centering are
 computed in site blocks; large output matrices use temporary disk backing.
-Unweighted and TPM-weighted residue compositions are cached on temporary disk
-once per requested OG/column across the species retained for training. Only
+Unweighted and TPM-weighted raw residue compositions are cached per requested
+OG/column across the species retained for training and reused across runs.
+The persistent entries live under `runs/.phenoradar_cache/alignments/frequencies`.
+Their identities include alignment content, species/gene correspondence, exact
+TPM weights, NumPy version and the aggregation implementation. Only
 columns requested after the callability screen are added. Only states present
 in those raw compositions occupy disk; zero and missing frequencies are restored
 exactly. This changes storage, not site or state selection. These per-species
@@ -299,13 +310,24 @@ Matrices use column-major storage for block writes and glmnet input.
 
 Callability and positive stored-frequency support use species bitsets; duplicate
 sampling rows retain their multiplicity. Raw frequencies occupy immutable,
-state-major file extents. Fold workers share existing extents and append only
+state-major file extents. Zero, one and canonical NaN values use bit planes;
+other float32 bit patterns are stored exactly. Blocks with little compression
+use dense storage. Signed zero and noncanonical NaNs also round-trip exactly.
+For 0/1/missing compositions, training statistics and shifted CSC columns are
+computed directly from bitsets. Mixed frequencies use the general numerical
+path; validation-only states still contribute no known-residue mass.
+Completed folds publish only newly computed segments atomically; concurrent
+workers can extend the same cache without overwriting existing segments. Fold workers share existing extents and append only
 new columns to private files, without copying an OG's earlier data.
 Set `TMPDIR` to a location with enough space for temporary caches and matrices.
 Validated training alignment bytes and presence masks are reused across runs
 under `runs/.phenoradar_cache/alignments`. Source changes, changed species ID
 resolution, changed retained species, or changed cache files invalidate entries.
-These caches contain no learned filters or means. Source alignments must remain
+A file-stat index avoids hashing unchanged inputs. Payload identity is based
+on content, so moving an unchanged file can reuse it. A changed file identity
+requires SHA-256 verification; arbitrary copies are not trusted from timestamps
+alone. Cold imports record the hash while parsing. Format changes rebuild the
+affected entries automatically. These caches contain no learned filters or means. Source alignments must remain
 available; deleting the cache safely forces rebuilding.
 Unranked preprocessing keeps fitted site statistics in columnar arrays and
 computes quality and moments in the same pass. Filters and means remain
@@ -320,6 +342,10 @@ are retained; completed folds do not accumulate Python feature dictionaries or
 full fitted transforms in RAM. Fold means and feature eligibility are aggregated
 one fold at a time; shared feature statistics are computed once for coefficient
 and importance outputs. Summary aggregates can differ at float64 roundoff.
+Fold coefficient and importance tables restore zero rows on a shared sorted
+feature axis, without sorting or copying full temporary TSVs per fold. Worker
+schema, site-QC and site-effect audits travel as ordered compressed Parquet
+parts; the parent writes each public TSV once. All original audit rows remain.
 Score ranking is performed one model context at a time. Heatmaps restore each
 fold's original eligible sites from this audit,
 including sites whose coefficient is zero in that fold.
@@ -339,17 +365,25 @@ Weighted mode converts sequence TPM once into compressed Parquet parts under
 persistent cache stores raw input only, with no labels or learned preprocessing,
 and can be reused across metadata/CV changes. Changed sources or incomplete parts
 are rebuilt; source files must remain available. Delete cache directories to
-reclaim space or force rebuilding. Cache hits and paths appear in
-`sequence_tpm_input.tsv`; no cache setting is needed.
+reclaim space or force rebuilding. Validated TPMs are additionally stored as float64 arrays in alignment record
+order, with a shared packed positive-residue mask. This avoids repeated string
+joins, number conversion and mask construction for the same alignment/species
+axis. `aligned_cache_hit` and `aligned_cache_path` identify this layer in
+`sequence_tpm_input.tsv`; no cache setting is needed. Missing TPMs are still
+errors and zero TPM is retained. Content-identical relocated TPM inputs can
+reuse both layers after identity verification.
 
 
-AA grid/random selection streams one inner fold at a time. With no site ranking,
-training statistics and train/validation encoding share one residue-frequency
-read. Filters, means and representative choices still use training species only.
-Outer folds use independent processes, sized from the first fold's feature count,
-`runtime.n_jobs` and available allocation memory. Tables are merged in fold order.
-Remaining folds are queued together so available workers continue immediately,
-even while an earlier fold's output is waiting to be merged.
+AA grid selection consumes each inner fold once. With no site ranking, training
+statistics and train/validation encoding share one residue-frequency read. Filters,
+means and representative choices still use training species only. The first
+inner fold sizes the shared scoring queue and refit budget from actual CSC sizes.
+Completed scopes can refit while other scopes score; when scoring finishes, its
+processes exit and available memory can support more refits. Relative `auto_log_range` paths retain scope-level extension decisions and the outer-fold
+scheduling path; they do not enter the absolute-lambda queue. Random/TPE selection
+also retains that path. Tables and warnings merge in fold order.
+Interpretation aggregation runs in a separate process so its allocation arenas
+are released before prediction and plotting.
 No sites, candidates or CV folds are removed to reduce resource use.
 
 AA runs also write the shared evaluation, model-selection, coefficient,
@@ -372,8 +406,9 @@ and tie rules, including signed-zero handling.
 Encoded fold matrices use RAM-buffered CSC arrays within an automatic process
 budget and spill to temporary disk when that budget is exceeded. Sparse native fitting avoids input copies; its coefficient-path buffer
 grows only if the active set needs more space, restarting the same complete path.
-The first-fold CSC sizes, site metadata and observed process peak size
-outer-fold concurrency. Each worker has its own matrix-buffer budget. Inner ratio paths
+CSC sizes and site metadata bound process concurrency. Each worker has its own
+matrix-buffer budget. Buffered CSC arrays grow incrementally without a full
+end-of-fold data/index concatenation. Inner ratio paths
 run sequentially within each AA worker, avoiding simultaneous full-matrix copies.
 
 Unranked preprocessing also distributes independent OGs across the CPUs assigned

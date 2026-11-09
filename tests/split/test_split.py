@@ -1228,6 +1228,10 @@ def test_expression_rows_excluded_rejects_non_integer_count(
                 return pl.Series(["sp1"])
             return "not-an-int"
 
+    class _FakeSpeciesCounts:
+        def select(self, *_args: object, **_kwargs: object) -> _FakeSpeciesSummary:
+            return _FakeSpeciesSummary()
+
     class _FakeScan:
         def __init__(self) -> None:
             self.collect_calls = 0
@@ -1238,9 +1242,15 @@ def test_expression_rows_excluded_rejects_non_integer_count(
         def select(self, *_args: object, **_kwargs: object) -> _FakeScan:
             return self
 
-        def collect(self) -> _FakeSpeciesSummary:
+        def group_by(self, *_args: object, **_kwargs: object) -> _FakeScan:
+            return self
+
+        def agg(self, *_args: object, **_kwargs: object) -> _FakeScan:
+            return self
+
+        def collect(self, **_kwargs: object) -> _FakeSpeciesCounts:
             self.collect_calls += 1
-            return _FakeSpeciesSummary()
+            return _FakeSpeciesCounts()
 
     metadata, tpm = _fixture_data(tmp_path)
     config = load_and_resolve_config([_write_config(tmp_path, metadata, tpm)])
@@ -1252,3 +1262,43 @@ def test_expression_rows_excluded_rejects_non_integer_count(
     ):
         build_split_artifacts(config)
     assert fake_scan.collect_calls == 1
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+def test_expression_species_summary_preserves_row_counts_and_normalization(
+    tmp_path: Path, compressed: bool
+) -> None:
+    import gzip
+
+    rows = (
+        "species\torthogroup\ttpm\n"
+        "sp1\tOG1\t1\n"
+        " sp1 \tOG2\t2\n"
+        "sp2\tOG1\t3\n"
+        "unknown\tOG1\t4\n"
+        "unknown\tOG2\t5\n"
+        "  \tOG1\t6\n"
+        "\tOG1\t7\n"
+    )
+    tpm = tmp_path / ("expression.tsv.gz" if compressed else "expression.tsv")
+    if compressed:
+        with gzip.open(tpm, "wt", encoding="utf-8") as handle:
+            handle.write(rows)
+    else:
+        tpm.write_text(rows, encoding="utf-8")
+    config = AppConfig.model_validate({"data": {"tpm_path": str(tpm)}})
+
+    species, excluded = split_mod._expression_species_and_excluded_rows(
+        config, ["sp1", "sp2"]
+    )
+
+    assert species == {"sp1", "sp2", "unknown"}
+    # Unknown rows and a whitespace-only species count; null species do not.
+    assert excluded == 3
+
+
+def test_expression_species_summary_handles_header_only_input(tmp_path: Path) -> None:
+    tpm = _write(tmp_path / "empty.tsv", "species\torthogroup\ttpm\n")
+    config = AppConfig.model_validate({"data": {"tpm_path": str(tpm)}})
+
+    assert split_mod._expression_species_and_excluded_rows(config, ["sp1"]) == (set(), 0)

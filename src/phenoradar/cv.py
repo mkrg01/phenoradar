@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import warnings as warning_control
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import copy
 from dataclasses import dataclass, field
 from hashlib import sha256
 from math import comb
@@ -38,6 +39,13 @@ from sklearn.utils.validation import has_fit_parameter
 from phenoradar.abstention import annotate_abstention
 from phenoradar.auto_lambda import AUTO_COLUMNS, fit_null_model, lambda_max, score_auto_paths
 from phenoradar.config import AppConfig, PredictConfig
+from phenoradar.expression_input_cache import (
+    ExpressionCacheError,
+    ExpressionSource,
+    normalized_cache,
+    source_signature,
+)
+from phenoradar.expression_matrix_cache import RawExpressionMatrixCache
 from phenoradar.feature_stability import (
     FeatureStabilityError,
     build_feature_stability_tables,
@@ -1301,6 +1309,9 @@ def _build_cv_species_evidence(
 class ExpressionMatrixBuilder:
     """Build species x orthogroup matrix from long-format expression data."""
 
+    _matrix_cache: RawExpressionMatrixCache | None = None
+    _matrix_cache_signature: tuple[int, int, int, int, int] | None = None
+
     _SOURCE_LINE_COL = "__phenoradar_source_line"
     _INVALID_TPM_PREVIEW_LIMIT = 10
     _INVALID_TPM_REASON_LABELS = (
@@ -1314,8 +1325,12 @@ class ExpressionMatrixBuilder:
     _MISSING_FEATURE_SENTINEL = "__phenoradar_missing_feature__"
 
     def __init__(
-        self, config: AppConfig | PredictConfig, *, absent_feature_fill: int | str | None = None
+        self, config: AppConfig | PredictConfig, *, absent_feature_fill: int | str | None = None,
+        cache_directory: Path | None = None, cache_source: ExpressionSource | None = None,
     ) -> None:
+        self._persistent_cache_directory = cache_directory
+        self._cache_source = cache_source
+        self._cache_workers = max(1, min(4, int(config.runtime.n_jobs)))
         self._timing_recorder: TimingRecorder | None = None
         self._timing_scope = "expression_input"
         self._tpm_path = Path(config.data.tpm_path)
@@ -1340,6 +1355,7 @@ class ExpressionMatrixBuilder:
         self._cache_tempdir: TemporaryDirectory[str] | None = None
         self._cached_long_path: Path | None = None
         self._cached_species: set[str] | None = None
+        self._cached_catalog: dict[str, Any] | None = None
 
         try:
             schema_scan = pl.scan_csv(self._tpm_path, separator="\t")
@@ -1397,7 +1413,7 @@ class ExpressionMatrixBuilder:
         finally:
             self._record_timing(started, stage)
 
-    def _raw_long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
+    def _normalized_rows_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
         raw_value = pl.col(self._value_col).cast(pl.String, strict=False).str.strip_chars()
         feature_value = pl.col(self._feature_col).cast(pl.String, strict=False).str.strip_chars()
         parsed_value = raw_value.cast(pl.Float64, strict=False)
@@ -1457,6 +1473,10 @@ class ExpressionMatrixBuilder:
             .otherwise(None)
             .alias("__invalid_line"),
         )
+        return normalized
+
+    @staticmethod
+    def _aggregate_normalized_rows(normalized: pl.LazyFrame) -> pl.LazyFrame:
         aggregated = normalized.group_by(["__species", "__feature"]).agg(
             pl.col("__value").sum(),
             pl.col("__invalid_count").sum(),
@@ -1479,6 +1499,9 @@ class ExpressionMatrixBuilder:
             .otherwise(pl.col("__invalid_reason_mask"))
             .alias("__invalid_reason_mask"),
         ).drop("__group_first_line")
+
+    def _raw_long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
+        return self._aggregate_normalized_rows(self._normalized_rows_for_species(unique_species))
 
     @classmethod
     def _raise_invalid_tpm_values(cls, invalid_rows: pl.DataFrame, total: int) -> None:
@@ -1532,16 +1555,23 @@ class ExpressionMatrixBuilder:
         )
         self._raise_invalid_tpm_values(invalid_rows, total)
 
+    def _check_cache_source(self) -> None:
+        if self._cache_source is not None and source_signature(self._tpm_path) != (
+            self._cache_source.signature
+        ):
+            raise CVError(f"Expression input changed while its cache was in use: {self._tpm_path}")
+
     def _long_scan_for_species(self, unique_species: list[str]) -> pl.LazyFrame:
+        self._check_cache_source()
         requested_species = set(unique_species)
         if (
             self._cached_long_path is not None
             and self._cached_species is not None
             and requested_species.issubset(self._cached_species)
         ):
-            return pl.scan_parquet(self._cached_long_path).filter(
-                pl.col("__species").is_in(unique_species)
-            )
+            cache_path = self._cached_long_path
+            source = str(cache_path / "part-*.parquet") if cache_path.is_dir() else str(cache_path)
+            return pl.scan_parquet(source).filter(pl.col("__species").is_in(unique_species))
         return self._raw_long_scan_for_species(unique_species)
 
     def cache_species(self, species_order: list[str]) -> None:
@@ -1551,11 +1581,31 @@ class ExpressionMatrixBuilder:
             raise CVError("No species were provided for matrix construction")
         unique_species = list(dict.fromkeys(species_order))
         requested_species = set(unique_species)
+        self._check_cache_source()
         if (
             self._cached_long_path is not None
             and self._cached_species is not None
             and requested_species.issubset(self._cached_species)
         ):
+            return
+
+        if self._persistent_cache_directory is not None:
+            started = self._start_timing()
+            hit = False
+            try:
+                entry, hit, source_identity = normalized_cache(
+                    self._persistent_cache_directory, self._tpm_path, unique_species,
+                    (self._species_col, self._feature_col, self._value_col),
+                    source=self._cache_source, workers=self._cache_workers,
+                )
+            except (ExpressionCacheError, OSError) as exc:
+                raise CVError(str(exc)) from exc
+            finally:
+                self._record_timing(started, "input_cache_hit" if hit else "input_normalize_cache")
+            self._cached_long_path = entry
+            self._cached_species = requested_species
+            self._cache_source = source_identity
+            self._cached_catalog = json.loads((entry / "catalog.json").read_text())
             return
 
         cache_tempdir = TemporaryDirectory(prefix="phenoradar-expression-")
@@ -1586,11 +1636,18 @@ class ExpressionMatrixBuilder:
 
     def close(self) -> None:
         """Release the normalized-expression cache owned by this builder."""
+        if self._matrix_cache is not None:
+            self._matrix_cache.clear()
+        self._matrix_cache_signature = None
         if self._cache_tempdir is not None:
             self._cache_tempdir.cleanup()
         self._cache_tempdir = None
-        self._cached_long_path = None
-        self._cached_species = None
+        # Persistent entries own no open readers or temporary files. Borrowers
+        # may continue reading their verified raw input during artifact generation.
+        if self._persistent_cache_directory is None:
+            self._cached_long_path = None
+            self._cached_species = None
+            self._cached_catalog = None
 
     @staticmethod
     def _normalize_feature_order(feature_order: list[str]) -> list[str]:
@@ -1647,6 +1704,71 @@ class ExpressionMatrixBuilder:
         )
         return matrix[ordered_rows, :]
 
+    def _present_species(
+        self, unique_species: list[str], long_scan: pl.LazyFrame,
+    ) -> set[str]:
+        if (
+            self._cached_catalog is not None and self._cached_species is not None
+            and set(unique_species).issubset(self._cached_species)
+        ):
+            return set(unique_species).intersection(self._cached_catalog["species"])
+        return {
+            str(value)
+            for value in self._collect_expression(long_scan.select("__species").unique())
+            .to_series().to_list()
+        }
+
+    def _cached_feature_names(self, unique_species: list[str]) -> list[str] | None:
+        if (
+            self._cached_catalog is not None and self._cached_long_path is not None
+            and set(unique_species) == self._cached_species
+        ):
+            return [
+                str(value) for value in
+                pl.read_parquet(self._cached_long_path / "features.parquet").to_series().to_list()
+            ]
+        return None
+
+    def _partitioned_matrix(
+        self, species_order: list[str], feature_names: list[str],
+    ) -> tuple[np.ndarray, list[str]]:
+        assert self._cached_catalog is not None and self._cached_long_path is not None
+        started = self._start_timing()
+        matrix = np.full(
+            (len(species_order), len(feature_names)), self._absent_feature_fill_value, dtype=float,
+        )
+        self._record_timing(started, "input_dense_assembly")
+        requested = set(species_order)
+        for name, part_species in self._cached_catalog["part_species"].items():
+            selected = requested.intersection(part_species)
+            if not selected:
+                continue
+            row_indices = [
+                index for index, species in enumerate(species_order) if species in selected
+            ]
+            part_order = [species_order[index] for index in row_indices]
+            ordering = pl.DataFrame({
+                "__species": part_order, "__row_idx": list(range(len(part_order))),
+            })
+            scan = pl.scan_parquet(self._cached_long_path / name).filter(
+                pl.col("__species").is_in(sorted(selected))
+            )
+            width = max(1, self._max_pivot_cells // max(1, len(part_order)))
+            for start in range(0, len(feature_names), width):
+                stop = min(len(feature_names), start + width)
+                features = feature_names[start:stop]
+                frame = self._collect_expression(
+                    scan.filter(pl.col("__feature").is_in(features)), stage="input_matrix_read",
+                )
+                started = self._start_timing()
+                block = self._matrix_from_long_df(
+                    frame, ordering, features, self._absent_feature_fill_value,
+                )
+                matrix[row_indices, start:stop] = block
+                self._record_timing(started, "input_dense_assembly")
+                del frame, block
+        return matrix, feature_names
+
     def feature_names_for_species(self, species_order: list[str]) -> list[str]:
         """Return sorted feature names available for the selected species."""
 
@@ -1655,12 +1777,7 @@ class ExpressionMatrixBuilder:
 
         unique_species = list(dict.fromkeys(species_order))
         long_scan = self._long_scan_for_species(unique_species)
-        present_species = {
-            str(value)
-            for value in self._collect_expression(long_scan.select("__species").unique())
-            .to_series()
-            .to_list()
-        }
+        present_species = self._present_species(unique_species, long_scan)
         if not present_species:
             raise CVError("Expression matrix is empty for the selected species")
         missing_species = sorted(set(unique_species) - set(str(v) for v in present_species))
@@ -1668,19 +1785,62 @@ class ExpressionMatrixBuilder:
             preview = ", ".join(missing_species[:10])
             raise CVError(f"Expression data is missing selected species: {preview}")
 
-        feature_names = [
-            str(value)
-            for value in (
-                self._collect_expression(long_scan.select("__feature").unique().sort("__feature"))
-                .to_series()
-                .to_list()
-            )
-        ]
+        feature_names = self._cached_feature_names(unique_species)
+        if feature_names is None:
+            feature_names = [
+                str(value)
+                for value in (
+                    self._collect_expression(long_scan.select("__feature").unique().sort("__feature"))
+                    .to_series()
+                    .to_list()
+                )
+            ]
         if not feature_names:
             raise CVError("No features were available after pivoting expression data")
         return feature_names
 
     def build_matrix(
+        self, species_order: list[str], feature_order: list[str] | None = None
+    ) -> tuple[np.ndarray, list[str]]:
+        cache = self._matrix_cache
+        if cache is None or not cache.byte_limit:
+            return self._build_matrix_uncached(species_order, feature_order)
+        if not species_order:
+            raise CVError("No species were provided for matrix construction")
+        self._check_cache_source()
+        signature = source_signature(self._tpm_path)
+        if self._matrix_cache_signature not in (None, signature):
+            cache.clear()
+            raise CVError(
+                f"Expression input changed while its matrices were in use: {self._tpm_path}"
+            )
+        self._matrix_cache_signature = signature
+        features = None if feature_order is None else self._normalize_feature_order(feature_order)
+        started = self._start_timing()
+        hit = cache.get(species_order, features)
+        if hit is not None:
+            self._record_timing(started, "input_matrix_cache_hit")
+            return hit
+        overlap = None if features is None else cache.overlapping_rows(species_order, features)
+        if overlap is None:
+            matrix, names = self._build_matrix_uncached(species_order, features)
+        else:
+            known_rows, known_values = overlap
+            self._record_timing(started, "input_matrix_cache_rows")
+            known = set(known_rows)
+            missing_rows = [i for i in range(len(species_order)) if i not in known]
+            missing, names = self._build_matrix_uncached(
+                [species_order[i] for i in missing_rows], features
+            )
+            started = self._start_timing()
+            matrix = np.empty((len(species_order), len(names)), dtype=float)
+            matrix[known_rows, :] = known_values
+            matrix[missing_rows, :] = missing
+            self._record_timing(started, "input_matrix_cache_assembly")
+        cache.put(species_order, names, matrix, complete_schema=feature_order is None)
+        return matrix, names
+
+    def _build_matrix_uncached(
         self, species_order: list[str], feature_order: list[str] | None = None
     ) -> tuple[np.ndarray, list[str]]:
         if not species_order:
@@ -1694,12 +1854,7 @@ class ExpressionMatrixBuilder:
         )
         long_scan = self._long_scan_for_species(unique_species)
 
-        present_species = {
-            str(value)
-            for value in self._collect_expression(long_scan.select("__species").unique())
-            .to_series()
-            .to_list()
-        }
+        present_species = self._present_species(unique_species, long_scan)
         if not present_species:
             raise CVError("Expression matrix is empty for the selected species")
         missing_species = sorted(set(unique_species) - set(str(v) for v in present_species))
@@ -1708,16 +1863,18 @@ class ExpressionMatrixBuilder:
             raise CVError(f"Expression data is missing selected species: {preview}")
 
         if feature_order is None:
-            feature_names = [
-                str(value)
-                for value in (
-                    self._collect_expression(
-                        long_scan.select("__feature").unique().sort("__feature")
+            feature_names = self._cached_feature_names(unique_species)
+            if feature_names is None:
+                feature_names = [
+                    str(value)
+                    for value in (
+                        self._collect_expression(
+                            long_scan.select("__feature").unique().sort("__feature")
+                        )
+                        .to_series()
+                        .to_list()
                     )
-                    .to_series()
-                    .to_list()
-                )
-            ]
+                ]
         else:
             feature_names = self._normalize_feature_order(feature_order)
             # Validate every consumed row for the requested species, including
@@ -1727,6 +1884,9 @@ class ExpressionMatrixBuilder:
             long_scan = long_scan.filter(pl.col("__feature").is_in(feature_names))
         if not feature_names:
             raise CVError("No features were available after pivoting expression data")
+
+        if uses_validated_cache and self._cached_catalog is not None and len(unique_species) > 128:
+            return self._partitioned_matrix(species_order, feature_names)
 
         ordering_df = pl.DataFrame(
             {"__species": species_order, "__row_idx": list(range(len(species_order)))}
@@ -1786,9 +1946,20 @@ class RunExpressionCache:
     scaling, and model fitting remain local to their existing training scopes.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, cache_directory: Path | None = None, cache_source: ExpressionSource | None = None,
+        matrix_cache_bytes: int = 128 * 1024 * 1024,
+    ) -> None:
+        self._cache_directory = cache_directory
+        self._matrix_cache_bytes = matrix_cache_bytes
+        self._cache_source = cache_source
         self._builder: ExpressionMatrixBuilder | None = None
         self._signature: tuple[object, ...] | None = None
+
+    @property
+    def prepared_builder(self) -> ExpressionMatrixBuilder | None:
+        """Return the raw-input builder already used by training, if any."""
+        return self._builder
 
     def get_builder(self, config: AppConfig) -> ExpressionMatrixBuilder:
         signature = (
@@ -1799,11 +1970,27 @@ class RunExpressionCache:
             config.preprocess.expression.absent_feature_fill,
         )
         if self._builder is None:
-            self._builder = ExpressionMatrixBuilder(config)
+            self._builder = ExpressionMatrixBuilder(
+                config, cache_directory=self._cache_directory, cache_source=self._cache_source,
+            )
+            self._builder._matrix_cache = RawExpressionMatrixCache(self._matrix_cache_bytes)
             self._signature = signature
         elif signature != self._signature:
             raise CVError("Run expression cache cannot be reused with different input settings")
         return self._builder
+
+    def validate_input_identity(self, input_files: Sequence[Mapping[str, Any]]) -> None:
+        """Require the normalized snapshot to match the input recorded for this run."""
+        if self._builder is None or self._builder._cache_source is None:
+            return
+        self._builder._check_cache_source()
+        target = self._builder._tpm_path.resolve()
+        for record in input_files:
+            raw_path = record.get("path")
+            if isinstance(raw_path, str) and Path(raw_path).resolve() == target:
+                if record.get("sha256") != self._builder._cache_source.digest:
+                    raise CVError("Expression input differs from the recorded input SHA-256")
+                return
 
     def close(self) -> None:
         if self._builder is not None:
@@ -4127,6 +4314,8 @@ def _score_glmnet_paths(
         started = None if timing_recorder is None else timing_recorder.start()
         params, ratio = _glmnet_candidate_params(config, path[0].params)
         penalty_options: dict[str, Any] = {}
+        if config.data.feature_mode in {"amino_acid", "combined"}:
+            penalty_options["compact_coefficients"] = True
         if config.data.feature_mode == "combined":
             if fold.n_expression_features is None:
                 raise CVError("Combined inner fold is missing its feature block boundary")
@@ -4676,6 +4865,23 @@ def _slice_outer_cv_matrix(
     return cache.matrix[train_row_idx, :], cache.matrix[valid_row_idx, :]
 
 
+def _top_expression_features(feature_importance: pl.DataFrame, feature_limit: int) -> list[str]:
+    if feature_limit < 1 or feature_importance.height == 0:
+        return []
+    return (
+        feature_importance.drop_nulls(["feature", "importance_mean"])
+        .with_columns(
+            pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("feature"),
+            pl.col("importance_mean").cast(pl.Float64, strict=False).alias("importance_mean"),
+        )
+        .filter(pl.col("feature").is_not_null() & (pl.col("feature") != ""))
+        .sort(["importance_mean", "feature"], descending=[True, False])
+        .head(feature_limit)
+        .get_column("feature")
+        .to_list()
+    )
+
+
 def _build_top_feature_expression_from_matrix(
     *,
     species_order: list[str],
@@ -4690,18 +4896,7 @@ def _build_top_feature_expression_from_matrix(
         return pl.DataFrame(schema=schema)
     if matrix.ndim != 2 or matrix.shape != (len(species_order), len(feature_names)):
         raise CVError("Top-feature expression matrix does not match its species/feature schema")
-    top_features = (
-        feature_importance.drop_nulls(["feature", "importance_mean"])
-        .with_columns(
-            pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("feature"),
-            pl.col("importance_mean").cast(pl.Float64, strict=False).alias("importance_mean"),
-        )
-        .filter(pl.col("feature").is_not_null() & (pl.col("feature") != ""))
-        .sort(["importance_mean", "feature"], descending=[True, False])
-        .head(feature_limit)
-        .get_column("feature")
-        .to_list()
-    )
+    top_features = _top_expression_features(feature_importance, feature_limit)
     if not top_features:
         return pl.DataFrame(schema=schema)
     feature_to_index = {feature: index for index, feature in enumerate(feature_names)}
@@ -4935,13 +5130,70 @@ def _transform_target_for_selected_features(
         preview = ", ".join(missing_features[:10])
         raise CVError(f"Target matrix is missing selected feature(s): {preview}")
     selected_indices = np.array([target_index[feature] for feature in selected_features], dtype=int)
-    x_target_expr = _apply_expression_transform_for_config(config, x_target_raw)
-    x_target_selected = x_target_expr[:, selected_indices]
+    if _can_defer_outer_inference(config):
+        x_target_selected = _apply_expression_transform_for_config(
+            config, x_target_raw[:, selected_indices]
+        )
+    else:
+        x_target_expr = _apply_expression_transform_for_config(config, x_target_raw)
+        x_target_selected = x_target_expr[:, selected_indices]
     return apply_feature_scaling(
         x_target_selected,
         scaler,
         config.preprocess.expression.feature_scaling.method,
     )
+
+
+def _compact_prediction_entry(
+    config: AppConfig,
+    feature_names: list[str],
+    scaler: FeatureScaler,
+    model: FittedEstimator,
+) -> FinalModelEntry:
+    """Drop exact-zero coefficients only in a temporary neutral linear predictor.
+
+    Training state, interpretation and coverage retain their original schema.
+    Row-wise rank transforms and other estimators keep the full prediction path.
+    """
+    original = FinalModelEntry(feature_names, scaler, model)
+    if (
+        config.preprocess.expression.expression_transform.method not in {"none", "log1p"}
+        or config.preprocess.expression.missing_expression.method != "neutral"
+        or not isinstance(scaler, NeutralStandardScaler)
+        or not isinstance(model, GlmnetLogisticRegression)
+    ):
+        return original
+    active = np.flatnonzero(model.coef_ != 0.0)
+    if active.size == len(feature_names) or not feature_names:
+        return original
+    # StandardScaler requires at least one column, including for intercept-only fits.
+    if active.size == 0:
+        active = np.array([0], dtype=int)
+    compact_model = copy(model)
+    compact_model.coef_ = model.coef_[active].copy()
+    compact_model.n_features_in_ = int(active.size)
+    compact_scaler = copy(scaler)
+    compact_scaler.n_features_in_ = int(active.size)
+    for name in ("mean_", "var_", "scale_", "n_samples_seen_", "feature_names_in_"):
+        value = getattr(scaler, name, None)
+        if isinstance(value, np.ndarray) and value.shape == (len(feature_names),):
+            setattr(compact_scaler, name, value[active].copy())
+    return FinalModelEntry(
+        [feature_names[int(index)] for index in active], compact_scaler, compact_model
+    )
+
+
+def _prediction_matrix_features(
+    config: AppConfig, entries: list[FinalModelEntry], feature_importance: pl.DataFrame,
+) -> list[str]:
+    """Keep prediction inputs and every feature required by exported evidence."""
+    required = set(_top_expression_features(feature_importance, config.figures.top_features))
+    for entry in entries:
+        required.update(_compact_prediction_entry(
+            config, entry.feature_names, entry.scaler, entry.model
+        ).feature_names)
+    original_order = dict.fromkeys(feature for entry in entries for feature in entry.feature_names)
+    return [feature for feature in original_order if feature in required]
 
 
 def _predict_final_refit_targets(
@@ -4950,14 +5202,21 @@ def _predict_final_refit_targets(
     x_target_raw: np.ndarray,
     target_feature_names: list[str],
 ) -> list[np.ndarray]:
-    x_target = _transform_target_for_selected_features(
-        config,
-        x_target_raw,
-        target_feature_names,
-        fit_result.selected_features,
-        fit_result.scaler,
-    )
-    return [_predict_positive_probability(model, x_target) for model in fit_result.fitted_models]
+    probabilities: list[np.ndarray] = []
+    transformed_by_features: dict[tuple[str, ...], np.ndarray] = {}
+    for model in fit_result.fitted_models:
+        entry = _compact_prediction_entry(
+            config, fit_result.selected_features, fit_result.scaler, model
+        )
+        key = tuple(entry.feature_names)
+        if key not in transformed_by_features:
+            transformed_by_features[key] = _transform_target_for_selected_features(
+                config, x_target_raw, target_feature_names, entry.feature_names, entry.scaler
+            )
+        probabilities.append(
+            _predict_positive_probability(entry.model, transformed_by_features[key])
+        )
+    return probabilities
 
 
 def _final_refit_can_prune_target_matrix(config: AppConfig) -> bool:
@@ -5026,6 +5285,7 @@ def _annotate_prediction_abstention(
         zero_as_missing=config.preprocess.expression.missing_expression.zero_as_missing,
         threshold=config.abstention.threshold,
         top_features=config.figures.top_features,
+        allow_missing_zero_coefficients=True,
     )
     if timing_recorder is not None and started is not None:
         timing_recorder.record_since(
@@ -5793,15 +6053,33 @@ def _run_final_refit_impl(
     selected_features = first_sample_result.selected_features
     scaler = first_sample_result.scaler
 
+    prediction_entries = [
+        FinalModelEntry(result.selected_features, result.scaler, model)
+        for sample_set_id in range(len(sampled_sets))
+        for result in [sample_results[sample_set_id]]
+        for model in result.fitted_models
+    ]
+    interpretation_started = recorder.start()
+    try:
+        (
+            feature_importance,
+            coefficients,
+            feature_importance_by_model,
+            coefficients_by_model,
+            interpretation_warnings,
+        ) = _build_final_refit_interpretation(prediction_entries)
+    except InterpretationError as exc:
+        raise CVError(str(exc)) from exc
+    recorder.record_since(
+        interpretation_started,
+        scope="final_refit",
+        stage="interpretation",
+    )
     target_model_probs_by_sample: dict[int, list[np.ndarray]] = {}
     if prune_target_matrix:
         if target_count > 0:
-            target_feature_union = list(
-                dict.fromkeys(
-                    feature
-                    for sample_set_id in range(len(sampled_sets))
-                    for feature in sample_results[sample_set_id].selected_features
-                )
+            target_feature_union = _prediction_matrix_features(
+                config, prediction_entries, feature_importance
             )
             x_target_pruned, target_feature_names = _with_native_thread_limit_for_config(
                 config,
@@ -5979,22 +6257,6 @@ def _run_final_refit_impl(
             timing_scope="final_refit",
             timing_stage="inference_abstention",
         )
-    interpretation_started = recorder.start()
-    try:
-        (
-            feature_importance,
-            coefficients,
-            feature_importance_by_model,
-            coefficients_by_model,
-            interpretation_warnings,
-        ) = _build_final_refit_interpretation(model_entries)
-    except InterpretationError as exc:
-        raise CVError(str(exc)) from exc
-    recorder.record_since(
-        interpretation_started,
-        scope="final_refit",
-        stage="interpretation",
-    )
     warnings.extend(interpretation_warnings)
 
     if external_count > 0:
@@ -6781,19 +7043,25 @@ def _predict_outer_inference_plan(
     model_probs: list[np.ndarray] = []
     entries: list[FinalModelEntry] = []
     for sample in plan.sample_sets:
-        preprocess_started = recorder.start()
-        indices = np.array([feature_index[name] for name in sample.feature_names], dtype=int)
-        selected = _apply_expression_transform_for_config(config, raw_matrix[:, indices])
-        transformed = apply_feature_scaling(
-            selected, sample.scaler, config.preprocess.expression.feature_scaling.method
-        )
-        recorder.record_since(
-            preprocess_started, scope="outer_fold", stage="inference_preprocessing",
-            fold_id=plan.fold_id, sample_set_id=sample.sample_set_id,
-        )
+        transformed_by_features: dict[tuple[str, ...], np.ndarray] = {}
         for model, candidate_index in zip(sample.models, sample.candidate_indices, strict=True):
+            preprocess_started = recorder.start()
+            entry = _compact_prediction_entry(config, sample.feature_names, sample.scaler, model)
+            key = tuple(entry.feature_names)
+            if key not in transformed_by_features:
+                indices = np.array([feature_index[name] for name in entry.feature_names], dtype=int)
+                selected = _apply_expression_transform_for_config(config, raw_matrix[:, indices])
+                transformed_by_features[key] = apply_feature_scaling(
+                    selected, entry.scaler, config.preprocess.expression.feature_scaling.method
+                )
+            transformed = transformed_by_features[key]
+            recorder.record_since(
+                preprocess_started, scope="outer_fold", stage="inference_preprocessing",
+                fold_id=plan.fold_id, sample_set_id=sample.sample_set_id,
+                candidate_index=candidate_index,
+            )
             prediction_started = recorder.start()
-            model_probs.append(_predict_positive_probability(model, transformed))
+            model_probs.append(_predict_positive_probability(entry.model, transformed))
             recorder.record_since(
                 prediction_started, scope="outer_fold", stage="inference_prediction",
                 fold_id=plan.fold_id, sample_set_id=sample.sample_set_id,
@@ -6824,13 +7092,16 @@ def _run_deferred_outer_inference(
     plans: list[OuterInferencePlan],
     species: list[str],
     recorder: TimingRecorder,
+    feature_importance: pl.DataFrame,
 ) -> tuple[list[dict[str, float | str]], np.ndarray, list[str]]:
     builder = cache.deferred_inference_builder
     if builder is None:
         raise CVError("Deferred outer-CV inference requires the validated expression cache")
-    retained = {
-        feature for plan in plans for sample in plan.sample_sets for feature in sample.feature_names
-    }
+    entries = [
+        FinalModelEntry(sample.feature_names, sample.scaler, model)
+        for plan in plans for sample in plan.sample_sets for model in sample.models
+    ]
+    retained = set(_prediction_matrix_features(config, entries, feature_importance))
     # Preserve the original CV feature order, independently of fold completion.
     feature_union = [feature for feature in cache.feature_names if feature in retained]
     matrix_started = recorder.start()
@@ -7021,11 +7292,25 @@ def _run_outer_cv_impl(
     if not oof_rows:
         raise CVError("No out-of-fold predictions were generated")
 
+    interpretation_started = recorder.start()
+    try:
+        interpretation_artifacts = _with_native_thread_limit_for_config(
+            config, build_interpretation_tables, interpretation_entries
+        )
+    except InterpretationError as exc:
+        raise CVError(str(exc)) from exc
+    recorder.record_since(
+        interpretation_started,
+        scope="outer_cv",
+        stage="interpretation",
+    )
+    warnings.extend(interpretation_artifacts.warnings)
+
     if defer_inference:
         _emit_progress("Build retained-feature inference matrix and predict outer folds.")
         deferred_rows, inference_raw, inference_feature_names = _run_deferred_outer_inference(
             config, outer_matrix_cache, [inference_plans[fold_id] for fold_id in fold_ids],
-            inference_species, recorder,
+            inference_species, recorder, interpretation_artifacts.feature_importance,
         )
         inference_prediction_rows.extend(deferred_rows)
         inference_plans.clear()
@@ -7085,20 +7370,6 @@ def _run_outer_cv_impl(
             },
         ]
     ).sort("threshold_name")
-    interpretation_started = recorder.start()
-    try:
-        interpretation_artifacts = _with_native_thread_limit_for_config(
-            config, build_interpretation_tables, interpretation_entries
-        )
-    except InterpretationError as exc:
-        raise CVError(str(exc)) from exc
-    recorder.record_since(
-        interpretation_started,
-        scope="outer_cv",
-        stage="interpretation",
-    )
-    warnings.extend(interpretation_artifacts.warnings)
-
     ensemble_model_probs: pl.DataFrame | None = None
     if max_fold_ensemble_size > 1:
         ensemble_model_probs = pl.DataFrame(ensemble_model_prob_rows).sort(

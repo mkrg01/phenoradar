@@ -6,6 +6,7 @@ import csv
 import gzip
 import hashlib
 import heapq
+import inspect
 import json
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Sequence
@@ -26,7 +27,10 @@ from phenoradar.amino_acid_frequency_cache import (
 from phenoradar.amino_acid_input_cache import AlignmentInputCache
 from phenoradar.amino_acid_presence import SpeciesPresenceCache
 from phenoradar.amino_acid_resources import SparseUsage
+from phenoradar.amino_acid_tpm_cache import AlignedTPMCache
+from phenoradar.cache_identity import digest_key
 from phenoradar.config.schema import AminoAcidConfig, AminoAcidSiteFilter
+from phenoradar.packed_float import FORMAT_SHA
 from phenoradar.provenance import file_identity
 from phenoradar.sequence_tpm_cache import SequenceTPMCacheError, read_sequence_tpm_cache
 
@@ -71,6 +75,7 @@ class AlignmentOG:
     mask_rows: dict[str, int]
     tpm: np.ndarray | None = None
     tpm_mask_cache: str | None = None
+    tpm_mask_offset: int = 0
 
     def matrix(self) -> np.ndarray:
         if not self.sequence_ids:
@@ -87,6 +92,7 @@ class AlignmentStore:
     metadata species list, independently of training labels and CV membership.
     """
 
+    _inner_parallel_disabled: bool = False
     _sparse_usage: SparseUsage
     _matrix_buffer_bytes: int
 
@@ -108,12 +114,16 @@ class AlignmentStore:
         self.species = set(species)
         self.retained_species = self.species if cache_species is None else set(cache_species)
         self.cache_frequencies = cache_frequencies
+        self._frequency_directory = (
+            input_cache_dir / "frequencies" if input_cache_dir is not None else None
+        )
         self._sparse_usage = SparseUsage()
         self._frequency_caches: dict[tuple[str, bool], AminoAcidFrequencyCache] = {}
         self._site_presence = SpeciesPresenceCache(Path(self._temp.name) / "species_presence.bin")
         self.tpm_identity: dict[str, Any] | None = None
         input_cache = (
-            AlignmentInputCache(input_cache_dir, self.species, self.retained_species)
+            AlignmentInputCache(input_cache_dir, self.species, self.retained_species,
+                                parser_version=_ALIGNMENT_CODE_SHA)
             if input_cache_dir is not None else None
         )
         try:
@@ -144,8 +154,15 @@ class AlignmentStore:
             self.close()
             raise
 
+    def flush_frequency_caches(self) -> None:
+        for cache in self._frequency_caches.values():
+            cache.persist()
+
     def close(self) -> None:
+        self.flush_frequency_caches()
         release_frequency_maps(Path(self._temp.name))
+        if self._frequency_directory is not None:
+            release_frequency_maps(self._frequency_directory)
         self._frequency_caches.clear()
         self._site_presence.clear()
         self._temp.cleanup()
@@ -279,6 +296,15 @@ class AlignmentStore:
         The same species/ID may occur in several OGs. It has one input TPM,
         assigned to all those records; duplicate matching input keys are errors.
         """
+        aligned_cache = (AlignedTPMCache(cache_dir, path, self.ogs,
+                                         mask_version=_TPM_MASK_CODE_SHA) if cache_dir else None)
+        if aligned_cache is not None:
+            restored = aligned_cache.restore()
+            if restored is not None:
+                self.tpm_identity = restored
+                if progress:
+                    progress("Reuse alignment-ordered sequence TPM and presence cache.")
+                return
         requests: dict[str, dict[str, list[tuple[AlignmentOG, int]]]] = {}
         for og in self.ogs.values():
             og.tpm = np.full(len(og.sequence_ids), np.nan, dtype=np.float64)
@@ -373,18 +399,28 @@ class AlignmentStore:
         after = path.stat()
         if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
             raise AlignmentError(f"Sequence TPM changed during import: {path}")
-        # Build once; each training fold can cheaply count species with at least
-        # one positive-TPM canonical residue without expanding 20-state features.
-        for index, og in enumerate(self.ogs.values()):
-            assert og.tpm is not None
-            matrix = og.matrix()
-            packed = np.zeros((len(og.mask_rows), (og.width + 7) // 8), dtype=np.uint8)
-            for sample, rows in og.species_rows.items():
-                for row in rows:
-                    if og.tpm[row] > 0:
-                        packed[og.mask_rows[sample]] |= np.packbits(_CODE[matrix[row]] < 20)
-            og.tpm_mask_cache = str(Path(self._temp.name) / f"{index}_tpm_presence.npy")
-            np.save(og.tpm_mask_cache, packed, allow_pickle=False)
+        if aligned_cache is not None:
+            aligned_cache.save(self.tpm_identity, self._positive_tpm_mask)
+            restored = aligned_cache.restore()
+            if restored is None:
+                raise AlignmentError("Cannot restore the completed alignment-ordered TPM cache")
+            self.tpm_identity["aligned_cache_hit"] = False
+            self.tpm_identity["aligned_cache_path"] = str(aligned_cache.entry)
+        else:
+            for index, og in enumerate(self.ogs.values()):
+                og.tpm_mask_cache = str(Path(self._temp.name) / f"{index}_tpm_presence.npy")
+                np.save(og.tpm_mask_cache, self._positive_tpm_mask(og), allow_pickle=False)
+
+    @staticmethod
+    def _positive_tpm_mask(og: AlignmentOG) -> np.ndarray:
+        assert og.tpm is not None
+        matrix = og.matrix()
+        packed = np.zeros((len(og.mask_rows), (og.width + 7) // 8), dtype=np.uint8)
+        for sample, rows in og.species_rows.items():
+            for row in rows:
+                if og.tpm[row] > 0:
+                    packed[og.mask_rows[sample]] |= np.packbits(_CODE[matrix[row]] < 20)
+        return packed
 
     def call_counts(
         self, og: AlignmentOG, species: list[str], *, weighted: bool = False
@@ -396,7 +432,11 @@ class AlignmentStore:
         rows = np.array([og.mask_rows[s] for s in species if s in og.mask_rows], dtype=int)
         if not len(rows):
             return counts
-        return self._site_presence.counts((og.orthogroup, weighted), Path(cache), og.width, rows)
+        return self._site_presence.counts(
+            (og.orthogroup, weighted), Path(cache), og.width, rows,
+            shape=(len(og.mask_rows), (og.width + 7) // 8) if weighted else None,
+            offset=og.tpm_mask_offset if weighted else 0,
+        )
 
     @property
     def correspondence(self) -> Any:
@@ -462,6 +502,15 @@ class AlignmentStore:
             self._frequency_caches[key] = AminoAcidFrequencyCache(
                 Path(self._temp.name) / f"{len(self._frequency_caches)}_frequency.bin",
                 og.mask_rows,
+                persistent=(self._frequency_directory / digest_key({
+                    "version": 1, "codec": FORMAT_SHA, "numpy": np.__version__,
+                    "dtype": np.dtype(np.float32).str,
+                    "compute": _FREQUENCY_CODE_SHA, "alphabet": _CODE.tolist(),
+                    "alignment": og.sha256, "species_rows": og.species_rows,
+                    "mask_rows": og.mask_rows, "weighted": weighted,
+                    "weights": hashlib.sha256(og.tpm.tobytes()).hexdigest()
+                    if weighted and og.tpm is not None else None,
+                })) if self._frequency_directory is not None else None,
             )
         cache = self._frequency_caches[key]
         block = min(SITE_BLOCK_SIZE, max(1, MAX_MATRIX_CELLS // max(1, len(cache.species) * 21)))
@@ -546,6 +595,19 @@ class AlignmentStore:
             values[i, observed] = counts[observed] / total[observed, None]
             coverage[i] = total / weights.sum()
         return values, coverage, chosen
+
+
+_ALIGNMENT_CODE_SHA = hashlib.sha256(
+    inspect.getsource(AlignmentStore._read).encode()
+    + inspect.getsource(AlignmentStore._resolve).encode() + _CODE.tobytes()
+).hexdigest()
+_TPM_MASK_CODE_SHA = hashlib.sha256(
+    inspect.getsource(AlignmentStore._positive_tpm_mask).encode()
+    + inspect.getsource(AlignmentStore._load_tpm).encode() + _CODE.tobytes()
+).hexdigest()
+_FREQUENCY_CODE_SHA = hashlib.sha256(
+    inspect.getsource(AlignmentStore._compute_frequencies).encode()
+).hexdigest()
 
 
 @dataclass
@@ -919,18 +981,28 @@ def fit_amino_acid(
                 selected = selected[candidates]
                 if not len(selected):
                     continue
-                values, _, observed, state_sites, residues = store.compact_frequencies(
-                    og, samples, selected, weighted=weighted,
+                from phenoradar.amino_acid_binary import encode_cached_block
+
+                statistics = encode_cached_block(
+                    store, og, selected, species, groups, quality, _encoding,
+                    weighted=weighted, audit=audit,
                 )
-                eligible, minor_samples, minor_groups, fractions, means, known, active = (
-                    compact_statistics(_encoding._selected(values, np.asarray(training_rows)),
-                                       _encoding._selected(observed, np.asarray(training_rows)),
-                                       state_sites, residues, groups, quality, audit=audit)
-                )
+                if statistics is None:
+                    values, _, observed, state_sites, residues = store.compact_frequencies(
+                        og, samples, selected, weighted=weighted,
+                    )
+                    statistics = compact_statistics(
+                        _encoding._selected(values, np.asarray(training_rows)),
+                        _encoding._selected(observed, np.asarray(training_rows)),
+                        state_sites, residues, groups, quality, audit=audit,
+                    )
+                    eligible, _, _, _, means, known, active = statistics
+                    if eligible.any():
+                        _encoding.add_compact(values, state_sites, residues, eligible,
+                                              means, known, active)
+                eligible, minor_samples, minor_groups, fractions, means, known, active = statistics
                 variant_count += int(eligible.sum())
                 if eligible.any():
-                    _encoding.add_compact(values, state_sites, residues, eligible,
-                                          means, known, active)
                     blocks.append({
                         "orthogroup": og.orthogroup, "column": selected[eligible],
                         "sample_fraction": calls[selected[eligible]] / len(species),

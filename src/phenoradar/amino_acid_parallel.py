@@ -17,6 +17,7 @@ import joblib
 import polars as pl
 
 from phenoradar.amino_acid import AlignmentStore
+from phenoradar.amino_acid_audits import ColumnarAudits, merge_audits
 from phenoradar.amino_acid_presence import SpeciesPresenceCache
 from phenoradar.amino_acid_reporting import AAReportWriter
 from phenoradar.amino_acid_resources import (
@@ -27,6 +28,7 @@ from phenoradar.amino_acid_resources import (
 )
 from phenoradar.combined import ExpressionInput
 from phenoradar.config import AppConfig
+from phenoradar.cv import SelectedCandidate
 from phenoradar.resource_budget import memory_budget
 
 
@@ -55,7 +57,7 @@ def fold_workers(config: AppConfig, n_species: int, n_features: int, n_folds: in
 def snapshot(store: AlignmentStore, expression: ExpressionInput | None) -> dict[str, Any]:
     state = {name: getattr(store, name) for name in
              ["ogs", "species", "retained_species", "cache_frequencies",
-              "_frequency_caches", "tpm_identity"]}
+              "_frequency_caches", "tpm_identity", "_frequency_directory"]}
     state["_site_presence"] = store._site_presence.entries
     return {
         "store": state,
@@ -66,7 +68,9 @@ def snapshot(store: AlignmentStore, expression: ExpressionInput | None) -> dict[
 
 def run_fold(config: AppConfig, store: AlignmentStore, expression: ExpressionInput | None,
              manifest: pl.DataFrame, fold: str, directory: Path, model_base: int,
-             progress: Callable[[str], None] | None = None) -> Path:
+             progress: Callable[[str], None] | None = None,
+             selections: dict[int, tuple[list[SelectedCandidate], list[dict[str, Any]], list[str]]]
+             | None = None) -> Path:
     from phenoradar.amino_acid_prediction import prediction_members
     from phenoradar.amino_acid_run import fit_scope, predict_members
 
@@ -76,8 +80,10 @@ def run_fold(config: AppConfig, store: AlignmentStore, expression: ExpressionInp
     train = manifest.filter((pl.col("fold_id") == fold) & (pl.col("pool") == "train"))
     valid = manifest.filter((pl.col("fold_id") == fold) & (pl.col("pool") == "validation"))
     warnings: list[str] = []
-    members = fit_scope(config, store, train.sort("species"), f"outer_fold_{fold}", tables,
-                        warnings, expression, progress=progress)
+    with ColumnarAudits(tables / ".columnar") as audit:
+        members = fit_scope(config, store, train.sort("species"), f"outer_fold_{fold}", tables,
+                            warnings, expression, progress=progress, audit=audit,
+                            selections=selections)
     features = max(len(m.model.coef_) for m in members)
     with AAReportWriter(tables, model_base=model_base) as report:
         report.add(members)
@@ -91,6 +97,7 @@ def run_fold(config: AppConfig, store: AlignmentStore, expression: ExpressionInp
     usage.peak_rss_bytes = max(usage.peak_rss_bytes, process_peak_rss())
     (directory / "resources.json").write_text(json.dumps(asdict(usage)))
     joblib.dump((compact, prediction, warnings, features), directory / "result.joblib")
+    store.flush_frequency_caches()
     return directory
 
 
@@ -106,6 +113,8 @@ def initialize(payload: dict[str, Any], n_jobs: int,
     store.__dict__.update(payload["store"])
     store._temp = TemporaryDirectory(prefix="phenoradar_aa_worker_")
     store._sparse_usage = SparseUsage()
+    # Outer-fold workers already consume the shared CPU/memory allocation.
+    store._inner_parallel_disabled = True
     if matrix_buffer_bytes is not None:
         store._matrix_buffer_bytes = matrix_buffer_bytes
     store._site_presence = SpeciesPresenceCache(
@@ -181,6 +190,7 @@ def outer_folds(config: AppConfig, store: AlignmentStore, expression: Expression
 
 
 def merge_tables(source: Path, destination: Path) -> None:
+    merge_audits(source / ".columnar", destination)
     for path in sorted(source.glob("*.tsv")):
         target = destination / path.name
         with target.open("ab") as output, path.open("rb") as input_file:

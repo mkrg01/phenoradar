@@ -219,6 +219,14 @@ def score_auto_paths(
                 if model is not None:
                     model.lambda_fraction_ = fraction
                     model.lambda_max_ = maximum
+                if model is None:
+                    nonzero_expression = nonzero_amino_acid = 0
+                elif hasattr(model, "coefficient_indices_"):
+                    nonzero_expression = int(np.count_nonzero(model.coefficient_indices_ < n))
+                    nonzero_amino_acid = len(model.coefficient_indices_) - nonzero_expression
+                else:
+                    nonzero_expression = int(np.count_nonzero(model.coef_[:n]))
+                    nonzero_amino_acid = int(np.count_nonzero(model.coef_[n:]))
                 rows[candidate.candidate_index].append(
                     {
                         "candidate_index": candidate.candidate_index,
@@ -231,12 +239,8 @@ def score_auto_paths(
                         "lambda_max": maximum,
                         "lambda_actual": maximum * fraction,
                         "lambda_extension_round": round_id,
-                        "nonzero_expression": 0
-                        if model is None
-                        else int(np.count_nonzero(model.coef_[:n])),
-                        "nonzero_amino_acid": 0
-                        if model is None
-                        else int(np.count_nonzero(model.coef_[n:])),
+                        "nonzero_expression": nonzero_expression,
+                        "nonzero_amino_acid": nonzero_amino_acid,
                     }
                 )
 
@@ -263,9 +267,13 @@ def score_auto_paths(
             ) -> None:
                 # Prepared validation arrays are finite; project exact nonzeros
                 # before multiplication, avoiding repeated scans of millions of zeros.
-                active = np.flatnonzero(model.coef_ != 0)
+                if hasattr(model, "coefficient_indices_"):
+                    active, values = model.coefficient_indices_, model.coefficient_values_
+                else:
+                    active = np.flatnonzero(model.coef_ != 0)
+                    values = model.coef_[active]
                 probability = expit(
-                    np.asarray(fold.x_valid[:, active] @ model.coef_[active]).reshape(-1)
+                    np.asarray(fold.x_valid[:, active] @ values).reshape(-1)
                     + model.intercept_
                 )
                 emit(targets[index], probability, model)
@@ -280,6 +288,7 @@ def score_auto_paths(
                 penalty_factor=factors,
                 sample_weight=fold.sample_weight,
                 compute_kkt=False,
+                compact_coefficients=config.data.feature_mode in {"amino_acid", "combined"},
                 warmup_lambdas=warmup,
                 on_model=consume,
             )

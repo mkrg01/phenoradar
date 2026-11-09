@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import polars as pl
 from sklearn.model_selection import GroupKFold, LeaveOneGroupOut, StratifiedGroupKFold
@@ -250,18 +252,35 @@ def _expression_species_and_excluded_rows(
     species_expr = (
         pl.col(species_col).cast(pl.String, strict=False).str.strip_chars().alias("__species")
     )
-    normalized_species = scan.select(species_expr)
+    # Reduce to one row per species before collecting. Mixing row-wise masks
+    # with unique().implode() otherwise retains the full expression species
+    # column, even when collect(engine="streaming") is requested.
+    species_scan = (
+        scan.select(species_expr)
+        .group_by("__species")
+        .agg(pl.len().alias("__row_count"))
+    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="the `streaming` parameter was deprecated",
+            category=DeprecationWarning,
+        )
+        # Keep compatibility with the supported Polars >=1.9 keyword spelling.
+        collect = cast(Callable[..., pl.DataFrame], species_scan.collect)
+        species_counts = collect(streaming=True)
     valid_species = pl.col("__species").is_not_null() & (pl.col("__species") != "")
-    species_summary = normalized_species.select(
+    species_summary = species_counts.select(
         pl.col("__species")
         .filter(valid_species)
         .unique()
         .implode()
         .alias("__expression_species"),
-        (~pl.col("__species").is_in(metadata_species))
+        pl.col("__row_count")
+        .filter(~pl.col("__species").is_in(metadata_species))
         .sum()
         .alias("__excluded_rows"),
-    ).collect()
+    )
     expression_species = species_summary.item(0, "__expression_species")
     excluded_rows = species_summary.item(0, "__excluded_rows")
     if not isinstance(expression_species, pl.Series) or not isinstance(excluded_rows, int):

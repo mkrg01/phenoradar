@@ -46,7 +46,11 @@ Keys in each table are relative to the section heading.
 See [data format](data-format.md) for input validation and
 [amino-acid and combined modes](amino-acid.md) for sequence-specific behavior.
 Cache paths and matrix-construction chunk sizes are managed internally and
-omitted from generated user configs.
+omitted from generated user configs. Expression runs reuse validated normalized
+TPM under `runs/.phenoradar_cache/expression/`. Input contents, selected species,
+column names, normalization code, and Polars version determine cache identity;
+changed or damaged entries are rebuilt. Filters and scaling are fitted within
+each training scope. Delete the cache directory between runs to reclaim disk space.
 
 ## `split`
 
@@ -428,7 +432,8 @@ The group bootstrap resamples `split.group_col` from pooled out-of-fold (OOF)
 predictions without refitting. Its seed derives from `runtime.seed`.
 
 Training parallelism shares the `n_jobs` budget across folds, candidates, and
-supported model threads; sequence outer folds run sequentially to bound memory.
+supported model threads. Sequence grid CV uses a shared inner-fold queue and
+separate refit processes within the available memory budget.
 The CLI initializes Polars threads from this value unless `POLARS_MAX_THREADS`
 is already set. Native BLAS/OpenMP threads are limited during execution. Direct
 Python invocations must set Polars limits before import when a strict cap matters.

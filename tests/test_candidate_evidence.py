@@ -10,7 +10,7 @@ from sklearn.preprocessing import StandardScaler
 
 from phenoradar.candidate_evidence import build_candidate_evidence_artifacts
 from phenoradar.config import load_and_resolve_config
-from phenoradar.cv import FinalModelEntry, _build_cv_species_evidence
+from phenoradar.cv import FinalModelEntry, RunExpressionCache, _build_cv_species_evidence
 from phenoradar.figures import (
     write_candidate_evidence_figures,
     write_cv_species_evidence_figures,
@@ -75,8 +75,10 @@ preprocess:
 
 @pytest.mark.parametrize("group_col", ["family", "order"])
 @pytest.mark.parametrize("include_model_reference", [False, True])
+@pytest.mark.parametrize("persistent", [False, True])
 def test_build_candidate_evidence_uses_candidate_local_contribution(
-    tmp_path: Path, group_col: str, include_model_reference: bool
+    tmp_path: Path, group_col: str, include_model_reference: bool,
+    persistent: bool, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _metadata, _tpm, config_path = _candidate_fixture(tmp_path)
     config = load_and_resolve_config([config_path])
@@ -117,6 +119,19 @@ def test_build_candidate_evidence_uses_candidate_local_contribution(
         }
     )
 
+    expression_builder = None
+    if persistent:
+        with RunExpressionCache(cache_directory=tmp_path / "cache") as cache:
+            expression_builder = cache.get_builder(config)
+            expression_builder.cache_species(
+                ["known_0a", "known_0b", "known_1a", "known_1b", "candidate_a"]
+            )
+        monkeypatch.setattr(
+            expression_builder, "_raw_long_scan_for_species",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("Candidate evidence must reuse normalized input")
+            ),
+        )
     artifacts = build_candidate_evidence_artifacts(
         config=config,
         split_manifest=split_manifest,
@@ -124,6 +139,7 @@ def test_build_candidate_evidence_uses_candidate_local_contribution(
         cross_fold_predictions=cross_fold,
         top_features=1,
         include_model_reference=include_model_reference,
+        expression_builder=expression_builder,
     )
 
     assert artifacts.candidates.row(0, named=True)["family"] == "Family three"

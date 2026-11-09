@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections import defaultdict
+from contextlib import ExitStack
 from dataclasses import replace
 from itertools import combinations
 from pathlib import Path
@@ -28,6 +29,12 @@ if TYPE_CHECKING:
     from phenoradar.amino_acid_run import AAMember
 
 REPORT_BLOCK_ROWS = 65_536
+
+
+def _finalize_worker(state: dict[str, Any], combined: bool, top_features: int) -> pl.DataFrame:
+    writer = object.__new__(AAReportWriter)
+    writer.__dict__.update(state)
+    return writer.finalize(combined=combined, top_features=top_features)
 
 
 class _Spool:
@@ -224,27 +231,25 @@ class AAReportWriter:
         raw = self.sites.scan()
         context = ["scope", "sample_set_id", "candidate_index"]
         for metric in ["pss", "effect_range"]:
-            parts = []
-            for index, (scope, sample, candidate) in enumerate(sorted(self.contexts)):
-                frame = raw.filter(
-                    (pl.col("scope") == scope) & (pl.col("sample_set_id") == sample)
-                    & (pl.col("candidate_index") == candidate)
-                ).with_columns(pl.col(metric).sum().over("_model").alias("_total"))
-                frame = frame.with_columns(
-                    pl.when(pl.col("_total") > 0).then(pl.col(metric) / pl.col("_total"))
-                    .otherwise(0.0).alias("normalized_score"),
-                    pl.when(pl.col(metric) > 0)
-                    .then(pl.col(metric).rank(method="min", descending=True).over(context))
-                    .otherwise(None).alias("rank"),
-                ).select(*context, "orthogroup", "alignment_pos_1based", "n_known_residue_states",
-                         "n_nonzero_coefficients", metric, "normalized_score", "rank")
-                path = self.path / f"scores_{metric}_{index}.tsv"
-                _sink(frame.sort([metric, "orthogroup", "alignment_pos_1based"],
-                                 descending=[True, False, False]), path)
-                parts.append(path)
-            _concat_csv(parts, self.destination / f"amino_acid_site_{metric}.tsv")
-            for path in parts:
-                path.unlink()
+            with (self.destination / f"amino_acid_site_{metric}.tsv").open("wb") as output:
+                for index, (scope, sample, candidate) in enumerate(sorted(self.contexts)):
+                    frame = raw.filter(
+                        (pl.col("scope") == scope) & (pl.col("sample_set_id") == sample)
+                        & (pl.col("candidate_index") == candidate)
+                    ).with_columns(pl.col(metric).sum().over("_model").alias("_total"))
+                    frame = frame.with_columns(
+                        pl.when(pl.col("_total") > 0).then(pl.col(metric) / pl.col("_total"))
+                        .otherwise(0.0).alias("normalized_score"),
+                        pl.when(pl.col(metric) > 0)
+                        .then(pl.col(metric).rank(method="min", descending=True).over(context))
+                        .otherwise(None).alias("rank"),
+                    ).select(*context, "orthogroup", "alignment_pos_1based",
+                             "n_known_residue_states", "n_nonzero_coefficients",
+                             metric, "normalized_score", "rank")
+                    frame.sort([metric, "orthogroup", "alignment_pos_1based"],
+                               descending=[True, False, False]).sink_csv(
+                        output, separator="\t", engine="streaming", include_header=index == 0,
+                    )
 
     def write_site_stability(self) -> None:
         raw = self.sites.scan()
@@ -317,6 +322,22 @@ class AAReportWriter:
             ["importance_mean", "feature"], descending=[True, False]
         ).head(top_features).collect(engine="streaming")
 
+    def finalize_isolated(self, *, combined: bool, top_features: int,
+                          n_jobs: int) -> pl.DataFrame:
+        """Release Polars sort/hash arenas when aggregation finishes."""
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+
+        from phenoradar.amino_acid_parallel import _worker_threads
+
+        self.features.flush()
+        self.sites.flush()
+        state = {key: value for key, value in self.__dict__.items() if key != "_temp"}
+        with _worker_threads(n_jobs), ProcessPoolExecutor(
+            max_workers=1, mp_context=multiprocessing.get_context("spawn"),
+        ) as executor:
+            return executor.submit(_finalize_worker, state, combined, top_features).result()
+
     def _interpret(self, means: pl.LazyFrame, union: pl.LazyFrame, counts: dict[str, int],
                    *, prefix: str, combined: bool) -> None:
         n = len(counts)
@@ -351,21 +372,45 @@ class AAReportWriter:
                 pl.lit(method).alias("method"), *extra, *mod,
             ).sort("feature")
             _sink(frame, self.destination / f"{prefix}{kind}.tsv")
-            parts = []
+        self._write_fold_values(means, union, counts, prefix=prefix, combined=combined)
+
+    def _write_fold_values(self, means: pl.LazyFrame, union: pl.LazyFrame,
+                           counts: dict[str, int], *, prefix: str, combined: bool) -> None:
+        # Keep the union once. Ordinary LASSO needs only a few numeric updates;
+        # retain signed zero too, including underflow after fold averaging.
+        axis = union.sort("feature").collect(engine="streaming")
+        columns = ["coefficient", "importance"]
+        explicit = pl.any_horizontal(*(
+            (pl.col(col) != 0) | (1.0 / pl.col(col) == float("-inf")) for col in columns
+        ))
+        kinds = [("coefficients", "coefficient", "coef", "coef_signed"),
+                 ("feature_importance", "importance", "importance", "coef_abs_l1_norm")]
+        with ExitStack() as stack:
+            outputs = [stack.enter_context(
+                (self.destination / f"{prefix}{kind}_by_fold.tsv").open("wb")
+            ) for kind, *_ in kinds]
             for index, fold in enumerate(sorted(counts)):
-                local = means.filter(pl.col("fold_id") == fold).select("feature", col)
-                frame = union.join(local, on="feature", how="left").select(
-                    pl.lit(fold).alias("fold_id"), "feature",
-                    pl.col(col).fill_null(0.0).alias(f"{label}_mean"),
-                    pl.lit(counts[fold]).alias("n_models"), pl.lit(method).alias("method"),
-                    *extra, *mod,
-                ).sort("feature")
-                path = self.path / f"fold_{index}_{prefix}{kind}.tsv"
-                _sink(frame, path)
-                parts.append(path)
-            _concat_csv(parts, self.destination / f"{prefix}{kind}_by_fold.tsv")
-            for path in parts:
-                path.unlink()
+                local = means.filter((pl.col("fold_id") == fold) & explicit).select(
+                    "feature", *columns,
+                ).collect(engine="streaming")
+                if local.height * 32 < axis.height:
+                    positions = axis["feature"].search_sorted(local["feature"]).to_numpy()
+                else:
+                    # Dense elastic-net fits must not perform millions of binary searches.
+                    local = axis.select("feature").with_row_index("_row").join(
+                        local, on="feature", how="inner",
+                    )
+                    positions = local["_row"].to_numpy()
+                for output, (_, col, label, method) in zip(outputs, kinds, strict=True):
+                    values = np.zeros(axis.height, dtype=np.float64)
+                    values[positions] = local[col].to_numpy()
+                    extra = [pl.lit("NA").alias("reason")] if col == "coefficient" else []
+                    frame = axis.with_columns(pl.Series(f"{label}_mean", values)).select(
+                        pl.lit(fold).alias("fold_id"), "feature", f"{label}_mean",
+                        pl.lit(counts[fold]).alias("n_models"), pl.lit(method).alias("method"),
+                        *extra, *(["modality"] if combined else []),
+                    )
+                    frame.write_csv(output, separator="\t", include_header=index == 0)
 
     def _stability(self, means: pl.LazyFrame, union: pl.LazyFrame, folds: list[str]) -> None:
         tolerance = DEFAULT_NONZERO_TOLERANCE

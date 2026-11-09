@@ -131,7 +131,8 @@ temporary allocations but do not impose a total process-memory limit.
 Sequence TPM has a separate [persistent input cache](amino-acid.md#caching-and-memory).
 
 `runtime.n_jobs` budgets fold, candidate, sampled-set, and supported estimator
-parallelism, with native thread limits. Sequence outer folds run sequentially.
+parallelism, with native thread limits. Sequence grid CV shares a memory-bounded
+inner-fold queue across outer scopes, with separate refit processes.
 Scoped seeds derive deterministically from `runtime.seed`; fixed inputs and
 config preserve sampling and candidate order.
 

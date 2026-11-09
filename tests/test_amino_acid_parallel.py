@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,8 @@ def test_process_outer_folds_match_serial_and_render_common_figures(
 ) -> None:
     from test_combined import combined_config
 
+    monkeypatch.chdir(tmp_path)
+
     import phenoradar.amino_acid_parallel as parallel
 
     path = (combined_config(tmp_path, aggregation) if combined
@@ -36,6 +39,8 @@ def test_process_outer_folds_match_serial_and_render_common_figures(
     # Keep this integration test small; the complete output tables are compared.
     config.figures.top_features = 3
     first = run_amino_acid(config, tmp_path / "serial")
+    # Keep exercising genuinely empty worker caches despite cross-run reuse.
+    shutil.rmtree(Path("runs/.phenoradar_cache/alignments/frequencies"), ignore_errors=True)
     config.runtime.n_jobs = 4
     monkeypatch.setattr(parallel, "fold_workers", lambda *args: 2)
     original_snapshot = parallel.snapshot
@@ -106,7 +111,8 @@ def test_worker_initializes_empty_caches_privately_and_shares_immutable_extents(
     parent_caches = {("empty", True): empty, ("populated", True): populated}
     payload = {"store": {"ogs": {}, "species": set(species), "retained_species": set(species),
                          "cache_frequencies": True, "_frequency_caches": parent_caches,
-                         "tpm_identity": None, "_site_presence": {}}, "expression": None}
+                         "tpm_identity": None, "_site_presence": {},
+                         "_frequency_directory": None}, "expression": None}
     parallel.initialize(payload, 1)
     worker = parallel._WORKER[0]
     try:

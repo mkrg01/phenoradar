@@ -13,8 +13,11 @@ _COUNTS = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).sum(
 )
 
 
-def _write_presence(source: Path, handle: BinaryIO, width: int) -> int:
+def _write_presence(source: Path, handle: BinaryIO, width: int,
+                    shape: tuple[int, int] | None = None, offset: int = 0) -> int:
     packed = np.load(source, mmap_mode="r", allow_pickle=False)
+    if shape is not None:
+        packed = packed.reshape(-1)[offset:offset + shape[0] * shape[1]].reshape(shape)
     block = max(1, 1_000_000 // max(1, len(packed)))
     for start in range(0, packed.shape[1], block):
         stop = min(packed.shape[1], start + block)
@@ -45,7 +48,8 @@ class SpeciesPresenceCache:
         self.entries.clear()
 
     def counts(self, key: tuple[str, bool], source: Path,
-               width: int, rows: np.ndarray) -> np.ndarray:
+               width: int, rows: np.ndarray, *, shape: tuple[int, int] | None = None,
+               offset: int = 0) -> np.ndarray:
         if not len(rows) or not width:
             return np.zeros(width, dtype=np.int32)
         extent = self.entries.get(key)
@@ -54,9 +58,9 @@ class SpeciesPresenceCache:
                 extent = self.entries.get(key)
                 if extent is None:
                     with self.path.open("ab") as handle:
-                        offset = handle.tell()
-                        nbytes = _write_presence(source, handle, width)
-                    extent = _Extent(self.path, offset, width, nbytes)
+                        start = handle.tell()
+                        nbytes = _write_presence(source, handle, width, shape, offset)
+                    extent = _Extent(self.path, start, width, nbytes)
                     self.entries[key] = extent
         packed = np.memmap(extent.path, mode="r", dtype=np.uint8, offset=extent.offset,
                            shape=(extent.width, extent.nbytes))

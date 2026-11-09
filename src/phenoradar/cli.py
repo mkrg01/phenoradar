@@ -260,7 +260,9 @@ def _write_group_summary_artifacts(
     predictions: pl.DataFrame,
     source_table_name: str,
     config: AppConfig | PredictConfig,
+    timing_recorder: TimingRecorder | None = None,
 ) -> list[str]:
+    summary_started = None if timing_recorder is None else timing_recorder.start()
     if config.data.metadata_path is None:
         return []
     try:
@@ -288,6 +290,11 @@ def _write_group_summary_artifacts(
             separator="\t",
             null_value="NA",
         )
+    if timing_recorder is not None and summary_started is not None:
+        timing_recorder.record_since(
+            summary_started, scope="artifacts", stage=f"{stage}_group_summary_tables"
+        )
+    figure_started = None if timing_recorder is None else timing_recorder.start()
     try:
         write_group_probability_figure(
             grouped_predictions=artifacts.predictions,
@@ -298,6 +305,11 @@ def _write_group_summary_artifacts(
         )
     except FigureError as exc:
         return [str(exc)]
+    finally:
+        if timing_recorder is not None and figure_started is not None:
+            timing_recorder.record_since(
+                figure_started, scope="artifacts", stage=f"{stage}_group_summary_figure"
+            )
     return []
 
 
@@ -981,7 +993,9 @@ def _run_single(
         stage="fingerprint_generation",
     )
 
-    with RunExpressionCache() as expression_cache:
+    with RunExpressionCache(
+        cache_directory=Path("runs/.phenoradar_cache/expression"),
+    ) as expression_cache:
         if resolved.runtime.execution_stage == "full_run":
             _log("Prepare shared expression input for CV and final refit.")
             input_started = timing_recorder.start()
@@ -989,6 +1003,7 @@ def _run_single(
                 expression_cache.prepare(
                     resolved, split_artifacts.split_manifest, timing_recorder
                 )
+                expression_cache.validate_input_identity(input_files)
             except CVError as exc:
                 raise typer.BadParameter(str(exc)) from exc
             timing_recorder.record_since(
@@ -1008,6 +1023,7 @@ def _run_single(
                 timing_recorder=timing_recorder,
                 expression_cache=expression_cache,
             )
+            expression_cache.validate_input_identity(input_files)
         except CVError as exc:
             raise typer.BadParameter(str(exc)) from exc
         timing_recorder.record_since(
@@ -1082,6 +1098,7 @@ def _run_single(
             _log("Final refit completed.")
         else:
             _log("Skip final refit stage (execution_stage=cv_only).")
+        expression_builder = expression_cache.prepared_builder
 
     _log("Create run directory and write core tabular artifacts.")
     artifact_writing_started = timing_recorder.start()
@@ -1263,6 +1280,7 @@ def _run_single(
                 phylogenetic_artifacts = interpret_unknown_predictions(
                     resolved, predictions=final_refit_artifacts.pred_inference, run_dir=run_dir,
                 )
+            candidate_evidence_started = timing_recorder.start()
             candidate_evidence_artifacts = build_candidate_evidence_artifacts(
                 config=resolved,
                 split_manifest=split_artifacts.split_manifest,
@@ -1274,6 +1292,10 @@ def _run_single(
                 ),
                 top_features=resolved.figures.top_features,
                 include_model_reference=True,
+                expression_builder=expression_builder,
+            )
+            timing_recorder.record_since(
+                candidate_evidence_started, scope="artifacts", stage="candidate_evidence"
             )
         except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
             raise typer.BadParameter(str(exc)) from exc
@@ -1334,6 +1356,16 @@ def _run_single(
             selected_tables.append(final_refit_artifacts.model_selection_selected)
         _log("Export model bundle.")
         try:
+            annotation_started = timing_recorder.start()
+            bundle_annotations = load_orthogroup_annotations(
+                None if orthogroup_annotation_path is None
+                else Path(orthogroup_annotation_path),
+                feature_names=candidate_evidence_artifacts.reference_expression["feature"],
+            )
+            timing_recorder.record_since(
+                annotation_started, scope="artifacts", stage="annotation_load"
+            )
+            bundle_started = timing_recorder.start()
             bundle_export_result = export_model_bundle(
                 run_dir=run_dir,
                 resolved_config_path=run_dir / "resolved_config.yml",
@@ -1341,11 +1373,10 @@ def _run_single(
                 final_refit_artifacts=final_refit_artifacts,
                 thresholds=cv_artifacts.thresholds,
                 reference_expression=candidate_evidence_artifacts.reference_expression,
-                orthogroup_annotations=load_orthogroup_annotations(
-                    None if orthogroup_annotation_path is None
-                    else Path(orthogroup_annotation_path),
-                    feature_names=candidate_evidence_artifacts.reference_expression["feature"],
-                ),
+                orthogroup_annotations=bundle_annotations,
+            )
+            timing_recorder.record_since(
+                bundle_started, scope="artifacts", stage="model_bundle_export"
             )
         except (BundleError, OrthogroupAnnotationError) as exc:
             raise typer.BadParameter(str(exc)) from exc
@@ -1598,6 +1629,7 @@ def _run_single(
             predictions=cv_artifacts.oof_predictions,
             source_table_name="prediction_cv.tsv",
             config=resolved,
+            timing_recorder=timing_recorder,
         )
     )
     if final_refit_artifacts is not None:
@@ -1609,6 +1641,7 @@ def _run_single(
                     predictions=final_refit_artifacts.pred_external_test,
                     source_table_name="prediction_external_test.tsv",
                     config=resolved,
+                    timing_recorder=timing_recorder,
                 )
             )
         if final_refit_artifacts.pred_inference.height > 0:
@@ -1619,6 +1652,7 @@ def _run_single(
                     predictions=final_refit_artifacts.pred_inference,
                     source_table_name="prediction_inference.tsv",
                     config=resolved,
+                    timing_recorder=timing_recorder,
                 )
             )
     warnings.extend(group_summary_warnings)
