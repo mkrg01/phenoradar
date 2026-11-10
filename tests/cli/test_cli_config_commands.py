@@ -530,7 +530,7 @@ def test_run_passes_top_features_to_run_and_tree_figures(
     assert result.exit_code == 0, result.output
     assert captured_run_kwargs["top_features"] == 7
     assert captured_run_kwargs["top_feature_expression"] is not None
-    assert captured_run_kwargs["feature_stability_by_feature"] is not None
+    assert "feature_stability_by_feature" not in captured_run_kwargs
     assert captured_run_kwargs["feature_stability_by_fold_pair"] is not None
     assert captured_tree_kwargs["feature_limit"] == 7
     assert captured_tree_kwargs["preserve_missing"] is False
@@ -751,7 +751,7 @@ evaluation:
     assert (run_dirs[0] / "cv" / "figures" / "top_feature_expression_by_confusion.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "feature_importance_by_fold_heatmap.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "coefficients_signed_top.svg").exists()
-    assert (run_dirs[0] / "cv" / "figures" / "feature_stability_top.svg").exists()
+    assert not (run_dirs[0] / "cv" / "figures" / "feature_stability_top.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "feature_set_jaccard_heatmap.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "cv_species_probability_by_trait.svg").exists()
     assert (run_dirs[0] / "cv" / "figures" / "cv_fold_trait_probability.svg").exists()

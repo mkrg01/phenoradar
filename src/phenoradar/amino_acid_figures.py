@@ -114,8 +114,6 @@ def write_amino_acid_figures(
             if column == "coefficient":
                 frame = frame.with_columns(pl.lit("NA").alias("reason"))
             by_fold[name] = frame.collect(engine="streaming")
-    # The saved table already has deterministic descending stability order.
-    stability = _scan(cv, "feature_stability_by_feature").head(limit).collect(engine="streaming")
     selected = _selection(cv, "model_selection_selected")
     final_selected = _selection(model, "model_selection_selected")
     if final_selected is not None:
@@ -152,7 +150,7 @@ def write_amino_acid_figures(
         top_sites[metric] = top
     from phenoradar.orthogroup_annotation import load_orthogroup_annotations
 
-    annotation_features = set(requested) | set(stability["feature"])
+    annotation_features = set(requested)
     for annotation_frame in [final_importance, final_coefficients,
                              _read(cv, "top_amino_acid_frequencies")]:
         if annotation_frame is not None:
@@ -172,7 +170,6 @@ def write_amino_acid_figures(
         model_selection_trials=_selection(cv, "model_selection_trials"),
         model_selection_selected=selected, feature_importance_by_fold=by_fold[
             "feature_importance_by_fold"], coefficients_by_fold=by_fold["coefficients_by_fold"],
-        feature_stability_by_feature=stability,
         feature_stability_by_fold_pair=_read(cv, "feature_stability_by_fold_pair"),
         loss_by_split_cv=_read(cv, "loss_by_split_cv"), model_sparsity=sparsity,
         final_refit_feature_importance=final_importance,

@@ -71,11 +71,14 @@ def test_process_outer_folds_match_serial_and_render_common_figures(
             columns = frames[0].columns
             assert_frame_equal(frames[0].sort(columns), frames[1].sort(columns), abs_tol=1e-14)
     for name in ["roc_curve_cv", "pr_curve_cv",
-                 "feature_importance_top", "coefficients_signed_top", "feature_stability_top",
+                 "feature_importance_top", "coefficients_signed_top",
                  "feature_importance_by_fold_heatmap", "model_selection",
                  "amino_acid_site_pss_top", "amino_acid_site_effect_range_top",
                  "amino_acid_frequency_by_confusion", "amino_acid_site_filter_funnel"]:
         assert (second / "cv/figures" / f"{name}.svg").exists(), name
+    for root in [first, second]:
+        assert not (root / "cv/figures/feature_stability_top.svg").exists()
+        assert (root / "cv/tables/feature_stability_by_feature.tsv").exists()
     np.testing.assert_array_equal(
         pl.read_csv(first / "cv/tables/prediction_cv.tsv", separator="\t")["prob"],
         pl.read_csv(second / "cv/tables/prediction_cv.tsv", separator="\t")["prob"],

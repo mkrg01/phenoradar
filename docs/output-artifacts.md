@@ -240,7 +240,7 @@ global or species-local features; optional OG annotations replace ID-only labels
 | Probability distributions | `cv_species_probability_by_trait.svg`, `cv_fold_trait_probability.svg`, `probability_by_<group>.svg` |
 | Feature reliance | `feature_importance_top.svg`, `feature_importance_by_fold_heatmap.svg`, `coefficients_signed_top.svg` |
 | Expression by TP/FN/TN/FP | `top_feature_expression_by_confusion.svg` using `log2(TPM + 1)` |
-| Stability | `feature_stability_top.svg`, `feature_set_jaccard_heatmap.svg` |
+| Stability | `feature_set_jaccard_heatmap.svg` |
 | Filtering and sparsity | `feature_filter_funnel.svg`, `non_zero_feature_count_by_fold.svg` |
 | Candidate selection | `model_selection.svg` for `best`, or `model_selection_one_se_curve.svg` for `one_se` |
 

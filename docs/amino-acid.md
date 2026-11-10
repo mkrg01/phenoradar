@@ -426,7 +426,7 @@ Species absent from the tree are omitted with a warning; accepted-only variants
 follow the existing abstention figure policy.
 
 When `data.orthogroup_annotation_path` is supplied, AA/combined importance,
-coefficient, stability, frequency and PSS/R figures include the annotation name
+coefficient, frequency and PSS/R figures include the annotation name
 alongside the OG/site/residue ID. Tree headers shorten long names; SVG tooltips
 and the annotation TSV retain the complete name. Missing annotations retain IDs.
 

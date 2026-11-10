@@ -1744,7 +1744,6 @@ def _run_single(
                     coefficients=cv_artifacts.coefficients,
                     feature_importance_by_fold=cv_artifacts.feature_importance_by_fold,
                     coefficients_by_fold=cv_artifacts.coefficients_by_fold,
-                    feature_stability_by_feature=cv_artifacts.feature_stability_by_feature,
                     feature_stability_by_fold_pair=cv_artifacts.feature_stability_by_fold_pair,
                     ensemble_model_probs=cv_artifacts.ensemble_model_probs,
                     model_selection_trials=cv_artifacts.model_selection_trials,
