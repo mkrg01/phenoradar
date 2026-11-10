@@ -457,3 +457,6 @@ when those predictions are available. AA/combined `predict` writes them under
 `predict`. A predict config can override the bundle's summary column. A missing
 metadata column skips that summary with a warning; missing individual group
 values are grouped as `unassigned`.
+
+For whole-protein numbering, PyMOL sessions and six-view structure PDFs, see
+[external site and structure annotation](site-structure-annotation.md).

@@ -11,11 +11,17 @@ installed version.
 | `run` | Train and evaluate; optionally export a model |
 | `predict` | Apply an exported model bundle |
 | `report` | Compare existing runs |
+| `prepare-site-references` | Freeze external sequence candidates for selected AA sites |
+| `annotate-sites` | Map AA sites to reference/structure residues and render PyMOL/PDF views |
 
 All commands accept `--verbose` / `-v` for detailed logs or `--quiet` / `-q`
 for final summaries and warnings. These flags are mutually exclusive. Warnings
 are saved in `run_metadata.json` for runs and expression predictions, or
 `report_warnings.tsv` for reports.
+
+Site annotation is optional postprocessing; it needs `phenoradar[structure]`,
+MAFFT and, for rendering, PyMOL. See [site and structure annotation](site-structure-annotation.md)
+for commands, reference QC, offline replay and output details.
 
 ## `dataset`
 

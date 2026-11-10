@@ -18,6 +18,10 @@
 
 ### Features
 
+* add optional, post-fit species-balanced external reference selection and
+  residue-level PDB/AlphaFold mapping, with frozen resource provenance, PyMOL
+  sessions and six-view PDF reports
+
 * reuse successful phylogenetic ASR outputs across runs with identical analysis
   inputs and software; verify cached output integrity, retain source-command
   provenance, and recompute expression comparisons for each run

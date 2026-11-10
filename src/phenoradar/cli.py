@@ -2814,5 +2814,97 @@ def report(
     )
 
 
+@app.command("prepare-site-references")
+def prepare_site_references_command(
+    run_dir: Annotated[Path, typer.Option("--run-dir", exists=True, file_okay=False)],
+    out: Annotated[Path, typer.Option("--out", help="New frozen candidate JSON catalog.")],
+    orthodb_release: Annotated[
+        str, typer.Option("--orthodb-release", help="Exact release, e.g. v12.2.")
+    ],
+    scope: Annotated[str, typer.Option("--scope", help="final or cv.")] = "final",
+    orthogroup: Annotated[list[str] | None, typer.Option("--orthogroup")] = None,
+    cache_dir: Annotated[Path, typer.Option("--cache-dir")] = Path(
+        "runs/.phenoradar_cache/site_resources"
+    ),
+    og2genes: Annotated[Path | None, typer.Option("--og2genes", exists=True)] = None,
+    gene_xrefs: Annotated[Path | None, typer.Option("--gene-xrefs", exists=True)] = None,
+    offline: Annotated[bool, typer.Option("--offline")] = False,
+) -> None:
+    """Freeze same-release OrthoDB/UniProt candidates for selected AA sites."""
+    from phenoradar.site_reference import _run_inputs, selected_sites
+    from phenoradar.site_reference_resources import (
+        ResourceCache,
+        SiteAnnotationError,
+        prepare_reference_catalog,
+    )
+
+    try:
+        _run_inputs(run_dir)
+        sites = selected_sites(run_dir, scope)
+        names = sorted(set(sites["orthogroup"]))
+        if orthogroup:
+            if set(orthogroup) - set(names):
+                raise SiteAnnotationError("Requested OG has no selected sites in this scope.")
+            names = sorted(set(orthogroup))
+        prepare_reference_catalog(
+            orthogroups=names,
+            release=orthodb_release,
+            out=out,
+            cache=ResourceCache(cache_dir, offline=offline),
+            members=og2genes,
+            xrefs=gene_xrefs,
+        )
+    except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"Wrote frozen reference candidates: {out}")
+
+
+@app.command("annotate-sites")
+def annotate_sites_command(
+    run_dir: Annotated[Path, typer.Option("--run-dir", exists=True, file_okay=False)],
+    catalog: Annotated[Path, typer.Option("--catalog", exists=True, dir_okay=False)],
+    out: Annotated[
+        Path, typer.Option("--out", help="New annotation directory; never overwritten.")
+    ],
+    scope: Annotated[str, typer.Option("--scope", help="final or cv.")] = "final",
+    orthogroup: Annotated[list[str] | None, typer.Option("--orthogroup")] = None,
+    orthodb_release: Annotated[str | None, typer.Option("--orthodb-release")] = None,
+    policy: Annotated[Path | None, typer.Option("--policy", exists=True, dir_okay=False)] = None,
+    reference_overrides: Annotated[
+        Path | None, typer.Option("--reference-overrides", exists=True)
+    ] = None,
+    cache_dir: Annotated[Path, typer.Option("--cache-dir")] = Path(
+        "runs/.phenoradar_cache/site_resources"
+    ),
+    mafft_exe: Annotated[str, typer.Option("--mafft-exe")] = "mafft",
+    pymol_exe: Annotated[str, typer.Option("--pymol-exe")] = "pymol",
+    render: Annotated[bool, typer.Option("--render/--no-render")] = True,
+    offline: Annotated[bool, typer.Option("--offline")] = False,
+) -> None:
+    """Map completed AA/combined results to references and PyMOL/six-view PDF structures."""
+    from phenoradar.site_reference import ReferencePolicy, annotate_sites
+    from phenoradar.site_reference_resources import ResourceCache
+
+    try:
+        values = {} if policy is None else json.loads(policy.read_text())
+        annotate_sites(
+            run=run_dir,
+            catalog=catalog,
+            out=out,
+            scope=scope,
+            orthogroups=orthogroup,
+            policy=ReferencePolicy(**values),
+            cache=ResourceCache(cache_dir, offline=offline),
+            mafft=mafft_exe,
+            pymol=pymol_exe,
+            render=render,
+            overrides=reference_overrides,
+            orthodb_release=orthodb_release,
+        )
+    except (ValueError, TypeError, OSError, pl.exceptions.PolarsError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"Wrote site annotations: {out}")
+
+
 if __name__ == "__main__":
     app()

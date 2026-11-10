@@ -51,6 +51,9 @@ def _extract_config_paths(argv: list[str]) -> list[Path]:
 
 def _maybe_set_polars_max_threads(argv: list[str]) -> None:
     command = _infer_command(argv)
+    if command in {"prepare-site-references", "annotate-sites"}:
+        os.environ.setdefault("POLARS_MAX_THREADS", "1")
+        return
     if command not in _COMMANDS_WITH_CONFIG:
         return
 

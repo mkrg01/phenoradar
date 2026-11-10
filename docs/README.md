@@ -11,4 +11,5 @@ model, and make predictions.
 | Find results and interpret them | [Outputs and interpretation](output-artifacts.md) |
 | Understand training and evaluation | [Pipeline details](pipeline-details.md) |
 | Use amino-acid alignments, alone or with expression | [Amino-acid and combined modes](amino-acid.md) |
+| Map selected sites to reference numbering and structures | [Site and structure annotation](site-structure-annotation.md) |
 | Compare unknown-trait predictions with a phylogeny | [Phylogenetic imputation](phylogenetic-imputation.md) |
