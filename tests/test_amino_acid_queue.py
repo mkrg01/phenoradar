@@ -43,7 +43,7 @@ def test_grid_queue_bounds_both_pools_and_falls_back_when_memory_is_small(monkey
     assert queue.queue_workers(config, SparseUsage(), 116, 8_000_000, 20)[1] == 0
     assert not queue.enabled(config)
     config.model_selection.selected_candidate_count = 1
-    assert not queue.enabled(config)  # Default automatic paths need synchronized extensions.
+    assert queue.enabled(config)  # Automatic paths now synchronize complete rounds.
     config.model_selection.search_space = {"lambda": [.1, .01]}
     assert queue.enabled(config)
     config.model_selection.search_strategy = "tpe"

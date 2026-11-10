@@ -245,7 +245,7 @@ def test_validation_values_do_not_set_scale_and_refit_recomputes_scale():
 def test_auto_nested_cv_and_final_refit_all_modes(
     tmp_path: Path, monkeypatch, mode, null_selection, n_jobs
 ):
-    if null_selection:
+    if null_selection and mode == "expression":
         import phenoradar.amino_acid_run as aa
 
         monkeypatch.setattr(cv, "_selection_metric_from_probability", lambda *args: 0.0)
@@ -261,6 +261,26 @@ def test_auto_nested_cv_and_final_refit_all_modes(
     path.write_text(yaml.safe_dump(raw))
     c = load_and_resolve_config([path])
     c.runtime.n_jobs = n_jobs
+    if null_selection and mode != "expression":
+        # Equal observations within each complete 0/1 contrast pair give an
+        # actual zero gradient, including in spawned workers without monkeypatches.
+        aa = Path(c.data.alignment_dir) / "OG1.faa"
+        records = aa.read_text().split(">")[1:]
+        rewritten = []
+        for record in records:
+            name = record.splitlines()[0]
+            if name.startswith("s"):
+                letter = "ACDE"[int(name.split("_", 1)[0][1:]) // 2]
+                rewritten.append(f">{name}\n-X{letter}{letter}*--\n")
+            else:
+                rewritten.append(">" + record)
+        aa.write_text("".join(rewritten))
+        expression = pl.read_csv(c.data.tpm_path, separator="\t")
+        expression = expression.with_columns(
+            pl.when(pl.col("species").str.starts_with("s"))
+            .then(pl.col("species").str.slice(1).cast(pl.Int64, strict=False) // 2 + 1)
+            .otherwise(pl.col("tpm")).alias("tpm"))
+        expression.write_csv(c.data.tpm_path, separator="\t")
     if mode == "expression":
         manifest = build_split_artifacts(c).split_manifest
         outer = cv.run_outer_cv(c, manifest)

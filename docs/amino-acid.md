@@ -379,9 +379,13 @@ statistics and train/validation encoding share one residue-frequency read. Filte
 means and representative choices still use training species only. The first
 inner fold sizes the shared scoring queue and refit budget from actual CSC sizes.
 Completed scopes can refit while other scopes score; when scoring finishes, its
-processes exit and available memory can support more refits. Relative `auto_log_range` paths retain scope-level extension decisions and the outer-fold
-scheduling path; they do not enter the absolute-lambda queue. Random/TPE selection
-also retains that path. Tables and warnings merge in fold order.
+processes exit and available memory can support more refits. Relative
+`auto_log_range` paths use the same bounded scheduling, with a separate barrier
+for each scope and sample source: all inner folds complete a round before its
+aggregate score can extend the path. Extension jobs reuse disk-backed designs
+and training-only scales, then refit the original native warmup prefix. Results
+and warnings merge in fold order regardless of completion order. Random/TPE
+selection retains the outer-fold scheduling path.
 Interpretation aggregation runs in a separate process so its allocation arenas
 are released before prediction and plotting.
 No sites, candidates or CV folds are removed to reduce resource use.

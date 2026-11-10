@@ -56,11 +56,8 @@ class _Scope:
 
 
 def enabled(config: AppConfig) -> bool:
-    # Relative paths decide bounded extensions from all inner folds together.
-    # This queue currently scores independent absolute-lambda batches only.
     return (config.runtime.n_jobs >= 3 and _selection_is_active(config)
-            and config.model_selection.search_strategy == "grid"
-            and auto_lambda_spec(config) is None)
+            and config.model_selection.search_strategy == "grid")
 
 
 def _plan(config: AppConfig, rows: pl.DataFrame, scope: str,
@@ -156,6 +153,11 @@ def grid_scopes(config: AppConfig, store: AlignmentStore, expression: Expression
                 manifest: pl.DataFrame, folds: list[str], progress: Callable[[str], None] | None,
                 ) -> Iterator[tuple[str, Path]]:
     """Preserve fold/candidate ordering while scheduling independent fits globally."""
+    if auto_lambda_spec(config) is not None:
+        from phenoradar.amino_acid_auto_queue import automatic_scopes
+
+        yield from automatic_scopes(config, store, expression, manifest, folds, progress)
+        return
     from phenoradar.amino_acid_parallel import outer_folds
     from phenoradar.amino_acid_run import _prepare_inner_fold
 
