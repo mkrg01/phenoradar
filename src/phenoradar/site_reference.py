@@ -160,6 +160,7 @@ def project_references(
     version_text = (version.stdout + version.stderr).strip()
     command = [
         mafft,
+        "--amino",
         "--anysymbol",
         "--add",
         candidates.name,

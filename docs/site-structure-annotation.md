@@ -52,7 +52,7 @@ removed from the comparison. All folds use the same display-only reference.
 
 1. Define core columns as input-MSA columns containing at least one canonical
    residue in at least 80% of training species. Conserved columns are included.
-2. Add full-length candidates with MAFFT `--anysymbol --add --keeplength --mapout --thread 1`.
+2. Add full-length candidates with MAFFT `--amino --anysymbol --add --keeplength --mapout --thread 1`.
    Original training rows must remain byte-identical. Identical candidate
    sequences are aligned once; their distinct accessions remain in the ranking.
 3. In core columns, let I be identity over jointly canonical positions and let
