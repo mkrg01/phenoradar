@@ -191,6 +191,7 @@ class AlignmentStore:
     def _read(self, path: Path, index: int) -> AlignmentOG:
         cache = Path(self._temp.name) / f"{index}.bin"
         mask_cache = Path(self._temp.name) / f"{index}_presence.npy"
+        translation = _CODE.tobytes()
         ids: list[str] = []
         hashes: list[str] = []
         rows: dict[str, list[int]] = defaultdict(list)
@@ -217,13 +218,14 @@ class AlignmentStore:
                 width = len(raw)
             if len(raw) != width:
                 raise AlignmentError(f"Unequal alignment lengths in {path}: {sequence_id}")
-            values = np.frombuffer(raw, dtype=np.uint8)
-            code = _CODE[values]
-            if np.any(code == 255):
+            encoded = raw.translate(translation)
+            if b"\xff" in encoded:
                 raise AlignmentError(f"Invalid sequence character in {path}: {sequence_id}")
             species = self._resolve(path.stem, sequence_id)
             if species not in self.retained_species:
                 return
+            values = np.frombuffer(raw, dtype=np.uint8)
+            code = np.frombuffer(encoded, dtype=np.uint8)
             row = len(ids)
             rows[species].append(row)
             ids.append(sequence_id)
