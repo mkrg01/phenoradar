@@ -429,3 +429,7 @@ When `data.orthogroup_annotation_path` is supplied, AA/combined importance,
 coefficient, stability, frequency and PSS/R figures include the annotation name
 alongside the OG/site/residue ID. Tree headers shorten long names; SVG tooltips
 and the annotation TSV retain the complete name. Missing annotations retain IDs.
+
+`amino_acid_frequency_by_confusion.svg` overlays one point per species with an
+available OOF residue frequency on each boxplot. Horizontal offsets are fixed by
+species order; each group reports its observed species count (`n`).

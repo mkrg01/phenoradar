@@ -205,6 +205,8 @@ def _frequency_by_confusion(
 ) -> None:
     import matplotlib.pyplot as plt
 
+    from phenoradar.colors import CONFUSION_GROUP_COLORS
+
     data = _read(run_dir / "cv/tables", "top_amino_acid_frequencies")
     if data is None:
         return
@@ -218,12 +220,33 @@ def _frequency_by_confusion(
     groups = [("TN", 0, False), ("FP", 0, True), ("FN", 1, False), ("TP", 1, True)]
     for axis, name in zip(axes[:, 0], names, strict=True):
         rows = data.filter((pl.col("feature") == name) & pl.col("frequency").is_finite())
-        values = [rows.filter((pl.col("label") == label) & ((pl.col("prob") >= .5) == pred))[
-            "frequency"].to_numpy() for _, label, pred in groups]
-        axis.boxplot(values, tick_labels=[g[0] for g in groups], widths=.6)
+        group_rows = [
+            rows.filter((pl.col("label") == label) & ((pl.col("prob") >= .5) == pred))
+            .sort("species") for _, label, pred in groups
+        ]
+        values = [frame["frequency"].to_numpy() for frame in group_rows]
+        box = axis.boxplot(values, widths=.6, patch_artist=True, showfliers=False)
+        for patch, (group, _, _) in zip(box["boxes"], groups, strict=True):
+            patch.set_facecolor(CONFUSION_GROUP_COLORS[group])
+            patch.set_edgecolor(CONFUSION_GROUP_COLORS[group])
+            patch.set_alpha(.22)
+        for position, ((group, _, _), observed) in enumerate(zip(groups, values, strict=True), 1):
+            if not len(observed):
+                continue
+            offsets = figures._deterministic_offsets(len(observed), .18)
+            kwargs = ({"marker": "x"} if group in {"FP", "FN"}
+                      else {"marker": "o", "edgecolors": "white"})
+            axis.scatter(
+                position + offsets, observed, s=12, color=CONFUSION_GROUP_COLORS[group],
+                linewidths=.45, alpha=.64, zorder=3, **kwargs,
+            )
+        axis.set_xticks(range(1, 5), [f"{group}\nn={len(observed)}" for
+                                    (group, _, _), observed in zip(groups, values, strict=True)])
+        axis.set_xlim(.55, 4.45)
         axis.set_ylim(-.05, 1.05)
         axis.set_ylabel("Frequency")
         axis.set_title(figures._feature_axis_labels([name], annotations)[0], fontsize=9)
+    figure.supxlabel("OOF confusion group; each point = one species", fontsize=7)
     figure.tight_layout()
     figures._save_svg_figure(figure, run_dir / "cv/figures/amino_acid_frequency_by_confusion.svg")
 
