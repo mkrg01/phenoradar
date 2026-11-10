@@ -27,6 +27,13 @@ def test_process_outer_folds_match_serial_and_render_common_figures(
     path = (combined_config(tmp_path, aggregation) if combined
             else fixture_config(tmp_path, aggregation))
     config = load_and_resolve_config([path])
+    # Noncontiguous numeric IDs exercise seed-ID transport into spawned workers.
+    metadata_path = Path(config.data.metadata_path)
+    pl.read_csv(metadata_path, separator="\t").with_columns(
+        pl.col(config.split.group_col).replace_strict(
+            {"g0": "0", "g1": "2", "g2": "10", "g3": "20"}, default=None,
+        )
+    ).write_csv(metadata_path, separator="\t")
     config.preprocess.amino_acid.ranked_site_filter.method = "none"
     alignments = Path(config.data.alignment_dir)
     (alignments / "OG2.faa").write_text((alignments / "OG1.faa").read_text())
@@ -39,6 +46,11 @@ def test_process_outer_folds_match_serial_and_render_common_figures(
     # Keep this integration test small; the complete output tables are compared.
     config.figures.top_features = 3
     first = run_amino_acid(config, tmp_path / "serial")
+    validation = pl.read_csv(first / "split/tables/split_manifest.tsv", separator="\t").filter(
+        pl.col("pool") == "validation"
+    )
+    assert validation.filter(pl.col("fold_id").cast(pl.String) != pl.col("group_id").cast(
+        pl.String)).is_empty()
     # Keep exercising genuinely empty worker caches despite cross-run reuse.
     shutil.rmtree(Path("runs/.phenoradar_cache/alignments/frequencies"), ignore_errors=True)
     config.runtime.n_jobs = 4

@@ -52,6 +52,7 @@ from phenoradar.cv import (
     _deterministic_int_seed,
     _fit_sample_weights,
     _fit_selected_estimator,
+    _fold_ids,
     _glmnet_candidate_params,
     _inner_cv_splits,
     _metric_rows,
@@ -69,6 +70,7 @@ from phenoradar.cv import (
     _tpe_trial_params,
     _with_native_thread_limit,
 )
+from phenoradar.fold_identity import configure_fold_seed_ids, seed_scope
 from phenoradar.glmnet import GlmnetLogisticRegression
 from phenoradar.group_bootstrap import run_oof_group_bootstrap
 from phenoradar.metrics import (
@@ -262,7 +264,7 @@ def _select(
             direction=_selection_metric_optuna_direction(config.model_selection.selection_metric),
             sampler=TPESampler(
                 seed=_deterministic_int_seed(
-                    f"{config.runtime.seed}|{scope}|{sample_set_id}|aa_tpe"
+                    f"{config.runtime.seed}|{seed_scope(config, scope)}|{sample_set_id}|aa_tpe"
                 )
             ),
         )
@@ -765,6 +767,7 @@ def run_amino_acid(
 ) -> Path:
     started = datetime.now(UTC)
     splits = split_override or build_split_artifacts(config)
+    configure_fold_seed_ids(config, splits.split_manifest)
     manifest = splits.split_manifest
     metadata = pl.read_csv(config.data.metadata_path, separator="\t")
     all_species = metadata[config.data.species_col].cast(pl.String).str.strip_chars().to_list()
@@ -839,10 +842,7 @@ def run_amino_acid(
         from phenoradar.amino_acid_parallel import merge_tables, outer_folds
         from phenoradar.amino_acid_queue import enabled, grid_scopes
 
-        folds = sorted(
-            manifest.filter(pl.col("pool").is_in(["train", "validation"]))["fold_id"]
-            .unique().to_list(), key=int,
-        )
+        folds = _fold_ids(manifest)
         scopes = (grid_scopes(config, store, expression, manifest, folds, progress)
                   if enabled(config) else zip(
                       folds, outer_folds(config, store, expression, manifest, folds, progress),

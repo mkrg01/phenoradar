@@ -75,7 +75,7 @@ input types, and threshold dependencies, including model-selection log loss.
 
 | `aggregate_scope` | Meaning |
 | --- | --- |
-| `NA` | One fold, with a concrete 1-based `fold_id` |
+| `NA` | One fold, with a concrete `fold_id` |
 | `macro` | Mean of defined fold scores; each fold has equal weight |
 | `micro` | Recomputed from all pooled OOF predictions |
 
@@ -158,7 +158,7 @@ but only the latter count as observed.
 
 | Table | Content / use |
 | --- | --- |
-| `split/tables/split_manifest.tsv` | `species`, `pool`, `fold_id`, `group_id`, `contrast_group_id`, `label` |
+| `split/tables/split_manifest.tsv` | `species`, `pool`, `fold_id`, `fold_index`, `group_id`, `contrast_group_id`, `label` |
 | `split/tables/fold_validation_groups.tsv` | Held-out groups per fold, species/label counts, and `validation_label_profile` |
 | `split/tables/fold_diagnostics.tsv` | Train/validation group and label counts; `two_class_validation_metrics_defined` |
 | `model/tables/training_group_subsets.tsv` | Requested/effective group counts, deterministic ranks, repeat index, selection flags |
@@ -398,3 +398,12 @@ training/CV species, excluding external-test and unknown species. Older bundles
 can reuse the source run's candidate reference TSV when accessible; unavailable
 references are marked and prediction continues. No training data are refitted.
 Sequence/combined bundles have [separate formats and alignment requirements](amino-acid.md#prediction).
+
+When validation groups and folds have a one-to-one correspondence (including
+LOGO), non-negative integer group IDs are reused as `fold_id`. For example,
+held-out group `10` is fold `10`, including noncontiguous or zero-based IDs.
+This applies to outer and inner CV in every feature mode. Other group labels or
+multi-group validation folds retain sequential IDs and their group mapping.
+`split_manifest.tsv` also records the original 1-based `fold_index` (null outside
+CV). Execution and random seeds retain this index, so renaming IDs does not
+change splits, sample selection or stochastic model initialization.

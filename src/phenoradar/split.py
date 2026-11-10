@@ -12,6 +12,7 @@ import polars as pl
 from sklearn.model_selection import GroupKFold, LeaveOneGroupOut, StratifiedGroupKFold
 
 from phenoradar.config import AppConfig
+from phenoradar.fold_identity import validation_fold_ids
 
 _POOL_TRAINING_VALIDATION = "training_validation"
 _POOL_EXTERNAL_TEST = "external_test"
@@ -339,13 +340,15 @@ def _preflight_training_pool(config: AppConfig, training_df: pl.DataFrame) -> No
 
 
 def _validate_fold_labels(
-    training_df: pl.DataFrame, folds: list[tuple[list[int], list[int]]]
+    training_df: pl.DataFrame, folds: list[tuple[list[int], list[int]]],
+    fold_ids: list[str] | None = None,
 ) -> None:
     labels = training_df.select("__label").to_series().to_list()
     for fold_id, (train_idx, _valid_idx) in enumerate(folds, start=1):
         train_labels = {int(labels[idx]) for idx in train_idx}
         if len(train_labels) < 2:
-            raise SplitError(f"Fold {fold_id} training split contains fewer than two labels")
+            label = str(fold_id) if fold_ids is None else fold_ids[fold_id - 1]
+            raise SplitError(f"Fold {label} training split contains fewer than two labels")
 
 
 def _build_fold_indices(
@@ -391,7 +394,8 @@ def _build_fold_indices(
 def _append_training_rows(
     rows: list[dict[str, Any]],
     training_df: pl.DataFrame,
-    fold_id: int,
+    fold_id: str,
+    fold_index: int,
     row_indices: list[int],
     pool: str,
 ) -> None:
@@ -405,7 +409,8 @@ def _append_training_rows(
             {
                 "species": str(species[idx]),
                 "pool": pool,
-                "fold_id": str(fold_id),
+                "fold_id": fold_id,
+                "fold_index": fold_index,
                 "group_id": str(groups[idx]),
                 "contrast_group_id": None
                 if contrast_groups[idx] is None
@@ -426,6 +431,7 @@ def _append_pool_rows(rows: list[dict[str, Any]], pool_df: pl.DataFrame, pool_na
                 "species": str(species[idx]),
                 "pool": pool_name,
                 "fold_id": "NA",
+                "fold_index": None,
                 "group_id": None,
                 "contrast_group_id": None
                 if contrast_groups[idx] is None
@@ -440,16 +446,20 @@ def _build_split_manifest(
     external_df: pl.DataFrame,
     inference_df: pl.DataFrame,
     folds: list[tuple[list[int], list[int]]],
+    fold_ids: list[str] | None = None,
 ) -> pl.DataFrame:
     rows: list[dict[str, Any]] = []
-    for fold_id, (train_idx, valid_idx) in enumerate(folds, start=1):
+    for fold_index, (train_idx, valid_idx) in enumerate(folds, start=1):
+        fold_id = str(fold_index) if fold_ids is None else fold_ids[fold_index - 1]
         _append_training_rows(
-            rows, training_df, fold_id=fold_id, row_indices=train_idx, pool="train"
+            rows, training_df, fold_id=fold_id, fold_index=fold_index,
+            row_indices=train_idx, pool="train"
         )
         _append_training_rows(
             rows,
             training_df,
             fold_id=fold_id,
+            fold_index=fold_index,
             row_indices=valid_idx,
             pool="validation",
         )
@@ -466,6 +476,7 @@ def _build_split_manifest(
             "species": pl.String,
             "pool": pl.String,
             "fold_id": pl.String,
+            "fold_index": pl.Int64,
             "group_id": pl.String,
             "contrast_group_id": pl.String,
             "label": pl.Int8,
@@ -477,12 +488,14 @@ def _build_split_manifest(
 def _build_fold_validation_groups(
     training_df: pl.DataFrame,
     folds: list[tuple[list[int], list[int]]],
+    fold_ids: list[str] | None = None,
 ) -> pl.DataFrame:
     groups = training_df.select("__group").to_series().to_list()
     labels = training_df.select("__label").to_series().to_list()
 
     rows: list[dict[str, Any]] = []
-    for fold_id, (_train_idx, valid_idx) in enumerate(folds, start=1):
+    for fold_index, (_train_idx, valid_idx) in enumerate(folds, start=1):
+        fold_id = str(fold_index) if fold_ids is None else fold_ids[fold_index - 1]
         for idx in valid_idx:
             rows.append(
                 {
@@ -541,12 +554,14 @@ def _label_profile(n_pos: int, n_neg: int) -> str:
 def _build_fold_diagnostics(
     training_df: pl.DataFrame,
     folds: list[tuple[list[int], list[int]]],
+    fold_ids: list[str] | None = None,
 ) -> pl.DataFrame:
     groups = [str(value) for value in training_df.select("__group").to_series().to_list()]
     labels = [int(value) for value in training_df.select("__label").to_series().to_list()]
 
     rows: list[dict[str, Any]] = []
-    for fold_id, (train_idx, valid_idx) in enumerate(folds, start=1):
+    for fold_index, (train_idx, valid_idx) in enumerate(folds, start=1):
+        fold_id = str(fold_index) if fold_ids is None else fold_ids[fold_index - 1]
         train_pos = sum(labels[idx] == 1 for idx in train_idx)
         valid_pos = sum(labels[idx] == 1 for idx in valid_idx)
         train_neg = len(train_idx) - train_pos
@@ -592,10 +607,11 @@ def build_split_artifacts(config: AppConfig) -> SplitArtifacts:
 
     _preflight_training_pool(config, training_df)
     folds = _build_fold_indices(config, training_df)
-    _validate_fold_labels(training_df, folds)
-    manifest = _build_split_manifest(training_df, external_df, inference_df, folds)
-    fold_validation_groups = _build_fold_validation_groups(training_df, folds)
-    fold_diagnostics = _build_fold_diagnostics(training_df, folds)
+    fold_ids = validation_fold_ids(training_df["__group"].to_list(), [v for _, v in folds])
+    _validate_fold_labels(training_df, folds, fold_ids)
+    manifest = _build_split_manifest(training_df, external_df, inference_df, folds, fold_ids)
+    fold_validation_groups = _build_fold_validation_groups(training_df, folds, fold_ids)
+    fold_diagnostics = _build_fold_diagnostics(training_df, folds, fold_ids)
 
     pool_counts = {
         _POOL_TRAINING_VALIDATION: training_df.height,
