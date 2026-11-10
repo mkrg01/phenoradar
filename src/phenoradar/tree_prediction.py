@@ -1304,13 +1304,20 @@ def _draw_toytree_heatmap(
     _save_toytree_svg(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
 
 
-def _feature_heatmap_label(feature: object, annotation: object) -> str:
+def _feature_heatmap_label(
+    feature: object, annotation: object, *, annotation_limit: int | None = None,
+) -> str:
     from phenoradar.figures import _feature_address
 
     feature_text = _feature_address(str(feature))[1]
     if not _has_text(annotation):
         return feature_text
-    return f"{feature_text}: {' '.join(str(annotation).split())}"
+    description = " ".join(str(annotation).split())
+    if annotation_limit is not None:
+        import textwrap
+
+        description = textwrap.shorten(description, width=annotation_limit, placeholder="…")
+    return f"{feature_text}: {description}"
 
 
 def _feature_heatmap_title(feature: object, annotation: object) -> str:
@@ -1364,10 +1371,12 @@ def _draw_toytree_feature_heatmap(
         feature_titles = features
     if value_col == "residue":
         import html
-        import textwrap
 
-        feature_labels = [html.escape(textwrap.shorten(label, width=100, placeholder="…"))
-                          for label in feature_labels]
+        # Only descriptions may be shortened: the OG and original MSA site are essential.
+        feature_labels = [html.escape(_feature_heatmap_label(
+            row["feature"], row.get("orthogroup_annotation") if annotate_features else None,
+            annotation_limit=80,
+        )) for row in feature_records]
     feature_step = 26.0
     trait_x = 20.0
     prob_x = 58.0
@@ -1660,12 +1669,14 @@ def _draw_residue_legend(*, canvas: Any, width: int, selection: str) -> None:
         legend.text(.12, y, f"{letters}: {label}", color=_TEXT_COLOR,
                     style={"font-size": "9px", "text-anchor": "start"})
 
-    note = canvas.cartesian(bounds=(width - 270, width - 20, 280, 335),
+    note = canvas.cartesian(bounds=(width - 270, width - 20, 280, 365),
                             show=False, xmin=0, xmax=1, ymin=0, ymax=1)
     rule = "Highest TPM" if selection == "max_tpm" else "Maximum input-MSA coverage"
-    note.text(.02, .8, f"{rule} per species/OG", color=_TEXT_COLOR,
+    note.text(.02, .85, f"{rule} per species/OG", color=_TEXT_COLOR,
               style={"font-size": "9px", "text-anchor": "start"})
-    note.text(.02, .35, "Ties: sequence ID; no per-site substitution", color=_TEXT_COLOR,
+    note.text(.02, .55, "Ties: sequence ID; no per-site substitution", color=_TEXT_COLOR,
+              style={"font-size": "9px", "text-anchor": "start"})
+    note.text(.02, .25, "Labels: OG ID : input MSA site (1-based)", color=_TEXT_COLOR,
               style={"font-size": "9px", "text-anchor": "start"})
 
 

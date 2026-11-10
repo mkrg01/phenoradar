@@ -131,3 +131,33 @@ def test_aa_run_generates_annotated_figures_and_tree(tmp_path: Path) -> None:
                         separator='\t')
     assert table['species'].n_unique() == 8
     assert set(table['representative_sequence_id']) == {f's{i}_gene' for i in range(8)}
+
+
+def test_tree_site_identifiers_survive_long_annotations_and_ids(tmp_path: Path) -> None:
+    from xml.etree import ElementTree as ET
+
+    from phenoradar.tree_prediction import _write_tree_feature_heatmap_svg
+
+    store, sites, predictions, annotations = inputs(tmp_path)
+    with store:
+        table = build_residue_annotation(store, sites.head(1), predictions,
+            aggregation='tpm_weighted_frequency', annotations=annotations)
+    og = 'OG_' + 'x' * 120
+    annotation = 'A very long annotated protein description ' * 12
+    table = table.with_columns(
+        pl.lit(json.dumps([og, 123456])).alias('feature'),
+        pl.lit(annotation).alias('orthogroup_annotation'),
+    )
+    tree = tmp_path / 'tree.nwk'
+    tree.write_text('(s1:1,s2:1,s3:1);')
+    path = tmp_path / 'tree.svg'
+    assert _write_tree_feature_heatmap_svg(
+        tree_path=tree, annotation=table, value_col='residue', cmap_name='', out_path=path,
+        title='', annotate_features=True,
+    ) == []
+    xml = ET.parse(path)
+    visible = [''.join(element.itertext()) for element in xml.getroot().iter()
+               if element.tag.endswith('text')]
+    assert any(f'{og}:123456:' in label and '…' in label for label in visible)
+    assert any('input MSA site (1-based)' in label for label in visible)
+    assert annotation.strip() in path.read_text()  # Tooltips keep the complete annotation.

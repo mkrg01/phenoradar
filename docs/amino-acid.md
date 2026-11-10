@@ -427,8 +427,8 @@ follow the existing abstention figure policy.
 
 When `data.orthogroup_annotation_path` is supplied, AA/combined importance,
 coefficient, frequency and PSS/R figures include the annotation name
-alongside the OG/site/residue ID. Tree headers shorten long names; SVG tooltips
-and the annotation TSV retain the complete name. Missing annotations retain IDs.
+alongside the OG/site/residue ID. Tree headers may shorten the annotation text; OG IDs and input-MSA site numbers
+are always kept in full. SVG tooltips and the annotation TSV retain the complete name. Missing annotations retain IDs.
 
 `amino_acid_frequency_by_confusion.svg` overlays one point per species with an
 available OOF residue frequency on each boxplot. Horizontal offsets are fixed by
