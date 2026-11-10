@@ -10,6 +10,11 @@ import polars as pl
 from phenoradar import figures
 from phenoradar.config import AppConfig
 from phenoradar.group_summary_outputs import write_group_summary_artifacts
+from phenoradar.metrics import (
+    FIXED_PROBABILITY_THRESHOLD_NAME,
+    FIXED_PROBABILITY_THRESHOLD_VALUE,
+)
+from phenoradar.tree_prediction import write_run_tree_prediction_artifacts
 
 if TYPE_CHECKING:
     from phenoradar.amino_acid import AlignmentStore
@@ -211,6 +216,26 @@ def write_amino_acid_figures(
     for metric, top in top_sites.items():
         path = run_dir / "cv/figures" / f"amino_acid_site_{metric}_top.svg"
         _site_bar(top, metric, path, annotations)
+    warnings.extend(write_run_tree_prediction_artifacts(
+        run_dir=run_dir,
+        tree_path=Path(config.data.tree_path) if config.data.tree_path else None,
+        metadata_path=Path(config.data.metadata_path),
+        tpm_path=Path(config.data.tpm_path),
+        species_col=config.data.species_col,
+        feature_col=config.data.feature_col,
+        value_col=config.data.value_col,
+        trait_col=config.data.trait_col,
+        group_col=config.data.contrast_pair_col or config.split.group_col,
+        oof_predictions=oof,
+        thresholds=pl.DataFrame({
+            "threshold_name": [FIXED_PROBABILITY_THRESHOLD_NAME],
+            "threshold_value": [FIXED_PROBABILITY_THRESHOLD_VALUE],
+        }),
+        feature_importance=importance,
+        coefficients=coefficients,
+        pred_external_test=external,
+        include_feature_heatmaps=False,
+    ))
     if store is not None:
         from phenoradar.amino_acid_tree import write_residue_tree
 

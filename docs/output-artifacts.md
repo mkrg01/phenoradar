@@ -300,7 +300,10 @@ species absent from the tree stay in annotation tables.
 
 Toytree figures include `tree_prediction_cv.svg`, `tree_group.svg`,
 `tree_feature_heatmap_log2_tpm.svg`, `tree_feature_heatmap_zscore.svg`, and
-stage-specific prediction trees. Heatmap values and annotations are retained in
+stage-specific prediction trees. Group and CV/external prediction trees are shared
+by expression, AA and combined modes. Expression heatmaps use log2 TPM and z-scores;
+AA/combined runs instead write `tree_feature_heatmap_amino_acid.svg`.
+Heatmap values and annotations are retained in
 the long-form table. Top features follow importance ranking; z-scores are within
 feature across included species. Optional
 [phylogenetic outputs](phylogenetic-imputation.md#outputs) live under `inference/`.

@@ -427,6 +427,12 @@ blocks, including zero coefficients and all eligible sites.
 
 ## Tree residue heatmap and annotation labels
 
+With `data.tree_path`, AA and combined runs also write `cv/figures/tree_group.svg`
+and `tree_prediction_cv.svg`, with the same tracks and annotation TSVs as expression
+runs. Groups use `data.contrast_pair_col`, falling back to `split.group_col` when
+null. External-test predictions also receive a tree when at least two predicted
+species occur in the tree. These plots use saved predictions; they do not refit models.
+
 With `data.tree_path`, `cv/figures/tree_feature_heatmap_amino_acid.svg` shows
 OOF species and the top sites by mean outer-fold PSS (absent sites score zero),
 up to `figures.top_features`. Each column is one original, 1-based MSA site.

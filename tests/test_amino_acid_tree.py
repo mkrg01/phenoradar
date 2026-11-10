@@ -133,6 +133,95 @@ def test_aa_run_generates_annotated_figures_and_tree(tmp_path: Path) -> None:
     assert set(table['representative_sequence_id']) == {f's{i}_gene' for i in range(8)}
 
 
+@pytest.mark.parametrize('mode', ['amino_acid', 'combined'])
+@pytest.mark.parametrize('full', [False, True])
+def test_sequence_modes_write_group_and_cv_prediction_trees(
+    tmp_path: Path, mode: str, full: bool,
+) -> None:
+    from test_amino_acid import fixture_config
+    from test_combined import combined_config
+
+    from phenoradar.amino_acid_run import run_amino_acid
+    from phenoradar.config import load_and_resolve_config
+
+    path = (combined_config(tmp_path, 'tpm_weighted_frequency') if mode == 'combined' else
+            fixture_config(tmp_path, 'tpm_weighted_frequency'))
+    raw = yaml.safe_load(path.read_text())
+    raw['runtime']['execution_stage'] = 'full_run' if full else 'cv_only'
+    if mode == 'amino_acid':
+        # Context trees must never read the inactive expression input.
+        raw['data']['tpm_path'] = str(tmp_path / 'does-not-exist.tsv')
+    metadata = Path(raw['data']['metadata_path'])
+    frame = pl.read_csv(metadata, separator='\t').with_columns(
+        pl.col('contrast_pair_id').replace(
+            {'g0': '1', 'g1': '10', 'g2': '2', 'g3': '20'})
+    )
+    frame.write_csv(metadata, separator='\t')
+    tree = tmp_path / 'tree.nwk'
+    tree.write_text('(' + ','.join(f'{s}:1' for s in frame['species']) + ');')
+    raw['data']['tree_path'] = str(tree)
+    path.write_text(yaml.safe_dump(raw))
+    out = run_amino_acid(load_and_resolve_config([path]), tmp_path / 'run')
+
+    for name in ['tree_group', 'tree_prediction_cv', 'tree_feature_heatmap_amino_acid']:
+        assert (out / 'cv/figures' / f'{name}.svg').exists()
+    assert (out / 'cv/figures/accepted_only/tree_prediction_cv.svg').exists()
+    assert not (out / 'cv/tables/tree_feature_heatmap_annotation.tsv').exists()
+    for name in ['tree_feature_heatmap_log2_tpm', 'tree_feature_heatmap_zscore']:
+        assert not (out / 'cv/figures' / f'{name}.svg').exists()
+
+    tree_table = pl.read_csv(out / 'cv/tables/tree_prediction_cv_annotation.tsv',
+        separator='\t', schema_overrides={'fold_id': pl.String, 'group_id': pl.String}
+    ).sort('species')
+    oof = pl.read_csv(out / 'cv/tables/prediction_cv.tsv', separator='\t',
+                     schema_overrides={'fold_id': pl.String}).sort('species')
+    assert tree_table.height == 8
+    assert tree_table['species'].to_list() == oof['species'].to_list()
+    assert tree_table['fold_id'].to_list() == oof['fold_id'].to_list()
+    assert tree_table['group_id'].to_list() == tree_table['fold_id'].to_list()
+    assert tree_table['true_label'].to_list() == oof['label'].to_list()
+    assert tree_table['pred_label'].to_list() == oof['pred_label_selective'].to_list()
+    np.testing.assert_allclose(tree_table['prob'], oof['prob'], rtol=0, atol=5e-9)
+    groups = pl.read_csv(out / 'cv/tables/tree_contrast_pairs_annotation.tsv', separator='\t')
+    assert set(groups['species']) == set(oof['species'])
+    external_table = out / 'external_test/tables/tree_prediction_external_annotation.tsv'
+    assert external_table.exists() == full
+    if full:
+        assert pl.read_csv(external_table, separator='\t')['species'].to_list() == ['external']
+
+
+@pytest.mark.parametrize('mode', ['amino_acid', 'combined'])
+def test_sequence_context_trees_fall_back_to_split_group_without_contrast_pairs(
+    tmp_path: Path, mode: str,
+) -> None:
+    from test_amino_acid import fixture_config
+    from test_combined import combined_config
+
+    from phenoradar.amino_acid_run import run_amino_acid
+    from phenoradar.config import load_and_resolve_config
+
+    path = combined_config(tmp_path) if mode == 'combined' else fixture_config(
+        tmp_path, 'aa_frequency', full=False)
+    raw = yaml.safe_load(path.read_text())
+    raw['runtime']['execution_stage'] = 'cv_only'
+    raw['data']['contrast_pair_col'] = None
+    raw['split'] = {'group_col': 'family'}
+    raw['preprocess']['amino_acid']['ranked_site_filter']['method'] = 'none'
+    metadata = pl.read_csv(raw['data']['metadata_path'], separator='\t')
+    tree = tmp_path / 'tree.nwk'
+    tree.write_text('(' + ','.join(f'{s}:1' for s in metadata['species']) + ');')
+    raw['data']['tree_path'] = str(tree)
+    path.write_text(yaml.safe_dump(raw))
+    out = run_amino_acid(load_and_resolve_config([path]), tmp_path / 'run')
+    assert (out / 'cv/figures/tree_group.svg').exists()
+    assert (out / 'cv/figures/tree_prediction_cv.svg').exists()
+    annotation = pl.read_csv(out / 'cv/tables/tree_prediction_cv_annotation.tsv', separator='\t')
+    oof = pl.read_csv(out / 'cv/tables/prediction_cv.tsv', separator='\t')
+    expected = oof.select('species').join(metadata.select('species', 'family'), on='species')
+    actual = annotation.select('species', pl.col('group_id').alias('family'))
+    assert actual.sort('species').equals(expected.sort('species'))
+
+
 def test_tree_site_identifiers_survive_long_annotations_and_ids(tmp_path: Path) -> None:
     from xml.etree import ElementTree as ET
 

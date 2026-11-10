@@ -157,6 +157,7 @@ def write_run_tree_prediction_artifacts(
     feature_importance: pl.DataFrame,
     coefficients: pl.DataFrame,
     pred_external_test: pl.DataFrame | None,
+    include_feature_heatmaps: bool = True,
     top_feature_expression: pl.DataFrame | None = None,
     feature_limit: int = _FEATURE_HEATMAP_LIMIT,
     orthogroup_annotations: pl.DataFrame | None = None,
@@ -219,59 +220,60 @@ def write_run_tree_prediction_artifacts(
     else:
         add_warning("Skipped tree_group.svg: metadata contains no non-empty split group.")
 
-    feature_annotation = build_tree_feature_heatmap_annotation(
-        metadata=metadata,
-        tpm_path=tpm_path,
-        species_col=species_col,
-        feature_col=feature_col,
-        value_col=value_col,
-        group_col=group_col,
-        oof_predictions=oof_predictions,
-        feature_importance=feature_importance,
-        coefficients=coefficients,
-        feature_limit=feature_limit,
-        orthogroup_annotations=orthogroup_annotations,
-        top_feature_expression=top_feature_expression,
-        preserve_missing=preserve_missing,
-        zero_as_missing=zero_as_missing,
-    )
-    if feature_annotation.height > 0:
-        cv_figures_dir = _stage_figures_dir(run_dir, "cv")
-        cv_tables_dir = _stage_tables_dir(run_dir, "cv")
-        feature_annotation.write_csv(
-            cv_tables_dir / "tree_feature_heatmap_annotation.tsv",
-            separator="\t",
-            float_precision=8,
-            null_value="NA",
+    if include_feature_heatmaps:
+        feature_annotation = build_tree_feature_heatmap_annotation(
+            metadata=metadata,
+            tpm_path=tpm_path,
+            species_col=species_col,
+            feature_col=feature_col,
+            value_col=value_col,
+            group_col=group_col,
+            oof_predictions=oof_predictions,
+            feature_importance=feature_importance,
+            coefficients=coefficients,
+            feature_limit=feature_limit,
+            orthogroup_annotations=orthogroup_annotations,
+            top_feature_expression=top_feature_expression,
+            preserve_missing=preserve_missing,
+            zero_as_missing=zero_as_missing,
         )
-        add_svg_job(
-            "tree_feature_heatmap_zscore",
-            _write_tree_feature_heatmap_svg,
-            {
-                "tree_path": tree_path,
-                "annotation": feature_annotation,
-                "value_col": "z_score_log2_tpm",
-                "out_path": cv_figures_dir / "tree_feature_heatmap_zscore.svg",
-                "title": "",
-                "cmap_name": "coolwarm",
-                "annotate_features": orthogroup_annotations is not None,
-            },
-        )
-        add_svg_job(
-            "tree_feature_heatmap_log2_tpm",
-            _write_tree_feature_heatmap_svg,
-            {
-                "tree_path": tree_path,
-                "annotation": feature_annotation,
-                "value_col": "log2_tpm_plus1",
-                "out_path": cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg",
-                "title": "",
-                "cmap_name": "viridis",
-                "annotate_features": orthogroup_annotations is not None,
-            },
-        )
-    else:
-        add_warning("Skipped tree_feature_heatmap.svg: no top features were available.")
+        if feature_annotation.height > 0:
+            cv_figures_dir = _stage_figures_dir(run_dir, "cv")
+            cv_tables_dir = _stage_tables_dir(run_dir, "cv")
+            feature_annotation.write_csv(
+                cv_tables_dir / "tree_feature_heatmap_annotation.tsv",
+                separator="\t",
+                float_precision=8,
+                null_value="NA",
+            )
+            add_svg_job(
+                "tree_feature_heatmap_zscore",
+                _write_tree_feature_heatmap_svg,
+                {
+                    "tree_path": tree_path,
+                    "annotation": feature_annotation,
+                    "value_col": "z_score_log2_tpm",
+                    "out_path": cv_figures_dir / "tree_feature_heatmap_zscore.svg",
+                    "title": "",
+                    "cmap_name": "coolwarm",
+                    "annotate_features": orthogroup_annotations is not None,
+                },
+            )
+            add_svg_job(
+                "tree_feature_heatmap_log2_tpm",
+                _write_tree_feature_heatmap_svg,
+                {
+                    "tree_path": tree_path,
+                    "annotation": feature_annotation,
+                    "value_col": "log2_tpm_plus1",
+                    "out_path": cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg",
+                    "title": "",
+                    "cmap_name": "viridis",
+                    "annotate_features": orthogroup_annotations is not None,
+                },
+            )
+        else:
+            add_warning("Skipped tree_feature_heatmap.svg: no top features were available.")
 
     cv_annotation = build_cv_tree_prediction_annotation(
         metadata=metadata,
