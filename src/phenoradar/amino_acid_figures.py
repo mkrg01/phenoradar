@@ -11,6 +11,7 @@ from phenoradar import figures
 from phenoradar.config import AppConfig
 
 if TYPE_CHECKING:
+    from phenoradar.amino_acid import AlignmentStore
     from phenoradar.amino_acid_reporting import AAReportWriter
     from phenoradar.amino_acid_run import AAMember
 
@@ -70,7 +71,7 @@ def _final_features(members: list[AAMember]) -> tuple[pl.DataFrame, pl.DataFrame
 
 def write_amino_acid_figures(
     run_dir: Path, config: AppConfig, members: list[AAMember] | None = None,
-    *, report: AAReportWriter | None = None,
+    *, report: AAReportWriter | None = None, store: AlignmentStore | None = None,
 ) -> list[str]:
     """Reuse common plots, without loading millions of zero coefficients into RAM."""
     cv = run_dir / "cv/tables"
@@ -131,6 +132,38 @@ def write_amino_acid_figures(
     sparsity = coefficient_source.group_by("fold_id").agg(
         (pl.col("coef_mean").abs() > 1e-12).sum().alias("n_nonzero_features")
     ).with_columns(pl.lit("outer_fold").alias("scope")).collect(engine="streaming")
+    # Site scores are aggregated after filtering zeros; denominator includes all
+    # models, including sites absent from individual fitted feature schemas.
+    counts = _selection(cv, "model_selection_selected")
+    assert counts is not None
+    n_models = counts.group_by("scope").len().lazy()
+    top_sites = {}
+    for metric in ["pss", "effect_range"]:
+        site_source = (_scan(cv, f"amino_acid_site_{metric}") if report is None
+                       else report.sites.scan())
+        top = site_source.filter(pl.col(metric) > 0).group_by(
+            "scope", "orthogroup", "alignment_pos_1based"
+        ).agg(pl.col(metric).sum()).join(n_models, on="scope").with_columns(
+            (pl.col(metric) / pl.col("len")).alias(metric)
+        ).group_by("orthogroup", "alignment_pos_1based").agg(
+            (pl.col(metric).sum() / counts["scope"].n_unique()).alias(metric)
+        ).sort([metric, "orthogroup", "alignment_pos_1based"],
+               descending=[True, False, False]).head(limit).collect(engine="streaming")
+        top_sites[metric] = top
+    from phenoradar.orthogroup_annotation import load_orthogroup_annotations
+
+    annotation_features = set(requested) | set(stability["feature"])
+    for annotation_frame in [final_importance, final_coefficients,
+                             _read(cv, "top_amino_acid_frequencies")]:
+        if annotation_frame is not None:
+            annotation_features.update(annotation_frame["feature"])
+    ogs = {figures._feature_address(f)[0] for f in annotation_features}
+    for top in top_sites.values():
+        ogs.update(top["orthogroup"])
+    annotations = load_orthogroup_annotations(
+        Path(config.data.orthogroup_annotation_path) if config.data.orthogroup_annotation_path
+        else None, feature_names=sorted(ogs),
+    )
     metrics = _read(cv, "metrics_cv")
     assert metrics is not None
     warnings = figures.write_run_figures(
@@ -149,31 +182,27 @@ def write_amino_acid_figures(
         pred_external_test=_read(run_dir / "external_test/tables", "pred_external_test"),
         pred_inference=_read(run_dir / "inference/tables", "pred_inference"),
         trait_name=config.data.trait_col, top_features=limit,
+        orthogroup_annotations=annotations,
     )
-    # Site scores are aggregated after filtering zeros; denominator includes all
-    # models, including sites absent from individual fitted feature schemas.
-    counts = _selection(cv, "model_selection_selected")
-    assert counts is not None
-    n_models = counts.group_by("scope").len().lazy()
-    for metric in ["pss", "effect_range"]:
-        site_source = (_scan(cv, f"amino_acid_site_{metric}") if report is None
-                       else report.sites.scan())
-        top = site_source.filter(pl.col(metric) > 0).group_by(
-            "scope", "orthogroup", "alignment_pos_1based"
-        ).agg(pl.col(metric).sum()).join(n_models, on="scope").with_columns(
-            (pl.col(metric) / pl.col("len")).alias(metric)
-        ).group_by("orthogroup", "alignment_pos_1based").agg(
-            (pl.col(metric).sum() / counts["scope"].n_unique()).alias(metric)
-        ).sort([metric, "orthogroup", "alignment_pos_1based"],
-               descending=[True, False, False]).head(limit).collect(engine="streaming")
+    for metric, top in top_sites.items():
         path = run_dir / "cv/figures" / f"amino_acid_site_{metric}_top.svg"
-        _site_bar(top, metric, path)
-    _frequency_by_confusion(run_dir, oof, limit)
+        _site_bar(top, metric, path, annotations)
+    if store is not None:
+        from phenoradar.amino_acid_tree import write_residue_tree
+
+        warnings.extend(write_residue_tree(
+            run_dir, Path(config.data.tree_path) if config.data.tree_path else None,
+            store, top_sites["pss"], oof,
+            aggregation=config.preprocess.amino_acid.aggregation, annotations=annotations,
+        ))
+    _frequency_by_confusion(run_dir, oof, limit, annotations)
     _site_filter_funnel(run_dir)
     return warnings
 
 
-def _frequency_by_confusion(run_dir: Path, oof: pl.DataFrame, limit: int) -> None:
+def _frequency_by_confusion(
+    run_dir: Path, oof: pl.DataFrame, limit: int, annotations: pl.DataFrame | None = None,
+) -> None:
     import matplotlib.pyplot as plt
 
     data = _read(run_dir / "cv/tables", "top_amino_acid_frequencies")
@@ -194,7 +223,7 @@ def _frequency_by_confusion(run_dir: Path, oof: pl.DataFrame, limit: int) -> Non
         axis.boxplot(values, tick_labels=[g[0] for g in groups], widths=.6)
         axis.set_ylim(-.05, 1.05)
         axis.set_ylabel("Frequency")
-        axis.set_title(figures._feature_axis_labels([name], None)[0], fontsize=9)
+        axis.set_title(figures._feature_axis_labels([name], annotations)[0], fontsize=9)
     figure.tight_layout()
     figures._save_svg_figure(figure, run_dir / "cv/figures/amino_acid_frequency_by_confusion.svg")
 
@@ -221,11 +250,16 @@ def _site_filter_funnel(run_dir: Path) -> None:
     )
 
 
-def _site_bar(frame: pl.DataFrame, metric: str, path: Path) -> None:
+def _site_bar(
+    frame: pl.DataFrame, metric: str, path: Path, annotations: pl.DataFrame | None = None,
+) -> None:
+    import json
+
     import matplotlib.pyplot as plt
 
-    labels = [f"{og}: {position}" for og, position in
-              frame.select("orthogroup", "alignment_pos_1based").iter_rows()]
+    features = [json.dumps([og, position]) for og, position in
+                frame.select("orthogroup", "alignment_pos_1based").iter_rows()]
+    labels = figures._feature_axis_labels(features, annotations)
     figure, axis = plt.subplots(figsize=(7, max(2, len(labels) * .24)))
     axis.barh(np.arange(len(labels)), frame[metric].to_numpy(), color="#4477aa")
     axis.set_yticks(np.arange(len(labels)), labels)

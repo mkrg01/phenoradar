@@ -188,11 +188,14 @@ def write_frequency_figure(
     members: list[AAMember],
     importance: pl.DataFrame,
     limit: int,
+    annotations: pl.DataFrame | None = None,
 ) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+
+    from phenoradar.figures import _feature_axis_labels
 
     features = (
         importance.sort(["importance_mean", "feature"], descending=[True, False])
@@ -251,7 +254,7 @@ def write_frequency_figure(
     artist = axis.imshow(values, vmin=0, vmax=1, cmap=cmap, aspect="auto", interpolation="nearest")
     axis.set_xticks(
         range(len(features)),
-        [f"{og}:{pos}:{aa}" for og, pos, aa in parsed],
+        _feature_axis_labels(features, annotations),
         rotation=90,
         fontsize=7,
     )

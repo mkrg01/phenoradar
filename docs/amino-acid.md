@@ -406,3 +406,26 @@ without recomputing their training-only shifts. Results retain the original
 OG/site/residue order; training reductions and representative choices are unchanged.
 Audit and interpretation tables use columnar
 blocks, including zero coefficients and all eligible sites.
+
+## Tree residue heatmap and annotation labels
+
+With `data.tree_path`, `cv/figures/tree_feature_heatmap_amino_acid.svg` shows
+OOF species and the top sites by mean outer-fold PSS (absent sites score zero),
+up to `figures.top_features`. Each column is one original, 1-based MSA site.
+Letters use the [Zappo physicochemical colors](https://www.jalview.org/help/html/colourSchemes/zappo.html).
+
+This is a display of one sequence, rather than a frequency or local contribution:
+TPM-weighted mode chooses the highest-TPM gene per species/OG; other modes choose
+maximum canonical-residue coverage over the input MSA. Ties use the sequence ID.
+This display choice does not replace training-frozen `best_covered` selection.
+Gaps remain gaps, unknown letters remain unknown, and no different gene is chosen
+at an individual site. Zero total TPM or no available sequence is shown as `?`.
+The accompanying `cv/tables/tree_feature_heatmap_amino_acid_annotation.tsv` records
+sequence IDs, TPM, selection rule, residue status, PSS and MSA/ungapped coordinates.
+Species absent from the tree are omitted with a warning; accepted-only variants
+follow the existing abstention figure policy.
+
+When `data.orthogroup_annotation_path` is supplied, AA/combined importance,
+coefficient, stability, frequency and PSS/R figures include the annotation name
+alongside the OG/site/residue ID. Tree headers shorten long names; SVG tooltips
+and the annotation TSV retain the complete name. Missing annotations retain IDs.

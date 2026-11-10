@@ -270,6 +270,21 @@ def _orthogroup_annotation_lookup(
     return lookup
 
 
+def _feature_address(feature: str) -> tuple[str, str]:
+    """Return the OG annotation key and a readable expression/AA/site identifier."""
+    try:
+        address = json.loads(feature)
+    except (ValueError, TypeError):
+        address = None
+    if (isinstance(address, list) and len(address) in {2, 3}
+            and isinstance(address[1], int)):
+        suffix = f" {address[2]}" if len(address) == 3 else ""
+        return str(address[0]), f"{address[0]}:{address[1]}{suffix}"
+    if isinstance(address, list) and len(address) == 2 and address[0] == "expression":
+        return str(address[1]), f"{address[1]} (expression)"
+    return feature, feature
+
+
 def _feature_axis_labels(
     features: list[str],
     orthogroup_annotations: pl.DataFrame | None,
@@ -277,21 +292,10 @@ def _feature_axis_labels(
     annotation_lookup = _orthogroup_annotation_lookup(orthogroup_annotations)
     labels: list[str] = []
     for feature in features:
-        annotation = annotation_lookup.get(feature)
-        if annotation is None:
-            try:
-                address = json.loads(feature)
-            except (ValueError, TypeError):
-                address = None
-            if (isinstance(address, list) and len(address) == 3
-                    and isinstance(address[1], int)):
-                labels.append(f"{address[0]}:{address[1]} {address[2]}")
-            elif isinstance(address, list) and len(address) == 2 and address[0] == "expression":
-                labels.append(f"{address[1]} (expression)")
-            else:
-                labels.append(feature)
-            continue
-        labels.append(textwrap.fill(f"{' '.join(annotation.split())} ({feature})", width=48))
+        og, display = _feature_address(feature)
+        annotation = annotation_lookup.get(feature, annotation_lookup.get(og))
+        labels.append(display if annotation is None else textwrap.fill(
+            f"{' '.join(annotation.split())} ({display})", width=48))
     return labels
 
 
@@ -457,7 +461,9 @@ def _feature_label_annotations_subset(
             .cast(pl.String, strict=False)
             .alias("orthogroup_annotation"),
         ]
-    ).filter(pl.col("feature").is_in(features))
+    ).filter(pl.col("feature").is_in(
+        sorted(set(features) | {_feature_address(f)[0] for f in features})
+    ))
 
 
 def figure_annotation_features(
