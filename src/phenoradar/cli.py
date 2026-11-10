@@ -18,7 +18,6 @@ import typer
 from phenoradar import __version__
 from phenoradar.abstention import (
     ABSTENTION_COLUMNS,
-    abstention_summary,
     prediction_label_expr,
     write_abstention_artifacts,
 )
@@ -52,7 +51,6 @@ from phenoradar.figures import (
     figure_annotation_features,
     write_candidate_evidence_figures,
     write_cv_species_evidence_figures,
-    write_group_probability_figure,
     write_predict_figures,
     write_run_figures,
 )
@@ -61,9 +59,8 @@ from phenoradar.group_bootstrap import (
     GroupBootstrapError,
     run_oof_group_bootstrap,
 )
-from phenoradar.group_summary import (
-    GroupSummaryError,
-    build_group_summary_artifacts,
+from phenoradar.group_summary_outputs import (
+    write_group_summary_artifacts as _write_group_summary_artifacts,
 )
 from phenoradar.metrics import (
     FIXED_PROBABILITY_THRESHOLD_NAME,
@@ -245,72 +242,6 @@ def _stage_tables_dir(run_dir: Path, stage: str) -> Path:
     tables_dir = run_dir / stage / "tables"
     tables_dir.mkdir(parents=True, exist_ok=True)
     return tables_dir
-
-
-def _stage_figures_dir(run_dir: Path, stage: str) -> Path:
-    figures_dir = run_dir / stage / "figures"
-    figures_dir.mkdir(parents=True, exist_ok=True)
-    return figures_dir
-
-
-def _write_group_summary_artifacts(
-    *,
-    run_dir: Path,
-    stage: str,
-    predictions: pl.DataFrame,
-    source_table_name: str,
-    config: AppConfig | PredictConfig,
-    timing_recorder: TimingRecorder | None = None,
-) -> list[str]:
-    summary_started = None if timing_recorder is None else timing_recorder.start()
-    if config.data.metadata_path is None:
-        return []
-    try:
-        artifacts = build_group_summary_artifacts(
-            predictions=predictions,
-            metadata_path=Path(config.data.metadata_path),
-            species_col=config.data.species_col,
-            group_col=config.summary.group_col,
-            source_table_name=source_table_name,
-        )
-    except GroupSummaryError as exc:
-        return [str(exc)]
-
-    tables_dir = _stage_tables_dir(run_dir, stage)
-    figures_dir = _stage_figures_dir(run_dir, stage)
-    artifacts.summary.write_csv(
-        tables_dir / f"group_summary_{artifacts.suffix}.tsv",
-        separator="\t",
-        float_precision=8,
-        null_value="NA",
-    )
-    if "decision_status" in artifacts.predictions.columns:
-        abstention_summary(artifacts.predictions).write_csv(
-            tables_dir / f"abstention_by_{artifacts.suffix}.tsv",
-            separator="\t",
-            null_value="NA",
-        )
-    if timing_recorder is not None and summary_started is not None:
-        timing_recorder.record_since(
-            summary_started, scope="artifacts", stage=f"{stage}_group_summary_tables"
-        )
-    figure_started = None if timing_recorder is None else timing_recorder.start()
-    try:
-        write_group_probability_figure(
-            grouped_predictions=artifacts.predictions,
-            out_path=figures_dir / f"probability_by_{artifacts.suffix}.svg",
-            group_label=artifacts.group_label,
-            source_table_name=source_table_name,
-            figure_name=f"probability_by_{artifacts.suffix}.svg",
-        )
-    except FigureError as exc:
-        return [str(exc)]
-    finally:
-        if timing_recorder is not None and figure_started is not None:
-            timing_recorder.record_since(
-                figure_started, scope="artifacts", stage=f"{stage}_group_summary_figure"
-            )
-    return []
 
 
 def _run_table_dirs(run_dir: Path) -> dict[str, Path]:
@@ -2492,6 +2423,7 @@ def predict(
             sequence_inputs = load_predict_config(
                 config_paths, overrides=sequence_overrides, require_tpm=combined
             )
+            sequence_warnings: list[str] = []
             destination = predict_amino_acid(
                 model_bundle,
                 _build_run_dir("predict"),
@@ -2518,11 +2450,16 @@ def predict(
                     if sequence_inputs.data.sequence_tpm_cache_dir else None
                 ),
                 n_jobs=sequence_inputs.runtime.n_jobs,
+                summary_group_col=(sequence_inputs.summary.group_col
+                                   if "summary" in sequence_inputs.model_fields_set else None),
+                warning_messages=sequence_warnings,
                 tpm_path=(Path(sequence_inputs.data.tpm_path)
                           if combined and sequence_inputs.data.tpm_path else None),
             )
         except (AlignmentError, CVError, OSError, ValueError) as exc:
             raise typer.BadParameter(str(exc)) from exc
+        for warning in sequence_warnings:
+            _warning_log("predict", warning, start_time=start_time)
         typer.echo(f"Wrote amino-acid predictions at {destination}")
         return
     if alignment_dir is not None:

@@ -9,6 +9,7 @@ import polars as pl
 
 from phenoradar import figures
 from phenoradar.config import AppConfig
+from phenoradar.group_summary_outputs import write_group_summary_artifacts
 
 if TYPE_CHECKING:
     from phenoradar.amino_acid import AlignmentStore
@@ -164,6 +165,8 @@ def write_amino_acid_figures(
     )
     metrics = _read(cv, "metrics_cv")
     assert metrics is not None
+    external = _read(run_dir / "external_test/tables", "pred_external_test")
+    inference = _read(run_dir / "inference/tables", "pred_inference")
     warnings = figures.write_run_figures(
         run_dir=run_dir, metrics_cv=metrics, oof_predictions=oof,
         feature_importance=importance, coefficients=coefficients, ensemble_model_probs=None,
@@ -176,11 +179,21 @@ def write_amino_acid_figures(
         final_refit_coefficients=final_coefficients,
         final_refit_model_selection_trials_summary=final_summary,
         group_bootstrap_metrics=_read(cv, "group_bootstrap_metrics"),
-        pred_external_test=_read(run_dir / "external_test/tables", "pred_external_test"),
-        pred_inference=_read(run_dir / "inference/tables", "pred_inference"),
+        pred_external_test=external,
+        pred_inference=inference,
         trait_name=config.data.trait_col, top_features=limit,
         orthogroup_annotations=annotations,
     )
+    for stage, predictions, source in [
+        ("cv", oof, "prediction_cv.tsv"),
+        ("external_test", external, "pred_external_test.tsv"),
+        ("inference", inference, "pred_inference.tsv"),
+    ]:
+        if predictions is not None and predictions.height:
+            warnings.extend(write_group_summary_artifacts(
+                run_dir=run_dir, stage=stage, predictions=predictions,
+                source_table_name=source, config=config,
+            ))
     for metric, top in top_sites.items():
         path = run_dir / "cv/figures" / f"amino_acid_site_{metric}_top.svg"
         _site_bar(top, metric, path, annotations)

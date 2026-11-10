@@ -437,3 +437,17 @@ species order; each group reports its observed species count (`n`).
 The standalone `amino_acid_frequency_heatmap.svg` is retired. Use the tree residue
 heatmap instead. `top_amino_acid_frequencies.tsv` remains the source of OOF residue
 frequencies for `amino_acid_frequency_by_confusion.svg`.
+
+## Grouped probabilities
+
+All feature modes use `summary.group_col` (default `family`) for grouped
+probability figures and summary tables. For example, `summary.group_col: order`
+uses metadata's `order` column and writes `probability_by_order.svg` and
+`group_summary_order.tsv`. Filename suffixes are lowercase, with punctuation
+replaced by underscores. This setting is independent of `split.group_col`.
+
+AA/combined runs write these under `cv`, plus `external_test` and `inference`
+when those predictions are available. AA/combined `predict` writes them under
+`predict`. A predict config can override the bundle's summary column. A missing
+metadata column skips that summary with a warning; missing individual group
+values are grouped as `unassigned`.

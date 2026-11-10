@@ -1169,6 +1169,8 @@ def predict_amino_acid(
     sequence_tpm_cache_dir: Path | None = None,
     n_jobs: int | None = None,
     tpm_path: Path | None = None,
+    summary_group_col: str | None = None,
+    warning_messages: list[str] | None = None,
 ) -> Path:
     from phenoradar.config import load_and_resolve_config
 
@@ -1251,5 +1253,18 @@ def predict_amino_acid(
         predictions = predict_members(config, store, targets, members, tables=tables,
                                       expression=expression)
         predictions.write_csv(tables / "pred_predict.tsv", separator="\t")
+        from phenoradar.group_summary_outputs import write_group_summary_artifacts
+
+        summary_config = config.model_copy(deep=True)
+        if metadata_path is not None:
+            summary_config.data.metadata_path = str(metadata_path)
+        if summary_group_col is not None:
+            summary_config.summary.group_col = summary_group_col
+        summary_warnings = write_group_summary_artifacts(
+            run_dir=destination, stage="predict", predictions=predictions,
+            source_table_name="pred_predict.tsv", config=summary_config,
+        )
+        if warning_messages is not None:
+            warning_messages.extend(summary_warnings)
         _write(tables / "selected_site_sequence_map.tsv", _coordinate_rows(store, members, targets))
     return destination

@@ -288,7 +288,10 @@ relative paths and probability summaries.
 
 `<stage>/tables/group_summary_<group>.tsv` reports species/label counts, positive
 decision rates, probability quantiles, uncertainty, and top species. Group names
-come directly from `summary.group_col`.
+come directly from `summary.group_col` in every feature mode. The matching figure
+is `probability_by_<group>.svg`; for example, `order` produces
+`probability_by_order.svg`. Filename suffixes are normalized to lowercase with
+underscores for punctuation.
 
 With `data.tree_path`, tree tables include `tree_prediction_cv_annotation.tsv`,
 `tree_contrast_pairs_annotation.tsv`, `tree_feature_heatmap_annotation.tsv`, and
