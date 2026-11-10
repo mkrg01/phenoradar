@@ -30,7 +30,7 @@ from phenoradar.amino_acid import (
 from phenoradar.amino_acid_audits import ColumnarAudits
 from phenoradar.amino_acid_outputs import (
     write_combined_coefficients,
-    write_frequency_figure,
+    write_frequency_table,
     write_preprocessing_audits,
     write_site_effects,
     write_site_scores,
@@ -899,17 +899,10 @@ def run_amino_acid(
         ) if config.runtime.n_jobs >= 3 else reports.finalize(
             combined=expression is not None, top_features=config.figures.top_features,
         ))
-        from phenoradar.orthogroup_annotation import load_orthogroup_annotations
-
-        frequency_annotations = load_orthogroup_annotations(
-            Path(config.data.orthogroup_annotation_path) if config.data.orthogroup_annotation_path
-            else None,
-            feature_names=sorted({json.loads(f)[0] for f in importance["feature"]}),
-        )
-        write_frequency_figure(
-            run_dir / "cv/figures", store, manifest,
+        write_frequency_table(
+            tables, store, manifest,
             reports.frequency_members(coordinate_members, importance),
-            importance, config.figures.top_features, frequency_annotations,
+            importance, config.figures.top_features,
         )
         _write(
             tables / "selected_site_sequence_map.tsv",

@@ -388,7 +388,8 @@ def test_nested_cv_refit_bundle_and_coordinates(tmp_path: Path, aggregation: str
     assert (destination / "cv/tables/model_selection_trials.tsv").exists()
     assert (destination / "cv/tables/group_bootstrap_metrics.tsv").exists()
     assert (destination / "cv/tables/amino_acid_site_stability.tsv").exists()
-    assert (destination / "cv/figures/amino_acid_frequency_heatmap.svg").exists()
+    assert not (destination / "cv/figures/amino_acid_frequency_heatmap.svg").exists()
+    assert (destination / "cv/tables/top_amino_acid_frequencies.tsv").exists()
     coordinates = pl.read_csv(
         destination / "cv/tables/selected_site_sequence_map.tsv", separator="\t"
     )

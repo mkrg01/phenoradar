@@ -433,3 +433,7 @@ and the annotation TSV retain the complete name. Missing annotations retain IDs.
 `amino_acid_frequency_by_confusion.svg` overlays one point per species with an
 available OOF residue frequency on each boxplot. Horizontal offsets are fixed by
 species order; each group reports its observed species count (`n`).
+
+The standalone `amino_acid_frequency_heatmap.svg` is retired. Use the tree residue
+heatmap instead. `top_amino_acid_frequencies.tsv` remains the source of OOF residue
+frequencies for `amino_acid_frequency_by_confusion.svg`.
