@@ -75,7 +75,7 @@ input types, and threshold dependencies, including model-selection log loss.
 
 | `aggregate_scope` | Meaning |
 | --- | --- |
-| `NA` | One fold, with a concrete 1-based `fold_id` |
+| `NA` | One fold, with a concrete `fold_id` |
 | `macro` | Mean of defined fold scores; each fold has equal weight |
 | `micro` | Recomputed from all pooled OOF predictions |
 
@@ -158,7 +158,7 @@ but only the latter count as observed.
 
 | Table | Content / use |
 | --- | --- |
-| `split/tables/split_manifest.tsv` | `species`, `pool`, `fold_id`, `group_id`, `contrast_group_id`, `label` |
+| `split/tables/split_manifest.tsv` | `species`, `pool`, `fold_id`, `fold_index`, `group_id`, `contrast_group_id`, `label` |
 | `split/tables/fold_validation_groups.tsv` | Held-out groups per fold, species/label counts, and `validation_label_profile` |
 | `split/tables/fold_diagnostics.tsv` | Train/validation group and label counts; `two_class_validation_metrics_defined` |
 | `model/tables/training_group_subsets.tsv` | Requested/effective group counts, deterministic ranks, repeat index, selection flags |
@@ -240,7 +240,7 @@ global or species-local features; optional OG annotations replace ID-only labels
 | Probability distributions | `cv_species_probability_by_trait.svg`, `cv_fold_trait_probability.svg`, `probability_by_<group>.svg` |
 | Feature reliance | `feature_importance_top.svg`, `feature_importance_by_fold_heatmap.svg`, `coefficients_signed_top.svg` |
 | Expression by TP/FN/TN/FP | `top_feature_expression_by_confusion.svg` using `log2(TPM + 1)` |
-| Stability | `feature_stability_top.svg`, `feature_set_jaccard_heatmap.svg` |
+| Stability | `feature_set_jaccard_heatmap.svg` |
 | Filtering and sparsity | `feature_filter_funnel.svg`, `non_zero_feature_count_by_fold.svg` |
 | Candidate selection | `model_selection.svg` for `best`, or `model_selection_one_se_curve.svg` for `one_se` |
 
@@ -288,7 +288,10 @@ relative paths and probability summaries.
 
 `<stage>/tables/group_summary_<group>.tsv` reports species/label counts, positive
 decision rates, probability quantiles, uncertainty, and top species. Group names
-come directly from `summary.group_col`.
+come directly from `summary.group_col` in every feature mode. The matching figure
+is `probability_by_<group>.svg`; for example, `order` produces
+`probability_by_order.svg`. Filename suffixes are normalized to lowercase with
+underscores for punctuation.
 
 With `data.tree_path`, tree tables include `tree_prediction_cv_annotation.tsv`,
 `tree_contrast_pairs_annotation.tsv`, `tree_feature_heatmap_annotation.tsv`, and
@@ -398,3 +401,12 @@ training/CV species, excluding external-test and unknown species. Older bundles
 can reuse the source run's candidate reference TSV when accessible; unavailable
 references are marked and prediction continues. No training data are refitted.
 Sequence/combined bundles have [separate formats and alignment requirements](amino-acid.md#prediction).
+
+When validation groups and folds have a one-to-one correspondence (including
+LOGO), non-negative integer group IDs are reused as `fold_id`. For example,
+held-out group `10` is fold `10`, including noncontiguous or zero-based IDs.
+This applies to outer and inner CV in every feature mode. Other group labels or
+multi-group validation folds retain sequential IDs and their group mapping.
+`split_manifest.tsv` also records the original 1-based `fold_index` (null outside
+CV). Execution and random seeds retain this index, so renaming IDs does not
+change splits, sample selection or stochastic model initialization.

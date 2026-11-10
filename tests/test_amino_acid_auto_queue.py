@@ -86,6 +86,28 @@ def test_automatic_queue_preserves_sample_sources_and_multiple_selected_candidat
     _compare_public_tables(serial, queued)
 
 
+@pytest.mark.parametrize("mode", ["amino_acid", "combined"])
+def test_automatic_queue_preserves_numeric_fold_ids_and_execution_order(
+    tmp_path: Path, monkeypatch, mode,
+):
+    monkeypatch.chdir(tmp_path)
+    config = _config(tmp_path, mode, "aa_frequency")
+    metadata = Path(config.data.metadata_path)
+    pl.read_csv(metadata, separator="\t").with_columns(
+        pl.col("contrast_pair_id").replace_strict(
+            {"g0": "0", "g1": "2", "g2": "10", "g3": "20"}, default=None,
+        )
+    ).write_csv(metadata, separator="\t")
+    serial = run_amino_acid(config, tmp_path / "serial")
+    config.runtime.n_jobs = 4
+    events = []
+    queued = run_amino_acid(config, tmp_path / "queued", progress=events.append)
+    assert [event for event in events if event.startswith("Outer CV fold")] == [
+        f"Outer CV fold {fold} completed." for fold in ["0", "10", "2", "20"]
+    ]
+    _compare_public_tables(serial, queued)
+
+
 def test_complete_round_uses_aggregate_optimum_not_individual_fold_boundary():
     config = AppConfig.model_validate({"model_selection": {
         "selected_candidate_count": 1, "inner_cv_strategy": "logo",

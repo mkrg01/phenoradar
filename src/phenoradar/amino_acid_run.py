@@ -29,7 +29,7 @@ from phenoradar.amino_acid import (
 from phenoradar.amino_acid_audits import ColumnarAudits
 from phenoradar.amino_acid_outputs import (
     write_combined_coefficients,
-    write_frequency_figure,
+    write_frequency_table,
     write_preprocessing_audits,
     write_site_effects,
     write_site_scores,
@@ -51,6 +51,7 @@ from phenoradar.cv import (
     _deterministic_int_seed,
     _fit_sample_weights,
     _fit_selected_estimator,
+    _fold_ids,
     _glmnet_candidate_params,
     _glmnet_fit_diagnostic,
     _inner_cv_splits,
@@ -72,6 +73,7 @@ from phenoradar.cv import (
     expression_input_species,
     iter_inner_cv_preprocessed_folds,
 )
+from phenoradar.fold_identity import configure_fold_seed_ids, seed_scope
 from phenoradar.glmnet import GlmnetLogisticRegression, fit_glmnet_path
 from phenoradar.group_bootstrap import run_oof_group_bootstrap
 from phenoradar.metrics import (
@@ -285,7 +287,7 @@ def _select(
             direction=_selection_metric_optuna_direction(config.model_selection.selection_metric),
             sampler=TPESampler(
                 seed=_deterministic_int_seed(
-                    f"{config.runtime.seed}|{scope}|{sample_set_id}|aa_tpe"
+                    f"{config.runtime.seed}|{seed_scope(config, scope)}|{sample_set_id}|aa_tpe"
                 )
             ),
         )
@@ -801,6 +803,7 @@ def run_amino_acid(
 ) -> Path:
     started = datetime.now(UTC)
     splits = split_override or build_split_artifacts(config)
+    configure_fold_seed_ids(config, splits.split_manifest)
     manifest = splits.split_manifest
     metadata = pl.read_csv(config.data.metadata_path, separator="\t")
     all_species = metadata[config.data.species_col].cast(pl.String).str.strip_chars().to_list()
@@ -878,10 +881,7 @@ def run_amino_acid(
         from phenoradar.amino_acid_parallel import merge_tables, outer_folds
         from phenoradar.amino_acid_queue import enabled, grid_scopes
 
-        folds = sorted(
-            manifest.filter(pl.col("pool").is_in(["train", "validation"]))["fold_id"]
-            .unique().to_list(), key=int,
-        )
+        folds = _fold_ids(manifest)
         scopes = (grid_scopes(config, store, expression, manifest, folds, progress)
                   if enabled(config) else zip(
                       folds, outer_folds(config, store, expression, manifest, folds, progress),
@@ -938,8 +938,8 @@ def run_amino_acid(
         ) if config.runtime.n_jobs >= 3 else reports.finalize(
             combined=expression is not None, top_features=config.figures.top_features,
         ))
-        write_frequency_figure(
-            run_dir / "cv/figures", store, manifest,
+        write_frequency_table(
+            tables, store, manifest,
             reports.frequency_members(coordinate_members, importance),
             importance, config.figures.top_features,
         )
@@ -1057,7 +1057,7 @@ def run_amino_acid(
             progress("Generate evaluation, selection and interpretation figures.")
         warnings.extend(write_amino_acid_figures(
             run_dir, config, final if config.runtime.execution_stage == "full_run" else None,
-            report=reports,
+            report=reports, store=store,
         ))
         _write(
             model_dir / "thresholds.tsv",
@@ -1208,6 +1208,8 @@ def predict_amino_acid(
     sequence_tpm_cache_dir: Path | None = None,
     n_jobs: int | None = None,
     tpm_path: Path | None = None,
+    summary_group_col: str | None = None,
+    warning_messages: list[str] | None = None,
 ) -> Path:
     from phenoradar.config import load_and_resolve_config
 
@@ -1290,5 +1292,18 @@ def predict_amino_acid(
         predictions = predict_members(config, store, targets, members, tables=tables,
                                       expression=expression)
         predictions.write_csv(tables / "pred_predict.tsv", separator="\t")
+        from phenoradar.group_summary_outputs import write_group_summary_artifacts
+
+        summary_config = config.model_copy(deep=True)
+        if metadata_path is not None:
+            summary_config.data.metadata_path = str(metadata_path)
+        if summary_group_col is not None:
+            summary_config.summary.group_col = summary_group_col
+        summary_warnings = write_group_summary_artifacts(
+            run_dir=destination, stage="predict", predictions=predictions,
+            source_table_name="pred_predict.tsv", config=summary_config,
+        )
+        if warning_messages is not None:
+            warning_messages.extend(summary_warnings)
         _write(tables / "selected_site_sequence_map.tsv", _coordinate_rows(store, members, targets))
     return destination

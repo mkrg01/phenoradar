@@ -16,7 +16,7 @@ from test_combined import combined_config
 
 import phenoradar.cv as cv
 from phenoradar.amino_acid_run import run_amino_acid
-from phenoradar.auto_lambda import lambda_max, score_auto_paths
+from phenoradar.auto_lambda import _FoldCache, lambda_max, score_auto_paths
 from phenoradar.config import AppConfig, load_and_resolve_config
 from phenoradar.glmnet import GlmnetError, fit_glmnet_path
 from phenoradar.model_selection import auto_lambda_spec, generate_candidates
@@ -125,6 +125,17 @@ def fold(scale=1, validation_scale=1):
         np.array([0, 1, 0, 1]),
         None,
     )
+
+
+def test_extension_cache_preserves_display_and_seed_fold_ids(tmp_path):
+    prepared = replace(fold(), inner_fold_id="10", seed_fold_id="2")
+    cache = _FoldCache(tmp_path)
+    cache.add(prepared, (.25, .5))
+    restored, maxima = next(iter(cache))
+    assert restored.inner_fold_id == "10" and restored.seed_fold_id == "2"
+    assert maxima == (.25, .5)
+    np.testing.assert_array_equal(restored.x_train.toarray(), prepared.x_train.toarray())
+    np.testing.assert_array_equal(restored.x_valid.toarray(), prepared.x_valid.toarray())
 
 
 def test_extensions_cache_once_and_only_score_new_candidates():

@@ -12,6 +12,7 @@ from pydantic import (
     NonNegativeFloat,
     PositiveFloat,
     PositiveInt,
+    PrivateAttr,
     field_validator,
     model_validator,
 )
@@ -558,6 +559,9 @@ class PreprocessConfig(StrictModel):
 
 class AppConfig(StrictModel):
     """Top-level application configuration."""
+
+    # Internal only: display-ID changes must not change random sampling or fitting.
+    _fold_seed_ids: dict[str, str] = PrivateAttr(default_factory=dict)
 
     data: DataConfig = Field(default_factory=DataConfig)
     split: SplitConfig = Field(default_factory=SplitConfig)

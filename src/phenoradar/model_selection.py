@@ -21,6 +21,7 @@ from phenoradar.config.schema import (
     LogRangeSpec,
     SearchSpaceValue,
 )
+from phenoradar.fold_identity import seed_scope
 
 _MAX_GENERATED_VALUES = 1_000_000
 ContinuousSpec = ContinuousRangeSpec | ContinuousLogRangeSpec
@@ -268,7 +269,8 @@ def generate_candidates(
             raise ModelSelectionError("trial_count is required for random strategy")
         requested = int(config.model_selection.trial_count)
         local_seed = _deterministic_int_seed(
-            f"{runtime_seed}|{training_scope_id}|sample_set_{source_sample_set_id}|random"
+            f"{runtime_seed}|{seed_scope(config, training_scope_id)}|"
+            f"sample_set_{source_sample_set_id}|random"
         )
         if not has_continuous:
             effective = min(requested, len(full_discrete))
@@ -293,7 +295,8 @@ def generate_candidates(
             raise ModelSelectionError("trial_count is required for tpe strategy")
         requested = int(config.model_selection.trial_count)
         local_seed = _deterministic_int_seed(
-            f"{runtime_seed}|{training_scope_id}|sample_set_{source_sample_set_id}|tpe"
+            f"{runtime_seed}|{seed_scope(config, training_scope_id)}|"
+            f"sample_set_{source_sample_set_id}|tpe"
         )
         effective = requested
         if not has_continuous:

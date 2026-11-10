@@ -1304,15 +1304,26 @@ def _draw_toytree_heatmap(
     _save_toytree_svg(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
 
 
-def _feature_heatmap_label(feature: object, annotation: object) -> str:
-    feature_text = str(feature)
+def _feature_heatmap_label(
+    feature: object, annotation: object, *, annotation_limit: int | None = None,
+) -> str:
+    from phenoradar.figures import _feature_address
+
+    feature_text = _feature_address(str(feature))[1]
     if not _has_text(annotation):
         return feature_text
-    return f"{feature_text}: {' '.join(str(annotation).split())}"
+    description = " ".join(str(annotation).split())
+    if annotation_limit is not None:
+        import textwrap
+
+        description = textwrap.shorten(description, width=annotation_limit, placeholder="…")
+    return f"{feature_text}: {description}"
 
 
 def _feature_heatmap_title(feature: object, annotation: object) -> str:
-    feature_text = str(feature)
+    from phenoradar.figures import _feature_address
+
+    feature_text = _feature_address(str(feature))[1]
     if not _has_text(annotation):
         return feature_text
     return f"{feature_text}: {' '.join(str(annotation).split())}"
@@ -1358,6 +1369,14 @@ def _draw_toytree_feature_heatmap(
     else:
         feature_labels = features
         feature_titles = features
+    if value_col == "residue":
+        import html
+
+        # Only descriptions may be shortened: the OG and original MSA site are essential.
+        feature_labels = [html.escape(_feature_heatmap_label(
+            row["feature"], row.get("orthogroup_annotation") if annotate_features else None,
+            annotation_limit=80,
+        )) for row in feature_records]
     feature_step = 26.0
     trait_x = 20.0
     prob_x = 58.0
@@ -1372,16 +1391,28 @@ def _draw_toytree_feature_heatmap(
     species_width = _text_column_width_px(tip_labels, min_width=120, padding=60)
     canvas, axes, headers, width = _tree_table_canvas(
         tree, table_width=int(species_x) + species_width,
-        header_height=max(64, feature_label_depth_px + 16), sidebar_width=285,
+        header_height=max(520 if value_col == "residue" else 64,
+                          feature_label_depth_px + 16), sidebar_width=285,
     )
 
+    from phenoradar.residue_colors import residue_color
+
     value_lookup: dict[tuple[str, str], object] = {}
+    residue_details: dict[tuple[str, str], str] = {}
     trait_lookup: dict[str, object] = {}
     prob_lookup: dict[str, object] = {}
     status_lookup: dict[str, object] = {}
     for row in annotation.iter_rows(named=True):
         species = str(row["species"])
-        value_lookup[(species, str(row["feature"]))] = row.get(value_col)
+        key = (species, str(row["feature"]))
+        value_lookup[key] = row.get(value_col)
+        if value_col == "residue":
+            residue_details[key] = (
+                f"; sequence={row.get('representative_sequence_id')}; "
+                f"TPM={row.get('representative_tpm')}; "
+                f"selection={row.get('representative_selection')}; "
+                f"status={row.get('residue_status')}"
+            )
         trait_lookup.setdefault(species, row.get("true_label"))
         prob_lookup.setdefault(species, row.get("prob"))
         status_lookup.setdefault(species, row.get("decision_status"))
@@ -1391,8 +1422,9 @@ def _draw_toytree_feature_heatmap(
         else _oof_confusion_group(trait_lookup.get(species), prob_lookup.get(species))
         for species in tip_labels
     ]
-    finite_values = _finite_values(annotation, value_col)
-    vmin, vmax = _heatmap_domain(value_col, finite_values)
+    residues = value_col == "residue"
+    finite_values = [] if residues else _finite_values(annotation, value_col)
+    vmin, vmax = (0.0, 1.0) if residues else _heatmap_domain(value_col, finite_values)
     trait_values = [
         _format_cell_value("true_label", trait_lookup.get(species)) for species in tip_labels
     ]
@@ -1444,16 +1476,28 @@ def _draw_toytree_feature_heatmap(
         titles: list[str] = []
         for species in tip_labels:
             value = value_lookup.get((species, feature))
-            colors.append(_continuous_color(value, vmin=vmin, vmax=vmax, cmap_name=cmap_name))
-            titles.append(f"{species} {feature_title} {value_col}={_format_value(value)}")
+            colors.append(residue_color(value) if residues else
+                          _continuous_color(value, vmin=vmin, vmax=vmax, cmap_name=cmap_name))
+            titles.append(f"{species} {feature_title} {value_col}={_format_value(value)}"
+                          + residue_details.get((species, feature), ""))
         axes.scatterplot(
             [x] * len(tip_labels),
             list(range(len(tip_labels))),
             marker="s",
-            size=9,
+            size=15 if residues else 9,
             color=colors,
             title=titles,
         )
+        if residues:
+            symbols = [value_lookup.get((species, feature)) for species in tip_labels]
+            axes.text(
+                [x] * len(tip_labels), list(range(len(tip_labels))),
+                ["?" if value is None else str(value) for value in symbols],
+                color=["#ffffff" if value in {"K", "R", "H", "D", "E"} else _TEXT_COLOR
+                       for value in symbols],
+                title=titles,
+                style={"font-size": "10px", "text-anchor": "middle"},
+            )
         headers.text(
             x,
             0,
@@ -1479,19 +1523,21 @@ def _draw_toytree_feature_heatmap(
         ],
         style={"font-size": "9px", "text-anchor": "start"},
     )
-    _draw_heatmap_legend(
-        canvas=canvas,
-        width=width,
-        value_col=value_col,
-        vmin=vmin,
-        vmax=vmax,
-        cmap_name=cmap_name,
-    )
-    _draw_confusion_group_legend(canvas=canvas, width=width)
+    if residues:
+        _draw_residue_legend(
+            canvas=canvas, width=width,
+            selection=str(annotation["representative_selection"][0]),
+        )
+    else:
+        _draw_heatmap_legend(
+            canvas=canvas, width=width, value_col=value_col,
+            vmin=vmin, vmax=vmax, cmap_name=cmap_name,
+        )
+    _draw_confusion_group_legend(canvas=canvas, width=width, y_offset=260 if residues else 0)
     if title:
         headers.text(
             0,
-            1,
+            .96 if residues else 1,
             title,
             color=_TEXT_COLOR,
             style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
@@ -1607,9 +1653,36 @@ def _draw_heatmap_legend(
     )
 
 
-def _draw_confusion_group_legend(*, canvas: Any, width: int) -> None:
+def _draw_residue_legend(*, canvas: Any, width: int, selection: str) -> None:
+    from phenoradar.residue_colors import ZAPPO_GROUPS
+
+    legend = canvas.cartesian(bounds=(width - 270, width - 20, 35, 270),
+                              show=False, xmin=0, xmax=1, ymin=0, ymax=11)
+    legend.text(.02, 10.6, "Zappo: representative amino acid", color=_TEXT_COLOR,
+                style={"font-size": "10px", "font-weight": "bold", "text-anchor": "start"})
+    groups = [*ZAPPO_GROUPS, ("- .", "Gap", "#ffffff"),
+              ("Other", "Unknown residue", "#dddddd"), ("?", "Unavailable", "#dddddd")]
+    for i, (letters, label, color) in enumerate(groups):
+        y = 9.5 - i
+        legend.rectangle(.02, .08, y - .25, y + .25, color=color,
+                         style={"stroke": "#999999", "stroke-width": ".5px"})
+        legend.text(.12, y, f"{letters}: {label}", color=_TEXT_COLOR,
+                    style={"font-size": "9px", "text-anchor": "start"})
+
+    note = canvas.cartesian(bounds=(width - 270, width - 20, 280, 365),
+                            show=False, xmin=0, xmax=1, ymin=0, ymax=1)
+    rule = "Highest TPM" if selection == "max_tpm" else "Maximum input-MSA coverage"
+    note.text(.02, .85, f"{rule} per species/OG", color=_TEXT_COLOR,
+              style={"font-size": "9px", "text-anchor": "start"})
+    note.text(.02, .55, "Ties: sequence ID; no per-site substitution", color=_TEXT_COLOR,
+              style={"font-size": "9px", "text-anchor": "start"})
+    note.text(.02, .25, "Labels: OG ID : input MSA site (1-based)", color=_TEXT_COLOR,
+              style={"font-size": "9px", "text-anchor": "start"})
+
+
+def _draw_confusion_group_legend(*, canvas: Any, width: int, y_offset: int = 0) -> None:
     legend_axes = canvas.cartesian(
-        bounds=(width - 270, width - 35, 150, 266),
+        bounds=(width - 270, width - 35, 150 + y_offset, 266 + y_offset),
         show=False,
         xmin=0,
         xmax=1,

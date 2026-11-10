@@ -50,6 +50,7 @@ from phenoradar.feature_stability import (
     FeatureStabilityError,
     build_feature_stability_tables,
 )
+from phenoradar.fold_identity import configure_fold_seed_ids, seed_scope, validation_fold_ids
 from phenoradar.glmnet import (
     DEFAULT_ALPHA,
     DEFAULT_LAMBDA,
@@ -218,6 +219,7 @@ class InnerCvPreprocessedFold:
     y_valid: np.ndarray
     sample_weight: np.ndarray | None
     n_expression_features: int | None = None
+    seed_fold_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -3138,7 +3140,8 @@ def _sample_training_sets(
             chosen: list[int] = []
             for group, label0_idx, label1_idx, k_value in group_specs:
                 seed_text = (
-                    f"{config.runtime.seed}|{training_scope_id}|{sample_set_id}|{salt}|{group}"
+                    f"{config.runtime.seed}|{seed_scope(config, training_scope_id)}|"
+                    f"{sample_set_id}|{salt}|{group}"
                 )
                 rng = np.random.default_rng(_deterministic_int_seed(seed_text))
                 chosen.extend(rng.choice(label0_idx, size=k_value, replace=False).tolist())
@@ -3895,17 +3898,18 @@ def _inner_cv_splits(
 
     rows: list[tuple[np.ndarray, np.ndarray, str]] = []
     try:
-        for inner_fold_index, (train_idx, valid_idx) in enumerate(split_iter, start=1):
+        pairs = list(split_iter)
+        fold_ids = validation_fold_ids(groups.tolist(), [list(valid) for _, valid in pairs])
+        for (train_idx, valid_idx), fold_id in zip(pairs, fold_ids, strict=True):
             train_idx_array = np.asarray(train_idx, dtype=int)
             valid_idx_array = np.asarray(valid_idx, dtype=int)
             if train_idx_array.size == 0 or valid_idx_array.size == 0:
                 raise CVError("Inner CV produced an empty train/validation split")
             if np.unique(y[train_idx_array]).size < 2:
                 raise CVError(
-                    f"Inner CV fold {inner_fold_index} training split contains "
-                    "fewer than two labels"
+                    f"Inner CV fold {fold_id} training split contains fewer than two labels"
                 )
-            rows.append((train_idx_array, valid_idx_array, str(inner_fold_index)))
+            rows.append((train_idx_array, valid_idx_array, fold_id))
     except ValueError as exc:
         raise CVError(f"Inner CV split error: {exc}") from exc
 
@@ -3947,7 +3951,7 @@ def iter_inner_cv_preprocessed_folds(
     x_source_expr = _apply_expression_transform_for_config(config, x_source_raw)
     splits = _inner_cv_splits(config, y_source, groups_source)
     sparse_counts = _build_inner_sparse_count_cache(config, x_source_expr, y_source, splits)
-    for train_idx, valid_idx, inner_fold_id in splits:
+    for inner_index, (train_idx, valid_idx, inner_fold_id) in enumerate(splits, 1):
         y_train = y_source[train_idx]
         y_valid = y_source[valid_idx]
         groups_train = groups_source[train_idx]
@@ -3974,6 +3978,7 @@ def iter_inner_cv_preprocessed_folds(
         sample_weight = _fit_sample_weights(config, y_train, groups_train)
         yield InnerCvPreprocessedFold(
             inner_fold_id=inner_fold_id,
+            seed_fold_id=str(inner_index),
             x_train=x_train,
             x_valid=x_valid,
             y_train=y_train,
@@ -4005,8 +4010,9 @@ def _score_candidate_inner_cv(
 
         for fold in preprocessed_folds:
             seed = _deterministic_int_seed(
-                f"{config.runtime.seed}|{training_scope_id}|source_{source_sample_set_id}|"
-                f"candidate_{candidate.candidate_index}|inner_{fold.inner_fold_id}"
+                f"{config.runtime.seed}|{seed_scope(config, training_scope_id)}|"
+                f"source_{source_sample_set_id}|candidate_{candidate.candidate_index}|"
+                f"inner_{fold.seed_fold_id or fold.inner_fold_id}"
             )
             estimator = _build_estimator(
                 config,
@@ -4170,7 +4176,8 @@ def _prepare_source_selection_tpe(
             )
 
     local_seed = _deterministic_int_seed(
-        f"{runtime_seed}|{training_scope_id}|source_{source_sample_set_id}|tpe_selection"
+        f"{runtime_seed}|{seed_scope(config, training_scope_id)}|"
+        f"source_{source_sample_set_id}|tpe_selection"
     )
     metric_name = config.model_selection.selection_metric
     study = optuna.create_study(
@@ -4681,14 +4688,13 @@ def _summarize_model_selection_trials(model_selection_trials: pl.DataFrame) -> p
 
 
 def _fold_ids(split_manifest: pl.DataFrame) -> list[str]:
-    fold_values = (
-        split_manifest.filter((pl.col("pool") == "validation") & (pl.col("fold_id") != "NA"))
-        .select("fold_id")
-        .unique()
-        .to_series()
-        .to_list()
+    validation = split_manifest.filter(
+        (pl.col("pool") == "validation") & (pl.col("fold_id") != "NA")
     )
-    return [str(v) for v in sorted(int(v) for v in fold_values)]
+    if "fold_index" in validation.columns:
+        return validation.select("fold_id", "fold_index").unique().sort("fold_index")[
+            "fold_id"].to_list()
+    return [str(v) for v in sorted(int(v) for v in validation["fold_id"].unique())]
 
 
 def _with_contrast_group_column(config: AppConfig, split_manifest: pl.DataFrame) -> pl.DataFrame:
@@ -5389,7 +5395,7 @@ def _fit_outer_sample_set(
         model_index = base_model_index + selected_offset
         model_seed = _ensemble_seed(
             config.runtime.seed,
-            f"fold_{fold_id}|sample_set_{sample_set_id}",
+            seed_scope(config, f"fold_{fold_id}|sample_set_{sample_set_id}"),
             model_index,
         )
         estimator = _build_estimator(
@@ -7173,6 +7179,7 @@ def _run_outer_cv_impl(
     cv_species_reference_expression_frames: list[pl.DataFrame] = []
     max_fold_ensemble_size = 0
 
+    configure_fold_seed_ids(config, split_manifest)
     fold_ids = _fold_ids(split_manifest)
     inference_species = _outer_cv_inference_species(config, split_manifest)
     defer_inference = bool(inference_species and _can_defer_outer_inference(config))

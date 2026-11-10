@@ -143,6 +143,8 @@ class _FoldCache:
                 "n_expression_features",
             ]
         }
+        if hasattr(fold, "seed_fold_id"):
+            metadata["seed_fold_id"] = fold.seed_fold_id
         metadata["shapes"] = [fold.x_train.shape, fold.x_valid.shape]
         metadata["sparse"] = [sparse.issparse(fold.x_train), sparse.issparse(fold.x_valid)]
         self.items.append((type(fold), metadata, gradients))
