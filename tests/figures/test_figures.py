@@ -1751,7 +1751,7 @@ def test_coefficients_signed_top_handles_zero_coefficients(tmp_path: Path) -> No
     assert out_path.exists()
     svg_text = out_path.read_text()
     assert "Coefficients Signed Top" not in svg_text
-    assert "Top 30 by |coef_mean|" not in svg_text
+    assert "Top 20 by |coef_mean|" not in svg_text
     assert "Orthogroup" in svg_text
     assert "#1f77b4" not in svg_text
     assert "#d62728" not in svg_text
@@ -1800,7 +1800,7 @@ def test_coefficients_signed_top_fold_points_use_neutral_styling(tmp_path: Path)
 
     svg_text = out_path.read_text()
     assert "Coefficients Signed Top" not in svg_text
-    assert "Top 30 by |mean fold-level coef|" not in svg_text
+    assert "Top 20 by |mean fold-level coef|" not in svg_text
     assert "Orthogroup" in svg_text
     assert "#1f77b4" not in svg_text
     assert "#d62728" not in svg_text

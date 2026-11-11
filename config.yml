@@ -105,7 +105,7 @@ evaluation:
     confidence_level: 0.95
 
 figures:
-  top_features: 30
+  top_features: 20
 
 phylogenetic_imputation:
   enabled: false  # choices: true, false; unknown-species interpretation only

@@ -205,7 +205,7 @@ def test_empty_config_file_resolves_to_defaults(tmp_path: Path) -> None:
     assert resolved.evaluation.group_bootstrap.n_resamples == 2000
     assert resolved.evaluation.group_bootstrap.confidence_level == 0.95
     assert resolved.summary.group_col == "family"
-    assert resolved.figures.top_features == 30
+    assert resolved.figures.top_features == 20
 
 
 def test_allow_empty_config_paths_resolves_to_defaults() -> None:
@@ -239,7 +239,7 @@ def test_allow_empty_config_paths_resolves_to_defaults() -> None:
     assert resolved.evaluation.group_bootstrap.n_resamples == 2000
     assert resolved.evaluation.group_bootstrap.confidence_level == 0.95
     assert resolved.summary.group_col == "family"
-    assert resolved.figures.top_features == 30
+    assert resolved.figures.top_features == 20
 
 
 def test_summary_group_column_is_configurable(tmp_path: Path) -> None:

@@ -24,6 +24,7 @@ from phenoradar.colors import (
     CONFUSION_GROUP_LABELS,
     CONFUSION_GROUP_ORDER,
 )
+from phenoradar.config.schema import DEFAULT_TOP_FEATURES
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
@@ -44,7 +45,6 @@ class TreePredictionError(ValueError):
 
 _MISSING_COLOR = "#eeeeee"
 _TEXT_COLOR = "#000000"
-_FEATURE_HEATMAP_LIMIT = 30
 _SVG_NS = "http://www.w3.org/2000/svg"
 _SVG_BACKGROUND_ID = "phenoradar-svg-background"
 _SVG_BACKGROUND_FILL = "#ffffff"
@@ -159,7 +159,7 @@ def write_run_tree_prediction_artifacts(
     pred_external_test: pl.DataFrame | None,
     include_feature_heatmaps: bool = True,
     top_feature_expression: pl.DataFrame | None = None,
-    feature_limit: int = _FEATURE_HEATMAP_LIMIT,
+    feature_limit: int = DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
     parallel_workers: int = 1,
     timing_recorder: TimingRecorder | None = None,
@@ -442,7 +442,7 @@ def build_tree_feature_heatmap_annotation(
     feature_importance: pl.DataFrame,
     coefficients: pl.DataFrame,
     oof_predictions: pl.DataFrame | None = None,
-    feature_limit: int = _FEATURE_HEATMAP_LIMIT,
+    feature_limit: int = DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
     top_feature_expression: pl.DataFrame | None = None,
     preserve_missing: bool = False,

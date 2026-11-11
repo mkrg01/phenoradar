@@ -34,6 +34,8 @@ RankedFeatureFilterMethod = Literal["none", "pair_aware", "unpaired", "variance"
 AbsentFeatureFill = Literal[0, "nan"]
 SparseFeatureScope = Literal["all_samples", "any_trait", "trait_0", "trait_1"]
 
+DEFAULT_TOP_FEATURES = 20
+
 
 class StrictModel(BaseModel):
     """Base model that rejects unknown configuration keys."""
@@ -494,7 +496,7 @@ class SummaryConfig(StrictModel):
 class FiguresConfig(StrictModel):
     """Figure output controls."""
 
-    top_features: PositiveInt = Field(default=30, le=100)
+    top_features: PositiveInt = Field(default=DEFAULT_TOP_FEATURES, le=100)
 
 
 class RuntimeConfig(StrictModel):

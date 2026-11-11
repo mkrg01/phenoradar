@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from phenoradar.config.schema import DEFAULT_TOP_FEATURES
 from phenoradar.metrics import binary_probability_metrics
 
 ABSTENTION_COLUMNS = [
@@ -52,7 +53,7 @@ def annotate_abstention(
     model_coefficients: Sequence[tuple[Sequence[str], np.ndarray]],
     zero_as_missing: bool,
     threshold: float,
-    top_features: int = 30,
+    top_features: int = DEFAULT_TOP_FEATURES,
     allow_missing_zero_coefficients: bool = False,
 ) -> pl.DataFrame:
     """Attach coverage from the original observation mask, aligned by species.

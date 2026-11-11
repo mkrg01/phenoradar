@@ -378,7 +378,7 @@ model_selection:
 | `evaluation.group_bootstrap.n_resamples` | `2000` | Positive replicate count |
 | `evaluation.group_bootstrap.confidence_level` | `0.95` | Value strictly between 0 and 1 |
 | `summary.group_col` | `family` | Metadata column for grouped summaries and display labels |
-| `figures.top_features` | `30` | Number of displayed global or species-local features, from 1 to 100 |
+| `figures.top_features` | `20` | Number of displayed global or species-local features, from 1 to 100 |
 | `runtime.seed` | `42` | Reproducible splitting, sampling, and model fitting |
 | `runtime.n_jobs` | `1` | Positive CPU upper bound for parallel work |
 | `runtime.execution_stage` | `cv_only` | `cv_only` or `full_run`; CLI `--execution-stage` overrides it |
@@ -414,7 +414,7 @@ metadata are optional. CLI input paths and `--n-jobs` override config values.
 | `data.trait_col`, `data.contrast_pair_col` | `C4`, `contrast_pair_id`; optional annotations |
 | `runtime.n_jobs` | `1`; also overrides inherited `POLARS_MAX_THREADS` for expression prediction |
 | `summary.group_col` | `family`; summaries require metadata with this column |
-| `figures.top_features` | Saved training value if `figures` is omitted; otherwise 30 unless specified |
+| `figures.top_features` | Saved training value if `figures` is omitted. If `figures` is supplied, defaults to 20. |
 | `phylogenetic_imputation` | Disabled; same options as training |
 
 For example:

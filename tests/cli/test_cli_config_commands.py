@@ -81,7 +81,7 @@ def _write_split_fixture(tmp_path: Path) -> tuple[Path, Path]:
 def _stub_resolved_config(
     *,
     execution_stage: str,
-    top_features: int = 30,
+    top_features: int = 20,
     tree_path: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
@@ -463,7 +463,7 @@ def test_config_without_config_writes_default_yaml(
         payload["preprocess"]["expression"]["ranked_feature_filter"]["higher_in_trait"]
         is None
     )
-    assert payload["figures"]["top_features"] == 30
+    assert payload["figures"]["top_features"] == 20
     assert payload == AppConfig().model_dump(
         mode="python",
         exclude={

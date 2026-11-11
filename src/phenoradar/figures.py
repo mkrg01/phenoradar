@@ -34,6 +34,7 @@ from sklearn.metrics import (
 
 from phenoradar.abstention import prediction_label_expr
 from phenoradar.colors import CONFUSION_GROUP_COLORS, CONFUSION_GROUP_ORDER
+from phenoradar.config.schema import DEFAULT_TOP_FEATURES
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
@@ -105,7 +106,6 @@ _TRAIT_POSITIVE_COLOR = "#1f77b4"
 _UNANNOTATED_COLOR = "#6f6f6f"
 _PROBABILITY_THRESHOLD_COLOR = "#999999"
 _MODEL_SELECTION_SAMPLE_SET_LIMIT = 1
-_DEFAULT_TOP_FEATURES = 30
 _CONFUSION_GROUP_ORDER = CONFUSION_GROUP_ORDER
 _CONFUSION_GROUP_COLORS = CONFUSION_GROUP_COLORS
 _FEATURE_IMPORTANCE_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
@@ -1101,7 +1101,7 @@ def _feature_importance_top(
     feature_importance: pl.DataFrame,
     out_path: Path,
     feature_importance_by_fold: pl.DataFrame | None = None,
-    top_features: int = _DEFAULT_TOP_FEATURES,
+    top_features: int = DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
     x_label: str = "Mean feature importance per fold",
 ) -> None:
@@ -1300,7 +1300,7 @@ def _feature_importance_by_fold_heatmap(
     feature_importance: pl.DataFrame,
     feature_importance_by_fold: pl.DataFrame,
     out_path: Path,
-    top_features: int = _DEFAULT_TOP_FEATURES,
+    top_features: int = DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
 ) -> None:
     required = {"feature", "importance_mean"}
@@ -1462,7 +1462,7 @@ def _coefficients_signed_top(
     coefficients: pl.DataFrame,
     out_path: Path,
     coefficients_by_fold: pl.DataFrame | None = None,
-    top_features: int = _DEFAULT_TOP_FEATURES,
+    top_features: int = DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
     x_label: str = "Mean signed coefficient per fold",
 ) -> None:
@@ -1680,7 +1680,7 @@ def _top_feature_expression_by_confusion(
     feature_importance: pl.DataFrame,
     coefficients: pl.DataFrame,
     out_path: Path,
-    top_features: int = _DEFAULT_TOP_FEATURES,
+    top_features: int = DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
     label_col: str = "label",
     source_table_name: str = "prediction_cv.tsv",
@@ -4469,7 +4469,7 @@ def write_run_figures(
     final_refit_model_selection_trials_summary: pl.DataFrame | None = None,
     final_refit_top_feature_expression_external: pl.DataFrame | None = None,
     feature_filter_funnel_stage_order: Sequence[str] | None = None,
-    top_features: int = _DEFAULT_TOP_FEATURES,
+    top_features: int = DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
     parallel_workers: int = 1,
     timing_recorder: TimingRecorder | None = None,
