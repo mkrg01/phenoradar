@@ -1790,7 +1790,7 @@ def _run_single(
                             ),
                             trait_name=resolved.data.trait_col,
                             orthogroup_annotations=orthogroup_annotations,
-                            parallel_workers=_artifact_parallel_workers(resolved),
+                            parallel_workers=resolved.runtime.n_jobs,
                             timing_recorder=timing_recorder,
                             workers=figure_workers,
                         )
@@ -2583,7 +2583,7 @@ def predict(
                 reference_expression=evidence.reference_expression,
                 cross_fold_predictions=evidence.model_predictions,
                 trait_name=evidence.trait_name, orthogroup_annotations=evidence.annotations,
-                parallel_workers=_artifact_parallel_workers(resolved),
+                parallel_workers=resolved.runtime.n_jobs,
                 timing_recorder=timing_recorder, evidence_context="predict",
                 probability_threshold=bundle.threshold_fixed,
             )

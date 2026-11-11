@@ -40,7 +40,7 @@ from phenoradar.figure_population import (
     prediction_figure_populations,
     remove_legacy_population_figure,
 )
-from phenoradar.figure_runtime import FigureWorkers
+from phenoradar.figure_runtime import FigureWorkers, candidate_pdf_worker_count
 from phenoradar.group_summary import GroupSummaryError, finite_group_probabilities
 from phenoradar.metrics import (
     FIXED_PROBABILITY_THRESHOLD_NAME,
@@ -5402,8 +5402,12 @@ def write_candidate_evidence_figures(
             }
         )
 
+    worker_count = candidate_pdf_worker_count(parallel_workers, len(jobs))
+    if worker_count and workers is not None and worker_count != workers.max_workers:
+        workers.close()
+        workers = None
     warnings = _run_figure_jobs(
-        jobs, parallel_workers=parallel_workers, timing_recorder=timing_recorder, workers=workers
+        jobs, parallel_workers=worker_count, timing_recorder=timing_recorder, workers=workers
     )
     manifest = pl.DataFrame(manifest_rows, schema=_CANDIDATE_MANIFEST_SCHEMA).sort(
         ["prob", "species"], descending=[True, False]

@@ -11,6 +11,7 @@ from sklearn.preprocessing import StandardScaler
 from phenoradar.candidate_evidence import build_candidate_evidence_artifacts
 from phenoradar.config import load_and_resolve_config
 from phenoradar.cv import FinalModelEntry, RunExpressionCache, _build_cv_species_evidence
+from phenoradar.figure_runtime import FigureWorkers
 from phenoradar.figures import (
     write_candidate_evidence_figures,
     write_cv_species_evidence_figures,
@@ -241,6 +242,39 @@ def test_write_candidate_evidence_figures_writes_probability_bin_pdf_and_manifes
     assert pdf_path.exists()
     assert pdf_path.read_bytes().startswith(b"%PDF")
     assert (root / "candidate_manifest.tsv").exists()
+
+
+def test_candidate_pdf_releases_shared_pool_under_memory_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    species = ["candidate_a", "candidate_b", "candidate_c", "candidate_d"]
+    candidates = pl.DataFrame({"species": species, "prob": [0.9] * 4, "family": ["F"] * 4})
+    features = pl.DataFrame({"species": species, "feature": ["OG1"] * 4, "local_rank": [1] * 4})
+
+    def run_jobs(jobs, *, parallel_workers, timing_recorder, workers):
+        assert len(jobs) == 4
+        assert parallel_workers == 2
+        assert workers is None
+        return []
+
+    monkeypatch.setattr("phenoradar.figure_runtime.memory_budget", lambda: 4 * 1024**3)
+    monkeypatch.setattr("phenoradar.figures._run_figure_jobs", run_jobs)
+    with FigureWorkers(4) as shared_workers:
+        old_pool = shared_workers.executor()
+        manifest, _ = write_candidate_evidence_figures(
+            run_dir=tmp_path,
+            candidates=candidates,
+            features=features,
+            reference_expression=pl.DataFrame({"feature": ["OG1"]}),
+            cross_fold_predictions=pl.DataFrame({"species": species, "prob": [0.9] * 4}),
+            trait_name="C4",
+            parallel_workers=19,
+            workers=shared_workers,
+        )
+        with pytest.raises(RuntimeError, match="shutdown"):
+            old_pool.submit(int)
+        assert shared_workers.executor() is not old_pool
+    assert manifest.height == 4
 
 
 def test_build_cv_species_evidence_uses_held_out_fold_models_and_training_reference(

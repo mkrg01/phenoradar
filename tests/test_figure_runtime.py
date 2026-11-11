@@ -5,13 +5,24 @@ from pathlib import Path
 
 import pytest
 
-from phenoradar.figure_runtime import FigureWorkers
+from phenoradar.figure_runtime import FigureWorkers, candidate_pdf_worker_count
 from phenoradar.figures import _run_figure_jobs
 from phenoradar.timing import TimingRecorder
 
 
 def _write_pid(path: Path) -> None:
     path.write_text(str(os.getpid()))
+
+
+@pytest.mark.parametrize(
+    ("cpus", "pdf_count", "memory_gib", "expected"),
+    [(19, 524, 114, 19), (19, 3, 114, 3), (19, 524, 4, 2), (19, 524, 0, 1), (19, 0, 0, 0)],
+)
+def test_candidate_pdf_worker_count(
+    monkeypatch: pytest.MonkeyPatch, cpus: int, pdf_count: int, memory_gib: int, expected: int
+) -> None:
+    monkeypatch.setattr("phenoradar.figure_runtime.memory_budget", lambda: memory_gib * 1024**3)
+    assert candidate_pdf_worker_count(cpus, pdf_count) == expected
 
 
 def test_shared_figure_workers_reuse_process_and_close(tmp_path: Path) -> None:

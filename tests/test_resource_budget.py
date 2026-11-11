@@ -31,3 +31,19 @@ def test_memory_budget_honors_parent_job_limit(tmp_path: Path, monkeypatch,
              "/sys/fs/cgroup": root}
     monkeypatch.setattr(resource, "Path", lambda name: paths[name])
     assert resource.memory_budget() == expected
+
+
+@pytest.mark.parametrize("address_space, expected", [(4096, 4096), (-1, 1048576)])
+def test_memory_budget_honors_grid_engine_address_space_limit(
+    tmp_path: Path, monkeypatch, address_space: int, expected: int,
+) -> None:
+    posix_resource = pytest.importorskip("resource")
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemAvailable: 1024 kB\n")
+    cgroup = tmp_path / "cgroup"
+    cgroup.write_text("3:cpuset:/AGE/123.1\n")
+    paths = {"/proc/meminfo": meminfo, "/proc/self/cgroup": cgroup}
+    limit = posix_resource.RLIM_INFINITY if address_space < 0 else address_space
+    monkeypatch.setattr(resource, "Path", lambda name: paths[name])
+    monkeypatch.setattr(posix_resource, "getrlimit", lambda _: (limit, limit))
+    assert resource.memory_budget() == expected

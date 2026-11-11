@@ -386,6 +386,10 @@ model_selection:
 The group bootstrap resamples `split.group_col` from pooled out-of-fold (OOF)
 predictions without refitting. Its seed derives from `runtime.seed`.
 
+Candidate-evidence PDF rendering uses up to `runtime.n_jobs` workers, bounded by
+the number of PDFs and 80% of the available memory budget at an estimated 1.5 GiB
+per worker. When the budget is tight, rendering runs in the main process.
+
 Training parallelism shares the `n_jobs` budget across folds, candidates, and
 supported model threads. Sequence grid CV uses a shared inner-fold queue and
 separate refit processes within the available memory budget.

@@ -17,6 +17,16 @@ def memory_budget() -> int:
         budget = int(meminfo["MemAvailable"].split()[0]) * 1024
     except (OSError, ValueError, KeyError):
         pass
+    # Grid Engine can enforce the job's virtual-memory allocation with a
+    # process resource limit even when the memory cgroup has no job limit.
+    try:
+        from resource import RLIM_INFINITY, RLIMIT_AS, getrlimit
+
+        address_space, _ = getrlimit(RLIMIT_AS)
+        if address_space != RLIM_INFINITY:
+            budget = min(budget, address_space)
+    except (ImportError, OSError, ValueError):
+        pass
     try:
         for line in Path("/proc/self/cgroup").read_text().splitlines():
             if line.startswith("0::"):
