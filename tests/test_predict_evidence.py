@@ -228,7 +228,10 @@ def test_predict_figure_labels_models_and_unavailable_references_honestly(
     def capture(fig: object, _path: Path, *, title: str) -> None:
         for ax in fig.axes:
             texts.append(ax.get_title(loc="left"))
+            texts.append(ax.get_ylabel())
             texts.extend(text.get_text() for text in ax.texts)
+            if ax.get_legend() is not None:
+                texts.extend(text.get_text() for text in ax.get_legend().get_texts())
         texts.extend(text.get_text() for text in fig.texts)
 
     monkeypatch.setattr("phenoradar.figures._save_pdf_figure", capture)
@@ -244,6 +247,7 @@ def test_predict_figure_labels_models_and_unavailable_references_honestly(
     assert not warnings
     assert manifest["n_bundle_models"].to_list() == [1]
     assert not any("cross_fold" in column for column in manifest.columns)
-    assert "A   Prediction from fitted model" in texts
+    assert "Bundle member" in texts
+    assert "Bundle prediction" in texts
     assert "Reference unavailable" in texts
-    assert not any("outer-CV" in text for text in texts)
+    assert "Outer CV fold" not in texts

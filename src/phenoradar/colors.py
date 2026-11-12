@@ -6,6 +6,10 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final
 
+BINARY_TRAIT_COLORS: Final[Mapping[int, str]] = MappingProxyType(
+    {0: "#D55E00", 1: "#0072B2"}
+)
+
 CONFUSION_GROUP_ORDER: Final[tuple[str, ...]] = ("TP", "FN", "TN", "FP")
 CONFUSION_GROUP_COLORS: Final[Mapping[str, str]] = MappingProxyType(
     {

@@ -1364,7 +1364,7 @@ def test_binary_trait_color_map_uses_expected_colors() -> None:
         [0, 1],
         source_table_name="prediction_cv.tsv",
         figure_name="cv_species_probability_by_trait.svg",
-    ) == {0: "#d62728", 1: "#1f77b4"}
+    ) == {0: "#D55E00", 1: "#0072B2"}
 
 
 def test_binary_trait_color_map_rejects_non_binary_values() -> None:

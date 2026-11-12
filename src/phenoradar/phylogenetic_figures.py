@@ -9,9 +9,10 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.cm import ScalarMappable
-from matplotlib.colors import Normalize
+from matplotlib.colors import ListedColormap, Normalize
 from matplotlib.patches import Patch
 
+from phenoradar.colors import BINARY_TRAIT_COLORS
 from phenoradar.figures import _legend_above, _save_svg_figure
 from phenoradar.phylogenetic_imputation import PhylogeneticImputationArtifacts
 
@@ -138,7 +139,7 @@ def _tree_comparison(
     tree_ax.tick_params(axis="y", left=False, labelleft=False)
     for spine in ["top", "left", "right"]:
         tree_ax.spines[spine].set_visible(False)
-    names_ax.set_title("Species", fontsize=9)
+    names_ax.set_title("Species", fontsize=7)
     for tip in tips:
         row = by_species[tip.name]
         names_ax.text(
@@ -146,7 +147,7 @@ def _tree_comparison(
             y[tip],
             tip.name,
             va="center",
-            fontsize=8,
+            fontsize=6,
             fontweight="bold" if row["is_prediction_target"] else "normal",
         )
     names_ax.set_axis_off()
@@ -155,10 +156,13 @@ def _tree_comparison(
         ["observed_trait", "prob", "phylo_prob", "prob_difference"],
         ["Observed", "Expression", "Phylogenetic", "Difference"],
         [(0, 1), (0, 1), (0, 1), (-1, 1)],
-        ["viridis", "viridis", "viridis", "RdBu_r"],
+        [None, "viridis", "viridis", "RdBu_r"],
         strict=True,
     ):
-        cmap = plt.get_cmap(cmap_name).copy()
+        cmap = (
+            ListedColormap([BINARY_TRAIT_COLORS[0], BINARY_TRAIT_COLORS[1]])
+            if cmap_name is None else plt.get_cmap(cmap_name).copy()
+        )
         cmap.set_bad("#eeeeee")
         values = np.array(
             [
@@ -170,28 +174,11 @@ def _tree_comparison(
         ax.imshow(
             values, vmin=domain[0], vmax=domain[1], cmap=cmap, aspect="auto", interpolation="none"
         )
-        for index, value in enumerate(values[:, 0]):
-            text = (
-                "NA"
-                if np.isnan(value)
-                else (str(int(value)) if column == "observed_trait" else f"{value:.2f}")
-            )
-            rgba = cmap(0 if np.isnan(value) else (value - domain[0]) / (domain[1] - domain[0]))
-            luminance = sum(
-                weight * channel
-                for weight, channel in zip(
-                    [0.2126, 0.7152, 0.0722],
-                    rgba[:3],
-                    strict=True,
-                )
-            )
-            color = "black" if np.isnan(value) or luminance > 0.48 else "white"
-            ax.text(0, index, text, ha="center", va="center", color=color, fontsize=7)
-        ax.set_title(title, fontsize=8)
+        ax.set_title(title, fontsize=7)
         ax.set_xticks([])
         ax.set_yticks([])
     status_ax = tracks[4]
-    status_ax.set_title("Status", fontsize=8)
+    status_ax.set_title("Status", fontsize=7)
     status_ax.set_axis_off()
     for tip in tips:
         row = by_species[tip.name]
@@ -206,7 +193,7 @@ def _tree_comparison(
         ax=list(axes[:5]),
         location="bottom",
         shrink=0.4,
-        label="Trait 1 / probability (including ancestral nodes)",
+        label="Probability of trait 1 (including ancestral nodes)",
         pad=0.04,
     )
     fig.colorbar(
@@ -218,11 +205,16 @@ def _tree_comparison(
         pad=0.04,
     )
     tree_ax.legend(
-        handles=[Patch(facecolor="#eeeeee", label="Missing / unavailable")],
+        handles=[
+            Patch(facecolor=BINARY_TRAIT_COLORS[0], label="Observed 0"),
+            Patch(facecolor=BINARY_TRAIT_COLORS[1], label="Observed 1"),
+            Patch(facecolor="#eeeeee", label="Unavailable"),
+        ],
         loc="upper left",
         bbox_to_anchor=(0, 1.10),
         frameon=False,
-        fontsize=7,
+        ncol=3,
+        fontsize=6,
     )
     _save_svg_figure(fig, path)
 

@@ -257,6 +257,8 @@ def test_real_figures_retain_references(tmp_path: Path, real_nwkit: str) -> None
     assert result.annotation.filter(~pl.col("is_prediction_target")).height == 3
     svg = (tmp_path / "inference/figures/tree_phylogenetic_imputation.svg").read_text()
     assert "Observed" in svg and "Phylogenetic" in svg and "abstained" in svg
+    assert "Observed 0" in svg and "#d55e00" in svg
+    assert "Observed 1" in svg and "#0072b2" in svg
     assert (tmp_path / "inference/figures/phylogenetic_comparison.svg").exists()
 
 

@@ -3,6 +3,8 @@ from xml.etree import ElementTree as ET
 
 import polars as pl
 import pytest
+from matplotlib.container import BarContainer
+from matplotlib.figure import Figure
 
 from phenoradar import figures
 from phenoradar.tree_prediction import _write_tree_prediction_svg
@@ -27,20 +29,36 @@ def text(path: Path) -> set[str]:
     }
 
 
-def test_confusion_and_comparison_evaluate_the_same_population(tmp_path: Path) -> None:
+def test_confusion_and_comparison_evaluate_the_same_population(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     external = predictions()
     original = external.clone()
     cv = external.rename({"true_label": "label"}).with_columns(pl.lit("0").alias("fold_id"))
+    rendered: dict[Path, Figure] = {}
+    save_svg = figures._save_svg_figure
+
+    def capture(fig: Figure, path: Path) -> None:
+        rendered[path] = fig
+        save_svg(fig, path)
+
+    monkeypatch.setattr(figures, "_save_svg_figure", capture)
     figures._external_confusion_matrix(external, tmp_path / "confusion.svg")
     figures._cv_external_comparison_by_population(cv, external, tmp_path / "comparison.svg")
     assert external.equals(original)
-    for subdir, count, precision in (("", 4, "0.500"), ("accepted_only", 2, "1.000")):
-        confusion = text(tmp_path / subdir / "confusion.svg")
-        comparison = text(tmp_path / subdir / "comparison.svg")
-        assert f"n = {count}" in confusion
-        assert f"Precision = {precision}" in confusion
-        assert precision in comparison
-        assert not any("abstained" in value for value in confusion | comparison)
+    for subdir, matrix, precision in (
+        ("", [[1, 1], [1, 1]], 0.5),
+        ("accepted_only", [[1, 0], [0, 1]], 1.0),
+    ):
+        confusion = tmp_path / subdir / "confusion.svg"
+        comparison = tmp_path / subdir / "comparison.svg"
+        assert rendered[confusion].axes[0].images[0].get_array().tolist() == matrix
+        bars = next(
+            container for container in rendered[comparison].axes[0].containers
+            if isinstance(container, BarContainer) and container.get_label() == "External test"
+        )
+        assert bars.patches[1].get_height() == precision
+        assert not any("abstained" in value for value in text(confusion) | text(comparison))
 
 
 @pytest.mark.parametrize("all_abstained", [False, True])

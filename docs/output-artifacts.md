@@ -256,6 +256,9 @@ ROC/PR curves, CV/external metric comparison, top-feature expression, and
 `species_probability_cv_and_inference.svg`. Group plots require the configured
 metadata column; ROC/PR plots require a usable label population.
 
+The confusion matrix shows cell counts and within-label percentages. Use the
+classification or abstention summary tables for exact scores and decision counts.
+
 ### Local evidence PDFs
 
 Linear models can produce:
@@ -266,10 +269,24 @@ Linear models can produce:
 | `cv/figures/species_evidence/abstained/` | The same OOF error diagnostics for withheld decisions |
 | `inference/figures/candidate_evidence/<probability_bin>/` | Accepted positive candidates; final models or loaded bundle members |
 
-PDFs show member probabilities, signed local contributions, and target expression
-against known-trait references when available. Local features are ranked by mean
-absolute contribution; absent member features contribute zero. Contributions
-add on the linear-score scale, not as probability components.
+Each PDF has three panels at 180 mm width. Panel **a** uses the saved fold or
+model IDs and marks the aggregate probability with a dashed line. For a CV
+species with one held-out model, panel **a** shows the fold ID and its prediction
+point alone. Panel **b**
+shows signed contributions with full feature annotations and identifiers.
+Panel **c** shows individual reference values beside boxplots and marks the
+target with a black diamond. Boxes span the interquartile range and mark the
+median. Whiskers reach the most extreme observations within 1.5 times that
+range. The number of observed reference values can vary by feature. Long labels
+or larger feature sets can increase the page height to keep the text readable.
+
+Figures showing the binary trait use blue for label 1 and vermilion for label 0.
+In panel **c**, triangles and circles also distinguish those labels. Use the
+species manifest and reference-expression table for the species identity, exact
+probabilities, and sample sizes in a manuscript caption.
+
+Local features are ranked by mean absolute contribution. Absent member features
+contribute zero. Contributions add on the linear-score scale.
 
 CV references include only species sampled for that target's training fold.
 Full-run candidates use known-trait training/CV references and can show

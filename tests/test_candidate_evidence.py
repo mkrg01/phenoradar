@@ -6,8 +6,10 @@ from types import SimpleNamespace
 import numpy as np
 import polars as pl
 import pytest
+from matplotlib.figure import Figure
 from sklearn.preprocessing import StandardScaler
 
+from phenoradar import figures
 from phenoradar.candidate_evidence import build_candidate_evidence_artifacts
 from phenoradar.config import load_and_resolve_config
 from phenoradar.cv import FinalModelEntry, RunExpressionCache, _build_cv_species_evidence
@@ -178,7 +180,7 @@ def test_reference_snapshot_is_available_without_positive_inference(tmp_path: Pa
 
 
 def test_write_candidate_evidence_figures_writes_probability_bin_pdf_and_manifest(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidates = pl.DataFrame(
         {
@@ -206,21 +208,43 @@ def test_write_candidate_evidence_figures_writes_probability_bin_pdf_and_manifes
     )
     cross_fold = pl.DataFrame(
         {
-            "fold_id": ["1", "2", "3"],
+            "fold_id": ["10", "2", "30"],
             "species": ["Candidate species"] * 3,
             "prob": [0.88, 0.92, 0.95],
         }
+    )
+    long_annotation = (
+        "beta carbonic anhydrase with a long and informative annotation for a gene "
+        "in a photosynthesis-related family"
     )
     annotations = pl.DataFrame(
         {
             "feature": ["OG1", "OG2"],
             "orthogroup_annotation": [
-                "beta carbonic anhydrase",
+                long_annotation,
                 "phosphoenolpyruvate carboxylase",
             ],
         }
     )
 
+    save_pdf = figures._save_pdf_figure
+
+    def verify_and_save(fig: Figure, path: Path, *, title: str) -> None:
+        probability, contribution, expression = fig.axes
+        assert [ax.get_title(loc="left") for ax in fig.axes] == ["a", "b", "c"]
+        assert probability.get_position().x1 < contribution.get_position().x0
+        assert contribution.get_position().x1 < expression.get_position().x0
+        assert [tick.get_text() for tick in probability.get_yticklabels()] == ["2", "10", "30"]
+        np.testing.assert_allclose(
+            probability.collections[0].get_offsets()[:, 0], [0.92, 0.88, 0.95],
+        )
+        first_label = contribution.get_yticklabels()[0].get_text()
+        assert " ".join(first_label.split()) == f"{long_annotation} OG1"
+        assert len(expression.patches) == 4
+        assert [len(points.get_offsets()) for points in expression.collections] == [4, 4, 2]
+        save_pdf(fig, path, title=title)
+
+    monkeypatch.setattr(figures, "_save_pdf_figure", verify_and_save)
     manifest, warnings = write_candidate_evidence_figures(
         run_dir=tmp_path,
         candidates=candidates,
@@ -334,9 +358,13 @@ def test_build_cv_species_evidence_uses_held_out_fold_models_and_training_refere
     assert set(reference.get_column("target_species")) == {"held_out_species"}
 
 
-@pytest.mark.parametrize("decision_status", ["accepted", "abstained"])
+@pytest.mark.parametrize(
+    ("decision_status", "n_models", "save_members"),
+    [("accepted", 1, False), ("accepted", 1, True), ("accepted", 2, True), ("abstained", 2, True)],
+)
 def test_write_cv_species_evidence_figures_writes_error_pdf_and_manifest(
-    tmp_path: Path, decision_status: str,
+    tmp_path: Path, decision_status: str, n_models: int, save_members: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     species_evidence = pl.DataFrame(
         {
@@ -350,7 +378,7 @@ def test_write_cv_species_evidence_figures_writes_error_pdf_and_manifest(
             "prob": [0.12],
             "log_loss": [-np.log(0.12)],
             "uncertainty_std": [0.03],
-            "n_models": [2],
+            "n_models": [n_models],
         }
     )
     features = pl.DataFrame(
@@ -373,15 +401,32 @@ def test_write_cv_species_evidence_figures_writes_error_pdf_and_manifest(
             "log2_tpm_plus1": [0.8, 1.2, 3.6, 4.0, 2.8, 3.0, 0.7, 1.1],
         }
     )
+    probabilities = [0.12] if n_models == 1 else [0.10, 0.14]
     ensemble_model_probs = pl.DataFrame(
         {
-            "fold_id": ["2", "2"],
-            "model_index": [0, 1],
-            "species": ["Held out species", "Held out species"],
-            "prob": [0.10, 0.14],
+            "fold_id": ["2"] * n_models,
+            "model_index": list(range(n_models)),
+            "species": ["Held out species"] * n_models,
+            "prob": probabilities,
         }
-    )
+    ) if save_members else None
+    save_pdf = figures._save_pdf_figure
 
+    def verify_and_save(fig: Figure, path: Path, *, title: str) -> None:
+        panel_a = fig.axes[0]
+        np.testing.assert_allclose(panel_a.collections[0].get_offsets()[:, 0], probabilities)
+        tick_labels = [tick.get_text() for tick in panel_a.get_yticklabels()]
+        if n_models == 1:
+            assert tick_labels == ["2"]
+            assert not panel_a.lines
+            assert panel_a.get_legend() is None
+        else:
+            assert tick_labels == ["0", "1"]
+            assert [line.get_label() for line in panel_a.lines] == ["OOF aggregate"]
+            np.testing.assert_allclose(panel_a.lines[0].get_xdata(), [0.12, 0.12])
+        save_pdf(fig, path, title=title)
+
+    monkeypatch.setattr(figures, "_save_pdf_figure", verify_and_save)
     manifest, warnings = write_cv_species_evidence_figures(
         run_dir=tmp_path,
         species_evidence=species_evidence,
@@ -396,7 +441,7 @@ def test_write_cv_species_evidence_figures_writes_error_pdf_and_manifest(
     assert manifest.height == 1
     row = manifest.row(0, named=True)
     assert row["confusion_group"] == "FN"
-    assert row["n_model_predictions"] == 2
+    assert row["n_model_predictions"] == n_models
     root = tmp_path / "cv" / "figures" / "species_evidence"
     pdf_path = root / str(row["figure_path"])
     assert ("abstained/" in row["figure_path"]) == (decision_status == "abstained")

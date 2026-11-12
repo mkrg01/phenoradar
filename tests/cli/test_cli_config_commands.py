@@ -861,7 +861,8 @@ evaluation:
     assert "C4=0" not in cv_trait_svg
     assert "C4=1" not in cv_trait_svg
     pr_curve_svg = (run_dirs[0] / "cv" / "figures" / "pr_curve_cv.svg").read_text(encoding="utf-8")
-    assert "Average Precision=" in pr_curve_svg
+    assert "Average precision = " in pr_curve_svg
+    assert "Positive prevalence" in pr_curve_svg
     assert "PR AUC=" not in pr_curve_svg
 
     metrics = pl.read_csv(run_dirs[0] / "cv" / "tables" / "metrics_cv.tsv", separator="\t")
