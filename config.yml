@@ -108,8 +108,8 @@ figures:
   top_features: 20
 
 phylogenetic_imputation:
-  enabled: false  # choices: true, false; unknown-species interpretation only
-  branch_length_mode: input  # choices: input, unit
+  enabled: true  # choices: true, false; expression inference only
+  branch_length_mode: unit  # The example NCBI taxonomy tree has no branch lengths.
   model: ER  # choices: ER, ARD
   root_prior: equal  # choices: equal, empirical
 

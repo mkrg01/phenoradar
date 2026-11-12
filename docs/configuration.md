@@ -397,8 +397,10 @@ The CLI initializes Polars threads from this value unless `POLARS_MAX_THREADS`
 is already set. Native BLAS/OpenMP threads are limited during execution. Direct
 Python invocations must set Polars limits before import when a strict cap matters.
 
-`phylogenetic_imputation` defaults to `enabled: false`, `branch_length_mode: input`,
-`model: ER`, `root_prior: equal`. See the
+`phylogenetic_imputation` defaults to `enabled: true` for expression inference.
+The other defaults are `branch_length_mode: input`, `model: ER`, and
+`root_prior: equal`. The example `config.yml` uses `unit` for its NCBI taxonomy
+tree. See the
 [phylogenetic guide](phylogenetic-imputation.md) for options and requirements.
 `report: {}` has no configurable fields. Classification uses a fixed probability
 threshold of 0.5 throughout.
@@ -419,7 +421,7 @@ metadata are optional. CLI input paths and `--n-jobs` override config values.
 | `runtime.n_jobs` | `1`; also overrides inherited `POLARS_MAX_THREADS` for expression prediction |
 | `summary.group_col` | `family`; summaries require metadata with this column |
 | `figures.top_features` | Saved training value if `figures` is omitted. If `figures` is supplied, defaults to 20. |
-| `phylogenetic_imputation` | Disabled; same options as training |
+| `phylogenetic_imputation` | Enabled for expression inference; same options as training |
 
 For example:
 

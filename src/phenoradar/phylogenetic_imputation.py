@@ -30,6 +30,10 @@ class PhylogeneticImputationError(ValueError):
     """Invalid phylogenetic interpretation input or incompatible nwkit installation."""
 
 
+class PhylogeneticImputationUnavailable(PhylogeneticImputationError):
+    """A prerequisite for phylogenetic imputation is unavailable."""
+
+
 @dataclass
 class PhylogeneticImputationArtifacts:
     comparison: pl.DataFrame = field(default_factory=pl.DataFrame)
@@ -44,7 +48,7 @@ def prepare_tree(path: Path, branch_length_mode: str) -> Any:
     try:
         ete = importlib.import_module("ete4")
     except ImportError as exc:
-        raise PhylogeneticImputationError(
+        raise PhylogeneticImputationUnavailable(
             "Phylogenetic imputation requires ete4; install phenoradar[phylogeny]."
         ) from exc
     try:
@@ -68,12 +72,14 @@ def prepare_tree(path: Path, branch_length_mode: str) -> Any:
             elif branch_length_mode == "unit":
                 node.dist = 1.0
             elif node.dist is None:
-                raise ValueError(
+                raise PhylogeneticImputationUnavailable(
                     "Input branch lengths are missing; select branch_length_mode: unit "
                     "to explicitly assign all branches length 1"
                 )
             elif not math.isfinite(node.dist) or node.dist < 0:
                 raise ValueError("Input branch lengths must be finite and non-negative")
+    except PhylogeneticImputationUnavailable:
+        raise
     except Exception as exc:
         raise PhylogeneticImputationError(f"Invalid imputation tree {path}: {exc}") from exc
     return tree
@@ -86,7 +92,7 @@ def _nwkit_executable() -> str:
         if local.is_file():
             executable = str(local)
     if executable is None:
-        raise PhylogeneticImputationError(
+        raise PhylogeneticImputationUnavailable(
             "Phylogenetic imputation requires the nwkit asr executable on PATH. "
             "See docs/phylogenetic-imputation.md for installation."
         )
@@ -98,8 +104,9 @@ def _run_asr(
     directory: Path,
     *,
     cache_root: Path | None = None,
+    executable: str | None = None,
 ) -> tuple[pl.DataFrame, dict[str, Any], list[str]]:
-    executable = _nwkit_executable()
+    executable = executable or _nwkit_executable()
     version = subprocess.run(
         [executable, "--version"],
         capture_output=True,
@@ -322,6 +329,20 @@ def write_phylogenetic_imputation(
     unknown = predictions.filter(~pl.col("species").is_in(reference["species"].to_list()))
     if unknown.height == 0:
         return artifacts
+    mapped = reference.clear()
+    n_targets_in_tree = 0
+    executable = None
+    if reference.height:
+        if tree_path is None:
+            raise PhylogeneticImputationError(
+                "Phylogenetic imputation requires data.tree_path when unknown targets exist."
+            )
+        artifacts.tree = prepare_tree(Path(tree_path), settings.branch_length_mode)
+        names = sorted(node.name for node in artifacts.tree.leaves())
+        mapped = reference.filter(pl.col("species").is_in(names))
+        n_targets_in_tree = unknown.filter(pl.col("species").is_in(names)).height
+        if mapped.height and n_targets_in_tree:
+            executable = _nwkit_executable()
     directory = run_dir / "inference" / "phylogenetic_imputation"
     directory.mkdir(parents=True, exist_ok=True)
     metadata: dict[str, Any] = {
@@ -341,28 +362,20 @@ def write_phylogenetic_imputation(
     if reference.height == 0:
         artifacts.warnings.append("Skipped phylogenetic imputation: no observed reference traits.")
     else:
-        if tree_path is None:
-            raise PhylogeneticImputationError(
-                "Phylogenetic imputation requires data.tree_path when unknown targets exist."
-            )
-        artifacts.tree = prepare_tree(Path(tree_path), settings.branch_length_mode)
         parser = importlib.import_module("ete4.parser.newick").make_parser(1, dist="%.17g")
         artifacts.tree.write(outfile=str(directory / "tree.nwk"), parser=parser)
         metadata["input_tree_sha256"] = sha256_file(Path(tree_path))
         metadata["analysis_tree_sha256"] = sha256_file(directory / "tree.nwk")
-        names = {node.name for node in artifacts.tree.leaves()}
-        mapped = reference.filter(pl.col("species").is_in(sorted(names)))
         metadata["n_reference_traits_in_tree"] = mapped.height
-        metadata["n_unknown_targets_in_tree"] = unknown.filter(
-            pl.col("species").is_in(sorted(names))
-        ).height
+        metadata["n_unknown_targets_in_tree"] = n_targets_in_tree
         mapped.rename({"species": "leaf_name", "label": "state"}).write_csv(
             directory / "traits.tsv", separator="\t"
         )
-        if mapped.height and metadata["n_unknown_targets_in_tree"]:
+        if executable is not None:
             artifacts.nodes, provenance, warnings = _run_asr(
                 settings, directory,
                 cache_root=run_dir.parent / ".phenoradar_cache" / "asr",
+                executable=executable,
             )
             metadata.update(provenance)
             artifacts.warnings.extend(warnings)
@@ -434,6 +447,10 @@ def interpret_unknown_predictions(
     """Shared inference-stage entry point, deliberately absent from CV and testing."""
     if not config.phylogenetic_imputation.enabled or predictions.height == 0:
         return PhylogeneticImputationArtifacts()
+    if config.data.tree_path is None:
+        return PhylogeneticImputationArtifacts(
+            warnings=["Skipped phylogenetic imputation: data.tree_path is unset."]
+        )
     from phenoradar.phylogenetic_figures import write_phylogenetic_figures
 
     metadata_trait = config.data.trait_col
@@ -448,14 +465,19 @@ def interpret_unknown_predictions(
             exclude_col=config.split.exclude_col if isinstance(config, AppConfig) else None,
         ),
     )
-    artifacts = write_phylogenetic_imputation(
-        settings=config.phylogenetic_imputation,
-        predictions=predictions,
-        observed_traits=reference,
-        tree_path=config.data.tree_path,
-        run_dir=run_dir,
-        trait_name=trait_name or config.data.trait_col,
-    )
+    try:
+        artifacts = write_phylogenetic_imputation(
+            settings=config.phylogenetic_imputation,
+            predictions=predictions,
+            observed_traits=reference,
+            tree_path=config.data.tree_path,
+            run_dir=run_dir,
+            trait_name=trait_name or config.data.trait_col,
+        )
+    except PhylogeneticImputationUnavailable as exc:
+        return PhylogeneticImputationArtifacts(
+            warnings=[f"Skipped phylogenetic imputation: {exc}"]
+        )
     write_phylogenetic_figures(
         artifacts,
         run_dir=run_dir,

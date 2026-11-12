@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -9,7 +10,6 @@ import numpy as np
 import polars as pl
 import pytest
 import yaml
-from click import unstyle
 from typer.testing import CliRunner
 
 from phenoradar.bundle import (
@@ -296,7 +296,7 @@ def test_predict_requires_explicit_tpm_and_valid_predict_settings(
     result = CliRunner().invoke(app, args)
     assert result.exit_code != 0
     # Rich can insert ANSI color codes around option names in CI.
-    assert error in unstyle(result.output)
+    assert error in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
 
 
 @pytest.mark.parametrize("with_metadata", [False, True])

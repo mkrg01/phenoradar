@@ -59,7 +59,7 @@ def test_full_run_and_predict_phylogeny_leave_model_predictions_unchanged(
         before = set((tmp_path / "runs").glob("*"))
         result = runner.invoke(app, [kind, "-c", str(config_path), *args])
         assert result.exit_code == 0, result.output + repr(result.exception)
-        return next(iter(set((tmp_path / "runs").glob("*")) - before))
+        return next(path for path in (tmp_path / "runs").glob(f"*_{kind}_*") if path not in before)
 
     baseline = run("run", config)
     assert not (baseline / "inference/tables/phylogenetic_imputation.tsv").exists()
@@ -67,7 +67,7 @@ def test_full_run_and_predict_phylogeny_leave_model_predictions_unchanged(
     assert bundle.observed_traits["species"].to_list() == ["a", "b", "c", "d", "e"]
     assert bundle.manifest["trait_name"] == "phenotype"
 
-    config["phylogenetic_imputation"]["enabled"] = True
+    del config["phylogenetic_imputation"]["enabled"]
     enabled = run("run", config)
     for artifact in [
         "cv/tables/prediction_cv.tsv",
@@ -104,7 +104,7 @@ def test_full_run_and_predict_phylogeny_leave_model_predictions_unchanged(
                 "tree_path": str(tree),
                 "contrast_pair_col": None,
             },
-            "phylogenetic_imputation": {"enabled": True, "branch_length_mode": "unit"},
+            "phylogenetic_imputation": {"branch_length_mode": "unit"},
         },
         "--model-bundle",
         str(baseline / "model_bundle"),

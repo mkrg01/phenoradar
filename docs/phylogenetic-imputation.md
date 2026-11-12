@@ -33,12 +33,13 @@ phylogenetic_imputation:
 
 | Setting | Default | Options |
 | --- | --- | --- |
-| `enabled` | `false` | Enable for expression `full_run` and `predict` with unknown targets |
+| `enabled` | `true` | Set to `false` to skip interpretation in expression `full_run` and `predict` |
 | `branch_length_mode` | `input` | `input` or `unit` |
 | `model` | `ER` | `ER` or `ARD`, with rates fitted by nwkit |
 | `root_prior` | `equal` | `equal` or `empirical` observed-state frequencies |
 
-`cv_only` never executes imputation. Combined mode does not support it.
+Imputation runs only for unknown-trait targets in expression `full_run` and
+`predict`.
 
 ## Trees and reference traits
 
@@ -46,8 +47,9 @@ Supply a rooted Newick tree containing targets and known-trait references.
 The supplied root and polytomies are preserved; an explicit `[&U]` marker is
 rejected.
 
-- `input` uses supplied non-root lengths. Missing, negative, or non-finite lengths
-  are errors; zero is valid. Root stem length does not participate.
+- `input` uses supplied non-root lengths. Missing lengths skip imputation.
+  Negative or non-finite lengths are errors. Zero is valid, and the root stem
+  length is ignored.
 - `unit` assigns every non-root length 1 in an analysis copy. This suits taxonomy
   trees with absent/arbitrary lengths; distances are branch counts, not time.
 
@@ -85,10 +87,11 @@ All paths are under `inference/`:
 | `phylogenetic_imputation/metadata.json` | Settings, reference scope, hashes, command/version, status, and warnings |
 | `phylogenetic_imputation/nwkit.{stderr,stdout}.txt` | External-command diagnostics |
 
-Disabled imputation or no unknown targets produces no files. Missing/incompatible
-nwkit or invalid input is an error. A numerical fit failure retains expression
-predictions, records the failure, and leaves phylogenetic probabilities unavailable;
-fit-dependent files may be absent.
+Disabled imputation or no unknown targets produces no files. When required tree
+data, ETE4, or nwkit are unavailable, PhenoRadar records a warning and completes
+the prediction run. Incompatible nwkit or invalid input is an error. A numerical
+fit failure retains expression predictions, records the failure, and leaves
+phylogenetic probabilities unavailable. Fit-dependent files may be absent.
 
 | Column | Meaning |
 | --- | --- |

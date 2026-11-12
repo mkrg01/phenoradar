@@ -49,7 +49,8 @@ def test_config_shared_with_predict_and_requires_explicit_branch_mode(tmp_path: 
         enabled=True,
         branch_length_mode="unit",
     )
-    assert not AppConfig().phylogenetic_imputation.enabled
+    assert AppConfig().phylogenetic_imputation.enabled
+    assert load_predict_config([], require_tpm=False).phylogenetic_imputation.enabled
     with pytest.raises(ValueError):
         PhylogeneticImputationConfig(branch_length_mode="auto")
     with pytest.raises(ValueError):
@@ -112,7 +113,9 @@ def test_unit_lengths_preserve_polytomies_and_species_ids(tmp_path: Path) -> Non
 
 def test_disabled_or_no_unknowns_do_not_require_tree_or_nwkit(tmp_path: Path) -> None:
     disabled = interpret_unknown_predictions(
-        AppConfig(), predictions=predictions(), run_dir=tmp_path
+        AppConfig(phylogenetic_imputation=PhylogeneticImputationConfig(enabled=False)),
+        predictions=predictions(),
+        run_dir=tmp_path,
     )
     assert disabled.comparison.height == 0
     enabled = write_phylogenetic_imputation(
@@ -124,6 +127,33 @@ def test_disabled_or_no_unknowns_do_not_require_tree_or_nwkit(tmp_path: Path) ->
         trait_name="trait",
     )
     assert enabled.comparison.height == 0
+    assert not (tmp_path / "inference").exists()
+
+
+@pytest.mark.parametrize("missing", ["tree", "lengths", "nwkit"])
+def test_default_skips_unavailable_imputation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    from phenoradar import phylogenetic_imputation as module
+    from phenoradar.config import PredictConfig
+
+    tree = tmp_path / "tree.nwk"
+    if missing != "tree":
+        pytest.importorskip("ete4")
+        tree.write_text("((a,b,u),(c,d,v,w));" if missing == "lengths" else "(a:1,u:1);")
+    if missing == "nwkit":
+        monkeypatch.setattr(module.shutil, "which", lambda name: None)
+        monkeypatch.setattr(module.sys, "executable", str(tmp_path / "python"))
+    config = PredictConfig.model_validate(
+        {"data": {"tree_path": None if missing == "tree" else str(tree)}}
+    )
+
+    artifacts = interpret_unknown_predictions(
+        config, predictions=predictions(), bundled_traits=references(), run_dir=tmp_path
+    )
+
+    expected = {"tree": "data.tree_path", "lengths": "branch lengths", "nwkit": "nwkit"}
+    assert expected[missing] in artifacts.warnings[0]
     assert not (tmp_path / "inference").exists()
 
 
@@ -232,7 +262,7 @@ def test_failed_fit_is_recorded_without_changing_predictions(
         predictions=predictions(),
         observed_traits=references(),
         tree_path=str(tree),
-        run_dir=tmp_path,
+        run_dir=tmp_path / "run",
         trait_name="trait",
     )
     assert result.comparison["phylo_prob"].null_count() == result.comparison.height

@@ -516,7 +516,7 @@ class RuntimeConfig(StrictModel):
 class PhylogeneticImputationConfig(StrictModel):
     """Optional interpretation of unknown-species predictions using observed traits."""
 
-    enabled: bool = False
+    enabled: bool = True
     branch_length_mode: Literal["input", "unit"] = "input"
     model: Literal["ER", "ARD"] = "ER"
     root_prior: Literal["equal", "empirical"] = "equal"
@@ -574,6 +574,10 @@ class AppConfig(StrictModel):
     @model_validator(mode="after")
     def validate_contrast_pair_dependencies(self) -> AppConfig:
         if self.data.feature_mode in {"amino_acid", "combined"}:
+            if "enabled" not in self.phylogenetic_imputation.model_fields_set:
+                self.phylogenetic_imputation = self.phylogenetic_imputation.model_copy(
+                    update={"enabled": False}
+                )
             if not self.data.alignment_dir:
                 raise ValueError("amino_acid mode requires data.alignment_dir")
             if (
