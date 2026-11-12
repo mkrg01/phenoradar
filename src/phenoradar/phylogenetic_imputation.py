@@ -8,8 +8,13 @@ import math
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from threading import Event
 from typing import Any
 
 import polars as pl
@@ -19,6 +24,7 @@ from phenoradar.abstention import prediction_label_expr
 from phenoradar.config import AppConfig, PredictConfig
 from phenoradar.config.schema import PhylogeneticImputationConfig
 from phenoradar.provenance import sha256_file
+from phenoradar.timing import TimingRecorder
 from phenoradar.trait_reference import (
     merge_observed_traits,
     read_observed_traits,
@@ -41,6 +47,17 @@ class PhylogeneticImputationArtifacts:
     nodes: pl.DataFrame = field(default_factory=pl.DataFrame)
     tree: Any = None
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _PreparedPhylogeneticFit:
+    reference: pl.DataFrame
+    unknown: pl.Series
+    artifacts: PhylogeneticImputationArtifacts
+    status: str
+    metadata: dict[str, Any]
+    directory: Path
+    executable: str | None
 
 
 def prepare_tree(path: Path, branch_length_mode: str) -> Any:
@@ -105,6 +122,7 @@ def _run_asr(
     *,
     cache_root: Path | None = None,
     executable: str | None = None,
+    cancel: Event | None = None,
 ) -> tuple[pl.DataFrame, dict[str, Any], list[str]]:
     executable = executable or _nwkit_executable()
     version = subprocess.run(
@@ -162,7 +180,10 @@ def _run_asr(
         else asr_cache.restore(cache_path, key, directory)
     )
     if cached is None:
-        result = subprocess.run(arguments, capture_output=True, text=True, check=False)
+        result = (
+            subprocess.run(arguments, capture_output=True, text=True, check=False)
+            if cancel is None else _run_cancellable_asr(arguments, cancel)
+        )
         (directory / "nwkit.stderr.txt").write_text(result.stderr, encoding="utf-8")
         (directory / "nwkit.stdout.txt").write_text(result.stdout, encoding="utf-8")
     else:
@@ -220,6 +241,27 @@ def _run_asr(
     if cached is None and cache_path is not None and key is not None:
         asr_cache.store(cache_path, key, directory, arguments)
     return nodes, provenance, warnings
+
+
+def _run_cancellable_asr(arguments: list[str], cancel: Event) -> subprocess.CompletedProcess[str]:
+    if cancel.is_set():
+        raise CancelledError()
+    with subprocess.Popen(
+        arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    ) as process:
+        while not cancel.is_set():
+            try:
+                stdout, stderr = process.communicate(timeout=0.25)
+                return subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                continue
+        process.terminate()
+        try:
+            process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+        raise CancelledError()
 
 
 def _validate_node_mapping(tree: Any, nodes: pl.DataFrame) -> None:
@@ -312,23 +354,19 @@ def _annotation(
     )
 
 
-def write_phylogenetic_imputation(
+def _prepare_phylogenetic_fit(
     *,
     settings: PhylogeneticImputationConfig,
-    predictions: pl.DataFrame,
-    observed_traits: pl.DataFrame,
+    target_species: pl.Series,
+    reference: pl.DataFrame,
     tree_path: str | None,
-    run_dir: Path,
+    directory: Path,
     trait_name: str,
-) -> PhylogeneticImputationArtifacts:
-    """Write post-prediction artifacts; never train or modify prediction labels."""
+) -> _PreparedPhylogeneticFit | None:
     artifacts = PhylogeneticImputationArtifacts()
-    if not settings.enabled or predictions.height == 0:
-        return artifacts
-    reference = validate_observed_traits(observed_traits)
-    unknown = predictions.filter(~pl.col("species").is_in(reference["species"].to_list()))
-    if unknown.height == 0:
-        return artifacts
+    unknown = target_species.filter(~target_species.is_in(reference["species"].to_list()))
+    if unknown.is_empty():
+        return None
     mapped = reference.clear()
     n_targets_in_tree = 0
     executable = None
@@ -340,16 +378,15 @@ def write_phylogenetic_imputation(
         artifacts.tree = prepare_tree(Path(tree_path), settings.branch_length_mode)
         names = sorted(node.name for node in artifacts.tree.leaves())
         mapped = reference.filter(pl.col("species").is_in(names))
-        n_targets_in_tree = unknown.filter(pl.col("species").is_in(names)).height
+        n_targets_in_tree = len(unknown.filter(unknown.is_in(names)))
         if mapped.height and n_targets_in_tree:
             executable = _nwkit_executable()
-    directory = run_dir / "inference" / "phylogenetic_imputation"
     directory.mkdir(parents=True, exist_ok=True)
     metadata: dict[str, Any] = {
         "settings": settings.model_dump(),
         "trait_name": trait_name,
         "reference_scope": "observed_metadata_and_bundle_traits",
-        "n_unknown_targets": unknown.height,
+        "n_unknown_targets": len(unknown),
         "n_reference_traits": reference.height,
         "rooting": "as_supplied",
         "distance_unit": (
@@ -371,28 +408,93 @@ def write_phylogenetic_imputation(
         mapped.rename({"species": "leaf_name", "label": "state"}).write_csv(
             directory / "traits.tsv", separator="\t"
         )
-        if executable is not None:
-            artifacts.nodes, provenance, warnings = _run_asr(
-                settings, directory,
-                cache_root=run_dir.parent / ".phenoradar_cache" / "asr",
-                executable=executable,
-            )
-            metadata.update(provenance)
-            artifacts.warnings.extend(warnings)
-            status = "imputed" if artifacts.nodes.height else "fit_failed"
-            if artifacts.nodes.height:
-                _validate_node_mapping(artifacts.tree, artifacts.nodes)
-        else:
+        if executable is None:
             artifacts.warnings.append(
                 "Skipped phylogenetic imputation: the tree must contain both "
                 "observed reference species and unknown prediction targets."
             )
+    return _PreparedPhylogeneticFit(
+        reference, unknown, artifacts, status, metadata, directory, executable
+    )
+
+
+def _execute_phylogenetic_fit(
+    fit: _PreparedPhylogeneticFit,
+    settings: PhylogeneticImputationConfig,
+    cache_root: Path,
+    cancel: Event | None = None,
+) -> _PreparedPhylogeneticFit:
+    if fit.executable is not None:
+        artifacts = fit.artifacts
+        artifacts.nodes, provenance, warnings = _run_asr(
+            settings, fit.directory, cache_root=cache_root, executable=fit.executable, cancel=cancel
+        )
+        fit.metadata.update(provenance)
+        artifacts.warnings.extend(warnings)
+        fit.status = "imputed" if artifacts.nodes.height else "fit_failed"
+        if artifacts.nodes.height:
+            _validate_node_mapping(artifacts.tree, artifacts.nodes)
+    return fit
+
+
+def write_phylogenetic_imputation(
+    *,
+    settings: PhylogeneticImputationConfig,
+    predictions: pl.DataFrame,
+    observed_traits: pl.DataFrame,
+    tree_path: str | None,
+    run_dir: Path,
+    trait_name: str,
+    prepared_fit: _PreparedPhylogeneticFit | None = None,
+) -> PhylogeneticImputationArtifacts:
+    """Write post-prediction artifacts; never train or modify prediction labels."""
+    if not settings.enabled or predictions.height == 0:
+        return PhylogeneticImputationArtifacts()
+    reference = validate_observed_traits(observed_traits)
+    target_species = predictions["species"]
+    directory = run_dir / "inference" / "phylogenetic_imputation"
+    if prepared_fit is not None:
+        unknown = target_species.filter(~target_species.is_in(reference["species"].to_list()))
+        if (
+            prepared_fit.metadata["settings"] == settings.model_dump()
+            and prepared_fit.metadata["trait_name"] == trait_name
+            and prepared_fit.reference.equals(reference)
+            and prepared_fit.unknown.sort().equals(unknown.sort())
+            and (
+                reference.is_empty()
+                or (tree_path is not None
+                    and prepared_fit.metadata["input_tree_sha256"] == sha256_file(Path(tree_path)))
+            )
+        ):
+            shutil.copytree(prepared_fit.directory, directory)
+            cache = prepared_fit.metadata.get("asr_cache")
+            if cache is not None:
+                # Keep the actual command, with a usable replay command for the saved inputs.
+                cache["requested_command"] = [
+                    str(directory / Path(arg).name) if Path(arg).parent == prepared_fit.directory
+                    else arg for arg in cache["requested_command"]
+                ]
+        else:
+            prepared_fit = None
+    if prepared_fit is None:
+        prepared_fit = _prepare_phylogenetic_fit(
+            settings=settings, target_species=target_species, reference=reference,
+            tree_path=tree_path, directory=directory, trait_name=trait_name,
+        )
+        if prepared_fit is not None:
+            _execute_phylogenetic_fit(
+                prepared_fit, settings, run_dir.parent / ".phenoradar_cache" / "asr"
+            )
+    if prepared_fit is None:
+        return PhylogeneticImputationArtifacts()
+    artifacts = prepared_fit.artifacts
+    metadata = prepared_fit.metadata
     artifacts.annotation = _annotation(
         predictions,
         reference,
         artifacts.tree,
         artifacts.nodes,
-        status,
+        prepared_fit.status,
     )
     artifacts.comparison = artifacts.annotation.filter(
         pl.col("is_prediction_target") & pl.col("observed_trait").is_null()
@@ -410,7 +512,7 @@ def write_phylogenetic_imputation(
         (positive, "phylogenetic_positive_candidates.tsv"),
     ]:
         frame.write_csv(tables / filename, separator="\t", null_value="NA", float_precision=10)
-    metadata["status"] = status
+    metadata["status"] = prepared_fit.status
     metadata["warnings"] = artifacts.warnings
     (directory / "metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -436,6 +538,69 @@ def add_phylogenetic_evidence(
     )
 
 
+@contextmanager
+def background_phylogenetic_fit(
+    config: AppConfig,
+    split_manifest: pl.DataFrame,
+    *,
+    run_root: Path,
+    timing_recorder: TimingRecorder,
+) -> Iterator[Future[_PreparedPhylogeneticFit | None] | None]:
+    """Stage the ASR inputs on the main thread, then fit alongside expression CV."""
+    if (
+        config.runtime.execution_stage != "full_run"
+        or config.runtime.n_jobs < 2
+        or not config.phylogenetic_imputation.enabled
+        or config.data.tree_path is None
+    ):
+        yield None
+        return
+    targets = (
+        split_manifest.filter(pl.col("pool") == "discovery_inference")["species"]
+        .unique()
+    )
+    if targets.is_empty():
+        yield None
+        return
+
+    with TemporaryDirectory(prefix="phenoradar-asr-") as scratch:
+        try:
+            reference = read_observed_traits(
+                config.data.metadata_path, species_col=config.data.species_col,
+                trait_col=config.data.trait_col, exclude_col=config.split.exclude_col,
+            )
+            prepared = _prepare_phylogenetic_fit(
+                settings=config.phylogenetic_imputation, target_species=targets,
+                reference=reference, tree_path=config.data.tree_path,
+                directory=Path(scratch) / "phylogenetic_imputation",
+                trait_name=config.data.trait_col,
+            )
+        except (OSError, ValueError, pl.exceptions.PolarsError):
+            # Report input errors in the normal inference stage using actual predictions.
+            yield None
+            return
+        if prepared is None or prepared.executable is None:
+            yield None
+            return
+
+        cancel = Event()
+
+        def fit() -> _PreparedPhylogeneticFit:
+            with timing_recorder.measure(scope="inference", stage="phylogenetic_background_fit"):
+                return _execute_phylogenetic_fit(
+                    prepared, config.phylogenetic_imputation,
+                    run_root / ".phenoradar_cache" / "asr", cancel,
+                )
+
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="phenoradar-asr") as executor:
+            future = executor.submit(fit)
+            try:
+                yield future
+            finally:
+                cancel.set()
+                future.cancel()
+
+
 def interpret_unknown_predictions(
     config: AppConfig | PredictConfig,
     *,
@@ -443,6 +608,7 @@ def interpret_unknown_predictions(
     run_dir: Path,
     bundled_traits: pl.DataFrame | None = None,
     trait_name: str | None = None,
+    background_fit: Future[_PreparedPhylogeneticFit | None] | None = None,
 ) -> PhylogeneticImputationArtifacts:
     """Shared inference-stage entry point, deliberately absent from CV and testing."""
     if not config.phylogenetic_imputation.enabled or predictions.height == 0:
@@ -473,6 +639,7 @@ def interpret_unknown_predictions(
             tree_path=config.data.tree_path,
             run_dir=run_dir,
             trait_name=trait_name or config.data.trait_col,
+            prepared_fit=background_fit.result() if background_fit is not None else None,
         )
     except PhylogeneticImputationUnavailable as exc:
         return PhylogeneticImputationArtifacts(

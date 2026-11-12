@@ -15,6 +15,7 @@ from phenoradar.cv import (
     CVError,
     ExpressionMatrixBuilder,
     FinalRefitArtifacts,
+    _compact_prediction_entry,
     apply_expression_transform,
 )
 from phenoradar.interpret import _linear_coefficients
@@ -316,7 +317,19 @@ def build_candidate_evidence_artifacts(
         )
 
     if config.preprocess.expression.expression_transform.method in {"none", "log1p"}:
-        transform_features = model_features
+        compact_entries = [
+            _compact_prediction_entry(config, entry.feature_names, entry.scaler, entry.model)
+            for entry in entries
+        ]
+        coefficients = [
+            coef if original.feature_names == compact.feature_names
+            else coef[np.isin(original.feature_names, compact.feature_names)]
+            for coef, original, compact in zip(coefficients, entries, compact_entries, strict=True)
+        ]
+        entries = compact_entries
+        transform_features = sorted({
+            feature for entry in entries for feature in entry.feature_names
+        })
         transform_index = {feature: idx for idx, feature in enumerate(transform_features)}
 
     try:

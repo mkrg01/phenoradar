@@ -1,9 +1,10 @@
 # Phylogenetic imputation
 
 Compare expression predictions for unknown-trait species with binary-trait
-imputation from `nwkit asr`. This optional interpretation runs after prediction;
-observed labels, model training, CV, and external-test evaluation remain unchanged.
-Imputed labels are never used for training.
+imputation from `nwkit asr`. For multicore expression full runs, PhenoRadar can
+start ASR from the tree and observed labels alongside model fitting. The
+comparison uses the final predictions after fitting. Only observed labels
+participate in model training, CV, and external-test evaluation.
 
 ## Installation and configuration
 

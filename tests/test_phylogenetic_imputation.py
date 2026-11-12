@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
+from concurrent.futures import CancelledError
 from pathlib import Path
+from threading import Event, Timer
 
 import polars as pl
 import pytest
@@ -13,6 +16,7 @@ from phenoradar.config import AppConfig, load_predict_config
 from phenoradar.config.schema import PhylogeneticImputationConfig
 from phenoradar.phylogenetic_imputation import (
     PhylogeneticImputationError,
+    _run_cancellable_asr,
     interpret_unknown_predictions,
     prepare_tree,
     write_phylogenetic_imputation,
@@ -39,6 +43,18 @@ def predictions() -> pl.DataFrame:
             "decision_status": ["accepted", "abstained", "accepted", "accepted", "accepted"],
         }
     )
+
+
+def test_cancelled_background_asr_terminates_subprocess() -> None:
+    cancel = Event()
+    timer = Timer(0.1, cancel.set)
+    timer.start()
+    try:
+        with pytest.raises(CancelledError):
+            _run_cancellable_asr([sys.executable, "-c", "import time; time.sleep(30)"], cancel)
+    finally:
+        timer.cancel()
+        timer.join()
 
 
 def test_config_shared_with_predict_and_requires_explicit_branch_mode(tmp_path: Path) -> None:

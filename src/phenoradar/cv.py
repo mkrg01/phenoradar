@@ -849,7 +849,7 @@ def _runtime_n_jobs(config: AppConfig) -> int:
     value = int(config.runtime.n_jobs)
     if value < 1:
         raise CVError("runtime.n_jobs must be >= 1")
-    return value
+    return min(value, config._worker_limit) if config._worker_limit is not None else value
 
 
 def _with_native_thread_limit[T](
@@ -888,7 +888,7 @@ def _with_native_thread_limit_for_config[T](
 
 
 def _polars_thread_pool_warning(config: AppConfig) -> str | None:
-    runtime_n_jobs = _runtime_n_jobs(config)
+    runtime_n_jobs = int(config.runtime.n_jobs)
     polars_threads = int(pl.thread_pool_size())
     if polars_threads <= runtime_n_jobs:
         return None

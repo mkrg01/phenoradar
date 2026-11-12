@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import UTC, datetime
 from math import sqrt
@@ -79,6 +80,7 @@ from phenoradar.orthogroup_annotation import (
 )
 from phenoradar.phylogenetic_imputation import (
     add_phylogenetic_evidence,
+    background_phylogenetic_fit,
     interpret_unknown_predictions,
 )
 from phenoradar.predict_evidence import build_predict_evidence_artifacts
@@ -944,10 +946,15 @@ def _run_single(
         stage="fingerprint_generation",
     )
 
-    with RunExpressionCache(
-        cache_directory=Path("runs/.phenoradar_cache/expression"),
-        cache_source=expression_source,
-    ) as expression_cache:
+    candidate_evidence_artifacts: CandidateEvidenceArtifacts | None = None
+    phylogenetic_artifacts = None
+    with (
+        RunExpressionCache(
+            cache_directory=Path("runs/.phenoradar_cache/expression"),
+            cache_source=expression_source,
+        ) as expression_cache,
+        ExitStack() as background,
+    ):
         if resolved.runtime.execution_stage == "full_run":
             _log("Prepare shared expression input for CV and final refit.")
             input_started = timing_recorder.start()
@@ -961,6 +968,17 @@ def _run_single(
             timing_recorder.record_since(
                 input_started, scope="run", stage="expression_preparation"
             )
+        phylogenetic_fit = background.enter_context(background_phylogenetic_fit(
+            resolved, split_artifacts.split_manifest,
+            run_root=run_dir_override.parent if run_dir_override is not None else Path("runs"),
+            timing_recorder=timing_recorder,
+        ))
+        training_config = resolved
+        if phylogenetic_fit is not None:
+            _log("Run phylogenetic imputation alongside model fitting.")
+            training_config = resolved.model_copy()
+            if not phylogenetic_fit.done():
+                training_config._worker_limit = resolved.runtime.n_jobs - 1
         _log("Run outer cross-validation.")
 
         def _outer_cv_progress(message: str) -> None:
@@ -969,7 +987,7 @@ def _run_single(
         outer_cv_started = timing_recorder.start()
         try:
             cv_artifacts = run_outer_cv(
-                resolved,
+                training_config,
                 split_artifacts.split_manifest,
                 progress_callback=_outer_cv_progress,
                 timing_recorder=timing_recorder,
@@ -1030,10 +1048,12 @@ def _run_single(
         final_refit_artifacts = None
         if resolved.runtime.execution_stage == "full_run":
             _log("Run final refit stage.")
+            if phylogenetic_fit is not None and phylogenetic_fit.done():
+                training_config._worker_limit = None
             final_refit_started = timing_recorder.start()
             try:
                 final_refit_artifacts = run_final_refit(
-                    config=resolved,
+                    config=training_config,
                     split_manifest=split_artifacts.split_manifest,
                     timing_recorder=timing_recorder,
                     expression_cache=expression_cache,
@@ -1048,17 +1068,45 @@ def _run_single(
             warnings.extend(final_refit_artifacts.warnings)
             status = "full_run_completed"
             _log("Final refit completed.")
+            inference_predictions_by_fold = getattr(
+                cv_artifacts, "inference_predictions_by_fold", None
+            )
+            try:
+                with timing_recorder.measure(scope="artifacts", stage="candidate_evidence"):
+                    candidate_evidence_artifacts = build_candidate_evidence_artifacts(
+                        config=resolved,
+                        split_manifest=split_artifacts.split_manifest,
+                        final_refit=final_refit_artifacts,
+                        cross_fold_predictions=(
+                            inference_predictions_by_fold
+                            if isinstance(inference_predictions_by_fold, pl.DataFrame)
+                            else None
+                        ),
+                        top_features=resolved.figures.top_features,
+                        include_model_reference=True,
+                        expression_builder=expression_cache.prepared_builder,
+                    )
+            except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
+                raise typer.BadParameter(str(exc)) from exc
         else:
             _log("Skip final refit stage (execution_stage=cv_only).")
-        expression_builder = expression_cache.prepared_builder
 
-    _log("Create run directory and write core tabular artifacts.")
-    artifact_writing_started = timing_recorder.start()
-    if run_dir_override is None:
-        run_dir = _build_run_dir("run")
-    else:
-        run_dir = run_dir_override
-        run_dir.mkdir(parents=True, exist_ok=False)
+        _log("Create run directory and write core tabular artifacts.")
+        artifact_writing_started = timing_recorder.start()
+        if run_dir_override is None:
+            run_dir = _build_run_dir("run")
+        else:
+            run_dir = run_dir_override
+            run_dir.mkdir(parents=True, exist_ok=False)
+        if phylogenetic_fit is not None and final_refit_artifacts is not None:
+            try:
+                with timing_recorder.measure(scope="inference", stage="phylogenetic_imputation"):
+                    phylogenetic_artifacts = interpret_unknown_predictions(
+                        resolved, predictions=final_refit_artifacts.pred_inference, run_dir=run_dir,
+                        background_fit=phylogenetic_fit,
+                    )
+            except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
+                raise typer.BadParameter(str(exc)) from exc
     table_dirs = _run_table_dirs(run_dir)
     split_tables_dir = table_dirs["split"]
     cv_tables_dir = table_dirs["cv"]
@@ -1198,7 +1246,6 @@ def _run_single(
             null_value="NA",
         )
     bundle_export_result = None
-    candidate_evidence_artifacts: CandidateEvidenceArtifacts | None = None
     selected_tables: list[pl.DataFrame] = []
     if cv_artifacts.model_selection_selected is not None:
         selected_tables.append(cv_artifacts.model_selection_selected)
@@ -1227,31 +1274,16 @@ def _run_single(
                 float_precision=8,
                 null_value="NA",
             )
-        try:
-            with timing_recorder.measure(scope="inference", stage="phylogenetic_imputation"):
-                phylogenetic_artifacts = interpret_unknown_predictions(
-                    resolved, predictions=final_refit_artifacts.pred_inference, run_dir=run_dir,
-                )
-            candidate_evidence_started = timing_recorder.start()
-            candidate_evidence_artifacts = build_candidate_evidence_artifacts(
-                config=resolved,
-                split_manifest=split_artifacts.split_manifest,
-                final_refit=final_refit_artifacts,
-                cross_fold_predictions=(
-                    inference_predictions_by_fold
-                    if isinstance(inference_predictions_by_fold, pl.DataFrame)
-                    else None
-                ),
-                top_features=resolved.figures.top_features,
-                include_model_reference=True,
-                expression_builder=expression_builder,
-            )
-            timing_recorder.record_since(
-                candidate_evidence_started, scope="artifacts", stage="candidate_evidence"
-            )
-        except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
-            raise typer.BadParameter(str(exc)) from exc
+        if phylogenetic_artifacts is None:
+            try:
+                with timing_recorder.measure(scope="inference", stage="phylogenetic_imputation"):
+                    phylogenetic_artifacts = interpret_unknown_predictions(
+                        resolved, predictions=final_refit_artifacts.pred_inference, run_dir=run_dir,
+                    )
+            except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
+                raise typer.BadParameter(str(exc)) from exc
         warnings.extend(phylogenetic_artifacts.warnings)
+        assert candidate_evidence_artifacts is not None
         candidate_evidence_artifacts = replace(
             candidate_evidence_artifacts, candidates=add_phylogenetic_evidence(
                 candidate_evidence_artifacts.candidates, phylogenetic_artifacts,

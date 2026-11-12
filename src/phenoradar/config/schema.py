@@ -561,6 +561,7 @@ class AppConfig(StrictModel):
 
     # Internal only: display-ID changes must not change random sampling or fitting.
     _fold_seed_ids: dict[str, str] = PrivateAttr(default_factory=dict)
+    _worker_limit: int | None = PrivateAttr(default=None)
 
     data: DataConfig = Field(default_factory=DataConfig)
     split: SplitConfig = Field(default_factory=SplitConfig)

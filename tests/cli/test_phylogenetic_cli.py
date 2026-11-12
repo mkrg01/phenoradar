@@ -48,7 +48,8 @@ def test_full_run_and_predict_phylogeny_leave_model_predictions_unchanged(
             "tree_path": str(tree),
             "trait_col": "phenotype",
         },
-        "runtime": {"execution_stage": "full_run", "n_jobs": 1},
+        "split": {"group_col": "contrast_pair_id"},
+        "runtime": {"execution_stage": "full_run", "n_jobs": 2},
         "phylogenetic_imputation": {"enabled": False, "branch_length_mode": "unit"},
     }
     runner = CliRunner()
@@ -91,6 +92,13 @@ def test_full_run_and_predict_phylogeny_leave_model_predictions_unchanged(
     )
     assert candidate["phylo_prob"].to_list() == pytest.approx(comparison["phylo_prob"].to_list())
     assert (enabled / "inference/figures/tree_phylogenetic_imputation.svg").exists()
+    timing = pl.read_csv(enabled / "runtime/tables/timing.tsv", separator="\t")
+    background = timing.filter(pl.col("stage") == "phylogenetic_background_fit")
+    cv = timing.filter((pl.col("scope") == "run") & (pl.col("stage") == "outer_cv"))
+    assert background.height == 1
+    assert max(background["started_at_sec"][0], cv["started_at_sec"][0]) < min(
+        background["ended_at_sec"][0], cv["ended_at_sec"][0]
+    )
 
     # Snapshot works after the original metadata has gone; expression input contains only u.
     metadata.unlink()
@@ -115,6 +123,9 @@ def test_full_run_and_predict_phylogeny_leave_model_predictions_unchanged(
     assert restored["phylo_prob"].to_list() == pytest.approx(comparison["phylo_prob"].to_list())
     assert restored["prob"].to_list() == pytest.approx(comparison["prob"].to_list())
     assert (predicted / "inference/figures/tree_phylogenetic_imputation.svg").exists()
+    for name in ["asr.tsv", "model.tsv", "annotated_tree.nhx"]:
+        artifact = f"inference/phylogenetic_imputation/{name}"
+        assert (enabled / artifact).read_bytes() == (predicted / artifact).read_bytes()
 
     corrupted = tmp_path / "corrupted"
     shutil.copytree(baseline / "model_bundle", corrupted)
@@ -142,6 +153,7 @@ def test_cv_only_does_not_invoke_imputation_or_require_a_tree(
         yaml.safe_dump(
             {
                 "data": {"metadata_path": str(metadata), "tpm_path": str(tpm)},
+                "split": {"group_col": "contrast_pair_id"},
                 "phylogenetic_imputation": {"enabled": True},
             }
         )

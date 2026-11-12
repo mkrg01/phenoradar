@@ -19,6 +19,7 @@ from phenoradar.figures import (
     write_cv_species_evidence_figures,
 )
 from phenoradar.glmnet import GlmnetLogisticRegression
+from phenoradar.missing_expression import NeutralStandardScaler
 
 
 def _write(path: Path, text: str) -> Path:
@@ -152,6 +153,55 @@ def test_build_candidate_evidence_uses_candidate_local_contribution(
     assert artifacts.features.row(0, named=True)["local_rank"] == 1
     assert artifacts.reference_expression.height == (8 if include_model_reference else 4)
     assert artifacts.cross_fold_predictions.height == 2
+
+
+def test_neutral_candidate_evidence_reuses_active_tpm_and_preserves_ensemble_zeros(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, config_path = _candidate_fixture(tmp_path)
+    config = load_and_resolve_config([config_path])
+    config.preprocess.expression.missing_expression.method = "neutral"
+    known = ["known_0a", "known_0b", "known_1a", "known_1b"]
+    split = pl.DataFrame({
+        "species": known, "pool": ["train", "validation", "train", "validation"],
+        "label": [0, 0, 1, 1],
+    })
+    scaler = NeutralStandardScaler().fit(np.log1p([[1.0, 10.0], [9.0, 1.0]]))
+    models = [GlmnetLogisticRegression(), GlmnetLogisticRegression()]
+    models[0].coef_ = np.array([1.5, 0.0])
+    models[1].coef_ = np.zeros(2)
+    refit = SimpleNamespace(
+        pred_inference=pl.DataFrame({
+            "species": ["candidate_a"], "prob": [0.97], "pred_label_fixed_threshold": [1],
+        }),
+        model_entries=[FinalModelEntry(["OG1", "OG2"], scaler, model) for model in models],
+        transform_feature_names=["OG1", "OG2"],
+    )
+    kwargs = dict(
+        config=config, split_manifest=split, final_refit=refit,
+        cross_fold_predictions=None, top_features=2, include_model_reference=True,
+    )
+    with monkeypatch.context() as original:
+        original.setattr(
+            "phenoradar.candidate_evidence._compact_prediction_entry",
+            lambda _config, names, scaler, model: FinalModelEntry(names, scaler, model),
+        )
+        baseline = build_candidate_evidence_artifacts(**kwargs)
+    with RunExpressionCache(cache_directory=tmp_path / "cache") as cache:
+        builder = cache.get_builder(config)
+        builder.cache_species([*known, "candidate_a"])
+        builder.build_matrix(["candidate_a"], feature_order=["OG1"])
+        uncached = builder._build_matrix_uncached
+
+        def read_uncached(species, features=None):
+            assert "candidate_a" not in species, "Expected the final prediction TPM cache"
+            return uncached(species, features)
+
+        monkeypatch.setattr(builder, "_build_matrix_uncached", read_uncached)
+        actual = build_candidate_evidence_artifacts(**kwargs, expression_builder=builder)
+    assert actual.features.equals(baseline.features)
+    assert actual.reference_expression.equals(baseline.reference_expression)
+    assert actual.features["contribution_min"].to_list() == [0.0]
 
 
 def test_reference_snapshot_is_available_without_positive_inference(tmp_path: Path) -> None:
