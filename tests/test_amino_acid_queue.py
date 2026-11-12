@@ -52,7 +52,10 @@ def test_grid_queue_bounds_both_pools_and_falls_back_when_memory_is_small(monkey
 def test_queued_sample_ensembles_match_serial_all_public_tables(
     tmp_path: Path, monkeypatch, policy,
 ):
+    from phenoradar import amino_acid_queue
+
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(amino_acid_queue, "memory_budget", lambda: 16 * 1024**3)
     config = load_and_resolve_config([fixture_config(tmp_path, "aa_frequency")])
     config.sampling.strategy = "group_balanced"
     config.sampling.max_samples_per_label_per_group = 1

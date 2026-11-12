@@ -356,6 +356,7 @@ def fixture_config(tmp_path: Path, aggregation: str, *, full: bool = True) -> Pa
             "inner_cv_strategy": "logo",
             "search_space": {"lambda": [0.01, 0.1], "alpha": [0.95]},
         },
+        "split": {"group_col": "contrast_pair_id"},
         "runtime": {"execution_stage": "full_run" if full else "cv_only", "n_jobs": 1},
         "evaluation": {"group_bootstrap": {"enabled": True, "n_resamples": 10}},
     }
