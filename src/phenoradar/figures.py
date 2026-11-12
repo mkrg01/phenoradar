@@ -333,7 +333,7 @@ def _save_svg_figure(fig: Figure, out_path: Path) -> None:
     plt.close(fig)
 
 
-def _publication_layout(fig: Figure) -> None:
+def _publication_layout(fig: Figure, *, layout_only: bool = False) -> None:
     """Measure decorations before export, keeping a consistent six-point gutter.
 
     Constrained layout accounts for tick labels, panel titles and colorbars without
@@ -361,7 +361,10 @@ def _publication_layout(fig: Figure) -> None:
             "constrained", w_pad=6 / 72, h_pad=6 / 72,
             wspace=0.04, hspace=0.04, rect=(0, bottom, 1, top - bottom),
         )
-    canvas.draw()
+    if layout_only:
+        fig.draw_without_rendering()
+    else:
+        canvas.draw()
 
 
 def _legend_above(ax: Any, *, handles: list[Any] | None = None, ncol: int = 3) -> None:
@@ -374,7 +377,7 @@ def _legend_above(ax: Any, *, handles: list[Any] | None = None, ncol: int = 3) -
 
 
 def _save_pdf_figure(fig: Figure, out_path: Path, *, title: str) -> None:
-    _publication_layout(fig)
+    _publication_layout(fig, layout_only=True)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(
         out_path,

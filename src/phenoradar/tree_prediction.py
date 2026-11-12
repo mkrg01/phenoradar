@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import math
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import nullcontext, suppress
 from functools import wraps
@@ -59,21 +59,31 @@ _INVALID_TPM_REASON_LABELS = (
 type _TreeSvgJob = tuple[str, Callable[..., list[str]], dict[str, Any]]
 
 
+def _tree_population_inputs(kwargs: dict[str, Any]) -> Iterator[tuple[str, dict[str, Any]]]:
+    for suffix, frames in prediction_figure_populations({"annotation": kwargs["annotation"]}):
+        yield suffix, {
+            **kwargs,
+            "annotation": frames["annotation"],
+            "out_path": population_figure_path(kwargs["out_path"], suffix),
+        }
+
+
 def _tree_population_figures(func: Callable[..., list[str]]) -> Callable[..., list[str]]:
     @wraps(func)
-    def render(**kwargs: Any) -> list[str]:
+    def render(*, population_suffix: str | None = None, **kwargs: Any) -> list[str]:
         warnings = []
-        for suffix, frames in prediction_figure_populations(
-            {"annotation": kwargs["annotation"]}
-        ):
-            annotation = frames["annotation"]
-            path = population_figure_path(kwargs["out_path"], suffix)
-            if suffix and annotation["species"].n_unique() < 2:
+        populations = (
+            _tree_population_inputs(kwargs)
+            if population_suffix is None
+            else [(population_suffix, kwargs)]
+        )
+        for suffix, inputs in populations:
+            if suffix and inputs["annotation"]["species"].n_unique() < 2:
                 write_population_message_svg(
-                    path, "Fewer than two accepted species; tree unavailable."
+                    inputs["out_path"], "Fewer than two accepted species; tree unavailable."
                 )
             else:
-                warnings.extend(func(**{**kwargs, "annotation": annotation, "out_path": path}))
+                warnings.extend(func(**inputs))
         return warnings
 
     return render
@@ -325,23 +335,19 @@ def write_run_tree_prediction_artifacts(
             float_precision=8,
             null_value="NA",
         )
-        add_svg_job(
-            "tree_prediction_external",
-            _write_tree_prediction_svg,
-            {
-                "tree_path": tree_path,
-                "annotation": external_annotation,
-                "out_path": external_test_figures_dir / "tree_prediction_external.svg",
-                "title": "External Test Tree Prediction",
-                "tracks": [
-                    "true_label",
-                    "prob",
-                    "pred_label",
-                    "uncertainty_std",
-                    "group_id",
-                ],
-            },
-        )
+        external_inputs = {
+            "tree_path": tree_path,
+            "annotation": external_annotation,
+            "out_path": external_test_figures_dir / "tree_prediction_external.svg",
+            "title": "External Test Tree Prediction",
+            "tracks": ["true_label", "prob", "pred_label", "uncertainty_std", "group_id"],
+        }
+        for suffix, inputs in _tree_population_inputs(external_inputs):
+            add_svg_job(
+                f"tree_prediction_external{suffix}",
+                _write_tree_prediction_svg,
+                {**inputs, "population_suffix": suffix},
+            )
     svg_warnings = _run_tree_svg_jobs(
         svg_jobs,
         parallel_workers=parallel_workers,

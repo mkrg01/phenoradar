@@ -7,6 +7,7 @@ from xml.etree import ElementTree as ET
 import polars as pl
 import pytest
 
+from phenoradar.timing import TimingRecorder
 from phenoradar.tree_prediction import (
     TreePredictionError,
     _ensure_svg_white_background,
@@ -643,6 +644,7 @@ def test_write_run_tree_prediction_artifacts_parallel_workers_write_outputs(
     _metadata().write_csv(metadata_path, separator="\t")
     _write_tpm(tpm_path)
     tree_path.write_text("(sp1,sp2,sp3);\n", encoding="utf-8")
+    timing = TimingRecorder()
 
     warnings = write_run_tree_prediction_artifacts(
         run_dir=tmp_path / "run",
@@ -665,10 +667,22 @@ def test_write_run_tree_prediction_artifacts_parallel_workers_write_outputs(
         thresholds=_thresholds(),
         feature_importance=_feature_importance(),
         coefficients=_coefficients(),
-        pred_external_test=None,
+        pred_external_test=pl.DataFrame(
+            {
+                "species": ["sp1", "sp2", "sp3"],
+                "true_label": [0, 1, 0],
+                "prob": [0.2, 0.8, 0.9],
+                "pred_label_fixed_threshold": [0, 1, 1],
+                "decision_status": ["accepted", "accepted", "abstained"],
+            }
+        ),
         parallel_workers=2,
+        timing_recorder=timing,
     )
 
+    assert {"tree_prediction_external", "tree_prediction_external_accepted_only"} <= set(
+        timing.to_frame()["stage"]
+    )
     cv_tables_dir = tmp_path / "run" / "cv" / "tables"
     cv_figures_dir = tmp_path / "run" / "cv" / "figures"
     assert (cv_tables_dir / "tree_contrast_pairs_annotation.tsv").exists()
@@ -678,6 +692,13 @@ def test_write_run_tree_prediction_artifacts_parallel_workers_write_outputs(
         assert (cv_figures_dir / "tree_group.svg").exists()
         assert (cv_figures_dir / "tree_feature_heatmap_zscore.svg").exists()
         assert (cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg").exists()
+        external = tmp_path / "run" / "external_test" / "figures"
+        full_tree = ET.parse(external / "tree_prediction_external.svg").getroot()
+        accepted_tree = ET.parse(
+            external / "accepted_only" / "tree_prediction_external.svg"
+        ).getroot()
+        assert "sp3" in set(full_tree.itertext())
+        assert "sp3" not in set(accepted_tree.itertext())
     else:
         assert any("Toytree is unavailable" in warning for warning in warnings)
 
