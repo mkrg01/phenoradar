@@ -12,7 +12,7 @@ from typing import Any, get_args
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from .io import ConfigError, _deep_merge_dicts, _load_yaml_mapping
+from .io import ConfigError, _deep_merge_dicts, _load_yaml_mapping, _require_group_col
 from .schema import AppConfig, ExecutionStage
 
 
@@ -290,6 +290,8 @@ def has_condition_dimensions(
 def load_config_conditions(
     config_paths: list[Path],
     execution_stage_override: ExecutionStage | None = None,
+    *,
+    require_group_col: bool = False,
 ) -> ConfigConditionSet:
     """Expand and validate all ordered study conditions in a config."""
     raw = _merged_raw_config(config_paths, execution_stage_override)
@@ -339,6 +341,8 @@ def load_config_conditions(
         except ValidationError as exc:
             details = ", ".join(f"{path}={_display_value(value)}" for path, value in values)
             raise ConfigError(f"Invalid generated condition {index} ({details}): {exc}") from exc
+        if require_group_col:
+            _require_group_col(resolved)
         digest = _config_sha256(resolved)
         duplicate = seen_hashes.get(digest)
         if duplicate is not None:

@@ -67,6 +67,7 @@ phenoradar run -c config.yml --resume runs/STUDY_ID
 | `--execution-stage` | Config value | Override with `cv_only` or `full_run` |
 | `--resume` | None | Resume a study using the same ordered conditions |
 
+The run YAML must specify `split.group_col`.
 `cv_only` writes held-out predictions, metrics, diagnostics, and figures.
 `full_run` also refits, predicts external-test and unknown species, and exports
 `model_bundle/`.

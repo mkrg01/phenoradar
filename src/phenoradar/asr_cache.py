@@ -29,10 +29,13 @@ def cache_key(executable: str, version: str, arguments: list[str], directory: Pa
     """
     try:
         script = Path(executable)
-        shebang = script.read_bytes().splitlines()[0].decode().removeprefix("#!")
-        if Path(shebang).absolute().parent != Path(sys.executable).absolute().parent:
+        interpreter = Path(script.read_bytes().splitlines()[0].decode().removeprefix("#!"))
+        current = Path(sys.executable)
+        # A venv can be mounted at multiple paths. Comparing only the executable
+        # would also match different venvs that symlink to the same base Python.
+        if not interpreter.is_absolute() or not interpreter.parent.samefile(current.parent):
             return None
-        if not Path(shebang).samefile(sys.executable):
+        if not interpreter.samefile(current):
             return None
         spec = importlib.util.find_spec("nwkit")
         if spec is None or spec.origin is None:

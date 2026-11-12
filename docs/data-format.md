@@ -20,12 +20,13 @@ sp4			Poaceae
 | --- | --- | --- |
 | `species` | Yes | Non-empty, unique species ID |
 | `C4` | Yes | Binary trait: `0`, `1`, empty, or null |
-| `contrast_pair_id` | With default split settings | CV group; also used for pair-aware feature scoring |
+| `contrast_pair_id` | When selected for grouping or pair-aware scoring | Contrast pair identifier |
+| `expanded_pair_clade_id` | When selected for grouping or pair-aware scoring | Expanded contrast-pair clade identifier |
 | `family` | No | Readable annotation for grouped summaries and plots |
 
-`split.group_col` must name an existing column. By default it is
-`contrast_pair_id`; `data.contrast_pair_col` separately controls pair-aware
-features and may be `null` when contrast pairs are unused.
+`split.group_col` must be specified and name an existing column.
+`data.contrast_pair_col` controls pair-aware features and may be `null` when
+contrast pairs are unused.
 
 Pool assignment follows these rules, in order:
 

@@ -37,11 +37,14 @@ paths in your config. See [data format](data-format.md) for required columns.
 data:
   metadata_path: data/species_metadata.tsv
   tpm_path: data/tpm.tsv
+split:
+  group_col: expanded_pair_clade_id
 runtime:
   n_jobs: 4
 ```
 
-Omitted settings use built-in defaults; unknown keys are rejected. To validate
+Choose a grouping column present in the metadata. Other omitted settings use
+built-in defaults, and unknown keys are rejected. To validate
 and inspect settings before training:
 
 ```bash

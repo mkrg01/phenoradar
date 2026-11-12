@@ -456,6 +456,8 @@ def test_config_writes_resolved_yaml(tmp_path: Path) -> None:
         """
 runtime:
   seed: 123
+split:
+  group_col: contrast_pair_id
 sampling:
   weighting: group_label_inverse
 """.strip()
@@ -522,6 +524,28 @@ def test_config_without_config_writes_default_yaml(
         },
     )
     assert list(payload["preprocess"]) == ["expression", "amino_acid"]
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        "{}\n",
+        "runtime:\n  seed: 42\n",
+        "split:\n  group_col: null\n",
+        "split:\n  group_col: '   '\n",
+        "preprocess:\n  expression:\n    sparse_feature_filter:\n"
+        "      min_nonzero_fraction: [0.9, 1.0]\n",
+    ],
+)
+def test_run_rejects_unspecified_group_column(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settings: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = _write(tmp_path / "config.yml", settings)
+    result = CliRunner().invoke(app, ["run", "-c", str(config)])
+    assert result.exit_code != 0
+    assert "split.group_col" in _plain_output(result.output)
+    assert not (tmp_path / "runs").exists()
 
 
 def test_run_passes_top_features_to_run_and_tree_figures(
@@ -692,6 +716,8 @@ def test_run_respects_execution_stage_override(
     config = _write(
         tmp_path / "config.yml",
         f"""
+split:
+  group_col: contrast_pair_id
 data:
   metadata_path: {metadata}
   tpm_path: {tpm}
@@ -1073,6 +1099,8 @@ def test_run_cv_only_does_not_emit_final_prediction_tables(
     config = _write(
         tmp_path / "config.yml",
         f"""
+split:
+  group_col: contrast_pair_id
 data:
   metadata_path: {metadata}
   tpm_path: {tpm}
@@ -1161,6 +1189,8 @@ def test_run_default_progress_is_compact_without_stage_level_logs(
     config = _write(
         tmp_path / "config.yml",
         f"""
+split:
+  group_col: contrast_pair_id
 data:
   metadata_path: {metadata}
   tpm_path: {tpm}
@@ -1249,6 +1279,7 @@ data:
   metadata_path: {metadata}
   tpm_path: {tpm}
 split:
+  group_col: contrast_pair_id
   outer_cv_strategy: group_kfold
   outer_cv_n_splits: 2
 model_selection:
@@ -1398,6 +1429,8 @@ def test_run_rejects_verbose_and_quiet_together(
     config = _write(
         tmp_path / "config.yml",
         f"""
+split:
+  group_col: contrast_pair_id
 data:
   metadata_path: {metadata}
   tpm_path: {tpm}
@@ -1422,6 +1455,8 @@ def test_predict_uses_model_bundle_and_emits_predict_artifacts(
     config = _write(
         tmp_path / "config.yml",
         f"""
+split:
+  group_col: contrast_pair_id
 data:
   metadata_path: {metadata}
   tpm_path: {tpm}
@@ -1512,6 +1547,8 @@ def test_report_aggregates_run_and_predict_outputs(
     config = _write(
         tmp_path / "config.yml",
         f"""
+split:
+  group_col: contrast_pair_id
 data:
   metadata_path: {metadata}
   tpm_path: {tpm}
@@ -1936,6 +1973,8 @@ def test_run_expands_scalar_lists_into_ordered_study_and_resumes(
     config = _write(
         tmp_path / "config.yml",
         f"""
+split:
+  group_col: contrast_pair_id
 preprocess:
   expression:
     ranked_feature_filter:
@@ -2487,6 +2526,8 @@ def test_predict_reuses_bundle_without_invoking_training_paths(
     config = _write(
         tmp_path / "config.yml",
         f"""
+split:
+  group_col: contrast_pair_id
 data:
   metadata_path: {metadata}
   tpm_path: {tpm}

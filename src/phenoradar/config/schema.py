@@ -35,6 +35,7 @@ AbsentFeatureFill = Literal[0, "nan"]
 SparseFeatureScope = Literal["all_samples", "any_trait", "trait_0", "trait_1"]
 
 DEFAULT_TOP_FEATURES = 20
+_EXPANDED_PAIR_CLADE_COL = "expanded_pair_clade_id"
 
 
 class StrictModel(BaseModel):
@@ -156,11 +157,18 @@ class DataConfig(StrictModel):
 class SplitConfig(StrictModel):
     """Data split and CV controls."""
 
-    group_col: str = "contrast_pair_id"
+    group_col: str = Field(default="contrast_pair_id", min_length=1)
     exclude_col: str | None = None
     require_both_labels_per_group: bool = False
     outer_cv_strategy: OuterCvStrategy = "logo"
     outer_cv_n_splits: PositiveInt | None = None
+
+    @field_validator("group_col")
+    @classmethod
+    def validate_group_col(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("split.group_col must be a non-empty metadata column name")
+        return value
 
     @model_validator(mode="after")
     def validate_group_kfold_args(self) -> SplitConfig:
@@ -570,6 +578,15 @@ class AppConfig(StrictModel):
     )
     report: ReportConfig = Field(default_factory=ReportConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
+
+    @model_validator(mode="after")
+    def resolve_pair_clade_column(self) -> AppConfig:
+        if (
+            self.split.group_col == _EXPANDED_PAIR_CLADE_COL
+            and "contrast_pair_col" not in self.data.model_fields_set
+        ):
+            self.data.contrast_pair_col = _EXPANDED_PAIR_CLADE_COL
+        return self
 
     @model_validator(mode="after")
     def validate_contrast_pair_dependencies(self) -> AppConfig:

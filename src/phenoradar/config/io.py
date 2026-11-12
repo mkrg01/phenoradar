@@ -51,6 +51,7 @@ def load_and_resolve_config(
     execution_stage_override: ExecutionStage | None = None,
     *,
     allow_empty: bool = False,
+    require_group_col: bool = False,
 ) -> AppConfig:
     """Load one or more YAML files, deep merge them, and validate with Pydantic."""
     if not config_paths and not allow_empty:
@@ -69,9 +70,20 @@ def load_and_resolve_config(
         merged["runtime"] = runtime
 
     try:
-        return AppConfig.model_validate(merged)
+        resolved = AppConfig.model_validate(merged)
     except ValidationError as exc:
         raise ConfigError(str(exc)) from exc
+    if require_group_col:
+        _require_group_col(resolved)
+    return resolved
+
+
+def _require_group_col(config: AppConfig) -> None:
+    if "group_col" not in config.split.model_fields_set:
+        raise ConfigError(
+            "Specify split.group_col explicitly in the run configuration "
+            "(for example, expanded_pair_clade_id or contrast_pair_id)."
+        )
 
 
 def _schema_variants(

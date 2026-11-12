@@ -77,6 +77,33 @@ def test_build_split_artifacts_success(tmp_path: Path) -> None:
     assert artifacts.fold_diagnostics.height == 2
 
 
+@pytest.mark.parametrize(
+    "group_col", ["contrast_pair_id", "expanded_pair_clade_id"],
+)
+def test_explicit_group_column_selects_cv_grouping(tmp_path: Path, group_col: str) -> None:
+    metadata, tpm = _fixture_data(tmp_path)
+    header, *rows = metadata.read_text().splitlines()
+    groups = ["clade_a", "clade_a", "clade_b", "clade_b", "clade_b", ""]
+    metadata.write_text(
+        "\n".join([
+            header + "\texpanded_pair_clade_id",
+            *(row + "\t" + group for row, group in zip(rows, groups, strict=True)),
+        ]) + "\n"
+    )
+    config = AppConfig.model_validate({
+        "data": {"metadata_path": str(metadata), "tpm_path": str(tpm)},
+        "split": {"group_col": group_col},
+    })
+
+    assert config.split.group_col == config.data.contrast_pair_col == group_col
+    split = build_split_artifacts(config)
+    expanded = group_col == "expanded_pair_clade_id"
+    assert split.fold_count == 2
+    assert split.pool_counts["external_test"] == (0 if expanded else 1)
+    assert split.pool_counts["training_validation"] == (5 if expanded else 4)
+    assert split.pool_counts["discovery_inference"] == 1
+
+
 def test_split_group_col_can_differ_from_contrast_pair_col(tmp_path: Path) -> None:
     metadata = _write(
         tmp_path / "species_metadata.tsv",

@@ -86,6 +86,25 @@ def test_unknown_wrapper_disables_cache(identity: tuple[Path, Path, Path]) -> No
     assert key(script, directory) is None
 
 
+def test_venv_directory_alias_shares_cache(
+    identity: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    script, _, directory = identity
+    python = Path(sys.executable)
+    alias = tmp_path / "venv_alias"
+    alias.symlink_to(python.parent, target_is_directory=True)
+    expected = key(script, directory)
+    assert expected is not None
+    monkeypatch.setattr(sys, "executable", str(alias / python.name))
+    assert key(script, directory) == expected
+
+    other_venv = tmp_path / "other_venv"
+    other_venv.mkdir()
+    (other_venv / python.name).symlink_to(python)
+    monkeypatch.setattr(sys, "executable", str(other_venv / python.name))
+    assert key(script, directory) is None
+
+
 def test_archive_roundtrip_and_corruption(tmp_path: Path) -> None:
     source, target = tmp_path / "source", tmp_path / "target"
     source.mkdir()

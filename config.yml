@@ -7,7 +7,7 @@ data:
   feature_col: orthogroup
   value_col: tpm
   trait_col: C4
-  contrast_pair_col: contrast_pair_id  # type: string or null
+  contrast_pair_col: expanded_pair_clade_id  # type: string or null
 
   # Optional amino-acid inputs.
   feature_mode: expression  # choices: expression, amino_acid, combined
@@ -15,7 +15,7 @@ data:
   sequence_tpm_path: null  # type: string or null; species/sequence_id/tpm TSV[.gz]
 
 split:
-  group_col: contrast_pair_id
+  group_col: expanded_pair_clade_id
   exclude_col: null  # type: string or null
   require_both_labels_per_group: false  # choices: true, false
   outer_cv_strategy: logo  # choices: logo, group_kfold, stratified_group_kfold

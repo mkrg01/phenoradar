@@ -9,6 +9,7 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.cm import ScalarMappable
+from matplotlib.collections import LineCollection
 from matplotlib.colors import ListedColormap, Normalize
 from matplotlib.patches import Patch
 
@@ -95,13 +96,16 @@ def _tree_comparison(
     path: Path,
     branch_length_mode: str,
 ) -> None:
-    tree = artifacts.tree.copy()
+    tree = artifacts.tree
     by_species = {row["species"]: row for row in artifacts.annotation.iter_rows(named=True)}
-    retained = [node.name for node in tree.leaves() if node.name in by_species]
+    leaves = list(tree.leaves())
+    retained = [node.name for node in leaves if node.name in by_species]
     if not retained:
         return
-    # Prune for display only, retaining the fitted lengths and original node IDs.
-    tree.prune(retained, preserve_branch_length=True)
+    # Pruning also collapses unary nodes, even if all tips are retained.
+    if len(retained) != len(leaves) or any(len(node.children) == 1 for node in tree.traverse()):
+        tree = tree.copy()
+        tree.prune(retained, preserve_branch_length=True)
     tips, x, y = _tree_coordinates(tree)
     names_width = max(1.8, min(7, max(len(str(tip.name)) for tip in tips) * 0.065))
     fig, axes = plt.subplots(
@@ -113,26 +117,29 @@ def _tree_comparison(
     )
     tree_ax, names_ax, *tracks = axes
     posterior = {row["branch_id"]: row["p_1"] for row in artifacts.nodes.iter_rows(named=True)}
+    branches = []
+    ancestors = []
     for node in tree.traverse():
         if not node.is_root:
-            tree_ax.plot([x[node.up], x[node]], [y[node], y[node]], color="#777777", lw=0.7)
+            branches.append([(x[node.up], y[node]), (x[node], y[node])])
         if not node.is_leaf:
             children_y = [y[child] for child in node.children]
-            tree_ax.plot(
-                [x[node], x[node]], [min(children_y), max(children_y)], color="#777777", lw=0.7
-            )
+            branches.append([(x[node], min(children_y)), (x[node], max(children_y))])
             probability = posterior.get(node.props["phylo_id"])
             if probability is not None:
-                tree_ax.scatter(
-                    [x[node]],
-                    [y[node]],
-                    c=[probability],
-                    vmin=0,
-                    vmax=1,
-                    cmap="viridis",
-                    s=14,
-                    zorder=3,
-                )
+                ancestors.append((x[node], y[node], probability))
+    tree_ax.add_collection(
+        LineCollection(
+            branches, colors="#777777", linewidths=0.7,
+            capstyle=plt.rcParams["lines.solid_capstyle"],
+        ),
+        autolim=False,
+    )
+    if ancestors:
+        ancestor_x, ancestor_y, probabilities = zip(*ancestors, strict=True)
+        tree_ax.scatter(
+            ancestor_x, ancestor_y, c=probabilities, vmin=0, vmax=1, cmap="viridis", s=14, zorder=3
+        )
     tree_ax.set_xlabel("Branch count" if branch_length_mode == "unit" else "Input branch length")
     depth = max(max(x.values()), 0.1)
     tree_ax.set_xlim(-0.02 * depth, depth * 1.04)

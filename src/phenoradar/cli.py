@@ -872,6 +872,7 @@ def _run_single(
                 config_paths,
                 execution_stage_override=execution_stage,
                 allow_empty=False,
+                require_group_col=True,
             )
         except ConfigError as exc:
             raise typer.BadParameter(str(exc)) from exc
@@ -2199,12 +2200,14 @@ def run(
             condition_set = load_config_conditions(
                 config_paths,
                 execution_stage_override=execution_stage,
+                require_group_col=True,
             )
         else:
             resolved = load_and_resolve_config(
                 config_paths,
                 execution_stage_override=execution_stage,
                 allow_empty=False,
+                require_group_col=True,
             )
     except ConfigError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -2264,7 +2267,9 @@ def config_command(
     )
     config_paths = _normalize_config_paths(config)
     try:
-        resolved = load_and_resolve_config(config_paths, allow_empty=True)
+        resolved = load_and_resolve_config(
+            config_paths, allow_empty=True, require_group_col=bool(config_paths)
+        )
     except ConfigError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
