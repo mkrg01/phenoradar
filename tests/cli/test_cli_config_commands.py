@@ -13,11 +13,13 @@ import yaml
 from typer.testing import CliRunner
 
 import phenoradar.cli as cli_mod
+import phenoradar.expression_input_cache as expression_cache_mod
 from phenoradar import __version__
 from phenoradar.bundle import BundleError
 from phenoradar.cli import app
 from phenoradar.config import AppConfig, ConfigConditionSet, ConfigError, PredictConfig
-from phenoradar.cv import CVError
+from phenoradar.cv import CVError, RunExpressionCache
+from phenoradar.expression_input_cache import ExpressionCacheError
 from phenoradar.figures import FigureError
 from phenoradar.provenance import ProvenanceError
 from phenoradar.reporting import ReportError
@@ -196,7 +198,7 @@ def test_prepare_run_inputs_hashes_and_builds_splits_concurrently(
     monkeypatch.setattr(cli_mod, "build_split_artifacts", _split)
     timing_recorder = TimingRecorder()
 
-    input_files, split_artifacts = cli_mod._prepare_run_inputs(
+    input_files, split_artifacts, cache_source = cli_mod._prepare_run_inputs(
         config_paths=[Path("config.yml")],
         config=_stub_resolved_config(execution_stage="cv_only"),  # type: ignore[arg-type]
         timing_recorder=timing_recorder,
@@ -204,10 +206,58 @@ def test_prepare_run_inputs_hashes_and_builds_splits_concurrently(
 
     assert input_files == []
     assert split_artifacts is expected_splits
+    assert cache_source is None
     assert set(timing_recorder.to_frame().get_column("stage")) == {
         "input_provenance",
         "split_construction",
     }
+
+
+def test_expression_cache_reuses_the_provenance_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata, tpm = _write_split_fixture(tmp_path)
+    config = AppConfig.model_validate(
+        {"data": {"metadata_path": str(metadata), "tpm_path": str(tpm)}}
+    )
+    input_files, splits, source = cli_mod._prepare_run_inputs(
+        config_paths=[], config=config, timing_recorder=TimingRecorder(),
+    )
+    assert source is not None
+    tpm = tpm.resolve()
+    assert source.digest == next(row["sha256"] for row in input_files if row["path"] == str(tpm))
+    original_hash = expression_cache_mod._sha256
+
+    def hash_cache_file(path: Path) -> str:
+        assert path != tpm
+        return original_hash(path)
+
+    monkeypatch.setattr(expression_cache_mod, "_sha256", hash_cache_file)
+    with RunExpressionCache(cache_directory=tmp_path / "cache", cache_source=source) as cache:
+        cache.prepare(config, splits.split_manifest)
+        cache.validate_input_identity(input_files)
+
+
+def test_prepare_run_inputs_rejects_tpm_modified_during_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata, tpm = _write_split_fixture(tmp_path)
+    config = AppConfig.model_validate(
+        {"data": {"metadata_path": str(metadata), "tpm_path": str(tpm)}}
+    )
+    collect_input_files = cli_mod.collect_input_files
+
+    def collect_and_change(paths: list[Path]) -> list[dict]:
+        records = collect_input_files(paths)
+        with tpm.open("a") as handle:
+            handle.write("sp1\tOG1\t1.0\n")
+        return records
+
+    monkeypatch.setattr(cli_mod, "collect_input_files", collect_and_change)
+    with pytest.raises(ExpressionCacheError, match="changed during provenance collection"):
+        cli_mod._prepare_run_inputs(
+            config_paths=[], config=config, timing_recorder=TimingRecorder(),
+        )
 
 
 def _stub_cv_artifacts(

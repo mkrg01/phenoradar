@@ -222,7 +222,7 @@ def test_catalog_does_not_expand_training_schema_and_builder_can_be_borrowed(
 def test_partitioned_assembly_preserves_custom_order_repeated_species_and_chunks(
     tmp_path: Path,
 ) -> None:
-    species = [f"s{i:03d}" for i in range(130)]
+    species = [f"s{i:03d}" for i in range(258)]
     path = tmp_path / "wide.tsv"
     path.write_text(
         "species\torthogroup\ttpm\n"
@@ -237,6 +237,8 @@ def test_partitioned_assembly_preserves_custom_order_repeated_species_and_chunks
     with RunExpressionCache(cache_directory=tmp_path / "cache") as cache:
         builder = cache.get_builder(config)
         builder.cache_species(species)
+        assert builder._cached_long_path is not None
+        assert len(list(builder._cached_long_path.glob("part-*.parquet"))) > 4
         builder._max_pivot_cells = 64
         actual, names = builder.build_matrix(order, feature_order=features)
     assert names == features

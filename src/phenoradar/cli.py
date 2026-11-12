@@ -45,6 +45,12 @@ from phenoradar.config import (
     write_resolved_config,
 )
 from phenoradar.cv import CVError, RunExpressionCache, run_final_refit, run_outer_cv
+from phenoradar.expression_input_cache import (
+    ExpressionCacheError,
+    ExpressionSource,
+    identify_source,
+    source_signature,
+)
 from phenoradar.figure_runtime import FigureWorkers
 from phenoradar.figures import (
     FigureError,
@@ -182,23 +188,35 @@ def _prepare_run_inputs(
     config: AppConfig,
     timing_recorder: TimingRecorder,
     split_artifacts_override: SplitArtifacts | None = None,
-) -> tuple[list[dict[str, Any]], SplitArtifacts]:
+) -> tuple[list[dict[str, Any]], SplitArtifacts, ExpressionSource | None]:
     """Hash run inputs while independently constructing split artifacts."""
 
     tree_path = getattr(config.data, "tree_path", None)
     orthogroup_annotation_path = getattr(config.data, "orthogroup_annotation_path", None)
+    tpm_path = Path(config.data.tpm_path).resolve()
     provenance_paths = [
         *config_paths,
         Path(config.data.metadata_path),
-        Path(config.data.tpm_path),
+        tpm_path,
         *([] if tree_path is None else [Path(tree_path)]),
         *([] if orthogroup_annotation_path is None else [Path(orthogroup_annotation_path)]),
     ]
 
-    def _collect_provenance() -> list[dict[str, Any]]:
+    def _collect_provenance() -> tuple[list[dict[str, Any]], ExpressionSource | None]:
         started = timing_recorder.start()
         try:
-            return collect_input_files(provenance_paths)
+            # Capture the file's identity on both sides of the provenance hash.
+            # The cache can then reuse the hash and still reject input changes.
+            signature = source_signature(tpm_path) if tpm_path.exists() else None
+            files = collect_input_files(provenance_paths)
+            record = next((row for row in files if row["path"] == str(tpm_path)), None)
+            if record is None:
+                return files, None
+            if signature is None:
+                raise ProvenanceError(f"Expression input appeared during provenance: {tpm_path}")
+            return files, identify_source(
+                Path(config.data.tpm_path), digest=record["sha256"], expected_signature=signature,
+            )
         finally:
             timing_recorder.record_since(
                 started,
@@ -222,7 +240,8 @@ def _prepare_run_inputs(
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="phenoradar-input") as executor:
         provenance_future = executor.submit(_collect_provenance)
         split_future = executor.submit(_build_splits)
-        return provenance_future.result(), split_future.result()
+        input_files, cache_source = provenance_future.result()
+        return input_files, split_future.result(), cache_source
 
 
 def _feature_filter_funnel_stage_order(config: AppConfig) -> list[str]:
@@ -884,13 +903,13 @@ def _run_single(
     orthogroup_annotation_path = getattr(resolved.data, "orthogroup_annotation_path", None)
     _log("Collect input file identities and build split artifacts.")
     try:
-        input_files, split_artifacts = _prepare_run_inputs(
+        input_files, split_artifacts, expression_source = _prepare_run_inputs(
             config_paths=config_paths,
             config=resolved,
             timing_recorder=timing_recorder,
             split_artifacts_override=split_artifacts_override,
         )
-    except (ProvenanceError, SplitError) as exc:
+    except (ExpressionCacheError, OSError, ProvenanceError, SplitError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     fold_count = getattr(split_artifacts, "fold_count", "unknown")
     excluded_rows = getattr(split_artifacts, "expression_rows_excluded", "unknown")
@@ -926,6 +945,7 @@ def _run_single(
 
     with RunExpressionCache(
         cache_directory=Path("runs/.phenoradar_cache/expression"),
+        cache_source=expression_source,
     ) as expression_cache:
         if resolved.runtime.execution_stage == "full_run":
             _log("Prepare shared expression input for CV and final refit.")

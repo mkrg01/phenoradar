@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import copy
 from dataclasses import dataclass, field
 from hashlib import sha256
+from itertools import batched
 from math import comb
 from numbers import Real
 from pathlib import Path
@@ -1735,10 +1736,13 @@ class ExpressionMatrixBuilder:
         )
         self._record_timing(started, "input_dense_assembly")
         requested = set(species_order)
-        for name, part_species in self._cached_catalog["part_species"].items():
-            selected = requested.intersection(part_species)
-            if not selected:
-                continue
+        matching_parts = (
+            (name, selected)
+            for name, part_species in self._cached_catalog["part_species"].items()
+            if (selected := requested.intersection(part_species))
+        )
+        for parts in batched(matching_parts, 4):
+            selected = set().union(*(part_species for _, part_species in parts))
             row_indices = [
                 index for index, species in enumerate(species_order) if species in selected
             ]
@@ -1746,8 +1750,10 @@ class ExpressionMatrixBuilder:
             ordering = pl.DataFrame({
                 "__species": part_order, "__row_idx": list(range(len(part_order))),
             })
-            scan = pl.scan_parquet(self._cached_long_path / name).filter(
-                pl.col("__species").is_in(sorted(selected))
+            scan = (
+                pl.scan_parquet([self._cached_long_path / name for name, _ in parts])
+                .select("__species", "__feature", "__value")
+                .filter(pl.col("__species").is_in(sorted(selected)))
             )
             width = max(1, self._max_pivot_cells // max(1, len(part_order)))
             for start in range(0, len(feature_names), width):
