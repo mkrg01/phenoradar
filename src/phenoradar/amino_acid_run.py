@@ -161,8 +161,9 @@ def _prepare_inner_fold(
                                         pairs[train], warnings)
         xv, _ = expr.transform(expression, valid_species)
         n_expression = xe.shape[1]
-        x_train = sparse.hstack((xe, x_train), format="csc")
-        x_valid = sparse.hstack((xv, x_valid), format="csc")
+        # Two CSC inputs let SciPy concatenate without converting AA to COO.
+        x_train = sparse.hstack((sparse.csc_matrix(xe), x_train), format="csc")
+        x_valid = sparse.hstack((sparse.csc_matrix(xv), x_valid), format="csc")
         record_sparse_usage(store, fitted, [x_train, x_valid])
     return InnerCvPreprocessedFold(fold, x_train, x_valid, y[train], y[valid],
                                    _fit_sample_weights(config, y[train], groups[train]),
@@ -397,7 +398,7 @@ def fit_scope(
             expr, xe, counts, scores = fit_expression(
                 config, expression, train_species, y[indices], pairs[indices], warnings
             )
-            matrix = sparse.hstack((xe, matrix), format="csc")
+            matrix = sparse.hstack((sparse.csc_matrix(xe), matrix), format="csc")
             record_sparse_usage(store, fitted, [matrix])
             shift = np.r_[np.zeros(xe.shape[1]), shift]
             _write(tables / "expression_feature_filter_counts.tsv", [{**context, **counts}])
