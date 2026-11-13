@@ -17,14 +17,17 @@ from phenoradar.amino_acid_sparse import SparseFoldEncoding
 @pytest.mark.parametrize("n", [7, 64, 113])
 @pytest.mark.parametrize("audit", [False, True])
 @pytest.mark.parametrize("duplicate", [False, True])
+@pytest.mark.parametrize("mode", ["mixed", "binary", "numpy"])
 def test_binary_and_mixed_columns_preserve_all_statistics_and_CSC_bits(
-    tmp_path: Path, n: int, audit: bool, duplicate: bool,
+    tmp_path: Path, monkeypatch, n: int, audit: bool, duplicate: bool, mode: str,
 ) -> None:
+    if mode == "numpy":
+        monkeypatch.setattr("phenoradar.amino_acid_kernels.native", None)
     rng = np.random.default_rng(853)
     samples = [f"s{i}" for i in range(n)]
     raw = np.zeros((n, 43, 20), dtype=np.float32)
     for j in range(raw.shape[1]):
-        if j % 3:
+        if j % 3 or mode == "binary":
             state = rng.integers(0, 4, n)
             raw[np.arange(n), j, state] = 1
         else:
@@ -35,7 +38,8 @@ def test_binary_and_mixed_columns_preserve_all_statistics_and_CSC_bits(
     raw[1, 1, 3] = 1
     raw[:, 2] = 0
     raw[:, 2, 4] = 1  # Ineligible monomorphic sites still have correct minor counts.
-    raw[0, 4, 10] = -0.0  # Noncanonical bits use the floating-point path.
+    if mode != "binary":
+        raw[0, 4, 10] = -0.0  # Noncanonical bits use the floating-point path.
     raw[-1, 5] = 0
     raw[-1, 5, 19] = 1  # A validation-only state must not enter the training schema.
     coverage = np.isfinite(raw[:, :, 0]).astype(np.float32)

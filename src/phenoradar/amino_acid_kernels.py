@@ -33,6 +33,23 @@ def center(values: np.ndarray, selected: np.ndarray, sites: np.ndarray,
     return result
 
 
+def packed_csc(ones: np.ndarray, mass: np.ndarray, sites: np.ndarray, rows: np.ndarray,
+               categories: np.ndarray, width: int,
+               ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    kernel = getattr(native, "packed_csc", None)
+    capacity = len(rows) * len(sites)
+    if kernel is None or max(capacity, len(rows), len(sites)) > np.iinfo(np.int32).max:
+        return None
+    data = np.empty(capacity, dtype=np.float64)
+    indices = np.empty(capacity, dtype=np.int32)
+    indptr = np.empty(len(sites) + 1, dtype=np.int32)
+    count = kernel(np.ascontiguousarray(ones), np.ascontiguousarray(mass),
+                   np.ascontiguousarray(sites, dtype=np.int64),
+                   np.ascontiguousarray(rows, dtype=np.int64),
+                   np.ascontiguousarray(categories.T), data, indices, indptr, width, len(mass))
+    return data[:count], indices[:count], indptr
+
+
 def append(encoding: Any, values: np.ndarray) -> None:
     from phenoradar.amino_acid_sparse import modal_shift
 
@@ -48,5 +65,6 @@ def append(encoding: Any, values: np.ndarray) -> None:
         count = native.csc(np.ascontiguousarray(values), np.ascontiguousarray(shift),
                            np.ascontiguousarray(rows, dtype=np.int64), data, indices, ends,
                            len(values), values.shape[1])
-        encoding._append_csc(i, data[:count].copy(), indices[:count].copy(), ends)
+        # _append_csc writes or buffers the arrays synchronously.
+        encoding._append_csc(i, data[:count], indices[:count], ends)
     encoding.width += values.shape[1]

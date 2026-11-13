@@ -128,7 +128,51 @@ static PyObject *csc(PyObject *self, PyObject *args) {
 fail:
     release(b, 6); return NULL;
 }
+static PyObject *packed_csc(PyObject *self, PyObject *args) {
+    PyObject *o[8]; Py_buffer b[8] = {{0}}; Py_ssize_t width, mass_rows;
+    if (!PyArg_ParseTuple(args, "OOOOOOOOnn", &o[0], &o[1], &o[2], &o[3],
+                          &o[4], &o[5], &o[6], &o[7], &width, &mass_rows)) return NULL;
+    GET(0, 1, 0); GET(1, 1, 0); GET(2, 8, 0); GET(3, 8, 0);
+    GET(4, 8, 0); GET(5, 8, 1); GET(6, 4, 1); GET(7, 4, 1);
+    REQUIRE(width >= 0 && width <= PY_SSIZE_T_MAX - 7);
+    Py_ssize_t k = b[2].len / 8, m = b[3].len / 8, bytes = (width + 7) / 8;
+    REQUIRE(shape(&b[0], k, bytes, 1) && shape(&b[1], mass_rows, bytes, 1));
+    REQUIRE(shape(&b[4], k, 3, 8) && shape(&b[5], m, k, 8) && shape(&b[6], m, k, 4));
+    REQUIRE(b[7].len / 4 == k + 1 && m <= INT32_MAX && k <= INT32_MAX);
+    REQUIRE(m == 0 || k <= INT32_MAX / m);
+    const uint8_t *ones = b[0].buf, *mass = b[1].buf;
+    const int64_t *sites = b[2].buf, *rows = b[3].buf;
+    const double *categories = b[4].buf;
+    double *data = b[5].buf;
+    int32_t *indices = b[6].buf, *indptr = b[7].buf;
+    for (Py_ssize_t j = 0; j < k; ++j) REQUIRE(sites[j] >= 0 && sites[j] < mass_rows);
+    for (Py_ssize_t i = 0; i < m; ++i) REQUIRE(rows[i] >= -1 && rows[i] < width);
+    int32_t count = 0;
+    indptr[0] = 0;
+    Py_BEGIN_ALLOW_THREADS
+    for (Py_ssize_t j = 0; j < k; ++j) {
+        const uint8_t *state = ones + j * bytes, *known = mass + sites[j] * bytes;
+        for (Py_ssize_t i = 0; i < m; ++i) {
+            int64_t row = rows[i];
+            int category = 1;
+            if (row >= 0) {
+                unsigned bit = 1U << (row % 8);
+                if (state[row / 8] & bit) category = 2;
+                else if (known[row / 8] & bit) category = 0;
+            }
+            double value = categories[j * 3 + category];
+            if (value != 0) { data[count] = value; indices[count] = (int32_t)i; ++count; }
+        }
+        indptr[j + 1] = count;
+    }
+    Py_END_ALLOW_THREADS
+    release(b, 8); return PyLong_FromLong(count);
+fail:
+    release(b, 8); return NULL;
+}
+
 static PyMethodDef methods[] = {{"decode", decode, METH_VARARGS, NULL},
-    {"center", center, METH_VARARGS, NULL}, {"csc", csc, METH_VARARGS, NULL}, {NULL, NULL, 0, NULL}};
+    {"center", center, METH_VARARGS, NULL}, {"csc", csc, METH_VARARGS, NULL},
+    {"packed_csc", packed_csc, METH_VARARGS, NULL}, {NULL, NULL, 0, NULL}};
 static struct PyModuleDef module = {PyModuleDef_HEAD_INIT, "_aa_kernels", NULL, -1, methods};
 PyMODINIT_FUNC PyInit__aa_kernels(void) { return PyModule_Create(&module); }

@@ -30,10 +30,11 @@ def _compact_mass(values: np.ndarray, sites: np.ndarray, residues: np.ndarray,
     if not n_sites:
         return result
     counts = np.bincount(sites, minlength=n_sites)
-    ordered = np.all((np.diff(sites) > 0) | ((np.diff(sites) == 0)
-                                          & (np.diff(residues) > 0)))
+    site_steps = np.diff(sites)
+    ordered = np.all((site_steps > 0) | ((site_steps == 0) & (np.diff(residues) > 0)))
     fallback = np.ones(n_sites, dtype=bool)
-    if (np.all(counts > 0) and ordered and np.all((values >= 0) & (values <= 1))):
+    if (np.all(counts > 0) and ordered
+            and values.min(initial=0) >= 0 and values.max(initial=1) <= 1):
         offsets = np.r_[0, np.cumsum(counts)]
         approximate = np.add.reduceat(values, offsets[:-1], axis=1, dtype=np.float64)
         # At most 20 nonnegative float32 terms: this guard exceeds the float64
@@ -93,8 +94,9 @@ class FoldEncoding:
                     active: np.ndarray) -> None:
         keep = eligible[sites]
         local = np.cumsum(eligible) - 1
-        q = (np.nan_to_num(values[:, keep], copy=False)
-             * known[sites[keep], residues[keep]][None, :]).astype(np.float32, copy=False)
+        q = np.nan_to_num(values[:, keep], copy=False)
+        q *= known[sites[keep], residues[keep]][None, :]
+        q = q.astype(np.float32, copy=False)
         mass = _compact_mass(q, local[sites[keep]], residues[keep], int(eligible.sum()))
         selected = keep & active[sites, residues]
         from phenoradar.amino_acid_kernels import center, native
@@ -200,9 +202,8 @@ def compact_statistics(
     from phenoradar.amino_acid import _quality_summary
 
     n = observed.shape[1]
-    values = np.nan_to_num(raw)
     known = np.zeros((n, 20), dtype=bool)
-    known[sites, residues] = np.any(values > 0, axis=0)
+    known[sites, residues] = np.any(raw > 0, axis=0)
     eligible = known.sum(axis=1) >= quality.min_residue_states
     minor_samples = np.zeros(n, dtype=int)
     minor_groups = np.zeros(n, dtype=int)
@@ -220,7 +221,7 @@ def compact_statistics(
         aa = residues[selected]
         # Two or more states per eligible site keep axis 0 as the same strided
         # float32 reduction used by the original (sample, site, 20) design.
-        data = np.ascontiguousarray(values[:, selected])
+        data = np.ascontiguousarray(np.nan_to_num(raw[:, selected], copy=False))
         denominator = counts[state_sites]
         mean = np.zeros(data.shape[1], dtype=float)
         np.divide(data.sum(axis=0, dtype=np.float64), denominator, out=mean,

@@ -62,6 +62,7 @@ class AminoAcidFrequencyCache:
         self.columns = np.empty(0, dtype=np.int64)
         self.states = np.empty(0, dtype=np.uint32)
         self._chunks: list[_Chunk] = []
+        self._binary_eligibility: dict[tuple[Path, int], np.ndarray] = {}
         self._chunk_ids = np.empty(0, dtype=np.int32)
         self._rows = np.empty(0, dtype=np.int64)
         self._file_lengths: dict[Path, int] = {}
