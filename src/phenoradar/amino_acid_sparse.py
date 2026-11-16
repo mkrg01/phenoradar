@@ -12,6 +12,7 @@ from phenoradar.amino_acid import AATransform, AlignmentStore, fit_amino_acid
 from phenoradar.amino_acid_encoding import EncodedBlock, FoldEncoding
 from phenoradar.amino_acid_resources import matrix_buffer_limit, record_sparse_usage
 from phenoradar.config.schema import AminoAcidConfig
+from phenoradar.glmnet import SPARSE_INDEX_LIMIT
 
 
 def modal_shift(values: np.ndarray) -> np.ndarray:
@@ -82,10 +83,9 @@ class SparseFoldEncoding(FoldEncoding):
     def _append_csc(self, index: int, data: np.ndarray,
                     rows: np.ndarray, ends: np.ndarray) -> None:
         count = self.nonzero[index] + len(data)
-        if count >= np.iinfo(np.int32).max:
-            raise ValueError("AA sparse matrix exceeds glmnet's 32-bit nonzero limit")
+        # Local column counts fit in int32 even when cumulative offsets do not.
         arrays = [data, np.asarray(rows, dtype=np.int32),
-                  np.asarray(ends + self.nonzero[index], dtype=np.int32)]
+                  np.diff(ends, prepend=0).astype(np.int32)]
         if self._buffers is not None:
             buffers = self._buffers[index]
             projected = self._buffered_bytes + sum(
@@ -153,17 +153,77 @@ class SparseFoldEncoding(FoldEncoding):
                 data = np.memmap(handles[0], mode="r", dtype=np.float64, shape=(count,))
                 indices = np.memmap(handles[1], mode="r", dtype=np.int32, shape=(count,))
                 ends = np.memmap(handles[2], mode="r", dtype=np.int32, shape=(self.width,))
-            indptr = np.r_[np.int32(0), ends]
-            result.append(sparse.csc_matrix((data, indices, indptr),
-                                            shape=(len(rows), self.width), copy=False))
+            index_type = np.int32 if count < SPARSE_INDEX_LIMIT else np.int64
+            indptr = np.empty(self.width + 1, dtype=index_type)
+            indptr[0] = 0
+            np.cumsum(ends, out=indptr[1:])
+            if index_type == np.int64:
+                # A 64-bit CSC needs matching index dtypes. Widen row indices
+                # into a temporary mapping without allocating a full heap copy.
+                with TemporaryFile(prefix="phenoradar_aa_csc_rows_") as handle:  # noqa: SIM115
+                    for start in range(0, count, 2**20):
+                        handle.write(indices[start:start + 2**20].astype(np.int64).tobytes())
+                    handle.flush()
+                    indices = np.memmap(handle, mode="r", dtype=np.int64, shape=(count,))
+                result.append(_wide_csc(data, indices, indptr, (len(rows), self.width)))
+            else:
+                result.append(sparse.csc_matrix((data, indices, indptr),
+                                                shape=(len(rows), self.width), copy=False))
         return result
+
+
+def _wide_csc(data: np.ndarray, indices: np.ndarray, indptr: np.ndarray,
+              shape: tuple[int, int]) -> Any:
+    # Construct from a CSC array so SciPy retains the 64-bit index arrays
+    # without scanning the entire row-index mapping for its min and max.
+    return sparse.csc_matrix(sparse.csc_array((data, indices, indptr), shape=shape, copy=False))
+
+
+def combine_sparse_features(expression: np.ndarray, aa: Any) -> Any:
+    """Prepend expression columns, spilling an oversized combined matrix to disk."""
+    first = sparse.csc_matrix(expression)
+    total = first.nnz + aa.nnz
+    if total < SPARSE_INDEX_LIMIT:
+        return sparse.hstack((first, aa), format="csc")
+    width = first.shape[1] + aa.shape[1]
+    pointers = np.empty(width + 1, dtype=np.int64)
+    pointers[:first.shape[1] + 1] = first.indptr
+    np.add(aa.indptr[1:], first.nnz, dtype=np.int64, out=pointers[first.shape[1] + 1:])
+    with ExitStack() as stack:
+        arrays = []
+        for attr, dtype in (("data", np.float64), ("indices", np.int64)):
+            handle = stack.enter_context(TemporaryFile(  # noqa: SIM115
+                prefix="phenoradar_combined_csc_"
+            ))
+            handle.truncate(total * np.dtype(dtype).itemsize)
+            out = np.memmap(handle, mode="r+", dtype=dtype, shape=(total,))
+            out[:first.nnz] = getattr(first, attr)
+            source = getattr(aa, attr)
+            for start in range(0, aa.nnz, 2**20):
+                stop = min(aa.nnz, start + 2**20)
+                out[first.nnz + start:first.nnz + stop] = source[start:stop]
+            arrays.append(out)
+    data, indices = arrays
+    return _wide_csc(data, indices, pointers, (aa.shape[0], width))
 
 
 def fit_sparse_encoded(
     store: AlignmentStore, training: list[str], settings: AminoAcidConfig,
-    targets: list[list[str]], **kwargs: Any,
+    targets: list[list[str]], *, packed: bool = False, **kwargs: Any,
 ) -> tuple[AATransform, list[Any], np.ndarray]:
-    encoding = SparseFoldEncoding(targets, training, buffer_bytes=matrix_buffer_limit(store))
+    encoding: SparseFoldEncoding
+    if packed:
+        from phenoradar.amino_acid_packed import packed_arithmetic
+        from phenoradar.amino_acid_packed_encoding import PackedFoldEncoding
+
+        fused = packed_arithmetic()
+        if fused is None:
+            raise ValueError("Packed AA matrices require native kernels matching SciPy arithmetic")
+        if settings.ranked_site_filter.method != "none":
+            raise ValueError("Packed AA matrices require unranked sites")
+        encoding = PackedFoldEncoding(targets, training, fused=fused)
+    else:
+        encoding = SparseFoldEncoding(targets, training, buffer_bytes=matrix_buffer_limit(store))
     try:
         if settings.ranked_site_filter.method == "none":
             fitted = fit_amino_acid(store, training, settings, _encoding=encoding, **kwargs)

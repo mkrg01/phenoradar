@@ -9,7 +9,8 @@ from scipy import sparse
 
 from phenoradar.amino_acid_encoding import EncodedBlock, compact_statistics
 from phenoradar.amino_acid_frequency_cache import _mapped_file
-from phenoradar.amino_acid_kernels import packed_csc
+from phenoradar.amino_acid_kernels import native, packed_csc
+from phenoradar.amino_acid_packed import PackedColumns
 from phenoradar.amino_acid_presence import _COUNTS, any_presence, count_presence
 
 if TYPE_CHECKING:
@@ -129,7 +130,8 @@ def _statistics(binary: _Binary, species: list[str], groups: np.ndarray,
 
 
 def _encode(binary: _Binary, training: list[str], targets: list[list[str]],
-            mean: np.ndarray, known: np.ndarray, active: np.ndarray) -> EncodedBlock:
+            mean: np.ndarray, known: np.ndarray, active: np.ndarray, *,
+            packed: bool = False) -> EncodedBlock:
     selected = active[binary.sites, binary.residues]
     sites, aa = binary.sites[selected], binary.residues[selected]
     ones = binary.ones[selected]
@@ -147,6 +149,11 @@ def _encode(binary: _Binary, training: list[str], targets: list[list[str]],
     for species in targets:
         sources = np.array([binary.species_rows.get(s, -1) for s in species], dtype=np.int64)
         shape = (len(species), len(mu))
+        if packed:
+            matrices.append(PackedColumns.from_masks(
+                ones, mass, sites, sources, category_values, len(binary.species_rows),
+            ))
+            continue
         encoded = packed_csc(ones, mass, sites, sources, category_values, len(binary.species_rows))
         if encoded is not None:
             matrices.append(sparse.csc_matrix(encoded, shape=shape))
@@ -171,12 +178,35 @@ def _encode(binary: _Binary, training: list[str], targets: list[list[str]],
     return EncodedBlock(matrices, shift)
 
 
+def _interleave_csc(bit_matrix: sparse.csc_matrix, float_matrix: sparse.csc_matrix,
+                    order: np.ndarray) -> sparse.csc_matrix:
+    """Copy ordered columns directly, with no intermediate concatenated CSC."""
+    kernel = getattr(native, "interleave_csc", None)
+    matrices = bit_matrix, float_matrix
+    nnz = bit_matrix.nnz + float_matrix.nnz
+    shape = bit_matrix.shape[0], len(order)
+    if (kernel is None or bit_matrix.shape[0] != float_matrix.shape[0]
+            or max(*shape, nnz) >= np.iinfo(np.int32).max
+            or any(matrix.data.dtype != np.float64 or matrix.indices.dtype != np.int32
+                   or matrix.indptr.dtype != np.int32 for matrix in matrices)):
+        return sparse.hstack(matrices, format="csc")[:, order]
+    data = np.empty(nnz, dtype=np.float64)
+    indices = np.empty(nnz, dtype=np.int32)
+    indptr = np.empty(len(order) + 1, dtype=np.int32)
+    kernel(*(np.ascontiguousarray(array) for matrix in matrices
+             for array in (matrix.data, matrix.indices, matrix.indptr)),
+           np.ascontiguousarray(order, dtype=np.int64), data, indices, indptr)
+    return sparse.csc_matrix((data, indices, indptr), shape=shape, copy=False)
+
+
 def encode_cached_block(store: AlignmentStore, og: AlignmentOG, columns: np.ndarray,
                         species: list[str], groups: np.ndarray, quality: AminoAcidSiteFilter,
                         encoding: FoldEncoding, *, weighted: bool,
                         audit: bool) -> tuple[Any, ...] | None:
+    from phenoradar.amino_acid_packed_encoding import PackedFoldEncoding
     from phenoradar.amino_acid_sparse import SparseFoldEncoding
 
+    packed = isinstance(encoding, PackedFoldEncoding)
     if not isinstance(encoding, SparseFoldEncoding) or len(species) > 2**24:
         return None
     cache, _, _ = store._frequency_cache(og, weighted)
@@ -185,7 +215,7 @@ def encode_cached_block(store: AlignmentStore, og: AlignmentOG, columns: np.ndar
         return None
     binary = _read(cache, columns[mask])
     binary_stats = _statistics(binary, species, groups, quality, audit=audit)
-    binary_block = _encode(binary, species, encoding.groups, *binary_stats[4:])
+    binary_block = _encode(binary, species, encoding.groups, *binary_stats[4:], packed=packed)
     if mask.all():
         encoding.extend(binary_block)
         return binary_stats
@@ -213,9 +243,17 @@ def encode_cached_block(store: AlignmentStore, og: AlignmentOG, columns: np.ndar
     positions = np.arange(n * 20).reshape(n, 20)
     order = np.argsort(np.r_[positions[mask][binary_stats[-1]],
                             positions[~mask][fractional_stats[-1]]])
-    matrices = [sparse.hstack((bit_matrix, float_matrix), format="csc")[:, order]
-                for bit_matrix, float_matrix in zip(binary_block.matrices,
-                                                    fractional_block.matrices, strict=True)]
+    matrices = []
+    for bit, fractional in zip(binary_block.matrices, fractional_block.matrices, strict=True):
+        if isinstance(bit, PackedColumns):
+            if fractional.shape[1]:
+                # The compact fractional encoder emits one block per target.
+                (other,) = fractional.blocks
+                matrices.append(bit.interleave(other, order))
+            else:
+                matrices.append(bit)
+        else:
+            matrices.append(_interleave_csc(bit, fractional, order))
     shift = np.r_[binary_block.shift, fractional_block.shift][order]
     encoding.extend(EncodedBlock(matrices, shift))
     return tuple(arrays)

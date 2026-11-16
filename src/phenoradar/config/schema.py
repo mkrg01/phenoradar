@@ -513,6 +513,7 @@ class RuntimeConfig(StrictModel):
     seed: int = 42
     n_jobs: int = 1
     execution_stage: ExecutionStage = "cv_only"
+    amino_acid_matrix: Literal["csc", "packed"] = "csc"
 
     @model_validator(mode="after")
     def validate_runtime(self) -> RuntimeConfig:
@@ -591,6 +592,11 @@ class AppConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_contrast_pair_dependencies(self) -> AppConfig:
+        if self.runtime.amino_acid_matrix == "packed" and (
+            self.data.feature_mode != "amino_acid"
+            or self.preprocess.amino_acid.ranked_site_filter.method != "none"
+        ):
+            raise ValueError("runtime.amino_acid_matrix=packed requires unranked amino_acid mode")
         if self.data.feature_mode in {"amino_acid", "combined"}:
             if "enabled" not in self.phylogenetic_imputation.model_fields_set:
                 self.phylogenetic_imputation = self.phylogenetic_imputation.model_copy(

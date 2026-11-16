@@ -8,6 +8,8 @@ from typing import BinaryIO
 
 import numpy as np
 
+from phenoradar import amino_acid_kernels
+
 _COUNTS = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).sum(
     axis=1, dtype=np.uint8,
 )
@@ -81,6 +83,16 @@ def count_presence(packed: np.ndarray, rows: np.ndarray) -> np.ndarray:
     result = np.zeros(len(packed), dtype=np.int32)
     unique, multiplicity = np.unique(rows, return_counts=True)
     block = max(1, 1_000_000 // max(1, packed.shape[1]))
+    kernel = getattr(amino_acid_kernels.native, "masked_counts", None)
+    if kernel is not None and packed.flags.c_contiguous and packed.shape[1] >= 8:
+        if len(unique) == len(rows):
+            kernel(packed, species_mask(unique, packed.shape[1]), result)
+            return result
+        counts = np.empty_like(result)
+        for weight in np.unique(multiplicity):
+            kernel(packed, species_mask(unique[multiplicity == weight], packed.shape[1]), counts)
+            result += int(weight) * counts
+        return result
     for weight in np.unique(multiplicity):
         mask = species_mask(unique[multiplicity == weight], packed.shape[1])
         for start in range(0, len(packed), block):

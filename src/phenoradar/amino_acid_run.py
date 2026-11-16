@@ -18,7 +18,6 @@ import numpy as np
 import optuna
 import polars as pl
 from optuna.samplers import TPESampler
-from scipy import sparse
 
 from phenoradar.amino_acid import (
     ALPHABET,
@@ -38,7 +37,11 @@ from phenoradar.amino_acid_outputs import (
 from phenoradar.amino_acid_prediction import prediction_members
 from phenoradar.amino_acid_reporting import AAReportWriter
 from phenoradar.amino_acid_resources import record_sparse_usage
-from phenoradar.amino_acid_sparse import fit_sparse_encoded, training_information
+from phenoradar.amino_acid_sparse import (
+    combine_sparse_features,
+    fit_sparse_encoded,
+    training_information,
+)
 from phenoradar.combined import ExpressionInput, ExpressionTransform, fit_expression
 from phenoradar.config import AppConfig
 from phenoradar.config.io import write_resolved_config
@@ -71,7 +74,7 @@ from phenoradar.cv import (
     _with_native_thread_limit,
 )
 from phenoradar.fold_identity import configure_fold_seed_ids, seed_scope
-from phenoradar.glmnet import GlmnetLogisticRegression
+from phenoradar.glmnet import SPARSE_INDEX_LIMIT, GlmnetLogisticRegression
 from phenoradar.group_bootstrap import run_oof_group_bootstrap
 from phenoradar.metrics import (
     binary_log_loss,
@@ -153,6 +156,7 @@ def _prepare_inner_fold(
         store, train_species, config.preprocess.amino_acid,
         [train_species, valid_species], y=y[train], groups=groups[train],
         contrast_groups=pairs[train], audit=False, n_jobs=config.runtime.n_jobs,
+        packed=config.runtime.amino_acid_matrix == "packed",
     )
     x_train, x_valid = matrices
     n_expression = None
@@ -161,10 +165,12 @@ def _prepare_inner_fold(
                                         pairs[train], warnings)
         xv, _ = expr.transform(expression, valid_species)
         n_expression = xe.shape[1]
-        # Two CSC inputs let SciPy concatenate without converting AA to COO.
-        x_train = sparse.hstack((sparse.csc_matrix(xe), x_train), format="csc")
-        x_valid = sparse.hstack((sparse.csc_matrix(xv), x_valid), format="csc")
+        x_train = combine_sparse_features(xe, x_train)
+        x_valid = combine_sparse_features(xv, x_valid)
         record_sparse_usage(store, fitted, [x_train, x_valid])
+    if x_train.nnz >= SPARSE_INDEX_LIMIT:
+        warnings.append(f"Inner fold {fold}: use glmnet with full KKT checks "
+                        f"for {x_train.nnz:,} sparse training entries.")
     return InnerCvPreprocessedFold(fold, x_train, x_valid, y[train], y[valid],
                                    _fit_sample_weights(config, y[train], groups[train]),
                                    n_expression)
@@ -382,6 +388,7 @@ def fit_scope(
             store, train_species, config.preprocess.amino_acid, [train_species],
             y=y[indices], groups=groups[indices], contrast_groups=pairs[indices],
             n_jobs=config.runtime.n_jobs,
+            packed=config.runtime.amino_acid_matrix == "packed",
         )
         matrix = matrices[0]
         del matrices
@@ -398,7 +405,7 @@ def fit_scope(
             expr, xe, counts, scores = fit_expression(
                 config, expression, train_species, y[indices], pairs[indices], warnings
             )
-            matrix = sparse.hstack((sparse.csc_matrix(xe), matrix), format="csc")
+            matrix = combine_sparse_features(xe, matrix)
             record_sparse_usage(store, fitted, [matrix])
             shift = np.r_[np.zeros(xe.shape[1]), shift]
             _write(tables / "expression_feature_filter_counts.tsv", [{**context, **counts}])
@@ -430,6 +437,9 @@ def fit_scope(
                     np.full(matrix.shape[1] - len(expr.features), ratio),
                 ))
             if progress:
+                if matrix.nnz >= SPARSE_INDEX_LIMIT:
+                    progress(f"{scope}: use glmnet with full KKT checks "
+                             f"for {matrix.nnz:,} sparse training entries.")
                 progress(
                     f"{scope}: fit selected candidate {result.candidate.candidate_index} "
                     f"({matrix.shape[0]} species, {matrix.shape[1]} features)."

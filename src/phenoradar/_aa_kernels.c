@@ -30,6 +30,41 @@ static unsigned pop(unsigned x) {
     return (x + (x >> 4)) & 15;
 }
 
+static unsigned pop64(uint64_t x) {
+    x -= (x >> 1) & UINT64_C(0x5555555555555555);
+    x = (x & UINT64_C(0x3333333333333333)) + ((x >> 2) & UINT64_C(0x3333333333333333));
+    x = (x + (x >> 4)) & UINT64_C(0x0f0f0f0f0f0f0f0f);
+    return (unsigned)((x * UINT64_C(0x0101010101010101)) >> 56);
+}
+
+static PyObject *masked_counts(PyObject *self, PyObject *args) {
+    PyObject *o[3]; Py_buffer b[3] = {{0}};
+    if (!PyArg_ParseTuple(args, "OOO", &o[0], &o[1], &o[2])) return NULL;
+    GET(0, 1, 0); GET(1, 1, 0); GET(2, 4, 1);
+    Py_ssize_t width = b[1].len, rows = b[2].len / 4;
+    REQUIRE(width <= INT32_MAX / 8 && shape(&b[0], rows, width, 1));
+    const uint8_t *packed = b[0].buf, *mask = b[1].buf;
+    int32_t *out = b[2].buf;
+    Py_BEGIN_ALLOW_THREADS
+    for (Py_ssize_t row = 0; row < rows; ++row) {
+        const uint8_t *bits = packed + row * width;
+        int32_t count = 0;
+        Py_ssize_t col = 0;
+        for (; col + 8 <= width; col += 8) {
+            uint64_t a, m;
+            memcpy(&a, bits + col, 8);
+            memcpy(&m, mask + col, 8);
+            count += (int32_t)pop64(a & m);
+        }
+        for (; col < width; ++col) count += (int32_t)pop(bits[col] & mask[col]);
+        out[row] = count;
+    }
+    Py_END_ALLOW_THREADS
+    release(b, 3); Py_RETURN_NONE;
+fail:
+    release(b, 3); return NULL;
+}
+
 static PyObject *decode(PyObject *self, PyObject *args) {
     PyObject *o[4]; Py_buffer b[4] = {{0}};
     Py_ssize_t nr, width; uint64_t *starts = NULL, *prefix = NULL;
@@ -171,8 +206,72 @@ fail:
     release(b, 8); return NULL;
 }
 
+static int csc_offsets(const int32_t *indptr, Py_ssize_t columns, Py_ssize_t nnz) {
+    if (indptr[0] != 0 || indptr[columns] != nnz) return 0;
+    for (Py_ssize_t col = 0; col < columns; ++col) {
+        if (indptr[col] > indptr[col + 1]) return 0;
+    }
+    return 1;
+}
+
+static PyObject *interleave_csc(PyObject *self, PyObject *args) {
+    PyObject *o[10]; Py_buffer b[10] = {{0}};
+    if (!PyArg_UnpackTuple(args, "interleave_csc", 10, 10,
+                           &o[0], &o[1], &o[2], &o[3], &o[4],
+                           &o[5], &o[6], &o[7], &o[8], &o[9])) return NULL;
+    GET(0, 8, 0); GET(1, 4, 0); GET(2, 4, 0);
+    GET(3, 8, 0); GET(4, 4, 0); GET(5, 4, 0);
+    GET(6, 8, 0); GET(7, 8, 1); GET(8, 4, 1); GET(9, 4, 1);
+    REQUIRE(b[2].len >= 4 && b[5].len >= 4);
+    Py_ssize_t left = b[2].len / 4 - 1, right = b[5].len / 4 - 1;
+    Py_ssize_t left_nnz = b[0].len / 8, right_nnz = b[3].len / 8;
+    Py_ssize_t width = b[6].len / 8, nnz = b[7].len / 8;
+    REQUIRE(left + right == width && left_nnz + right_nnz == nnz && nnz <= INT32_MAX);
+    REQUIRE(b[1].len / 4 == left_nnz && b[4].len / 4 == right_nnz);
+    REQUIRE(b[8].len / 4 == nnz && b[9].len / 4 == width + 1);
+
+    const int32_t *pointers[] = {b[2].buf, b[5].buf};
+    REQUIRE(csc_offsets(pointers[0], left, left_nnz) && csc_offsets(pointers[1], right, right_nnz));
+    const double *data[] = {b[0].buf, b[3].buf};
+    const int32_t *indices[] = {b[1].buf, b[4].buf};
+    const int64_t *order = b[6].buf;
+    double *out_data = b[7].buf;
+    int32_t *out_indices = b[8].buf, *out_indptr = b[9].buf;
+    Py_ssize_t offset = 0;
+    int valid = 1;
+    out_indptr[0] = 0;
+    Py_BEGIN_ALLOW_THREADS
+    for (Py_ssize_t dest = 0; dest < width; ++dest) {
+        int64_t col = order[dest];
+        if (col < 0 || col >= width) { valid = 0; break; }
+        int source = col >= left;
+        if (source) col -= left;
+        int32_t start = pointers[source][col], length = pointers[source][col + 1] - start;
+        if (length > nnz - offset) { valid = 0; break; }
+        if (length) {
+            memcpy(out_data + offset, data[source] + start, (size_t)length * sizeof(double));
+            memcpy(out_indices + offset, indices[source] + start, (size_t)length * sizeof(int32_t));
+        }
+        offset += length;
+        out_indptr[dest + 1] = (int32_t)offset;
+    }
+    Py_END_ALLOW_THREADS
+    REQUIRE(valid && offset == nnz);
+    release(b, 10); Py_RETURN_NONE;
+fail:
+    release(b, 10); return NULL;
+}
+
+#include "_aa_packed.h"
+
 static PyMethodDef methods[] = {{"decode", decode, METH_VARARGS, NULL},
     {"center", center, METH_VARARGS, NULL}, {"csc", csc, METH_VARARGS, NULL},
-    {"packed_csc", packed_csc, METH_VARARGS, NULL}, {NULL, NULL, 0, NULL}};
+    {"packed_csc", packed_csc, METH_VARARGS, NULL},
+    {"interleave_csc", interleave_csc, METH_VARARGS, NULL},
+    {"pack_csc_columns", pack_csc_columns, METH_VARARGS, NULL},
+    {"pack_mask_columns", pack_mask_columns, METH_VARARGS, NULL},
+    {"scan_packed_columns", scan_packed_columns, METH_VARARGS, NULL},
+    {"gather_packed_columns", gather_packed_columns, METH_VARARGS, NULL},
+    {"masked_counts", masked_counts, METH_VARARGS, NULL}, {NULL, NULL, 0, NULL}};
 static struct PyModuleDef module = {PyModuleDef_HEAD_INIT, "_aa_kernels", NULL, -1, methods};
 PyMODINIT_FUNC PyInit__aa_kernels(void) { return PyModule_Create(&module); }

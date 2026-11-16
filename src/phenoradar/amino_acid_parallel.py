@@ -161,7 +161,7 @@ def outer_folds(config: AppConfig, store: AlignmentStore, expression: Expression
             int(memory_budget() * .7) // (3 * workers)))
         if progress:
             progress(f"AA outer folds: {workers} workers; pilot had {features:,} features; "
-                     f"CSC pair {(usage.matrix_bytes if usage else 0) / 1024**3:.2f} GiB; "
+                     f"Matrix pair {(usage.matrix_bytes if usage else 0) / 1024**3:.2f} GiB; "
                      f"matrix buffer {matrix_buffer / 1024**3:.2f} GiB/worker.")
         child = config.model_copy(deep=True)
         child.runtime.n_jobs = max(1, config.runtime.n_jobs // workers)

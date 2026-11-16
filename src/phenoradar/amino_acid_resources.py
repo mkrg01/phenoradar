@@ -38,9 +38,12 @@ def matrix_buffer_limit(store: AlignmentStore) -> int:
 def record_sparse_usage(store: AlignmentStore, fitted: AATransform,
                         matrices: list[Any]) -> None:
     usage: SparseUsage = getattr(store, "_sparse_usage", SparseUsage())
+    from phenoradar.amino_acid_packed import PackedAAMatrix
+
     usage.matrix_bytes = max(usage.matrix_bytes, sum(
-        array.nbytes for matrix in matrices
-        for array in [matrix.data, matrix.indices, matrix.indptr]
+        matrix.nbytes if isinstance(matrix, PackedAAMatrix) else
+        matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes
+        for matrix in matrices
     ))
     # Means, known/active states and the columnar site audit (including axes).
     usage.metadata_bytes = max(usage.metadata_bytes, len(fitted.sites) * 264)

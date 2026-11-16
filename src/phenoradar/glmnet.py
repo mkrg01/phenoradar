@@ -16,6 +16,8 @@ from scipy.special import expit
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.utils.validation import check_array, check_is_fitted, check_X_y
 
+from phenoradar.amino_acid_packed import PackedAAMatrix
+
 DEFAULT_LAMBDA = 0.01
 DEFAULT_ALPHA = 0.5
 DEFAULT_THRESH = 1e-7
@@ -25,6 +27,7 @@ DEFAULT_MAXIT = 2_000_000
 # A half-decade candidate grid is expanded to ten intervals between candidates.
 _MAX_LOG_LAMBDA_STEP = 0.05 * np.log(10.0)
 _SPARSE_PATH_CAPACITY = 4096
+SPARSE_INDEX_LIMIT = np.iinfo(np.int32).max
 
 
 class GlmnetError(ValueError):
@@ -103,11 +106,16 @@ class GlmnetLogisticRegression(ClassifierMixin, BaseEstimator):  # type: ignore[
             sample_weight=sample_weight,
             penalty_factor=self.penalty_factor,
         )[0]
+        self.__dict__.pop("used_working_set_", None)
         self.__dict__.update(model.__dict__)
         return self
 
     def decision_function(self, X: Any) -> np.ndarray:
         check_is_fitted(self, ["coef_", "intercept_", "n_features_in_"])
+        if isinstance(X, PackedAAMatrix):
+            _check_packed_width(X, self.n_features_in_)
+            columns = np.flatnonzero(self.coef_)
+            return np.asarray(X[:, columns] @ self.coef_[columns] + self.intercept_)
         x = check_array(X, accept_sparse="csc", dtype=np.float64, ensure_min_features=0)
         if x.shape[1] != self.n_features_in_:
             raise ValueError(f"Expected {self.n_features_in_} features, got {x.shape[1]}")
@@ -137,10 +145,15 @@ class _CompactGlmnetModel(GlmnetLogisticRegression):
             sample_weight=sample_weight, penalty_factor=self.penalty_factor,
             compact_coefficients=True, compute_kkt=False,
         )[0]
+        self.__dict__.pop("used_working_set_", None)
         self.__dict__.update(model.__dict__)
         return self
 
     def decision_function(self, X: Any) -> np.ndarray:
+        if isinstance(X, PackedAAMatrix):
+            _check_packed_width(X, self.n_features_in_)
+            return np.asarray(X[:, self.coefficient_indices_] @ self.coefficient_values_
+                              + self.intercept_)
         x = check_array(X, accept_sparse="csc", dtype=np.float64, ensure_min_features=0)
         if x.shape[1] != self.n_features_in_:
             raise ValueError(f"Expected {self.n_features_in_} features, got {x.shape[1]}")
@@ -190,7 +203,14 @@ def fit_glmnet_path(
         raise GlmnetError("thresh must be a finite number > 0")
     if isinstance(maxit, bool) or not isinstance(maxit, (int, np.integer)) or maxit < 1:
         raise GlmnetError("maxit must be a positive integer")
-    x, y = check_X_y(x, y, accept_sparse="csc", dtype=np.float64, ensure_min_samples=2)
+    if isinstance(x, PackedAAMatrix):
+        # The internal encoder guarantees finite matrix values and canonical columns.
+        _, y = check_X_y(np.empty((x.shape[0], 1)), y, ensure_min_samples=2,
+                         ensure_all_finite=False)
+        if not x.shape[1]:
+            raise GlmnetError("Packed AA training requires at least one feature")
+    else:
+        x, y = check_X_y(x, y, accept_sparse="csc", dtype=np.float64, ensure_min_samples=2)
     if not np.array_equal(np.unique(y), [0, 1]):
         raise GlmnetError("glmnet requires both binary labels 0 and 1")
     weights = np.ones(len(y)) if sample_weight is None else np.asarray(sample_weight, dtype=float)
@@ -203,7 +223,8 @@ def fit_glmnet_path(
         raise GlmnetError("sample_weight must be finite, nonnegative, and have positive total")
     positive = weights > 0
     if not np.all(positive):
-        x, y, weights = x[positive], y[positive], weights[positive]
+        x = x.select_rows(positive) if isinstance(x, PackedAAMatrix) else x[positive]
+        y, weights = y[positive], weights[positive]
     if not np.array_equal(np.unique(y), [0, 1]):
         raise GlmnetError("Both classes must have positive sample weight")
     # Normalizing first prevents overflow when forming the weighted responses.
@@ -221,14 +242,28 @@ def fit_glmnet_path(
     if not np.isfinite(factor_mean) or factor_mean <= 0:
         raise GlmnetError("penalty_factor mean must be finite and positive")
     path = np.unique(requested)[::-1].copy()
+    if isinstance(x, PackedAAMatrix):
+        if x.nnz >= SPARSE_INDEX_LIMIT:
+            return _fit_oversized_path(
+                x, y, weights, factors, requested, path, alpha=alpha, thresh=thresh, maxit=maxit,
+                keep_factors=penalty_factor is not None, compute_kkt=compute_kkt,
+                compact_coefficients=compact_coefficients,
+            )
+        x = x.to_csc()
     if sparse.issparse(x):
         x = sparse.csc_matrix(x, copy=False)
         if not x.has_canonical_format:
             x = x.copy()
             x.sum_duplicates()
             x.sort_indices()
-        if max(*x.shape, x.nnz) >= np.iinfo(np.int32).max:
-            raise GlmnetError("Sparse matrix exceeds native glmnet's 32-bit index limit")
+        if max(*x.shape, x.nnz) >= SPARSE_INDEX_LIMIT:
+            if max(x.shape) >= SPARSE_INDEX_LIMIT:
+                raise GlmnetError("Sparse matrix dimensions exceed glmnet's 32-bit index limit")
+            return _fit_oversized_path(
+                x, y, weights, factors, requested, path, alpha=alpha, thresh=thresh, maxit=maxit,
+                keep_factors=penalty_factor is not None, compute_kkt=compute_kkt,
+                compact_coefficients=compact_coefficients,
+            )
         variable = _sparse_has_variation(x)
     else:
         variable = bool(np.any(np.ptp(x, axis=0) > 0))
@@ -359,6 +394,54 @@ def fit_glmnet_path(
     return models
 
 
+def _fit_oversized_path(
+    x: Any, y: np.ndarray, weights: np.ndarray, factors: np.ndarray,
+    requested: np.ndarray, path: np.ndarray, *, alpha: float, thresh: float, maxit: int,
+    keep_factors: bool, compute_kkt: bool, compact_coefficients: bool,
+) -> list[GlmnetLogisticRegression]:
+    from phenoradar.glmnet_working_set import solve_working_set
+
+    solutions = {}
+    shared = factors.copy() if keep_factors and compact_coefficients else None
+    if shared is not None:
+        shared.flags.writeable = False
+    for strength, solution in zip(path, solve_working_set(
+        x, y, weights, factors, path, alpha=alpha, thresh=thresh, maxit=maxit,
+    ), strict=True):
+        solutions[float(strength)] = solution
+    models = []
+    for strength in requested:
+        solution = solutions[float(strength)]
+        intercept, columns, coef, passes, fits, kkt = solution
+        model = (_CompactGlmnetModel if compact_coefficients else GlmnetLogisticRegression)(
+            lambda_=float(strength), alpha=alpha, thresh=thresh, maxit=maxit,
+            penalty_factor=(shared if compact_coefficients else
+                            factors.copy() if keep_factors else None),
+        )
+        if isinstance(model, _CompactGlmnetModel):
+            model.coefficient_indices_, model.coefficient_values_ = columns.copy(), coef.copy()
+        else:
+            model.coef_ = np.zeros(x.shape[1])
+            model.coef_[columns] = coef
+        model.intercept_ = intercept
+        model.classes_ = np.array([0, 1])
+        model.n_features_in_ = x.shape[1]
+        model.n_iter_ = passes
+        model.path_length_ = len(path)
+        model.native_path_length_ = fits
+        model.converged_ = True
+        model.used_working_set_ = True
+        if compute_kkt:
+            model.kkt_residual_ = kkt
+        models.append(model)
+    return models
+
+
+def _check_packed_width(x: PackedAAMatrix, p: int) -> None:
+    if x.shape[1] != p:
+        raise ValueError(f"Expected {p} features, got {x.shape[1]}")
+
+
 def predict_glmnet_path(
     models: Sequence[GlmnetLogisticRegression], x: Any,
 ) -> list[np.ndarray]:
@@ -366,6 +449,8 @@ def predict_glmnet_path(
     if not models:
         return []
     p = models[0].n_features_in_
+    if isinstance(x, PackedAAMatrix):
+        return [model.predict_proba(x)[:, 1] for model in models]
     if p < 100_000:
         return [model.predict_proba(x)[:, 1] for model in models]
     if all(isinstance(model, _CompactGlmnetModel) for model in models):

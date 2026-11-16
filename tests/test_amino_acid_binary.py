@@ -11,13 +11,15 @@ from phenoradar.amino_acid_binary import encode_cached_block
 from phenoradar.amino_acid_encoding import compact_statistics
 from phenoradar.amino_acid_frequency_cache import AminoAcidFrequencyCache
 from phenoradar.amino_acid_outputs import _append_frame
+from phenoradar.amino_acid_packed import packed_arithmetic
+from phenoradar.amino_acid_packed_encoding import PackedFoldEncoding
 from phenoradar.amino_acid_sparse import SparseFoldEncoding
 
 
 @pytest.mark.parametrize("n", [7, 64, 113])
 @pytest.mark.parametrize("audit", [False, True])
 @pytest.mark.parametrize("duplicate", [False, True])
-@pytest.mark.parametrize("mode", ["mixed", "binary", "numpy"])
+@pytest.mark.parametrize("mode", ["mixed", "binary", "numpy", "packed"])
 def test_binary_and_mixed_columns_preserve_all_statistics_and_CSC_bits(
     tmp_path: Path, monkeypatch, n: int, audit: bool, duplicate: bool, mode: str,
 ) -> None:
@@ -61,7 +63,13 @@ def test_binary_and_mixed_columns_preserve_all_statistics_and_CSC_bits(
     targets = [training, [samples[-1], "absent", samples[0], samples[0]], []]
     groups = np.array([str(i % 3) for i in range(len(training))])
     quality = settings().site_filter
-    new = SparseFoldEncoding(targets, training, buffer_bytes=1024**2)
+    if mode == "packed":
+        fused = packed_arithmetic()
+        if fused is None:
+            pytest.skip("Compatible native packing kernels are unavailable")
+        new = PackedFoldEncoding(targets, training, fused=fused, budget=1024**2)
+    else:
+        new = SparseFoldEncoding(targets, training, buffer_bytes=1024**2)
     old = SparseFoldEncoding(targets, training, buffer_bytes=1024**2)
     try:
         values, _, observed, sites, aa = cache.get_compact(
@@ -80,6 +88,16 @@ def test_binary_and_mixed_columns_preserve_all_statistics_and_CSC_bits(
                 np.testing.assert_array_equal(a.view(np.uint64), b.view(np.uint64))
         np.testing.assert_array_equal(new.shift.view(np.uint64), old.shift.view(np.uint64))
         for a, b in zip(new.matrices(), old.matrices(), strict=True):
+            if mode == "packed":
+                selected = np.arange(0, b.shape[1], 3)
+                np.testing.assert_array_equal(a[:, selected].toarray(), b[:, selected].toarray())
+                residual = rng.standard_normal(a.shape[0])
+                gradients = np.empty(a.shape[1])
+                a.gradient(residual, gradients)
+                np.testing.assert_array_equal(
+                    gradients.view(np.uint64), np.abs(b.T @ residual).view(np.uint64),
+                )
+                a = a.to_csc()
             np.testing.assert_array_equal(a.data.view(np.uint64), b.data.view(np.uint64))
             np.testing.assert_array_equal(a.indices, b.indices)
             np.testing.assert_array_equal(a.indptr, b.indptr)

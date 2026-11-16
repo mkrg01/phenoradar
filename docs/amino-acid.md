@@ -278,6 +278,22 @@ bundles retain pre-ranking scoring masks.
 
 ## Caching and memory
 
+Oversized sparse logistic fits use a working set of columns that fits into
+glmnet's native 32-bit CSC format. Before accepting each positive lambda, the
+solver checks all omitted columns against the KKT conditions. This path requires
+a positive L1 penalty. The full gradient from the preceding solution is reused
+when starting the next lambda.
+
+For an unranked amino-acid run with enough RAM, set
+`runtime.amino_acid_matrix: packed` to retain the fold as in-memory column
+blocks. This needs the native kernels and checks that their floating-point
+accumulation matches SciPy. It builds compressible columns directly from the
+frequency masks, stores other columns in local CSC blocks, and extracts only the
+columns requested by the oversized solver and reports. Folds below glmnet's
+index limit use the native CSC fit. The default `csc` retains the disk-backed
+path for memory-constrained jobs. The worker planner sizes concurrency from the
+pilot fold's observed matrix size and RSS.
+
 Prediction byte caches are temporary per run. Frequencies and centering are
 computed in site blocks; large output matrices use temporary disk backing.
 Unweighted and TPM-weighted raw residue compositions are cached per requested
