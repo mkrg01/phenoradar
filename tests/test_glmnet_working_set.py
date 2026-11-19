@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import joblib
 import numpy as np
 import polars as pl
@@ -33,6 +35,75 @@ def test_intercept_only_path_scans_once(monkeypatch):
                for intercept, columns, _, _, _, kkt in solutions)
 
 
+@pytest.mark.parametrize("strength,error,precisions", [
+    (.02, 5e-8, [1e-12]),
+    (.02, 2e-7, [1e-12, 1e-15]),
+    (2e-6, 5e-8, [1e-12, 1e-15]),
+    (1e-9, 5e-10, [1e-12]),
+])
+def test_kkt_acceptance_retains_penalty_scaling_and_strict_retry(
+    monkeypatch, strength, error, precisions,
+):
+    x = sparse.csc_matrix([[-1.], [1.]])
+    y = np.array([0., 1.])
+    observed = []
+
+    def native_fit(matrix, labels, path, **kwargs):
+        observed.append(kwargs["thresh"])
+        # For these symmetric observations, the coefficient KKT residual is
+        # |lambda - sigmoid(-beta)| and the intercept residual is zero.
+        probability = strength + (error if len(observed) == 1 else 0)
+        beta = np.log1p(-probability) - np.log(probability)
+        return [SimpleNamespace(coef_=np.array([beta]), intercept_=0., n_iter_=1)]
+
+    monkeypatch.setattr(glmnet_working_set, "fit_glmnet_path", native_fit)
+    solution, = glmnet_working_set.solve_working_set(
+        x, y, np.full(2, .5), np.ones(1), np.array([strength]),
+        alpha=1, thresh=1e-7, maxit=10_000,
+    )
+    assert observed == precisions
+    intercept, columns, coefficients, *_ = solution
+    np.testing.assert_array_equal(columns, [0])
+    residual = .5 * (expit(x @ coefficients + intercept) - y)
+    kkt = abs(float((x.T @ residual)[0]) + strength)
+    np.testing.assert_allclose(kkt, error if len(precisions) == 1 else 0, atol=1e-15)
+
+
+def test_default_working_set_precision_avoids_unnecessary_strict_resolves(monkeypatch):
+    rng = np.random.default_rng(2026)
+    x = sparse.csc_matrix(rng.normal(size=(180, 210)) * (rng.random((180, 210)) < .28))
+    y = rng.binomial(1, expit(x[:, :5] @ [2, -1, .5, 1, -.5]))
+    weights = rng.uniform(.4, 1.7, len(y))
+    weights[0] = 0
+    weights /= weights.sum()
+    factors = rng.uniform(.7, 1.3, x.shape[1])
+    path = np.array([.055, .035, .024])
+    native_fit = glmnet_working_set.fit_glmnet_path
+    precisions = []
+
+    def record_fit(*args, **kwargs):
+        precisions.append(kwargs["thresh"])
+        return native_fit(*args, **kwargs)
+
+    monkeypatch.setattr(glmnet_working_set, "fit_glmnet_path", record_fit)
+    solutions = glmnet_working_set.solve_working_set(
+        x, y, weights, factors, path, alpha=1, thresh=1e-7, maxit=2_000_000,
+    )
+    errors = []
+    for strength, (intercept, columns, coefficients, *_) in zip(path, solutions, strict=True):
+        beta = np.zeros(x.shape[1])
+        beta[columns] = coefficients
+        residual = weights * (expit(x @ beta + intercept) - y)
+        gradient = x.T @ residual
+        violation = np.maximum(np.abs(gradient) - strength * factors, 0)
+        violation[columns] = np.abs(
+            gradient[columns] + strength * factors[columns] * np.sign(coefficients)
+        )
+        errors.append(max(abs(residual.sum()), float(violation.max())))
+    assert 1e-8 < max(errors) <= 1e-7
+    assert precisions and set(precisions) == {1e-12}
+
+
 @pytest.mark.parametrize("alpha", [0.6, 1.0])
 @pytest.mark.parametrize("compact", [False, True])
 def test_oversized_path_matches_weighted_full_objective(monkeypatch, alpha, compact):
@@ -66,10 +137,10 @@ def test_oversized_path_matches_weighted_full_objective(monkeypatch, alpha, comp
         np.testing.assert_allclose(
             gradient[selected],
             -strength * alpha * factors[selected] * np.sign(fit.coef_[selected]),
-            atol=1e-8, rtol=0,
+            atol=1e-7, rtol=0,
         )
-        assert np.max(np.abs(gradient[~selected]) - strength * alpha * factors[~selected]) <= 1e-8
-        assert abs(r.sum()) <= 1e-8
+        assert np.max(np.abs(gradient[~selected]) - strength * alpha * factors[~selected]) <= 1e-7
+        assert abs(r.sum()) <= 1e-7
     assert result[0] is not result[-1]
 
 

@@ -107,7 +107,7 @@ def solve_working_set(
             raise GlmnetError("The glmnet working set requires finite, positive L1 penalties")
         # glmnet stops on changes in its objective, while the check below
         # measures gradients. Use a separate absolute gradient tolerance.
-        tolerance = max(1e-9, min(1e-8, strength * alpha * min_factor * .01))
+        tolerance = max(1e-9, min(1e-7, strength * alpha * min_factor * .01))
         working = active
         coef = np.empty(0)
         passes = fits = 0

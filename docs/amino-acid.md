@@ -280,7 +280,10 @@ bundles retain pre-ranking scoring masks.
 
 Oversized sparse logistic fits use a working set of columns that fits into
 glmnet's native 32-bit CSC format. Before accepting each positive lambda, the
-solver checks all omitted columns against the KKT conditions. This path requires
+solver checks all omitted columns against the KKT conditions. Its gradient
+tolerance is capped at `1e-7`, scaled to the L1 penalty with a `1e-9` floor.
+Native subproblems still use an objective-change threshold of at most `1e-12`,
+retrying at `1e-15` when needed to pass the KKT check. This path requires
 a positive L1 penalty. The full gradient from the preceding solution is reused
 when starting the next lambda.
 
