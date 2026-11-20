@@ -28,7 +28,7 @@ from phenoradar.amino_acid_resources import (
 )
 from phenoradar.combined import ExpressionInput
 from phenoradar.config import AppConfig
-from phenoradar.cv import SelectedCandidate
+from phenoradar.cv import SelectedCandidate, _runtime_n_jobs
 from phenoradar.resource_budget import memory_budget
 
 
@@ -51,7 +51,7 @@ def fold_workers(config: AppConfig, n_species: int, n_features: int, n_folds: in
     retained = ((config.model_selection.inner_cv_n_splits or n_species)
                 if config.model_selection.search_strategy == "tpe" else 1)
     per_worker = worker_bytes(usage or SparseUsage(), n_species, n_features, retained)
-    return max(1, min(config.runtime.n_jobs, n_folds, int(memory_budget() * .7) // per_worker))
+    return max(1, min(_runtime_n_jobs(config), n_folds, int(memory_budget() * .7) // per_worker))
 
 
 def snapshot(store: AlignmentStore, expression: ExpressionInput | None) -> dict[str, Any]:
@@ -164,7 +164,7 @@ def outer_folds(config: AppConfig, store: AlignmentStore, expression: Expression
                      f"Matrix pair {(usage.matrix_bytes if usage else 0) / 1024**3:.2f} GiB; "
                      f"matrix buffer {matrix_buffer / 1024**3:.2f} GiB/worker.")
         child = config.model_copy(deep=True)
-        child.runtime.n_jobs = max(1, config.runtime.n_jobs // workers)
+        child.runtime.n_jobs = max(1, _runtime_n_jobs(config) // workers)
         if workers == 1:
             for i, fold in enumerate(folds[1:], 1):
                 yield run_fold(child, store, expression, manifest, fold, root / fold,

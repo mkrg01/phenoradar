@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from phenoradar.cache_identity import SourceIndex, digest_key, signature
@@ -40,6 +41,11 @@ class AlignmentInputCache:
         self.sources = SourceIndex(directory)
         self.directory = directory / "v2" / digest_key(context)
         self.hits = 0
+        self._hit_lock = Lock()
+
+    def _record_hit(self) -> None:
+        with self._hit_lock:
+            self.hits += 1
 
     @staticmethod
     def _restore(entry: Path, digest: str) -> AlignmentOG | None:
@@ -73,7 +79,7 @@ class AlignmentInputCache:
         entry = parent / key
         restored = self._restore(entry, digest)
         if restored is not None:
-            self.hits += 1
+            self._record_hit()
             restored.source, restored.orthogroup = str(path.resolve()), alignment_stem(path)
             if signature(path) != before:
                 raise ValueError(f"Alignment changed during cache lookup: {path}")
@@ -83,7 +89,7 @@ class AlignmentInputCache:
             fcntl.flock(lock, fcntl.LOCK_EX)
             restored = self._restore(entry, digest)
             if restored is not None:
-                self.hits += 1
+                self._record_hit()
                 restored.source, restored.orthogroup = str(path.resolve()), alignment_stem(path)
                 if signature(path) != before:
                     raise ValueError(f"Alignment changed during cache lookup: {path}")

@@ -858,14 +858,17 @@ def _with_native_thread_limit[T](
     resolved_n_jobs = int(n_jobs)
     if resolved_n_jobs < 1:
         raise CVError("native thread limit must be >= 1")
-    controller = _get_threadpool_controller()
-    if controller is not None:
-        with controller.limit(limits=resolved_n_jobs):
+    from phenoradar.amino_acid_gradient_parallel import gradient_thread_limit
+
+    with gradient_thread_limit(resolved_n_jobs):
+        controller = _get_threadpool_controller()
+        if controller is not None:
+            with controller.limit(limits=resolved_n_jobs):
+                return func(*args, **kwargs)
+        if threadpool_limits is None:
             return func(*args, **kwargs)
-    if threadpool_limits is None:
-        return func(*args, **kwargs)
-    with threadpool_limits(limits=resolved_n_jobs):
-        return func(*args, **kwargs)
+        with threadpool_limits(limits=resolved_n_jobs):
+            return func(*args, **kwargs)
 
 
 def _get_threadpool_controller() -> ThreadpoolController | None:

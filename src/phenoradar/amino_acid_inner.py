@@ -14,7 +14,7 @@ from phenoradar.amino_acid_parallel import _worker_threads, initialize, snapshot
 from phenoradar.amino_acid_resources import MAX_MATRIX_BUFFER, SparseUsage, worker_bytes
 from phenoradar.combined import ExpressionInput
 from phenoradar.config import AppConfig
-from phenoradar.cv import InnerCvPreprocessedFold, _score_glmnet_paths
+from phenoradar.cv import InnerCvPreprocessedFold, _runtime_n_jobs, _score_glmnet_paths
 from phenoradar.model_selection import Candidate
 from phenoradar.resource_budget import memory_budget
 
@@ -23,13 +23,14 @@ Score = list[tuple[float, list[dict[str, Any]]]]
 
 def inner_workers(config: AppConfig, store: AlignmentStore, first: InnerCvPreprocessedFold,
                   remaining: int) -> int:
-    if getattr(store, "_inner_parallel_disabled", False) or config.runtime.n_jobs < 3:
+    jobs = _runtime_n_jobs(config)
+    if getattr(store, "_inner_parallel_disabled", False) or jobs < 3:
         return 0
     usage = getattr(store, "_sparse_usage", SparseUsage())
     # A fresh child does not inherit the parent's earlier reporting arenas/HWM.
     per_worker = worker_bytes(replace(usage, peak_rss_bytes=0),
                               len(first.y_train), first.x_train.shape[1])
-    return min(remaining, config.runtime.n_jobs - 1, int(memory_budget() * .6) // per_worker)
+    return min(remaining, jobs - 1, int(memory_budget() * .6) // per_worker)
 
 
 def _score(config: AppConfig, scope: str, sample_set: int, candidates: list[Candidate],
@@ -59,7 +60,7 @@ def _task(config: AppConfig, scope: str, sample_set: int, candidates: list[Candi
         preparation.runtime.n_jobs = preprocessing_jobs
     fold = _prepare_inner_fold(preparation, store, expression, species, y, groups, pairs,
                                split, warnings)
-    return _score(config, scope, sample_set, candidates, fold), warnings
+    return _score(preparation, scope, sample_set, candidates, fold), warnings
 
 
 def score_parallel(config: AppConfig, store: AlignmentStore, expression: ExpressionInput | None,
@@ -70,7 +71,9 @@ def score_parallel(config: AppConfig, store: AlignmentStore, expression: Express
                    warnings: list[str], progress: Callable[[str], None] | None,
                    ) -> Iterator[Score]:
     child = config.model_copy(deep=True)
-    child.runtime.n_jobs = max(1, (config.runtime.n_jobs - 1) // workers)
+    child.runtime.n_jobs = max(1, (_runtime_n_jobs(config) - 1) // workers)
+    first_config = config.model_copy(deep=True)
+    first_config.runtime.n_jobs = 1
     buffer = min(MAX_MATRIX_BUFFER, max(1, int(memory_budget() * .6) // (3 * workers)))
     if progress:
         progress(f"{scope}: {workers} inner-fold workers; first fold scores concurrently; "
@@ -83,7 +86,7 @@ def score_parallel(config: AppConfig, store: AlignmentStore, expression: Express
         futures = [executor.submit(_task, child, scope, sample_set, candidates,
                                    species, y, groups, pairs, split) for split in splits]
         try:
-            yield _score(config, scope, sample_set, candidates, first)
+            yield _score(first_config, scope, sample_set, candidates, first)
             del first
             for split, future in zip(splits, futures, strict=True):
                 result, messages = future.result()

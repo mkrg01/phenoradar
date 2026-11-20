@@ -36,6 +36,10 @@ def fit_orthogroups(
     buffer = min(OG_BUFFER_BYTES, max(1, memory_budget() // (workers * 8)))
 
     def fit(og: AlignmentOG) -> tuple[AATransform, EncodedBlock | None]:
+        if store.cache_frequencies:
+            # One task owns each OG. Key-derived private paths remain unique,
+            # while expensive persistent-cache reads overlap across tasks.
+            store._frequency_cache(og, settings.aggregation == "tpm_weighted_frequency")
         local = copy(store)
         local.ogs = {og.orthogroup: og}
         encoder = encoding.fork() if encoding is not None else None
@@ -63,9 +67,6 @@ def fit_orthogroups(
             og = next(orthogroups, None)
             if og is None:
                 return False
-            if store.cache_frequencies:
-                # Allocate unique cache paths on the caller thread, before any write.
-                store._frequency_cache(og, settings.aggregation == "tpm_weighted_frequency")
             pending.append(executor.submit(fit, og))
             return True
 

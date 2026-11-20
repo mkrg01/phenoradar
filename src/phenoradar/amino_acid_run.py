@@ -62,6 +62,7 @@ from phenoradar.cv import (
     _metrics_dataframe,
     _rank_selected_candidates,
     _requested_selected_candidate_count,
+    _runtime_n_jobs,
     _sample_training_sets,
     _score_glmnet_paths,
     _score_std_error_from_trial_rows,
@@ -155,7 +156,7 @@ def _prepare_inner_fold(
     fitted, matrices, _ = fit_sparse_encoded(
         store, train_species, config.preprocess.amino_acid,
         [train_species, valid_species], y=y[train], groups=groups[train],
-        contrast_groups=pairs[train], audit=False, n_jobs=config.runtime.n_jobs,
+        contrast_groups=pairs[train], audit=False, n_jobs=_runtime_n_jobs(config),
         packed=config.runtime.amino_acid_matrix == "packed",
     )
     x_train, x_valid = matrices
@@ -387,7 +388,7 @@ def fit_scope(
         fitted, matrices, shift = fit_sparse_encoded(
             store, train_species, config.preprocess.amino_acid, [train_species],
             y=y[indices], groups=groups[indices], contrast_groups=pairs[indices],
-            n_jobs=config.runtime.n_jobs,
+            n_jobs=_runtime_n_jobs(config),
             packed=config.runtime.amino_acid_matrix == "packed",
         )
         matrix = matrices[0]
@@ -445,7 +446,7 @@ def fit_scope(
                     f"({matrix.shape[0]} species, {matrix.shape[1]} features)."
                 )
             _with_native_thread_limit(
-                config.runtime.n_jobs,
+                _runtime_n_jobs(config),
                 _fit_selected_estimator,
                 model,
                 matrix,
@@ -829,6 +830,7 @@ def run_amino_acid(
                 cache_species=training_species,
                 cache_frequencies=True,
                 input_cache_dir=Path("runs/.phenoradar_cache/alignments"),
+                n_jobs=_runtime_n_jobs(config),
                 sequence_tpm_path=tpm_path,
                 sequence_tpm_cache_dir=tpm_cache,
                 progress=progress,

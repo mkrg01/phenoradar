@@ -27,7 +27,7 @@ def test_preprocessing_budget_keeps_all_active_pools_within_cpu_slots(
 
 @pytest.mark.parametrize("score_jobs", [1, 3])
 @pytest.mark.parametrize("preparation_jobs", [None, 1, 2, 4])
-def test_task_changes_preprocessing_budget_without_changing_model_fit(
+def test_task_shares_its_cpu_budget_between_preparation_and_model_fit(
     monkeypatch, score_jobs, preparation_jobs,
 ):
     from phenoradar import amino_acid_inner as inner
@@ -46,7 +46,8 @@ def test_task_changes_preprocessing_budget_without_changing_model_fit(
 
     def score(current, scope, sample, candidates, fold):
         observed.append(("score", current.runtime.n_jobs))
-        assert current is config and fold is prepared
+        assert fold is prepared
+        assert current.model_dump(exclude={"runtime"}) == config.model_dump(exclude={"runtime"})
         return []
 
     monkeypatch.setattr(parallel, "_WORKER", (SimpleNamespace(), None))
@@ -56,7 +57,8 @@ def test_task_changes_preprocessing_budget_without_changing_model_fit(
                                    np.array(["g"]), np.array(["p"]),
                                    (np.array([0]), np.array([], dtype=int), "1"),
                                    preparation_jobs)
-    assert observed == [("prepare", preparation_jobs or score_jobs), ("score", score_jobs)]
+    assert observed == [("prepare", preparation_jobs or score_jobs),
+                        ("score", preparation_jobs or score_jobs)]
     assert config.runtime.n_jobs == score_jobs
     assert result == [] and warnings == ["kept"]
 
@@ -109,3 +111,40 @@ def test_packed_og_threads_preserve_buffers_statistics_and_matrix_arithmetic(tmp
             if reference is None:
                 reference = identity
             assert identity == reference
+
+
+def test_cli_worker_limit_caps_shared_cpu_budget(monkeypatch):
+    from phenoradar import amino_acid_queue as queue
+    from phenoradar.amino_acid_parallel import fold_workers
+    from phenoradar.amino_acid_resources import SparseUsage
+
+    config = AppConfig()
+    config.runtime.n_jobs = 12
+    config._worker_limit = 5
+    monkeypatch.setattr(queue, 'memory_budget', lambda: 100 * 1024**3)
+    monkeypatch.setattr(queue, 'worker_bytes', lambda *args, **kwargs: 1024**3)
+    monkeypatch.setattr(queue, '_refit_bytes', lambda *args, **kwargs: 1024**3)
+    scoring, refits, _ = queue.queue_workers(config, SparseUsage(), 1000, 100000, 19)
+    assert scoring + refits <= 5
+    assert scoring * preprocessing_threads(config, scoring, refits) + refits <= 5
+    assert fold_workers(config, 10, 10, 19) <= 5
+
+
+def test_preparation_honors_cli_worker_reservation(monkeypatch):
+    from phenoradar import amino_acid_run as run
+
+    config = AppConfig()
+    config.data.feature_mode = 'amino_acid'
+    config.runtime.n_jobs = 12
+    config._worker_limit = 5
+    observed = []
+    def fit(*args, **kwargs):
+        observed.append(kwargs['n_jobs'])
+        raise RuntimeError('captured budget')
+    monkeypatch.setattr(run, 'fit_sparse_encoded', fit)
+    with pytest.raises(RuntimeError, match='captured budget'):
+        run._prepare_inner_fold(config, SimpleNamespace(), None, ['a', 'b', 'c', 'd'],
+                                np.array([0, 1, 0, 1]), np.array(['g', 'g', 'h', 'h']),
+                                np.array(['g', 'g', 'h', 'h']),
+                                (np.array([0, 1]), np.array([2, 3]), '5'), [])
+    assert observed == [5] and config.runtime.n_jobs == 12

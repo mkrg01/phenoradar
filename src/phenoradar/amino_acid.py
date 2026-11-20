@@ -8,8 +8,10 @@ import hashlib
 import heapq
 import inspect
 import json
+import os
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from functools import partial
@@ -108,7 +110,10 @@ class AlignmentStore:
         sequence_tpm_path: str | None = None,
         sequence_tpm_cache_dir: Path | None = None,
         progress: Callable[[str], None] | None = None,
+        n_jobs: int = 1,
     ) -> None:
+        if n_jobs < 1:
+            raise ValueError("AA input threads must be positive")
         self._temp = TemporaryDirectory(prefix="phenoradar_aa_")
         self.ogs: dict[str, AlignmentOG] = {}
         self.species = set(species)
@@ -127,24 +132,38 @@ class AlignmentStore:
             if input_cache_dir is not None else None
         )
         try:
-            paths = sorted(
-                p
-                for p in directory.iterdir()
-                if p.is_file() and p.name.lower().endswith(
-                    (".faa", ".fa", ".fasta", ".faa.gz", ".fa.gz", ".fasta.gz")
+            with os.scandir(directory) as entries:
+                paths = sorted(
+                    Path(entry.path) for entry in entries
+                    if entry.name.lower().endswith(
+                        (".faa", ".fa", ".fasta", ".faa.gz", ".fa.gz", ".fasta.gz")
+                    )
+                    and entry.is_file()
                 )
-            )
+            paths = [p for p in paths
+                     if only_orthogroups is None or alignment_stem(p) in only_orthogroups]
+            seen: set[str] = set()
             for path in paths:
                 name = alignment_stem(path)
-                if only_orthogroups is not None and name not in only_orthogroups:
-                    continue
-                if name in self.ogs:
+                if name in seen:
                     raise AlignmentError(f"Duplicate orthogroup filename stem: {name}")
-                index = len(self.ogs)
-                self.ogs[name] = (
+                seen.add(name)
+
+            def load(item: tuple[int, Path]) -> tuple[str, AlignmentOG]:
+                index, path = item
+                og = (
                     self._read(path, index) if input_cache is None
                     else input_cache.read(path, partial(self._read, path, index))
                 )
+                return alignment_stem(path), og
+
+            with ExitStack() as stack:
+                results: Iterator[tuple[str, AlignmentOG]] = map(load, enumerate(paths))
+                if n_jobs > 1 and paths:
+                    executor = stack.enter_context(ThreadPoolExecutor(max_workers=min(n_jobs, 4)))
+                    results = executor.map(load, enumerate(paths))
+                for name, og in results:
+                    self.ogs[name] = og
             if not self.ogs:
                 raise AlignmentError(f"No alignment FASTA files found in {directory}")
             if only_orthogroups is not None and only_orthogroups - self.ogs.keys():
@@ -510,7 +529,7 @@ class AlignmentStore:
         key = og.orthogroup, weighted
         if key not in self._frequency_caches:
             self._frequency_caches[key] = AminoAcidFrequencyCache(
-                Path(self._temp.name) / f"{len(self._frequency_caches)}_frequency.bin",
+                Path(self._temp.name) / f"{digest_key(key)}_frequency.bin",
                 og.mask_rows,
                 persistent=(self._frequency_directory / digest_key({
                     "version": 1, "codec": FORMAT_SHA, "numpy": np.__version__,
@@ -920,6 +939,10 @@ def fit_amino_acid(
         weighted = settings.aggregation == "tpm_weighted_frequency"
         warm = any(c.length for (_, is_weighted), c in store._frequency_caches.items()
                    if is_weighted == weighted)
+        if store.cache_frequencies and not warm and store._frequency_directory is not None:
+            # A fresh store may still have validated frequency segments on disk.
+            cached, _, _ = store._frequency_cache(next(iter(store.ogs.values())), weighted)
+            warm = bool(cached.length)
         # Cold cache creation avoids the per-OG assembly overhead.
         if not store.cache_frequencies or warm:
             from phenoradar.amino_acid_og_parallel import fit_orthogroups

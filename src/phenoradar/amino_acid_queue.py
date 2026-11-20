@@ -22,6 +22,7 @@ from phenoradar.config import AppConfig
 from phenoradar.cv import (
     SelectedCandidate,
     _inner_cv_splits,
+    _runtime_n_jobs,
     _sample_training_sets,
     _score_std_error_from_trial_rows,
     _select_training_groups,
@@ -56,7 +57,7 @@ class _Scope:
 
 
 def enabled(config: AppConfig) -> bool:
-    return (config.runtime.n_jobs >= 3 and _selection_is_active(config)
+    return (_runtime_n_jobs(config) >= 3 and _selection_is_active(config)
             and config.model_selection.search_strategy == "grid")
 
 
@@ -111,16 +112,17 @@ def queue_workers(config: AppConfig, usage: SparseUsage, n: int,
     # Inner paths retain compressed coefficients, not dense refit/report models.
     inner = worker_bytes(replace(usage, peak_rss_bytes=0), n, p, retained_matrices=0)
     refit = _refit_bytes(usage, n, p, refit_n or n)
-    refits = min(2, scopes, max(1, config.runtime.n_jobs // 4))
+    jobs = _runtime_n_jobs(config)
+    refits = min(2, scopes, max(1, jobs // 4))
     while refits and budget - refits * refit < inner:
         refits -= 1
-    workers = min(config.runtime.n_jobs - refits, (budget - refits * refit) // inner)
+    workers = min(jobs - refits, (budget - refits * refit) // inner)
     return max(1, workers), refits, min(MAX_MATRIX_BUFFER, max(1, inner // 3))
 
 
 def preprocessing_threads(config: AppConfig, scoring: int, refits: int) -> int:
     """Use remaining CPU slots inside each scoring worker's OG preparation."""
-    return max(1, min(4, (config.runtime.n_jobs - refits) // scoring))
+    return max(1, min(4, (_runtime_n_jobs(config) - refits) // scoring))
 
 
 def _refit_bytes(usage: SparseUsage, n: int, p: int, refit_n: int) -> int:
@@ -210,7 +212,7 @@ def grid_scopes(config: AppConfig, store: AlignmentStore, expression: Expression
             max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
             initializer=initialize, initargs=(payload, 1, buffer),
         ) as scoring, ProcessPoolExecutor(
-            max_workers=config.runtime.n_jobs, mp_context=multiprocessing.get_context("spawn"),
+            max_workers=_runtime_n_jobs(config), mp_context=multiprocessing.get_context("spawn"),
             initializer=initialize, initargs=(payload, 1, min(MAX_MATRIX_BUFFER, buffer * 2)),
             max_tasks_per_child=1,
         ) as fitting:
@@ -247,7 +249,7 @@ def grid_scopes(config: AppConfig, store: AlignmentStore, expression: Expression
                                                         for _, sid, _ in pending.values()):
                         scoring.shutdown(wait=True)
                         scoring_finished = True
-                        refits = min(config.runtime.n_jobs, max(refits, running + int(
+                        refits = min(_runtime_n_jobs(config), max(refits, running + int(
                             memory_budget() * .8) // refit_bytes))
                         if progress:
                             progress(f"AA grid queue: scoring complete; "

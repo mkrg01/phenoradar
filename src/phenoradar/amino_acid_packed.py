@@ -158,10 +158,13 @@ class PackedAAMatrix:
         self.nbytes = self.indptr.nbytes + self.boundaries.nbytes + sum(b.nbytes for b in blocks)
 
     def gradient(self, residual: np.ndarray, out: np.ndarray) -> None:
+        from phenoradar.amino_acid_gradient_parallel import scan_blocks
+
         residual = np.ascontiguousarray(residual, dtype=float)
-        for left, right, block in zip(self.boundaries[:-1], self.boundaries[1:],
-                                      self.blocks, strict=True):
-            block.gradient(residual, out[left:right], fused=self.fused)
+        if not scan_blocks(self, residual, out):
+            for left, right, block in zip(self.boundaries[:-1], self.boundaries[1:],
+                                          self.blocks, strict=True):
+                block.gradient(residual, out[left:right], fused=self.fused)
         np.abs(out, out=out)
 
     def to_csc(self) -> sparse.csc_matrix:
