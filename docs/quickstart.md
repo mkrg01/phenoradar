@@ -38,7 +38,7 @@ data:
   metadata_path: data/species_metadata.tsv
   tpm_path: data/tpm.tsv
 split:
-  group_col: expanded_pair_clade_id
+  group_col: phylogenetic_block_id
 runtime:
   n_jobs: 4
 ```

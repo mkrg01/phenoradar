@@ -42,7 +42,7 @@ def test_null_ranked_limit_matches_disabled_filter_and_preserves_other_filters(
         **settings,
         ranked_feature_filter={
             "method": method, "max_features": None, "higher_in_trait": direction,
-            "min_contrast_pairs": 2,
+            "min_contrast_groups": 2,
         },
     )
     disabled = _config(neutral=neutral, **settings)
@@ -118,7 +118,7 @@ def test_sparse_and_neutral_intersection_preserves_candidates_and_stage_counts(
         neutral=True,
         missing_expression={"method": "neutral", "zero_as_missing": zero_as_missing},
         sparse_feature_filter={"scope": scope, "min_nonzero_fraction": min_fraction},
-        ranked_feature_filter={"method": method, "max_features": 20, "min_contrast_pairs": 2},
+        ranked_feature_filter={"method": method, "max_features": 20, "min_contrast_groups": 2},
     )
     # Hand-checked eligibility before sparsity, including pair-specific missingness.
     eligible = {
@@ -346,7 +346,7 @@ def test_skipping_diagnostic_rows_preserves_ranking_priorities_and_warnings(
         ranked_feature_filter={
             "method": method,
             "max_features": 2,
-            "min_contrast_pairs": 4 if case == "insufficient_pairs" else 1,
+            "min_contrast_groups": 4 if case == "insufficient_pairs" else 1,
         }
     )
     values = np.array([[1, 3, 5], [5, 1, 2], [2, 4, 8], [8, 2, 3], [3, 6, 4], [9, 3, 1]])

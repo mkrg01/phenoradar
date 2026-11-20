@@ -157,7 +157,7 @@ def test_supervised_filtering_does_not_treat_missing_label_as_low_expression(met
     config = neutral_config()
     config.preprocess.expression.ranked_feature_filter.method = method
     config.preprocess.expression.ranked_feature_filter.max_features = 3
-    config.preprocess.expression.ranked_feature_filter.min_contrast_pairs = 2
+    config.preprocess.expression.ranked_feature_filter.min_contrast_groups = 2
     # one_label has observations only in label 1; one_pair has one valid contrast.
     train = np.array([[1, 0, 1], [8, 8, 8], [2, 0, 0], [9, 9, 9]], dtype=float)
     _, _, names, _ = _preprocess_train_and_target(

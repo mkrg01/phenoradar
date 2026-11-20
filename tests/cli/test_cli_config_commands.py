@@ -116,7 +116,7 @@ def _stub_resolved_config(
             feature_col="orthogroup",
             value_col="tpm",
             trait_col="C4",
-            contrast_pair_col="contrast_pair_id",
+            contrast_group_col="contrast_pair_id",
         ),
     )
 

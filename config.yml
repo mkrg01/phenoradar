@@ -7,7 +7,7 @@ data:
   feature_col: orthogroup
   value_col: tpm
   trait_col: C4
-  contrast_pair_col: expanded_pair_clade_id  # type: string or null
+  contrast_group_col: phylogenetic_block_id  # type: string or null
 
   # Optional amino-acid inputs.
   feature_mode: expression  # choices: expression, amino_acid, combined
@@ -15,7 +15,7 @@ data:
   sequence_tpm_path: null  # type: string or null; species/sequence_id/tpm TSV[.gz]
 
 split:
-  group_col: expanded_pair_clade_id
+  group_col: phylogenetic_block_id
   exclude_col: null  # type: string or null
   require_both_labels_per_group: false  # choices: true, false
   outer_cv_strategy: logo  # choices: logo, group_kfold, stratified_group_kfold
@@ -47,7 +47,7 @@ preprocess:
     ranked_feature_filter:
       method: none  # choices: none, pair_aware, unpaired, variance
       max_features: null  # type: integer or null
-      min_contrast_pairs: 1
+      min_contrast_groups: 1
       higher_in_trait: null  # choices: 0, 1, null; null keeps either direction
     correlation_filter:
       enabled: false  # choices: true, false
@@ -64,7 +64,7 @@ preprocess:
     ranked_site_filter:
       method: none  # choices: none, pair_aware, unpaired
       max_sites: 2000  # Used only for pair_aware or unpaired ranking
-      min_contrast_pairs: 2
+      min_contrast_groups: 2
 model:
   name: logistic_elasticnet  # choices: logistic_elasticnet, linear_svm, random_forest
 

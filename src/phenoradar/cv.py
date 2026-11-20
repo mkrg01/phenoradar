@@ -2255,22 +2255,22 @@ def _apply_ranked_feature_filter(
             x_train_expr, y_train, groups_train, selected, train_rows=train_rows
         )
         n_valid_contrast_pairs = int(contrasts.shape[0])
-        min_contrast_pairs = int(filter_config.min_contrast_pairs)
-        if n_valid_contrast_pairs < min_contrast_pairs:
+        min_contrast_groups = int(filter_config.min_contrast_groups)
+        if n_valid_contrast_pairs < min_contrast_groups:
             if higher_in_trait is not None:
                 raise CVError(
                     "ranked_feature_filter cannot enforce "
                     f"higher_in_trait={higher_in_trait} because too few valid contrast "
                     "pairs were available in a split; "
                     f"valid_contrast_pairs={n_valid_contrast_pairs}, "
-                    f"min_contrast_pairs={min_contrast_pairs}"
+                    f"min_contrast_groups={min_contrast_groups}"
                 )
             if warnings is not None:
                 warnings.append(
                     "ranked_feature_filter method pair_aware skipped because too few valid "
                     "contrast pairs were available in a split; "
                     f"valid_contrast_pairs={n_valid_contrast_pairs}, "
-                    f"min_contrast_pairs={min_contrast_pairs}"
+                    f"min_contrast_groups={min_contrast_groups}"
                 )
             rows = _ranked_score_rows(
                 method=method,
@@ -2732,7 +2732,7 @@ def _select_feature_indices_with_counts(
             counts_per_feature = np.count_nonzero(np.isfinite(contrasts), axis=0)
             selected = selected[
                 counts_per_feature
-                >= config.preprocess.expression.ranked_feature_filter.min_contrast_pairs
+                >= config.preprocess.expression.ranked_feature_filter.min_contrast_groups
             ]
 
     # This count has always included neutral eligibility as well as sparsity.
@@ -5734,7 +5734,7 @@ def _run_final_refit_impl(
     groups_train = np.array(train_pool.select("group_id").to_series().to_list(), dtype=str)
     contrast_groups_train: np.ndarray | None = None
     if (
-        config.data.contrast_pair_col is not None
+        config.data.contrast_group_col is not None
         or config.preprocess.expression.ranked_feature_filter.method == "pair_aware"
     ):
         contrast_values = train_pool.select("contrast_group_id").to_series().to_list()
@@ -6314,7 +6314,7 @@ def _run_outer_fold(
     groups_train = np.array(train_df.select("group_id").to_series().to_list(), dtype=str)
     contrast_groups_train: np.ndarray | None = None
     if (
-        config.data.contrast_pair_col is not None
+        config.data.contrast_group_col is not None
         or config.preprocess.expression.ranked_feature_filter.method == "pair_aware"
     ):
         contrast_values = train_df.select("contrast_group_id").to_series().to_list()

@@ -1052,7 +1052,7 @@ def fit_amino_acid(
                     sums[valid] += difference[valid]
                     n_pairs += valid
                 scores = np.linalg.norm(sums / np.maximum(n_pairs[:, None], 1), axis=1)
-                eligible &= n_pairs >= ranked.min_contrast_pairs
+                eligible &= n_pairs >= ranked.min_contrast_groups
             if ranked.method == "none":
                 variant_count += int(np.count_nonzero(eligible))
                 if np.any(eligible):

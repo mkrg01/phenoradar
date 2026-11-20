@@ -78,7 +78,7 @@ def test_build_split_artifacts_success(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "group_col", ["contrast_pair_id", "expanded_pair_clade_id"],
+    "group_col", ["contrast_pair_id", "phylogenetic_block_id"],
 )
 def test_explicit_group_column_selects_cv_grouping(tmp_path: Path, group_col: str) -> None:
     metadata, tpm = _fixture_data(tmp_path)
@@ -86,7 +86,7 @@ def test_explicit_group_column_selects_cv_grouping(tmp_path: Path, group_col: st
     groups = ["clade_a", "clade_a", "clade_b", "clade_b", "clade_b", ""]
     metadata.write_text(
         "\n".join([
-            header + "\texpanded_pair_clade_id",
+            header + "\tphylogenetic_block_id",
             *(row + "\t" + group for row, group in zip(rows, groups, strict=True)),
         ]) + "\n"
     )
@@ -95,16 +95,16 @@ def test_explicit_group_column_selects_cv_grouping(tmp_path: Path, group_col: st
         "split": {"group_col": group_col},
     })
 
-    assert config.split.group_col == config.data.contrast_pair_col == group_col
+    assert config.split.group_col == config.data.contrast_group_col == group_col
     split = build_split_artifacts(config)
-    expanded = group_col == "expanded_pair_clade_id"
+    expanded = group_col == "phylogenetic_block_id"
     assert split.fold_count == 2
     assert split.pool_counts["external_test"] == (0 if expanded else 1)
     assert split.pool_counts["training_validation"] == (5 if expanded else 4)
     assert split.pool_counts["discovery_inference"] == 1
 
 
-def test_split_group_col_can_differ_from_contrast_pair_col(tmp_path: Path) -> None:
+def test_split_group_col_can_differ_from_contrast_group_col(tmp_path: Path) -> None:
     metadata = _write(
         tmp_path / "species_metadata.tsv",
         "\n".join(
@@ -137,7 +137,7 @@ def test_split_group_col_can_differ_from_contrast_pair_col(tmp_path: Path) -> No
 data:
   metadata_path: {metadata}
   tpm_path: {tpm}
-  contrast_pair_col: contrast_pair_id
+  contrast_group_col: contrast_pair_id
 split:
   group_col: family
 """.strip()
@@ -200,7 +200,7 @@ def test_pair_aware_filter_allows_missing_contrast_pairs_for_rank_split(
 data:
   metadata_path: {metadata}
   tpm_path: {tpm}
-  contrast_pair_col: contrast_pair_id
+  contrast_group_col: contrast_pair_id
 split:
   group_col: order
 preprocess:
@@ -268,7 +268,7 @@ def _both_label_groups_config(
         f"""data:
   metadata_path: {metadata}
   tpm_path: {tpm}
-  contrast_pair_col: contrast_pair_id
+  contrast_group_col: contrast_pair_id
 split:
   group_col: family
   exclude_col: exclude
@@ -387,23 +387,23 @@ def test_require_both_labels_rejects_insufficient_remaining_cv_groups(
         build_split_artifacts(config)
 
 
-@pytest.mark.parametrize("contrast_pair_col", ["contrast_pair_id", None])
+@pytest.mark.parametrize("contrast_group_col", ["contrast_pair_id", None])
 @pytest.mark.parametrize("require_both_labels", [True, False])
 def test_non_contrast_splits_reject_missing_group_values(
-    tmp_path: Path, contrast_pair_col: str | None, require_both_labels: bool
+    tmp_path: Path, contrast_group_col: str | None, require_both_labels: bool
 ) -> None:
     config = _both_label_groups_config(
         tmp_path,
         rows=["missing\t1\t\t\tno"],
         require_both_labels=require_both_labels,
     )
-    config.data.contrast_pair_col = contrast_pair_col
+    config.data.contrast_group_col = contrast_group_col
 
     with pytest.raises(SplitError, match="non-empty split group"):
         build_split_artifacts(config)
 
 
-def test_null_contrast_pair_col_uses_split_group_without_contrast_column(
+def test_null_contrast_group_col_uses_split_group_without_contrast_column(
     tmp_path: Path,
 ) -> None:
     metadata = _write(
@@ -438,7 +438,7 @@ def test_null_contrast_pair_col_uses_split_group_without_contrast_column(
 data:
   metadata_path: {metadata}
   tpm_path: {tpm}
-  contrast_pair_col: null
+  contrast_group_col: null
 split:
   group_col: family
 """.strip()
@@ -502,25 +502,25 @@ data:
     assert "external_test" not in set(artifacts.split_manifest.get_column("pool").to_list())
 
 
-@pytest.mark.parametrize("contrast_pair_col", ["contrast_pair_id", "custom_pair"])
+@pytest.mark.parametrize("contrast_group_col", ["contrast_pair_id", "custom_pair"])
 @pytest.mark.parametrize("require_both_labels", [True, False])
 def test_unpaired_labeled_species_are_automatically_external_test(
-    tmp_path: Path, contrast_pair_col: str, require_both_labels: bool
+    tmp_path: Path, contrast_group_col: str, require_both_labels: bool
 ) -> None:
     metadata, tpm = _fixture_data(tmp_path)
     table = pl.read_csv(metadata, separator="\t").rename(
-        {"contrast_pair_id": contrast_pair_col}
+        {"contrast_pair_id": contrast_group_col}
     )
     table = table.with_columns(
         pl.when(pl.col("species") == "sp5")
         .then(pl.lit("   "))
-        .otherwise(pl.col(contrast_pair_col))
-        .alias(contrast_pair_col)
+        .otherwise(pl.col(contrast_group_col))
+        .alias(contrast_group_col)
     )
     table.write_csv(metadata, separator="\t")
     config = load_and_resolve_config([_write_config(tmp_path, metadata, tpm)])
-    config.data.contrast_pair_col = contrast_pair_col
-    config.split.group_col = contrast_pair_col
+    config.data.contrast_group_col = contrast_group_col
+    config.split.group_col = contrast_group_col
     config.split.require_both_labels_per_group = require_both_labels
 
     artifacts = build_split_artifacts(config)

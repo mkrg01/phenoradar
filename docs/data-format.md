@@ -20,13 +20,19 @@ sp4			Poaceae
 | --- | --- | --- |
 | `species` | Yes | Non-empty, unique species ID |
 | `C4` | Yes | Binary trait: `0`, `1`, empty, or null |
-| `contrast_pair_id` | When selected for grouping or pair-aware scoring | Contrast pair identifier |
-| `expanded_pair_clade_id` | When selected for grouping or pair-aware scoring | Expanded contrast-pair clade identifier |
+| `contrast_pair_id` | When selected for grouping or pair-aware scoring | Pair of sister clades with uniform but opposite focal-trait states |
+| `phylogenetic_block_id` | When selected for grouping or pair-aware scoring | Largest rooted clade containing one selected contrast pair and no other selected pair |
 | `family` | No | Readable annotation for grouped summaries and plots |
 
 `split.group_col` must be specified and name an existing column.
-`data.contrast_pair_col` controls pair-aware features and may be `null` when
-contrast pairs are unused.
+`data.contrast_group_col` controls pair-aware features and may be `null` when
+contrast groups are unused. These groups can contain several samples of each
+trait state. A contrast pair identifies two clades, not necessarily two samples.
+
+Earlier metadata using `expanded_pair_clade_id` is accepted as
+`phylogenetic_block_id`, including suffixes such as `_all` and `_phenotyped`.
+If both names are present, their IDs must agree. Saved input files are not
+rewritten.
 
 Pool assignment follows these rules, in order:
 
@@ -138,7 +144,7 @@ data:
   feature_col: og_id
   value_col: abundance
   trait_col: phenotype
-  contrast_pair_col: contrast_id
+  contrast_group_col: contrast_id
 split:
   group_col: contrast_id
   exclude_col: final_exclude

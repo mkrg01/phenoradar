@@ -211,7 +211,7 @@ def write_amino_acid_figures(
         feature_col=config.data.feature_col,
         value_col=config.data.value_col,
         trait_col=config.data.trait_col,
-        group_col=config.data.contrast_pair_col or config.split.group_col,
+        group_col=config.data.contrast_group_col or config.split.group_col,
         oof_predictions=oof,
         thresholds=pl.DataFrame({
             "threshold_name": [FIXED_PROBABILITY_THRESHOLD_NAME],

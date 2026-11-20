@@ -12,6 +12,7 @@ import polars as pl
 from sklearn.model_selection import GroupKFold, LeaveOneGroupOut, StratifiedGroupKFold
 
 from phenoradar.config import AppConfig
+from phenoradar.contrast_metadata import canonical_metadata
 from phenoradar.fold_identity import validation_fold_ids
 
 _POOL_TRAINING_VALIDATION = "training_validation"
@@ -82,16 +83,19 @@ def _hold_out_single_label_groups(metadata: pl.DataFrame) -> pl.DataFrame:
 
 
 def _normalize_metadata(config: AppConfig) -> pl.DataFrame:
-    metadata = _load_tsv(Path(config.data.metadata_path))
+    try:
+        metadata = canonical_metadata(_load_tsv(Path(config.data.metadata_path)))
+    except ValueError as exc:
+        raise SplitError(str(exc)) from exc
     species_col = config.data.species_col
     trait_col = config.data.trait_col
     split_group_col = config.split.group_col
-    contrast_pair_col = config.data.contrast_pair_col
+    contrast_group_col = config.data.contrast_group_col
     exclude_col = config.split.exclude_col
 
     required = [species_col, trait_col, split_group_col]
-    if contrast_pair_col is not None:
-        required.append(contrast_pair_col)
+    if contrast_group_col is not None:
+        required.append(contrast_group_col)
     if exclude_col is not None:
         required.append(exclude_col)
     _require_columns(metadata, required, "metadata")
@@ -101,10 +105,10 @@ def _normalize_metadata(config: AppConfig) -> pl.DataFrame:
         _normalized_string_expr(trait_col, "__trait_raw"),
         _normalized_string_expr(split_group_col, "__group_raw"),
     ]
-    if contrast_pair_col is None:
+    if contrast_group_col is None:
         columns.append(pl.lit(None, dtype=pl.String).alias("__contrast_group_raw"))
     else:
-        columns.append(_normalized_string_expr(contrast_pair_col, "__contrast_group_raw"))
+        columns.append(_normalized_string_expr(contrast_group_col, "__contrast_group_raw"))
     if exclude_col is None:
         columns.append(pl.lit("no", dtype=pl.String).alias("__exclude_raw"))
     else:
@@ -196,7 +200,7 @@ def _normalize_metadata(config: AppConfig) -> pl.DataFrame:
     # groups remain input errors, even when a contrast column is available.
     normalized = normalized.with_columns(
         (
-            pl.lit(contrast_pair_col is not None and split_group_col == contrast_pair_col)
+            pl.lit(contrast_group_col is not None and split_group_col == contrast_group_col)
             & pl.col("__label").is_not_null()
             & pl.col("__group").is_null()
             & ~pl.col("__exclude")

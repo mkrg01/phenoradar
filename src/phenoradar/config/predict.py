@@ -6,7 +6,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field, PositiveInt, ValidationError
+from pydantic import Field, PositiveInt, ValidationError, field_validator, model_validator
+
+from phenoradar.contrast_metadata import canonical_column, canonical_config_fields
 
 from .io import ConfigError, _deep_merge_dicts, _load_yaml_mapping
 from .schema import (
@@ -31,7 +33,17 @@ class PredictDataConfig(StrictModel):
     feature_col: str = Field(default="orthogroup", min_length=1)
     value_col: str = Field(default="tpm", min_length=1)
     trait_col: str = Field(default="C4", min_length=1)
-    contrast_pair_col: str | None = "contrast_pair_id"
+    contrast_group_col: str | None = "contrast_pair_id"
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_names(cls, value: Any) -> Any:
+        return canonical_config_fields(value)
+
+    @field_validator("contrast_group_col")
+    @classmethod
+    def normalize_contrast_column(cls, value: str | None) -> str | None:
+        return canonical_column(value) if value is not None else None
 
 
 class PredictRuntimeConfig(StrictModel):

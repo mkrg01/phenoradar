@@ -10,6 +10,8 @@ import yaml
 from pydantic import ValidationError
 from yaml.nodes import MappingNode, ScalarNode
 
+from phenoradar.contrast_metadata import canonical_config_fields, canonical_config_tree
+
 from .schema import AppConfig, ExecutionStage
 
 if TYPE_CHECKING:
@@ -21,6 +23,11 @@ class ConfigError(ValueError):
 
 
 def _deep_merge_dicts(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        base = canonical_config_fields(base)
+        override = canonical_config_fields(override)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     merged: dict[str, Any] = dict(base)
     for key, override_value in override.items():
         base_value = merged.get(key)
@@ -43,7 +50,10 @@ def _load_yaml_mapping(path: Path) -> dict[str, Any]:
         return {}
     if not isinstance(raw, Mapping):
         raise ConfigError(f"Top-level YAML must be a mapping: {path}")
-    return dict(raw)
+    try:
+        return dict(canonical_config_tree(raw))
+    except ValueError as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
 
 
 def load_and_resolve_config(
@@ -82,7 +92,7 @@ def _require_group_col(config: AppConfig) -> None:
     if "group_col" not in config.split.model_fields_set:
         raise ConfigError(
             "Specify split.group_col explicitly in the run configuration "
-            "(for example, expanded_pair_clade_id or contrast_pair_id)."
+            "(for example, phylogenetic_block_id or contrast_pair_id)."
         )
 
 

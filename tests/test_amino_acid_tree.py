@@ -204,7 +204,7 @@ def test_sequence_context_trees_fall_back_to_split_group_without_contrast_pairs(
         tmp_path, 'aa_frequency', full=False)
     raw = yaml.safe_load(path.read_text())
     raw['runtime']['execution_stage'] = 'cv_only'
-    raw['data']['contrast_pair_col'] = None
+    raw['data']['contrast_group_col'] = None
     raw['split'] = {'group_col': 'family'}
     raw['preprocess']['amino_acid']['ranked_site_filter']['method'] = 'none'
     metadata = pl.read_csv(raw['data']['metadata_path'], separator='\t')

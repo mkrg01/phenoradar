@@ -1852,8 +1852,8 @@ def _run_single(
                     raise typer.BadParameter(str(exc)) from exc
                 figure_warnings.extend(candidate_figure_warnings)
         with timing_recorder.measure(scope="figures", stage="tree_figures"):
-            contrast_pair_col = resolved.data.contrast_pair_col
-            if tree_path is not None and contrast_pair_col is not None:
+            contrast_group_col = resolved.data.contrast_group_col
+            if tree_path is not None and contrast_group_col is not None:
                 try:
                     tree_warnings = write_run_tree_prediction_artifacts(
                         preserve_missing=resolved.preprocess.expression.missing_expression.method
@@ -1867,7 +1867,7 @@ def _run_single(
                         feature_col=resolved.data.feature_col,
                         value_col=resolved.data.value_col,
                         trait_col=resolved.data.trait_col,
-                        group_col=contrast_pair_col,
+                        group_col=contrast_group_col,
                         oof_predictions=cv_artifacts.oof_predictions,
                         thresholds=cv_artifacts.thresholds,
                         feature_importance=cv_artifacts.feature_importance,
@@ -1891,7 +1891,7 @@ def _run_single(
                 figure_warnings.extend(tree_warnings)
             elif tree_path is not None:
                 figure_warnings.append(
-                    "Skipped tree prediction artifacts because data.contrast_pair_col is null."
+                    "Skipped tree prediction artifacts because data.contrast_group_col is null."
                 )
         warnings.extend(figure_warnings)
     timing_recorder.record_since(
@@ -2647,8 +2647,8 @@ def predict(
         except FigureError as exc:
             raise typer.BadParameter(str(exc)) from exc
         predict_warnings.extend(evidence_warnings)
-    contrast_pair_col = resolved.data.contrast_pair_col
-    if tree_path is not None and contrast_pair_col is not None:
+    contrast_group_col = resolved.data.contrast_group_col
+    if tree_path is not None and contrast_group_col is not None:
         try:
             tree_warnings = write_predict_tree_prediction_artifacts(
                 run_dir=run_dir,
@@ -2660,7 +2660,7 @@ def predict(
                 ),
                 species_col=resolved.data.species_col,
                 trait_col=resolved.data.trait_col,
-                group_col=contrast_pair_col,
+                group_col=contrast_group_col,
                 pred_predict=pred_predict,
             )
         except TreePredictionError as exc:
@@ -2668,7 +2668,7 @@ def predict(
         predict_warnings.extend(tree_warnings)
     elif tree_path is not None:
         predict_warnings.append(
-            "Skipped tree prediction artifacts because data.contrast_pair_col is null."
+            "Skipped tree prediction artifacts because data.contrast_group_col is null."
         )
     timing_recorder.record_since(figures_started, scope="predict", stage="figure_generation")
     _log("Collect provenance metadata.")

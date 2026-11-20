@@ -107,7 +107,7 @@ never determine them.
 | `preprocess.amino_acid.site_filter.min_residue_states` | `2` | Required distinct canonical states, from 2 to 20 |
 | `preprocess.amino_acid.ranked_site_filter.method` | `none` | `none`, `pair_aware`, or `unpaired` |
 | `preprocess.amino_acid.ranked_site_filter.max_sites` | `2000` | Retained-site limit for ranking; ignored with `none` |
-| `preprocess.amino_acid.ranked_site_filter.min_contrast_pairs` | `2` | Positive valid-pair minimum for pair-aware ranking |
+| `preprocess.amino_acid.ranked_site_filter.min_contrast_groups` | `2` | Positive valid-pair minimum for pair-aware ranking |
 
 Processing order:
 
@@ -430,7 +430,7 @@ blocks, including zero coefficients and all eligible sites.
 
 With `data.tree_path`, AA and combined runs also write `cv/figures/tree_group.svg`
 and `tree_prediction_cv.svg`, with the same tracks and annotation TSVs as expression
-runs. Groups use `data.contrast_pair_col`, falling back to `split.group_col` when
+runs. Groups use `data.contrast_group_col`, falling back to `split.group_col` when
 null. External-test predictions also receive a tree when at least two predicted
 species occur in the tree. These plots use saved predictions; they do not refit models.
 

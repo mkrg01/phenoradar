@@ -110,7 +110,7 @@ def test_full_run_and_predict_phylogeny_leave_model_predictions_unchanged(
             "data": {
                 "tpm_path": str(target_tpm),
                 "tree_path": str(tree),
-                "contrast_pair_col": None,
+                "contrast_group_col": None,
             },
             "phylogenetic_imputation": {"branch_length_mode": "unit"},
         },

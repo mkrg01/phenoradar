@@ -265,7 +265,7 @@ def test_representatives_are_frozen_before_ranking_and_ignore_held_out(tmp_path:
                     ranked_site_filter={
                         "method": "pair_aware",
                         "max_sites": 1,
-                        "min_contrast_pairs": 2,
+                        "min_contrast_groups": 2,
                     },
                 ),
                 y=np.array([0, 1, 0, 1]),
@@ -343,7 +343,7 @@ def fixture_config(tmp_path: Path, aggregation: str, *, full: bool = True) -> Pa
             "ranked_site_filter": {
                 "method": "pair_aware",
                 "max_sites": 10,
-                "min_contrast_pairs": 1,
+                "min_contrast_groups": 1,
             },
         }},
         "sampling": {

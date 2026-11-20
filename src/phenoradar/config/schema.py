@@ -17,6 +17,8 @@ from pydantic import (
     model_validator,
 )
 
+from phenoradar.contrast_metadata import canonical_column, canonical_config_fields
+
 ExecutionStage = Literal["cv_only", "full_run"]
 OuterCvStrategy = Literal["logo", "group_kfold", "stratified_group_kfold"]
 SamplingStrategy = Literal["all_samples", "group_balanced"]
@@ -35,13 +37,25 @@ AbsentFeatureFill = Literal[0, "nan"]
 SparseFeatureScope = Literal["all_samples", "any_trait", "trait_0", "trait_1"]
 
 DEFAULT_TOP_FEATURES = 20
-_EXPANDED_PAIR_CLADE_COL = "expanded_pair_clade_id"
+_PHYLOGENETIC_BLOCK_COL = "phylogenetic_block_id"
 
 
 class StrictModel(BaseModel):
     """Base model that rejects unknown configuration keys."""
 
     model_config = ConfigDict(extra="forbid")
+
+    def __setstate__(self, state: dict[Any, Any]) -> None:
+        """Keep configuration objects in earlier model bundles readable."""
+        state = dict(state)
+        values = canonical_config_fields(state["__dict__"])
+        for key in ("contrast_group_col", "group_col"):
+            if isinstance(values.get(key), str):
+                values[key] = canonical_column(values[key])
+        state["__dict__"] = values
+        fields = {key: True for key in state.get("__pydantic_fields_set__", set())}
+        state["__pydantic_fields_set__"] = set(canonical_config_fields(fields))
+        super().__setstate__(state)
 
 
 class DiscreteRangeSpec(StrictModel):
@@ -147,11 +161,21 @@ class DataConfig(StrictModel):
     feature_col: str = "orthogroup"
     value_col: str = "tpm"
     trait_col: str = "C4"
-    contrast_pair_col: str | None = "contrast_pair_id"
+    contrast_group_col: str | None = "contrast_pair_id"
     feature_mode: Literal["expression", "amino_acid", "combined"] = "expression"
     alignment_dir: str | None = None
     sequence_tpm_path: str | None = None
     sequence_tpm_cache_dir: str | None = "runs/.phenoradar_cache/sequence_tpm"
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_names(cls, value: Any) -> Any:
+        return canonical_config_fields(value)
+
+    @field_validator("contrast_group_col")
+    @classmethod
+    def normalize_contrast_column(cls, value: str | None) -> str | None:
+        return canonical_column(value) if value is not None else None
 
 
 class SplitConfig(StrictModel):
@@ -168,7 +192,7 @@ class SplitConfig(StrictModel):
     def validate_group_col(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("split.group_col must be a non-empty metadata column name")
-        return value
+        return canonical_column(value)
 
     @model_validator(mode="after")
     def validate_group_kfold_args(self) -> SplitConfig:
@@ -256,8 +280,13 @@ class RankedFeatureFilterConfig(StrictModel):
 
     method: RankedFeatureFilterMethod = "none"
     max_features: PositiveInt | None = None
-    min_contrast_pairs: PositiveInt = 1
+    min_contrast_groups: PositiveInt = 1
     higher_in_trait: Literal[0, 1] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_names(cls, value: Any) -> Any:
+        return canonical_config_fields(value)
 
     @field_validator("higher_in_trait", mode="before")
     @classmethod
@@ -500,6 +529,11 @@ class SummaryConfig(StrictModel):
 
     group_col: str = Field(default="family", min_length=1)
 
+    @field_validator("group_col")
+    @classmethod
+    def normalize_group_column(cls, value: str) -> str:
+        return canonical_column(value)
+
 
 class FiguresConfig(StrictModel):
     """Figure output controls."""
@@ -539,7 +573,12 @@ class AminoAcidSiteFilter(StrictModel):
 class AminoAcidRankedFilter(StrictModel):
     method: Literal["none", "pair_aware", "unpaired"] = "none"
     max_sites: PositiveInt = 2000
-    min_contrast_pairs: PositiveInt = 2
+    min_contrast_groups: PositiveInt = 2
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_names(cls, value: Any) -> Any:
+        return canonical_config_fields(value)
 
 
 class AminoAcidConfig(StrictModel):
@@ -582,12 +621,12 @@ class AppConfig(StrictModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
 
     @model_validator(mode="after")
-    def resolve_pair_clade_column(self) -> AppConfig:
+    def resolve_phylogenetic_block_column(self) -> AppConfig:
         if (
-            self.split.group_col == _EXPANDED_PAIR_CLADE_COL
-            and "contrast_pair_col" not in self.data.model_fields_set
+            self.split.group_col == _PHYLOGENETIC_BLOCK_COL
+            and "contrast_group_col" not in self.data.model_fields_set
         ):
-            self.data.contrast_pair_col = _EXPANDED_PAIR_CLADE_COL
+            self.data.contrast_group_col = _PHYLOGENETIC_BLOCK_COL
         return self
 
     @model_validator(mode="after")
@@ -613,9 +652,9 @@ class AppConfig(StrictModel):
                 raise ValueError("amino_acid mode requires model.name=logistic_elasticnet")
             if (
                 self.preprocess.amino_acid.ranked_site_filter.method == "pair_aware"
-                and self.data.contrast_pair_col is None
+                and self.data.contrast_group_col is None
             ):
-                raise ValueError("amino_acid pair_aware ranking requires data.contrast_pair_col")
+                raise ValueError("amino_acid pair_aware ranking requires data.contrast_group_col")
         missing = self.preprocess.expression.missing_expression
         if self.data.feature_mode == "amino_acid":
             pass  # Expression preprocessing settings are inactive in sequence mode.
@@ -648,11 +687,11 @@ class AppConfig(StrictModel):
         if (
             self.preprocess.expression.ranked_feature_filter.method == "pair_aware"
             and self.data.feature_mode != "amino_acid"
-            and self.data.contrast_pair_col is None
+            and self.data.contrast_group_col is None
         ):
             raise ValueError(
                 "preprocess.expression.ranked_feature_filter.method=pair_aware requires "
-                "data.contrast_pair_col"
+                "data.contrast_group_col"
             )
         selection_active = (
             self.model_selection.selected_candidate_count is not None

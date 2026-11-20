@@ -26,7 +26,7 @@ def test_fused_encoding_is_exact_and_validation_does_not_fit_sites(
     cfg = settings(aggregation)
     cfg.site_filter.min_sample_fraction = .5
     cfg.ranked_site_filter.method = method
-    cfg.ranked_site_filter.min_contrast_pairs = 1
+    cfg.ranked_site_filter.min_contrast_groups = 1
     training = ["a", "b", "c", "d", "a"]  # Duplicate biological rows are preserved.
     kwargs = dict(y=np.array([0, 1, 0, 1, 0]), groups=np.array(["1", "1", "2", "2", "1"]),
                   contrast_groups=np.array(["1", "1", "2", "2", "1"]))

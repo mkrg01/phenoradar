@@ -8,6 +8,7 @@ from pathlib import Path
 import polars as pl
 
 from phenoradar.abstention import ABSTENTION_COLUMNS, prediction_label_expr
+from phenoradar.contrast_metadata import canonical_column, canonical_metadata
 
 
 class GroupSummaryError(ValueError):
@@ -47,15 +48,16 @@ def build_group_summary_artifacts(
     if predictions.height == 0:
         raise GroupSummaryError(f"{source_table_name} is empty; cannot write group summary")
 
+    group_col = canonical_column(group_col)
     try:
-        metadata = pl.read_csv(metadata_path, separator="\t")
+        metadata = canonical_metadata(pl.read_csv(metadata_path, separator="\t"))
     except FileNotFoundError as exc:
         raise GroupSummaryError(
             f"Metadata file not found for group summary: {metadata_path}"
         ) from exc
     except Exception as exc:
         raise GroupSummaryError(
-            f"Failed to read metadata TSV for group summary: {metadata_path}"
+            f"Failed to read metadata TSV for group summary: {metadata_path}: {exc}"
         ) from exc
 
     missing = sorted({species_col, group_col} - set(metadata.columns))

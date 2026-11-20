@@ -4680,7 +4680,7 @@ preprocess:
     ranked_feature_filter:
       method: pair_aware
       max_features: 1
-      min_contrast_pairs: 2
+      min_contrast_groups: 2
 """.strip(),
             )
         ]
@@ -4771,7 +4771,7 @@ preprocess:
     ranked_feature_filter:
       method: pair_aware
       max_features: 1
-      min_contrast_pairs: 2
+      min_contrast_groups: 2
 """.strip(),
             )
         ]
@@ -4815,7 +4815,7 @@ preprocess:
     ranked_feature_filter:
       method: pair_aware
       max_features: 1
-      min_contrast_pairs: 2
+      min_contrast_groups: 2
       higher_in_trait: 1
 """.strip(),
             )

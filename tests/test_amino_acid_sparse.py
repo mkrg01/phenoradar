@@ -31,7 +31,7 @@ def test_sparse_encoding_preserves_filters_missing_novel_and_duplicate_rows(
     cfg = settings(aggregation)
     cfg.site_filter.min_sample_fraction = .5
     cfg.ranked_site_filter.method = method
-    cfg.ranked_site_filter.min_contrast_pairs = 1
+    cfg.ranked_site_filter.min_contrast_groups = 1
     training = ["d", "b", "a", "c", "a"]
     targets = [training, ["held", "absent", "c"], []]
     kwargs = dict(y=np.array([0, 1, 0, 1, 0]), groups=np.array(["1", "1", "2", "2", "1"]),

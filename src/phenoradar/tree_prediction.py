@@ -25,6 +25,7 @@ from phenoradar.colors import (
     CONFUSION_GROUP_ORDER,
 )
 from phenoradar.config.schema import DEFAULT_TOP_FEATURES
+from phenoradar.contrast_metadata import canonical_metadata
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
@@ -767,11 +768,11 @@ def _load_metadata(
     require_trait: bool = True,
 ) -> pl.DataFrame:
     try:
-        metadata = pl.read_csv(path, separator="\t")
+        metadata = canonical_metadata(pl.read_csv(path, separator="\t"))
     except FileNotFoundError as exc:
         raise TreePredictionError(f"Metadata file not found: {path}") from exc
     except Exception as exc:
-        raise TreePredictionError(f"Failed to read metadata TSV: {path}") from exc
+        raise TreePredictionError(f"Failed to read metadata TSV: {path}: {exc}") from exc
 
     required = {species_col}
     if require_trait:

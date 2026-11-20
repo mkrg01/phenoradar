@@ -716,7 +716,7 @@ def test_ranked_feature_filter_null_or_omitted_limit_disables_filter(
     cfg = _write(
         tmp_path / "valid.yml",
         f"""data:
-  contrast_pair_col: null
+  contrast_group_col: null
 preprocess:
   expression:
     ranked_feature_filter:
@@ -807,12 +807,12 @@ preprocess:
         load_and_resolve_config([cfg])
 
 
-def test_unpaired_ranked_filter_does_not_require_contrast_pair_col(tmp_path: Path) -> None:
+def test_unpaired_ranked_filter_does_not_require_contrast_group_col(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path / "valid.yml",
         """
 data:
-  contrast_pair_col: null
+  contrast_group_col: null
 preprocess:
   expression:
     ranked_feature_filter:
@@ -827,12 +827,12 @@ preprocess:
     assert resolved.preprocess.expression.ranked_feature_filter.method == "unpaired"
 
 
-def test_generic_group_options_allow_null_contrast_pair_col(tmp_path: Path) -> None:
+def test_generic_group_options_allow_null_contrast_group_col(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path / "valid.yml",
         """
 data:
-  contrast_pair_col: null
+  contrast_group_col: null
 split:
   group_col: family
 sampling:
@@ -843,17 +843,17 @@ sampling:
 
     resolved = load_and_resolve_config([cfg])
 
-    assert resolved.data.contrast_pair_col is None
+    assert resolved.data.contrast_group_col is None
     assert resolved.split.group_col == "family"
     assert resolved.sampling.weighting == "group_label_inverse"
 
 
-def test_pair_aware_filter_requires_contrast_pair_col(tmp_path: Path) -> None:
+def test_pair_aware_filter_requires_contrast_group_col(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path / "invalid.yml",
         """
 data:
-  contrast_pair_col: null
+  contrast_group_col: null
 preprocess:
   expression:
     ranked_feature_filter:
@@ -863,7 +863,7 @@ preprocess:
         + "\n",
     )
 
-    with pytest.raises(ConfigError, match="contrast_pair_col"):
+    with pytest.raises(ConfigError, match="contrast_group_col"):
         load_and_resolve_config([cfg])
 
 
@@ -874,7 +874,7 @@ def test_pair_aware_group_balanced_allows_split_group_to_differ_from_contrast_pa
         tmp_path / "valid.yml",
         """
 data:
-  contrast_pair_col: contrast_pair_id
+  contrast_group_col: contrast_pair_id
 split:
   group_col: family
 preprocess:
@@ -888,12 +888,12 @@ preprocess:
 
     resolved = load_and_resolve_config([cfg])
 
-    assert resolved.data.contrast_pair_col == "contrast_pair_id"
+    assert resolved.data.contrast_group_col == "contrast_pair_id"
     assert resolved.split.group_col == "family"
-    assert resolved.preprocess.expression.ranked_feature_filter.min_contrast_pairs == 1
+    assert resolved.preprocess.expression.ranked_feature_filter.min_contrast_groups == 1
 
 
-def test_pair_aware_filter_rejects_zero_min_contrast_pairs(tmp_path: Path) -> None:
+def test_pair_aware_filter_rejects_zero_min_contrast_groups(tmp_path: Path) -> None:
     cfg = _write(
         tmp_path / "invalid.yml",
         """
@@ -902,12 +902,12 @@ preprocess:
     ranked_feature_filter:
       method: pair_aware
       max_features: 10
-      min_contrast_pairs: 0
+      min_contrast_groups: 0
 """.strip()
         + "\n",
     )
 
-    with pytest.raises(ConfigError, match="min_contrast_pairs"):
+    with pytest.raises(ConfigError, match="min_contrast_groups"):
         load_and_resolve_config([cfg])
 
 
