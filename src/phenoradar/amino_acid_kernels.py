@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["native", "decode", "center", "append"]
+__all__ = ["native", "decode", "center", "append", "centering_mass"]
 
 try:
     from phenoradar import _aa_kernels as native  # type: ignore[attr-defined]
@@ -68,3 +68,35 @@ def append(encoding: Any, values: np.ndarray) -> None:
         # _append_csc writes or buffers the arrays synchronously.
         encoding._append_csc(i, data[:count], indices[:count], ends)
     encoding.width += values.shape[1]
+
+
+def centering_mass(values: np.ndarray, sites: np.ndarray, residues: np.ndarray,
+                   eligible: np.ndarray, known: np.ndarray) -> np.ndarray | None:
+    """Sum only provably exact sites; preserve the original reduction elsewhere."""
+    kernel = getattr(native, "centering_mass", None)
+    if kernel is None or values.dtype != np.float32:
+        return None
+    steps = np.diff(sites)
+    if (np.any((residues < 0) | (residues >= 20))
+            or not np.all((steps > 0) | ((steps == 0) & (np.diff(residues) > 0)))):
+        return None
+    local = np.cumsum(eligible) - 1
+    keep = eligible[sites]
+    columns = np.flatnonzero(keep & known[sites, residues])
+    nsites = int(eligible.sum())
+    mass = np.empty((len(values), nsites))
+    fallback = np.empty(nsites, dtype=bool)
+    kernel(np.ascontiguousarray(values), np.ascontiguousarray(columns, dtype=np.int64),
+           np.ascontiguousarray(local[sites[columns]], dtype=np.int64), mass, fallback,
+           len(values), values.shape[1], nsites)
+    if fallback.any():
+        from phenoradar.amino_acid_encoding import _compact_mass
+
+        positions = np.flatnonzero(keep)
+        columns = positions[fallback[local[sites[positions]]]]
+        raw = np.nan_to_num(values[:, columns], copy=False)
+        raw *= known[sites[columns], residues[columns]][None, :]
+        local_fallback = np.cumsum(fallback) - 1
+        mass[:, fallback] = _compact_mass(
+            raw, local_fallback[local[sites[columns]]], residues[columns], int(fallback.sum()))
+    return mass

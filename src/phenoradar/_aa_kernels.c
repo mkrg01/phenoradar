@@ -163,6 +163,66 @@ static PyObject *csc(PyObject *self, PyObject *args) {
 fail:
     release(b, 6); return NULL;
 }
+/* At most 20 nonnegative float32 values spanning <=24 binades need at most
+   24 + 24 + ceil(log2(20)) = 53 significant bits. Their float64 sum is exact
+   in every order. Sums safely inside the existing unit-mass clipping guard
+   also produce exactly 1. With <=2 nonzero terms, every reduction order is
+   equivalent. Other sites retain the original NumPy reduction. */
+static PyObject *centering_mass(PyObject *self, PyObject *args) {
+    PyObject *o[5]; Py_buffer b[5] = {{0}};
+    Py_ssize_t n, raw_width, nsites;
+    if (!PyArg_ParseTuple(args, "OOOOOnnn", &o[0], &o[1], &o[2], &o[3], &o[4],
+                          &n, &raw_width, &nsites)) return NULL;
+    GET(0, 4, 0); GET(1, 8, 0); GET(2, 8, 0); GET(3, 8, 1); GET(4, 1, 1);
+    Py_ssize_t k = b[1].len / 8;
+    REQUIRE(n >= 0 && raw_width >= 0 && nsites >= 0);
+    REQUIRE(shape(&b[0], n, raw_width, 4) && shape(&b[3], n, nsites, 8));
+    REQUIRE(b[2].len == k * 8 && b[4].len == nsites);
+    const float *raw = b[0].buf;
+    const int64_t *columns = b[1].buf, *sites = b[2].buf;
+    double *mass = b[3].buf;
+    uint8_t *fallback = b[4].buf;
+    Py_ssize_t count = 0;
+    for (Py_ssize_t j = 0; j < k; ++j) {
+        REQUIRE(columns[j] >= 0 && columns[j] < raw_width && sites[j] >= 0 && sites[j] < nsites);
+        REQUIRE(j == 0 || (columns[j] > columns[j - 1] && sites[j] >= sites[j - 1]));
+        count = j && sites[j] == sites[j - 1] ? count + 1 : 1;
+        REQUIRE(count <= 20);
+    }
+    Py_ssize_t failures = 0, left = 0;
+    Py_BEGIN_ALLOW_THREADS
+    for (Py_ssize_t site = 0; site < nsites; ++site) {
+        Py_ssize_t right = left;
+        while (right < k && sites[right] == site) ++right;
+        fallback[site] = 0;
+        for (Py_ssize_t i = 0; i < n; ++i) {
+            double sum = 0, minimum = DBL_MAX, maximum = 0;
+            int valid = 1, terms = 0;
+            for (Py_ssize_t j = left; j < right; ++j) {
+                float q = raw[i * raw_width + columns[j]];
+                if (isnan(q)) continue;
+                if (q == 0 && !signbit(q)) continue;
+                if (!isfinite(q) || q < 0 || signbit(q)) { valid = 0; break; }
+                double value = q;
+                ++terms;
+                sum += value;
+                if (value < minimum) minimum = value;
+                if (value > maximum) maximum = value;
+            }
+            int clipped = fabs(sum - 1.0) < 1e-7 - 64 * DBL_EPSILON;
+            if (!valid || (!clipped && terms > 2 && minimum < maximum / 16777216.0)) {
+                fallback[site] = 1; ++failures; break;
+            }
+            mass[i * nsites + site] = fabs(sum - 1.0) <= 1e-7 ? 1 : sum;
+        }
+        left = right;
+    }
+    Py_END_ALLOW_THREADS
+    release(b, 5); return PyLong_FromSsize_t(failures);
+fail:
+    release(b, 5); return NULL;
+}
+
 static PyObject *packed_csc(PyObject *self, PyObject *args) {
     PyObject *o[8]; Py_buffer b[8] = {{0}}; Py_ssize_t width, mass_rows;
     if (!PyArg_ParseTuple(args, "OOOOOOOOnn", &o[0], &o[1], &o[2], &o[3],
@@ -266,6 +326,7 @@ fail:
 
 static PyMethodDef methods[] = {{"decode", decode, METH_VARARGS, NULL},
     {"center", center, METH_VARARGS, NULL}, {"csc", csc, METH_VARARGS, NULL},
+    {"centering_mass", centering_mass, METH_VARARGS, NULL},
     {"packed_csc", packed_csc, METH_VARARGS, NULL},
     {"interleave_csc", interleave_csc, METH_VARARGS, NULL},
     {"pack_csc_columns", pack_csc_columns, METH_VARARGS, NULL},

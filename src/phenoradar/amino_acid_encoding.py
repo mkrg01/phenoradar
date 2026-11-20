@@ -94,10 +94,14 @@ class FoldEncoding:
                     active: np.ndarray) -> None:
         keep = eligible[sites]
         local = np.cumsum(eligible) - 1
-        q = np.nan_to_num(values[:, keep], copy=False)
-        q *= known[sites[keep], residues[keep]][None, :]
-        q = q.astype(np.float32, copy=False)
-        mass = _compact_mass(q, local[sites[keep]], residues[keep], int(eligible.sum()))
+        from phenoradar.amino_acid_kernels import centering_mass
+
+        mass = centering_mass(values, sites, residues, eligible, known)
+        if mass is None:
+            q = np.nan_to_num(values[:, keep], copy=False)
+            q *= known[sites[keep], residues[keep]][None, :]
+            q = q.astype(np.float32, copy=False)
+            mass = _compact_mass(q, local[sites[keep]], residues[keep], int(eligible.sum()))
         selected = keep & active[sites, residues]
         from phenoradar.amino_acid_kernels import center, native
 
