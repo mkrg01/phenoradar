@@ -97,7 +97,7 @@ phenoradar predict --model-bundle runs/RUN_ID/model_bundle -c predict_config.yml
 Explicit CLI values override config values. Expression prediction uses all TPM
 species when metadata is omitted; metadata needs only the species column.
 Model state, preprocessing, aggregation, and decision policies come from the
-bundle. Training settings in an older config do not retrain or change the model.
+bundle.
 
 Expression results are written to `runs/<timestamp>_predict_<id>/`, with
 predictions at `inference/tables/prediction_inference.tsv`. See
@@ -140,8 +140,8 @@ not define that identity. Use `--allow-mixed-experiments` when a cross-experimen
 comparison is intentional.
 
 Non-strict mode records ingestion warnings and may retain runs without metrics
-as unranked. Legacy runs with missing fingerprints or metric contracts produce
-warnings; `--strict` rejects them. Metric definitions are read from saved run
+as unranked. Missing fingerprints or metric contracts produce warnings;
+`--strict` rejects the affected runs. Metric definitions are read from saved run
 contracts. Reports also flag mixed software versions and dirty source builds.
 
 See [report outputs](output-artifacts.md#report-artifacts) for the resulting

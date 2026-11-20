@@ -49,8 +49,10 @@ sequence-only mode. Metadata follows the usual [training format](data-format.md#
 
 ## Inputs
 
-Each `.faa`, `.fa`, or `.fasta` file directly in `data.alignment_dir` is one OG;
-its filename stem is the OG ID. No manifest is needed. Records within each OG
+Each `.faa`, `.fa`, or `.fasta` file, optionally gzip-compressed (`.gz`),
+directly in `data.alignment_dir` is one OG;
+its name after removing the FASTA and optional `.gz` suffixes is the OG ID.
+No manifest is needed. Records within each OG
 must have unique IDs and equal alignment lengths.
 
 The FASTA ID is the first header token. It must match an exact metadata species
@@ -229,9 +231,7 @@ stability, and coverage use effect range.
 
 Coordinates are one-based: alignment positions refer to the original MSA;
 sequence positions count non-gap characters, including `X` and `*`. Gap coordinates
-are empty. The OOF frequency heatmap uses held-out-fold preprocessing and displays
-states ranked by normalized absolute coefficient importance, not PSS; gray is
-unavailable. No separate site-score plots are generated.
+are empty.
 
 Combined mode adds:
 
@@ -459,9 +459,8 @@ are always kept in full. SVG tooltips and the annotation TSV retain the complete
 available OOF residue frequency on each boxplot. Horizontal offsets are fixed by
 species order; each group reports its observed species count (`n`).
 
-The standalone `amino_acid_frequency_heatmap.svg` is retired. Use the tree residue
-heatmap instead. `top_amino_acid_frequencies.tsv` remains the source of OOF residue
-frequencies for `amino_acid_frequency_by_confusion.svg`.
+`top_amino_acid_frequencies.tsv` contains the OOF residue frequencies used in
+`amino_acid_frequency_by_confusion.svg`.
 
 ## Grouped probabilities
 

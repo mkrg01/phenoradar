@@ -29,11 +29,6 @@ sp4			Poaceae
 contrast groups are unused. These groups can contain several samples of each
 trait state. A contrast pair identifies two clades, not necessarily two samples.
 
-Earlier metadata using `expanded_pair_clade_id` is accepted as
-`phylogenetic_block_id`, including suffixes such as `_all` and `_phenotyped`.
-If both names are present, their IDs must agree. Saved input files are not
-rewritten.
-
 Pool assignment follows these rules, in order:
 
 | Species | Pool |

@@ -24,7 +24,7 @@ from phenoradar.amino_acid_frequency_cache import (
     AminoAcidFrequencyCache,
     release_frequency_maps,
 )
-from phenoradar.amino_acid_input_cache import AlignmentInputCache
+from phenoradar.amino_acid_input_cache import AlignmentInputCache, alignment_stem
 from phenoradar.amino_acid_presence import SpeciesPresenceCache
 from phenoradar.amino_acid_resources import SparseUsage
 from phenoradar.amino_acid_tpm_cache import AlignedTPMCache
@@ -130,15 +130,18 @@ class AlignmentStore:
             paths = sorted(
                 p
                 for p in directory.iterdir()
-                if p.is_file() and p.suffix.lower() in {".faa", ".fa", ".fasta"}
+                if p.is_file() and p.name.lower().endswith(
+                    (".faa", ".fa", ".fasta", ".faa.gz", ".fa.gz", ".fasta.gz")
+                )
             )
             for path in paths:
-                if only_orthogroups is not None and path.stem not in only_orthogroups:
+                name = alignment_stem(path)
+                if only_orthogroups is not None and name not in only_orthogroups:
                     continue
-                if path.stem in self.ogs:
-                    raise AlignmentError(f"Duplicate orthogroup filename stem: {path.stem}")
+                if name in self.ogs:
+                    raise AlignmentError(f"Duplicate orthogroup filename stem: {name}")
                 index = len(self.ogs)
-                self.ogs[path.stem] = (
+                self.ogs[name] = (
                     self._read(path, index) if input_cache is None
                     else input_cache.read(path, partial(self._read, path, index))
                 )
@@ -221,7 +224,7 @@ class AlignmentStore:
             encoded = raw.translate(translation)
             if b"\xff" in encoded:
                 raise AlignmentError(f"Invalid sequence character in {path}: {sequence_id}")
-            species = self._resolve(path.stem, sequence_id)
+            species = self._resolve(alignment_stem(path), sequence_id)
             if species not in self.retained_species:
                 return
             values = np.frombuffer(raw, dtype=np.uint8)
@@ -237,7 +240,8 @@ class AlignmentStore:
             else:
                 masks[species] = present
 
-        with path.open("rb") as source, cache.open("wb") as target:
+        opener = gzip.open if path.suffix.lower() == ".gz" else open
+        with opener(path, "rb") as source, cache.open("wb") as target:
             for line in source:
                 digest.update(line)
                 if line.startswith(b">"):
@@ -256,6 +260,10 @@ class AlignmentStore:
             consume(target)
         if width is None:
             raise AlignmentError(f"Empty alignment: {path}")
+        # Cache identities describe the stored file, including its compression.
+        source_hash = (
+            file_identity(path)["sha256"] if path.suffix.lower() == ".gz" else digest.hexdigest()
+        )
         after = path.stat()
         if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
             raise AlignmentError(f"Alignment changed during import: {path}")
@@ -267,9 +275,9 @@ class AlignmentStore:
         )
         np.save(mask_cache, packed, allow_pickle=False)
         return AlignmentOG(
-            path.stem,
+            alignment_stem(path),
             str(path.resolve()),
-            digest.hexdigest(),
+            source_hash,
             width,
             str(cache),
             str(mask_cache),

@@ -19,6 +19,10 @@ if TYPE_CHECKING:
     from phenoradar.amino_acid import AlignmentOG
 
 
+def alignment_stem(path: Path) -> str:
+    return path.with_suffix("").stem if path.suffix.lower() == ".gz" else path.stem
+
+
 def _payload(entry: Path) -> dict[str, dict[str, Any]]:
     result = {}
     for name in ["residues.bin", "presence.npy"]:
@@ -70,7 +74,7 @@ class AlignmentInputCache:
         restored = self._restore(entry, digest)
         if restored is not None:
             self.hits += 1
-            restored.source, restored.orthogroup = str(path.resolve()), path.stem
+            restored.source, restored.orthogroup = str(path.resolve()), alignment_stem(path)
             if signature(path) != before:
                 raise ValueError(f"Alignment changed during cache lookup: {path}")
             return restored
@@ -80,7 +84,7 @@ class AlignmentInputCache:
             restored = self._restore(entry, digest)
             if restored is not None:
                 self.hits += 1
-                restored.source, restored.orthogroup = str(path.resolve()), path.stem
+                restored.source, restored.orthogroup = str(path.resolve()), alignment_stem(path)
                 if signature(path) != before:
                     raise ValueError(f"Alignment changed during cache lookup: {path}")
                 return restored

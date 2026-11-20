@@ -378,8 +378,7 @@ config, shared split, and full run artifacts under `conditions/`.
 | `figures/training_group_sensitivity.{svg,pdf,png}` | Mean, IQR, and min–max across subset repeats |
 
 Pairwise intervals match bootstrap replicate IDs on the shared groups and seed.
-Sensitivity plots use effective mean training groups per fold. Legacy study
-reports may also contain ranked-filter sensitivity and method-difference plots.
+Sensitivity plots use effective mean training groups per fold.
 
 ## `report` artifacts
 
@@ -392,9 +391,8 @@ reports may also contain ranked-filter sensitivity and method-difference plots.
 | `report.md`, `report.html`, or `report.json` | Optional narrative selected by `--output-format` |
 | `figures/` | Metric ranking/comparison and multi-stage breakdown SVGs |
 
-Legacy unknown metric definitions remain `NA`; they are not guessed from the
-installed version. The manifest separates experiment compatibility from software
-version/build warnings. See [report controls](cli-reference.md#report).
+Unknown metric definitions are recorded as `NA`. The manifest records experiment
+compatibility and software version/build warnings. See [report controls](cli-reference.md#report).
 
 ## Model bundle
 
@@ -412,14 +410,11 @@ Expression `full_run` exports:
 | `observed_traits.parquet` | Optional known-trait references for phylogenetic context |
 
 Loading validates format, required files, sizes/checksums, and schema/state
-consistency. Current expression exports use format `3`; readers support `1` and
-`2` with their original policies. Version-1 rank-transform bundles lack the full
-transform schema and must be regenerated.
+consistency.
 
 Expression references cover nonzero final-model features and known-trait
-training/CV species, excluding external-test and unknown species. Older bundles
-can reuse the source run's candidate reference TSV when accessible; unavailable
-references are marked and prediction continues. No training data are refitted.
+training/CV species, excluding external-test and unknown species. Unavailable
+references are marked in prediction outputs.
 Sequence/combined bundles have [separate formats and alignment requirements](amino-acid.md#prediction).
 
 When validation groups and folds have a one-to-one correspondence (including

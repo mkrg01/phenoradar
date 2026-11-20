@@ -179,11 +179,6 @@ trait-0 species has prevalence 0.6 overall and 1.0 in trait 1. At a 0.8 threshol
 | `correlation_filter.method` | `pearson` | `pearson` or `spearman` |
 | `correlation_filter.max_abs_correlation` | `null` | Required value in `(0, 1]` when enabled |
 
-Legacy keys `data.contrast_pair_col` and `min_contrast_pairs` are accepted as
-`data.contrast_group_col` and `min_contrast_groups`. Old and new keys with
-different values are errors; separate config files retain their normal override
-order. Generated and resolved configs use canonical names.
-
 ### Ranked feature filter
 
 | Key under `ranked_feature_filter` | Default | Purpose / accepted values |
@@ -309,9 +304,6 @@ lambda × alpha × sum(abs(beta)) + 0.5 × lambda × (1 − alpha) × sum(beta²
 `thresh > 0` controls relative objective improvement. Native errors or incomplete
 paths stop training. Increase `maxit` when its limit is reached. Path fitting is
 automatic; see [solver behavior](pipeline-details.md#solver-behavior).
-
-Old logistic search keys must be replaced with glmnet parameters and old logistic
-bundles regenerated. There is no direct conversion from the previous `C` scale.
 
 ## `model_selection`
 

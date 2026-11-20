@@ -61,13 +61,13 @@ Known traits come from metadata using `data.species_col` and `data.trait_col`.
 All observed, non-excluded species can serve as interpretation references,
 including external-test species. No extra reference table is needed.
 
-New expression `full_run` bundles save an integrity-verified
+Expression `full_run` bundles save an integrity-verified
 `observed_traits.parquet` even when imputation is disabled. `predict` merges it
 with optional metadata traits; conflicting labels are errors. The saved trait
 name is used unless `data.trait_col` is explicitly supplied. Species with known
 traits in either source are excluded from discrepancy candidates.
 
-Older bundles remain usable. With no known references, imputation is skipped
+With no known references, imputation is skipped
 with a recorded reason and unavailable probabilities; no prior-only values are
 substituted. Targets missing from the tree remain in comparison tables with `NA`.
 
