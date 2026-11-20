@@ -43,14 +43,21 @@ def _score(config: AppConfig, scope: str, sample_set: int, candidates: list[Cand
 
 def _task(config: AppConfig, scope: str, sample_set: int, candidates: list[Candidate],
           species: list[str], y: np.ndarray, groups: np.ndarray, pairs: np.ndarray,
-          split: tuple[np.ndarray, np.ndarray, str]) -> tuple[Score, list[str]]:
+          split: tuple[np.ndarray, np.ndarray, str],
+          preprocessing_jobs: int | None = None) -> tuple[Score, list[str]]:
     from phenoradar import amino_acid_parallel
     from phenoradar.amino_acid_run import _prepare_inner_fold
 
     assert amino_acid_parallel._WORKER is not None
     store, expression = amino_acid_parallel._WORKER
     warnings: list[str] = []
-    fold = _prepare_inner_fold(config, store, expression, species, y, groups, pairs,
+    preparation = config
+    if preprocessing_jobs is not None:
+        if preprocessing_jobs < 1:
+            raise ValueError("AA preprocessing threads must be positive")
+        preparation = config.model_copy(deep=True)
+        preparation.runtime.n_jobs = preprocessing_jobs
+    fold = _prepare_inner_fold(preparation, store, expression, species, y, groups, pairs,
                                split, warnings)
     return _score(config, scope, sample_set, candidates, fold), warnings
 

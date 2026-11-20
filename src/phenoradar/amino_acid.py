@@ -525,9 +525,11 @@ class AlignmentStore:
 
     def compact_frequencies(
         self, og: AlignmentOG, species: list[str], columns: np.ndarray, *, weighted: bool,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        include_coverage: bool = True,
+    ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray, np.ndarray, np.ndarray]:
         cache, compute, block = self._frequency_cache(og, weighted)
-        return cache.get_compact(species, columns, compute, block_size=block)
+        return cache.get_compact(species, columns, compute, block_size=block,
+                                 include_coverage=include_coverage)
 
     def frequency_candidates(
         self, og: AlignmentOG, species: list[str], columns: np.ndarray, *,
@@ -991,7 +993,7 @@ def fit_amino_acid(
                 )
                 if statistics is None:
                     values, _, observed, state_sites, residues = store.compact_frequencies(
-                        og, samples, selected, weighted=weighted,
+                        og, samples, selected, weighted=weighted, include_coverage=False,
                     )
                     statistics = compact_statistics(
                         _encoding._selected(values, np.asarray(training_rows)),

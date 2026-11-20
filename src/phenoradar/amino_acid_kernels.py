@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["native", "decode", "center", "append", "centering_mass"]
+__all__ = ["native", "decode", "decode_compact_into", "center", "append", "centering_mass"]
 
 try:
     from phenoradar import _aa_kernels as native  # type: ignore[attr-defined]
@@ -22,6 +22,23 @@ def decode(data: np.ndarray, nrows: int, width: int, rows: np.ndarray,
                   np.ascontiguousarray(rows, dtype=np.int64),
                   np.ascontiguousarray(columns, dtype=np.int64), result)
     return result
+
+
+def decode_compact_into(
+    data: np.ndarray, nrows: int, width: int, coverage_rows: np.ndarray,
+    state_rows: np.ndarray, samples: np.ndarray, targets: np.ndarray,
+    selected: np.ndarray, features: np.ndarray, values: np.ndarray,
+    observed: np.ndarray, coverage: np.ndarray | None, *, packed: bool,
+) -> bool:
+    """Copy exact float32 bits straight into the cache caller's output axes."""
+    kernel = getattr(native, "decode_compact", None)
+    if kernel is None or not np.little_endian:
+        return False
+    axes = tuple(np.ascontiguousarray(axis, dtype=np.int64) for axis in
+                 [coverage_rows, state_rows, samples, targets, selected, features])
+    kernel(np.ascontiguousarray(data), nrows, width, axes,
+           (values, observed, coverage), packed)
+    return True
 
 
 def center(values: np.ndarray, selected: np.ndarray, sites: np.ndarray,

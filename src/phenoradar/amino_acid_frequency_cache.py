@@ -184,13 +184,16 @@ class AminoAcidFrequencyCache:
     def get_compact(
         self, species: list[str], columns: np.ndarray,
         compute: Callable[[list[str], np.ndarray], tuple[np.ndarray, np.ndarray]],
-        *, block_size: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        *, block_size: int, include_coverage: bool = True,
+    ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray, np.ndarray, np.ndarray]:
+        from phenoradar.amino_acid_kernels import decode_compact_into
+
         self._ensure(columns, compute, block_size)
         sites, residues, parts = self._parts(columns)
         values = np.full((len(species), len(sites)), np.nan, dtype=np.float32)
-        coverage = np.zeros((len(species), len(columns)), dtype=np.float32)
-        observed = np.zeros(coverage.shape, dtype=bool)
+        shape = len(species), len(columns)
+        coverage = np.zeros(shape, dtype=np.float32) if include_coverage else None
+        observed = np.zeros(shape, dtype=bool)
         present = [(i, self.species_rows[s]) for i, s in enumerate(species)
                    if s in self.species_rows]
         if present and len(columns):
@@ -199,14 +202,22 @@ class AminoAcidFrequencyCache:
                 data = _mapped_file(chunk.path, self._file_lengths[chunk.path])[
                     chunk.start:chunk.stop
                 ]
+                state_fields = chunk.columns + source_states
+                if decode_compact_into(
+                    data, chunk.columns + int(chunk.offsets[-1]), len(self.species),
+                    source_rows, state_fields, rows, targets, selected, features,
+                    values, observed, coverage, packed=chunk.packed,
+                ):
+                    continue
                 decoded = take(data, chunk.columns + int(chunk.offsets[-1]), len(self.species),
                                np.r_[source_rows, chunk.columns + source_states], rows,
                                packed=chunk.packed)
                 raw_coverage = decoded[:len(source_rows)].T
                 observed[np.ix_(targets, selected)] = np.isfinite(raw_coverage)
-                coverage[np.ix_(targets, selected)] = np.where(
-                    np.isfinite(raw_coverage), raw_coverage, 0,
-                )
+                if coverage is not None:
+                    coverage[np.ix_(targets, selected)] = np.where(
+                        np.isfinite(raw_coverage), raw_coverage, 0,
+                    )
                 values[np.ix_(targets, features)] = decoded[len(source_rows):].T
         return values, coverage, observed, sites, residues
 
@@ -218,6 +229,7 @@ class AminoAcidFrequencyCache:
         compact, coverage, observed, sites, residues = self.get_compact(
             species, columns, compute, block_size=block_size,
         )
+        assert coverage is not None
         values = np.full((len(species), len(columns), 20), np.nan, dtype=np.float32)
         values[observed] = 0
         values[:, sites, residues] = compact

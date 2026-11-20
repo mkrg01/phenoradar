@@ -221,7 +221,7 @@ def encode_cached_block(store: AlignmentStore, og: AlignmentOG, columns: np.ndar
         return binary_stats
 
     values, _, observed, sites, residues = store.compact_frequencies(
-        og, encoding.species, columns[~mask], weighted=weighted,
+        og, encoding.species, columns[~mask], weighted=weighted, include_coverage=False,
     )
     fractional_stats = compact_statistics(encoding._selected(values, encoding.training),
                                           encoding._selected(observed, encoding.training),

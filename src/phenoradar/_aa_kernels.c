@@ -112,6 +112,8 @@ fail:
     PyMem_Free(starts); PyMem_Free(prefix); release(b, 4); return NULL;
 }
 
+#include "_aa_decode_into.h"
+
 static PyObject *center(PyObject *self, PyObject *args) {
     PyObject *o[6]; Py_buffer b[6] = {{0}}; Py_ssize_t n, raw_width, mass_width;
     if (!PyArg_ParseTuple(args, "OOOOOOnnn", &o[0], &o[1], &o[2], &o[3], &o[4], &o[5],
@@ -325,6 +327,7 @@ fail:
 #include "_aa_packed.h"
 
 static PyMethodDef methods[] = {{"decode", decode, METH_VARARGS, NULL},
+    {"decode_compact", decode_compact, METH_VARARGS, NULL},
     {"center", center, METH_VARARGS, NULL}, {"csc", csc, METH_VARARGS, NULL},
     {"centering_mass", centering_mass, METH_VARARGS, NULL},
     {"packed_csc", packed_csc, METH_VARARGS, NULL},

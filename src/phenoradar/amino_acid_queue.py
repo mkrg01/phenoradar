@@ -118,6 +118,11 @@ def queue_workers(config: AppConfig, usage: SparseUsage, n: int,
     return max(1, workers), refits, min(MAX_MATRIX_BUFFER, max(1, inner // 3))
 
 
+def preprocessing_threads(config: AppConfig, scoring: int, refits: int) -> int:
+    """Use remaining CPU slots inside each scoring worker's OG preparation."""
+    return max(1, min(4, (config.runtime.n_jobs - refits) // scoring))
+
+
 def _refit_bytes(usage: SparseUsage, n: int, p: int, refit_n: int) -> int:
     return worker_bytes(replace(usage, matrix_bytes=int(
         usage.matrix_bytes * 1.25 * max(1, refit_n / n)),
@@ -194,10 +199,12 @@ def grid_scopes(config: AppConfig, store: AlignmentStore, expression: Expression
         store.flush_frequency_caches()
         child = config.model_copy(deep=True)
         child.runtime.n_jobs = 1
+        preprocessing_jobs = preprocessing_threads(config, workers, refits)
         if progress:
             progress(f"AA grid queue: {workers} scoring workers, "
                      f"{refits} short-lived refit workers; "
-                     f"matrix buffer {buffer / 1024**3:.2f} GiB/scoring worker.")
+                     f"matrix buffer {buffer / 1024**3:.2f} GiB/scoring worker; "
+                     f"{preprocessing_jobs} OG preprocessing threads/scoring worker.")
         payload = snapshot(store, expression)
         with _worker_threads(1), ProcessPoolExecutor(
             max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
@@ -220,7 +227,8 @@ def grid_scopes(config: AppConfig, store: AlignmentStore, expression: Expression
                         if fold_index in src.results:
                             continue
                         future = scoring.submit(_task, child, plan.name, sid, src.candidates,
-                                                src.species, src.y, src.groups, src.pairs, split)
+                                                src.species, src.y, src.groups, src.pairs, split,
+                                                preprocessing_jobs)
                         pending[future] = index, sid, fold_index
             submitted: set[int] = set()
             prepared: dict[int, dict[int, Selection]] = {}
