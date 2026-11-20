@@ -13,7 +13,7 @@ from phenoradar.amino_acid_packed import PackedAAMatrix
 from phenoradar.glmnet import GlmnetError, fit_glmnet_path
 
 _SCAN_COLUMNS = 65_536
-_ADD_COLUMNS = 4_096
+_ADD_COLUMNS = 1_024
 _MAX_ROUNDS = 100
 
 
