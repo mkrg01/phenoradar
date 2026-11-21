@@ -36,10 +36,9 @@ def fit_orthogroups(
     buffer = min(OG_BUFFER_BYTES, max(1, memory_budget() // (workers * 8)))
 
     def fit(og: AlignmentOG) -> tuple[AATransform, EncodedBlock | None]:
-        if store.cache_frequencies:
-            # One task owns each OG. Key-derived private paths remain unique,
-            # while expensive persistent-cache reads overlap across tasks.
-            store._frequency_cache(og, settings.aggregation == "tpm_weighted_frequency")
+        # Keep cache restoration behind the training-only coverage gates in
+        # fit_amino_acid. Each OG still owns its shared dictionary entry and
+        # private append path; retained OGs restore concurrently in these tasks.
         local = copy(store)
         local.ogs = {og.orthogroup: og}
         encoder = encoding.fork() if encoding is not None else None

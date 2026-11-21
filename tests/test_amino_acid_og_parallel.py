@@ -69,6 +69,44 @@ def test_og_parallel_keeps_global_empty_fold_errors(tmp_path: Path) -> None:
                     y=np.array([0, 1]), groups=np.array(["a", "b"]))
 
 
+@pytest.mark.parametrize("packed", [False, True])
+def test_parallel_does_not_restore_frequency_cache_for_uncovered_og(
+    tmp_path: Path, monkeypatch, packed: bool,
+) -> None:
+    from phenoradar.amino_acid_packed import packed_arithmetic
+    from phenoradar.amino_acid_sparse import fit_sparse_encoded
+
+    if packed and packed_arithmetic() is None:
+        pytest.skip("Compatible native packing kernels are unavailable")
+    path = alignment(tmp_path / "aa", [("a_1", "AA"), ("b_1", "VV"),
+                                        ("c_1", "AV"), ("d_1", "VA")])
+    (path / "OG_few.faa").write_text(">a_1\nAV\n")
+    samples = ["a", "b", "c", "d"]
+    args = dict(y=np.array([0, 1, 0, 1]), groups=np.array(["g0", "g0", "g1", "g1"]))
+    with AlignmentStore(path, samples, cache_frequencies=True) as store:
+        reference, expected, shift = fit_sparse_encoded(
+            store, samples, settings(), [samples], packed=packed, **args,
+        )
+        original = AlignmentStore._frequency_cache
+        calls = []
+
+        def restore(current, og, weighted):
+            assert og.orthogroup != "OG_few", "Uncovered OG must not read its frequency cache"
+            calls.append(og.orthogroup)
+            return original(current, og, weighted)
+
+        monkeypatch.setattr(AlignmentStore, "_frequency_cache", restore)
+        actual, matrices, actual_shift = fit_sparse_encoded(
+            store, samples, settings(), [samples], packed=packed, n_jobs=3, **args,
+        )
+        assert calls and actual.features == reference.features and actual.qc == reference.qc
+        np.testing.assert_array_equal(actual_shift, shift)
+        a = matrices[0].to_csc() if packed else matrices[0]
+        b = expected[0].to_csc() if packed else expected[0]
+        for name in ["data", "indices", "indptr"]:
+            assert getattr(a, name).tobytes() == getattr(b, name).tobytes()
+
+
 def test_cold_cache_uses_serial_creation_then_parallel_cached_folds(
     tmp_path: Path, monkeypatch,
 ) -> None:
