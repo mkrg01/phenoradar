@@ -28,6 +28,7 @@ DEFAULT_MAXIT = 2_000_000
 _MAX_LOG_LAMBDA_STEP = 0.05 * np.log(10.0)
 _SPARSE_PATH_CAPACITY = 4096
 SPARSE_INDEX_LIMIT = np.iinfo(np.int32).max
+_PACKED_WORKING_SET_CSC_BYTES = 1024**3
 
 
 class GlmnetError(ValueError):
@@ -243,7 +244,10 @@ def fit_glmnet_path(
         raise GlmnetError("penalty_factor mean must be finite and positive")
     path = np.unique(requested)[::-1].copy()
     if isinstance(x, PackedAAMatrix):
-        if x.nnz >= SPARSE_INDEX_LIMIT:
+        expanded_bytes = x.nnz * 12 + (p + 1) * 4
+        if (x.nnz >= SPARSE_INDEX_LIMIT or
+                (alpha > 0 and path[-1] > 0 and
+                 expanded_bytes >= _PACKED_WORKING_SET_CSC_BYTES)):
             return _fit_oversized_path(
                 x, y, weights, factors, requested, path, alpha=alpha, thresh=thresh, maxit=maxit,
                 keep_factors=penalty_factor is not None, compute_kkt=compute_kkt,
