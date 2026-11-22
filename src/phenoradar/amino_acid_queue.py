@@ -133,11 +133,14 @@ def _refit_bytes(usage: SparseUsage, n: int, p: int, refit_n: int) -> int:
 
 
 def _refit(config: AppConfig, plan: _Scope, selections: dict[int, Selection],
-           manifest: pl.DataFrame) -> Path:
+           manifest: pl.DataFrame, payload: dict[str, Any], matrix_buffer_bytes: int) -> Path:
     from phenoradar import amino_acid_parallel
     from phenoradar.amino_acid_outputs import write_site_scores
     from phenoradar.amino_acid_run import fit_scope
 
+    # Recycled pool workers may wait without receiving a task. Load the large
+    # input snapshot only for a dispatched refit, never for an idle replacement.
+    initialize(payload, 1, matrix_buffer_bytes)
     assert amino_acid_parallel._WORKER is not None
     store, expression = amino_acid_parallel._WORKER
     if plan.name != "final_refit":
@@ -213,7 +216,6 @@ def grid_scopes(config: AppConfig, store: AlignmentStore, expression: Expression
             initializer=initialize, initargs=(payload, 1, buffer),
         ) as scoring, ProcessPoolExecutor(
             max_workers=_runtime_n_jobs(config), mp_context=multiprocessing.get_context("spawn"),
-            initializer=initialize, initargs=(payload, 1, min(MAX_MATRIX_BUFFER, buffer * 2)),
             max_tasks_per_child=1,
         ) as fitting:
             pending: dict[Future[Any], tuple[int, int | None, int | None]] = {}
@@ -260,7 +262,8 @@ def grid_scopes(config: AppConfig, store: AlignmentStore, expression: Expression
                         # Pass selection records, never matrices or fitted inner-fold state.
                         task = replace(plan, sources={})
                         future = fitting.submit(_refit, child, task,
-                                                prepared.pop(index), manifest)
+                                                prepared.pop(index), manifest, payload,
+                                                min(MAX_MATRIX_BUFFER, buffer * 2))
                         pending[future] = index, None, None
                         submitted.add(index)
                     done, _ = wait(pending, return_when=FIRST_COMPLETED)

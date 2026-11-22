@@ -102,9 +102,12 @@ def test_queue_refits_before_later_scores_finish_and_keeps_output_order(
     config.runtime.n_jobs = 4
     manifest = build_split_artifacts(config).split_manifest
     event = Event()
+    pools = []
+    payload = {"input_snapshot": object()}
 
     class Executor(ThreadPoolExecutor):
         def __init__(self, max_workers, **kwargs):
+            pools.append((max_workers, kwargs))
             super().__init__(max_workers=max_workers)
 
     def task(config, scope, *args):
@@ -114,7 +117,9 @@ def test_queue_refits_before_later_scores_finish_and_keeps_output_order(
                 raise RuntimeError("test score failure")
         return [(1.0, [])], []
 
-    def refit(config, plan, *args):
+    def refit(config, plan, selections, manifest, actual_payload, matrix_buffer_bytes):
+        assert actual_payload is payload
+        assert matrix_buffer_bytes == 2048
         if plan.name == "outer_fold_1":
             event.set()
         plan.directory.mkdir()
@@ -124,17 +129,60 @@ def test_queue_refits_before_later_scores_finish_and_keeps_output_order(
     monkeypatch.setattr(run, "_prepare_inner_fold", lambda *args: SimpleNamespace(
         y_train=np.array([0, 1]), x_train=np.zeros((2, 2))))
     monkeypatch.setattr(queue, "ProcessPoolExecutor", Executor)
+    monkeypatch.setattr(queue, "memory_budget", lambda: 16 * 1024**3)
+    monkeypatch.setattr(queue, "_refit_bytes", lambda *args: 2 * 1024**3)
     monkeypatch.setattr(queue, "queue_workers", lambda *args: (2, 1, 1024))
-    monkeypatch.setattr(queue, "snapshot", lambda *args: {})
+    monkeypatch.setattr(queue, "snapshot", lambda *args: payload)
     monkeypatch.setattr(queue, "_task", task)
     monkeypatch.setattr(queue, "_score", lambda *args: [(1.0, [])])
     monkeypatch.setattr(queue, "_selections", lambda *args: {})
     monkeypatch.setattr(queue, "_refit", refit)
-    iterator = queue.grid_scopes(config, store, None, manifest, ["1", "2", "3", "4"], None)
+    progress = []
+    iterator = queue.grid_scopes(config, store, None, manifest, ["1", "2", "3", "4"],
+                                 progress.append)
     if fail:
         with pytest.raises(RuntimeError, match="test score failure"):
             list(iterator)
     else:
         results = list(iterator)
         assert [scope for scope, _ in results] == ["1", "2", "3", "4", "final_refit"]
+        assert any("up to 4 refit workers" in message for message in progress)
     assert event.is_set()
+    assert [size for size, _ in pools] == [2, config.runtime.n_jobs]
+    assert pools[0][1]["initargs"] == (payload, 1, 1024)
+    assert "initializer" not in pools[1][1] and "initargs" not in pools[1][1]
+    assert pools[1][1]["max_tasks_per_child"] == 1
+
+
+def test_refit_loads_its_own_snapshot_before_fitting(tmp_path, monkeypatch):
+    import phenoradar.amino_acid_parallel as parallel
+    import phenoradar.amino_acid_queue as queue
+
+    config = AppConfig()
+    plan = queue._Scope("outer_fold_1", pl.DataFrame(), {}, tmp_path / "fold", 0)
+    selections = {}
+    manifest = pl.DataFrame()
+    payload = {"private_input": object()}
+    store, expression = object(), object()
+    events = []
+    monkeypatch.setattr(parallel, "_WORKER", (object(), None))
+
+    def initialize(actual_payload, threads, buffer):
+        assert actual_payload is payload and threads == 1 and buffer == 4096
+        events.append("initialize")
+        parallel._WORKER = store, expression
+
+    def fit(actual_config, actual_store, actual_expression, actual_manifest,
+            fold, directory, model_base, *, selections):
+        assert events == ["initialize"]
+        assert actual_config is config and actual_store is store
+        assert actual_expression is expression and actual_manifest is manifest
+        assert fold == "1" and directory == plan.directory and model_base == 0
+        assert selections == {}
+        events.append("fit")
+        return directory
+
+    monkeypatch.setattr(queue, "initialize", initialize)
+    monkeypatch.setattr(queue, "run_fold", fit)
+    assert queue._refit(config, plan, selections, manifest, payload, 4096) == plan.directory
+    assert events == ["initialize", "fit"]
