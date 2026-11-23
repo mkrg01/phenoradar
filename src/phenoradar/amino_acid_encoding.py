@@ -205,6 +205,13 @@ def compact_statistics(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     from phenoradar.amino_acid import _quality_summary
 
+    if not audit:
+        from phenoradar.amino_acid_kernels import compact_statistics_native
+
+        exact = compact_statistics_native(raw, observed, sites, residues,
+                                           quality.min_residue_states)
+        if exact is not None:
+            return exact
     n = observed.shape[1]
     known = np.zeros((n, 20), dtype=bool)
     known[sites, residues] = np.any(raw > 0, axis=0)
