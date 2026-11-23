@@ -1,4 +1,5 @@
 from pathlib import Path
+from threading import Event
 
 import numpy as np
 import pytest
@@ -6,6 +7,48 @@ from test_amino_acid import alignment, settings, tpm_table
 
 from phenoradar.amino_acid import AASiteTable, AlignmentError, AlignmentStore, fit_amino_acid
 from phenoradar.amino_acid_encoding import fit_encoded
+
+
+def test_completed_og_refills_workers_before_slow_first_og_finishes(tmp_path, monkeypatch):
+    import phenoradar.amino_acid_og_parallel as parallel
+
+    path = alignment(tmp_path / "aa", [("a_1", "AA"), ("b_1", "VV")])
+    for i in range(2, 7):
+        (path / f"OG{i}.faa").write_text((path / "OG1.faa").read_text())
+    later_started = Event()
+    original = parallel.fit_amino_acid
+
+    def fit(local, *args, **kwargs):
+        name, = local.ogs
+        if name == "OG1":
+            assert later_started.wait(5), "Idle worker did not receive the third OG"
+        elif name == "OG3":
+            later_started.set()
+        return original(local, *args, **kwargs)
+
+    monkeypatch.setattr(parallel, "fit_amino_acid", fit)
+    with AlignmentStore(path, ["a", "b"]) as store:
+        result = parallel.fit_orthogroups(
+            store, ["a", "b"], settings(), n_jobs=2, encoding=None,
+            y=np.array([0, 1]), groups=np.array(["a", "b"]),
+        )
+    assert result.sites.orthogroups.tolist() == [f"OG{i}" for i in range(1, 7) for _ in range(2)]
+
+
+def test_og_completed_byte_accounting_includes_sparse_and_packed_buffers():
+    from types import SimpleNamespace
+
+    from scipy import sparse
+
+    from phenoradar.amino_acid_encoding import EncodedBlock
+    from phenoradar.amino_acid_og_parallel import _result_bytes
+
+    matrix = sparse.csc_matrix(np.eye(3))
+    shift = np.zeros(3)
+    fitted = SimpleNamespace(sites=[])
+    expected = sum(getattr(matrix, n).nbytes for n in ["data", "indices", "indptr"])
+    assert _result_bytes(fitted, EncodedBlock([matrix], shift)) == expected + shift.nbytes
+    assert _result_bytes(fitted, EncodedBlock([np.eye(3)], shift)) == 72 + shift.nbytes
 
 
 @pytest.mark.parametrize("aggregation", ["best_covered", "aa_frequency", "tpm_weighted_frequency"])
