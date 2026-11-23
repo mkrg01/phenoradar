@@ -27,6 +27,7 @@ def test_process_outer_folds_match_serial_and_render_common_figures(
     path = (combined_config(tmp_path, aggregation) if combined
             else fixture_config(tmp_path, aggregation))
     config = load_and_resolve_config([path])
+    config.report.amino_acid_tables = "full"
     # Noncontiguous numeric IDs exercise seed-ID transport into spawned workers.
     metadata_path = Path(config.data.metadata_path)
     pl.read_csv(metadata_path, separator="\t").with_columns(
@@ -61,7 +62,9 @@ def test_process_outer_folds_match_serial_and_render_common_figures(
         payload = original_snapshot(store, expression)
         key = ("OG_later", aggregation == "tpm_weighted_frequency")
         if aggregation != "best_covered":
-            assert payload["store"]["_frequency_caches"][key].length == 0
+            # Lazy initialization can leave the empty entry absent altogether.
+            cached = payload["store"]["_frequency_caches"].get(key)
+            assert cached is None or cached.length == 0
         return payload
 
     monkeypatch.setattr(parallel, "snapshot", snapshot_with_empty_cache)

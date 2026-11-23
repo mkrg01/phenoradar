@@ -375,13 +375,17 @@ def fixture_config(tmp_path: Path, aggregation: str, *, full: bool = True) -> Pa
 
 
 @pytest.mark.parametrize("aggregation", ["aa_frequency", "best_covered", "tpm_weighted_frequency"])
-def test_nested_cv_refit_bundle_and_coordinates(tmp_path: Path, aggregation: str) -> None:
+@pytest.mark.parametrize("output_mode", ["compact", "full"])
+def test_nested_cv_refit_bundle_and_coordinates(
+    tmp_path: Path, aggregation: str, output_mode: str,
+) -> None:
     config_path = fixture_config(tmp_path, aggregation)
     if aggregation == "tpm_weighted_frequency":
         payload = yaml.safe_load(config_path.read_text())
         del payload["preprocess"]["amino_acid"]["aggregation"]
         config_path.write_text(yaml.safe_dump(payload))
     config = load_and_resolve_config([config_path])
+    config.report.amino_acid_tables = output_mode
     destination = run_amino_acid(config, tmp_path / "run")
     oof = pl.read_csv(destination / "cv/tables/prediction_cv.tsv", separator="\t")
     assert oof.height == 8
@@ -414,7 +418,8 @@ def test_nested_cv_refit_bundle_and_coordinates(tmp_path: Path, aggregation: str
     before = pl.read_csv(destination / "inference/tables/pred_inference.tsv", separator="\t")
     np.testing.assert_array_equal(after["prob"].to_numpy(), before["prob"].to_numpy())
     for metric in ["pss", "effect_range"]:
-        name = f"amino_acid_site_{metric}.tsv"
+        name = ("amino_acid_site_scores.tsv" if output_mode == "compact" else
+                f"amino_acid_site_{metric}.tsv")
         for stage in ["cv", "model"]:
             scores = pl.read_csv(destination / stage / "tables" / name, separator="\t")
             assert set(scores["alignment_pos_1based"]) == {3, 4}

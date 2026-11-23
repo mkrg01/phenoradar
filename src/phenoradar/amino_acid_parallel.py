@@ -18,6 +18,7 @@ import polars as pl
 
 from phenoradar.amino_acid import AlignmentStore
 from phenoradar.amino_acid_audits import ColumnarAudits, merge_audits
+from phenoradar.amino_acid_compact_reports import compact_reports
 from phenoradar.amino_acid_presence import SpeciesPresenceCache
 from phenoradar.amino_acid_reporting import AAReportWriter
 from phenoradar.amino_acid_resources import (
@@ -85,7 +86,7 @@ def run_fold(config: AppConfig, store: AlignmentStore, expression: ExpressionInp
                             warnings, expression, progress=progress, audit=audit,
                             selections=selections)
     features = max(len(m.model.coef_) for m in members)
-    with AAReportWriter(tables, model_base=model_base) as report:
+    with AAReportWriter(tables, model_base=model_base, compact=compact_reports(config)) as report:
         report.add(members)
         report.export(directory / "reports")
     compact = prediction_members(members, padding_sites=config.figures.top_features)

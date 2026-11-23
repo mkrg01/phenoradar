@@ -505,9 +505,9 @@ class ModelSelectionConfig(StrictModel):
 
 
 class ReportConfig(StrictModel):
-    """Prediction threshold settings."""
+    """Interpretation table retention; independent of fitting and prediction."""
 
-    pass
+    amino_acid_tables: Literal["compact", "full"] = "compact"
 
 
 class GroupBootstrapConfig(StrictModel):

@@ -45,7 +45,7 @@ def test_annotated_config_round_trips_all_fields_and_quoted_values() -> None:
     ) in rendered
     assert "tree_path:" in rendered and "# type: string or null" in rendered
     assert "group_subsample_repeat_index: 3" in rendered
-    assert "report: {}" in rendered
+    assert "amino_acid_tables: compact  # choices: compact, full" in rendered
 
 
 @pytest.mark.parametrize(

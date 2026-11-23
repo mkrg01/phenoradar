@@ -162,6 +162,7 @@ def _packed_refit_path(matrix: Any, plans: list[_Scope]) -> bool:
 def _refit(config: AppConfig, plan: _Scope, selections: dict[int, Selection],
            manifest: pl.DataFrame, payload: dict[str, Any], matrix_buffer_bytes: int) -> Path:
     from phenoradar import amino_acid_parallel
+    from phenoradar.amino_acid_compact_reports import compact_reports
     from phenoradar.amino_acid_outputs import write_site_scores
     from phenoradar.amino_acid_run import fit_scope
 
@@ -180,7 +181,8 @@ def _refit(config: AppConfig, plan: _Scope, selections: dict[int, Selection],
     warnings: list[str] = []
     members = fit_scope(config, store, plan.rows, plan.name, tables, warnings, expression,
                         selections=selections)
-    write_site_scores(tables, members)
+    if not compact_reports(config):
+        write_site_scores(tables, members)
     joblib.dump((members, warnings), plan.directory / "members.joblib")
     store.flush_frequency_caches()
     return plan.directory

@@ -80,7 +80,9 @@ def _concat_csv(parts: list[Path], destination: Path) -> None:
 class AAReportWriter:
     """Spool each model once; retain no full feature names or fitted fold models."""
 
-    def __init__(self, destination: Path, *, model_base: int = 0) -> None:
+    def __init__(self, destination: Path, *, model_base: int = 0,
+                 compact: bool = False) -> None:
+        self.compact = compact
         self.model_base = model_base
         self.destination = destination
         destination.mkdir(parents=True, exist_ok=True)
@@ -89,6 +91,7 @@ class AAReportWriter:
         self.features = _Spool(self.path / "features")
         self.sites = _Spool(self.path / "sites")
         self.models: list[tuple[str, str, int]] = []
+        self.model_details: list[dict[str, Any]] = []
         self.contexts: set[tuple[str, int, int]] = set()
         self.transforms: dict[tuple[str, int, int], tuple[int, Path | None]] = {}
 
@@ -125,6 +128,20 @@ class AAReportWriter:
             self.transforms[context] = transforms[key]
             n = member.expression_width
             aa_total = float(np.abs(member.model.coef_[n:]).sum())
+            expression_total = float(np.abs(member.model.coef_[:n]).sum())
+            if self.compact and features:
+                self.model_details.append({
+                    "model_id": model_index, "fold_id": fold, "scope": member.scope,
+                    "sample_set_id": member.sample_set_id,
+                    "candidate_index": member.candidate.candidate_index,
+                    "intercept": float(member.model.intercept_),
+                    "n_amino_acid_features": len(member.model.coef_) - n,
+                    "n_expression_features": n,
+                    "amino_acid_l1": aa_total, "expression_l1": expression_total,
+                    "amino_acid_importance_zeroed": bool(np.isclose(aa_total, 0)),
+                    "expression_importance_zeroed": bool(np.isclose(expression_total, 0)),
+                    "aggregation": member.transform.settings.aggregation,
+                })
             expression = getattr(member, "expression", None)
             if features and expression is not None:
                 coefficient = member.model.coef_[:n]
@@ -136,9 +153,10 @@ class AAReportWriter:
             ):
                 known, active = block["known"], block["active"]
                 if features:
-                    names = feature_axes(block, active)["feature"]
+                    axes = feature_axes(block, active)
+                    names = axes["feature"]
                     self._features(names, beta[active], aa_total, "amino_acid",
-                                   model_index, fold, member.sample_set_id)
+                                   model_index, fold, member.sample_set_id, axes=axes)
                 n_known = known.sum(axis=1)
                 effect = (np.max(np.where(known, beta, -np.inf), axis=1)
                           - np.min(np.where(known, beta, np.inf), axis=1))
@@ -164,11 +182,13 @@ class AAReportWriter:
         shutil.move(str(self.path), destination)
         transforms = {key: (index, None if path is None else path.name)
                       for key, (index, path) in self.transforms.items()}
-        joblib.dump((self.models, self.contexts, transforms), destination / "index.joblib")
+        joblib.dump((self.models, self.contexts, transforms, self.model_details),
+                    destination / "index.joblib")
 
     def merge(self, source: Path) -> None:
-        models, contexts, transforms = joblib.load(source / "index.joblib")
+        models, contexts, transforms, details = joblib.load(source / "index.joblib")
         self.models.extend(models)
+        self.model_details.extend(details)
         self.contexts.update(contexts)
         for key, (index, filename) in transforms.items():
             path = None
@@ -216,19 +236,36 @@ class AAReportWriter:
         return result
 
     def _features(self, names: list[str] | pl.Series, coefficient: np.ndarray, total: float,
-                  modality: str, model: int, fold: str, sample: int) -> None:
+                  modality: str, model: int, fold: str, sample: int,
+                  axes: pl.DataFrame | None = None) -> None:
         if not len(names):
             return
         importance = np.abs(coefficient) / total if not np.isclose(total, 0) else coefficient * 0
-        self.features.add(pl.DataFrame({
+        frame = pl.DataFrame({
             "feature": names, "coefficient": coefficient, "importance": importance,
         }).with_columns(
             pl.lit(modality).alias("modality"), pl.lit(model).alias("_model"),
             pl.lit(fold).alias("fold_id"), pl.lit(sample).alias("sample_set_id"),
-        ))
+        )
+        if self.compact:
+            frame = frame.with_columns(
+                pl.lit(None, dtype=pl.String).alias("orthogroup") if axes is None else
+                axes["orthogroup"],
+                pl.lit(None, dtype=pl.Int64).alias("alignment_pos_1based") if axes is None else
+                axes["alignment_pos_1based"].cast(pl.Int64),
+                pl.lit(None, dtype=pl.String).alias("residue") if axes is None else axes["residue"],
+                pl.col("feature").alias("expression_feature") if axes is None else
+                pl.lit(None, dtype=pl.String).alias("expression_feature"),
+            )
+        self.features.add(frame)
 
     def write_site_scores(self) -> None:
         raw = self.sites.scan()
+        if self.compact:
+            from phenoradar.amino_acid_compact_reports import write_site_scores
+
+            write_site_scores(raw, self.destination)
+            return
         context = ["scope", "sample_set_id", "candidate_index"]
         for metric in ["pss", "effect_range"]:
             with (self.destination / f"amino_acid_site_{metric}.tsv").open("wb") as output:
@@ -269,10 +306,23 @@ class AAReportWriter:
                 .then(pl.col("n_selected_folds") / pl.col("n_eligible_folds"))
                 .otherwise(0.0).alias("selection_frequency_when_eligible"),
             )
+            if self.compact and name == "site":
+                summary = frame.select(
+                    pl.lit(n).alias("n_outer_folds"), pl.len().alias("n_eligible_sites"),
+                    (pl.col("n_selected_folds") > 0).sum().alias("n_selected_sites"),
+                )
+                _sink(summary, self.destination / "amino_acid_site_stability_summary.tsv")
+                selected = raw.filter(pl.col("pss") != 0).select(keys).unique()
+                frame = frame.join(selected, on=keys, how="semi")
             _sink(frame.sort(keys), self.destination / f"amino_acid_{name}_stability.tsv")
 
     def finalize(self, *, combined: bool, top_features: int) -> pl.DataFrame:
         raw = self.features.scan()
+        self.top_features = top_features
+        if self.compact:
+            from phenoradar.amino_acid_compact_reports import write_dictionary
+
+            write_dictionary(self, raw)
         counts: dict[str, int] = {}
         for fold, _, _ in self.models:
             counts[fold] = counts.get(fold, 0) + 1
@@ -295,10 +345,14 @@ class AAReportWriter:
                 path = means_directory / f"{index:06d}.parquet"
                 means.sink_parquet(path, engine="streaming")
                 means_parts.append(path)
-                local.select(pl.lit("outer_fold").alias("scope"), "fold_id", "sample_set_id",
-                             "feature").unique().sink_csv(
-                    retained_output, separator="\t", engine="streaming", include_header=index == 0,
-                )
+                if not self.compact:
+                    local.select(pl.lit("outer_fold").alias("scope"), "fold_id", "sample_set_id",
+                                 "feature").unique().sink_csv(
+                        retained_output, separator="\t", engine="streaming",
+                        include_header=index == 0,
+                    )
+        if self.compact:
+            retained_path.unlink()
         means = pl.scan_parquet(means_parts)
         union = means.select("feature", "modality").unique()
         union.sink_parquet(self.path / "union.parquet", engine="streaming")
@@ -359,6 +413,19 @@ class AAReportWriter:
         stats_path = self.path / f"{prefix}feature_statistics.parquet"
         stats.sink_parquet(stats_path, engine="streaming")
         stats = pl.scan_parquet(stats_path)
+        if self.compact:
+            keys = pl.concat([
+                self.features.scan().filter((pl.col("modality") ==
+                    ("amino_acid" if not prefix else prefix[:-1])) &
+                    (pl.col("coefficient") != 0)).select("feature", "modality"),
+                *[stats.sort([column, "feature"], descending=[True, False])
+                  .head(self.top_features).select("feature", "modality")
+                  for column in ["importance_mean", "coefficient_mean"]],
+            ]).unique()
+            keys.sink_parquet(self.path / f"{prefix}compact_keys.parquet", engine="streaming")
+            keys = pl.scan_parquet(self.path / f"{prefix}compact_keys.parquet")
+            stats = stats.join(keys, on=["feature", "modality"], how="semi")
+            union = union.join(keys, on=["feature", "modality"], how="semi")
         for kind, col in [("feature_importance", "importance"), ("coefficients", "coefficient")]:
             coefficient = col == "coefficient"
             label = "coef" if coefficient else "importance"
@@ -390,9 +457,13 @@ class AAReportWriter:
                 (self.destination / f"{prefix}{kind}_by_fold.tsv").open("wb")
             ) for kind, *_ in kinds]
             for index, fold in enumerate(sorted(counts)):
-                local = means.filter((pl.col("fold_id") == fold) & explicit).select(
+                local_scan = means.filter((pl.col("fold_id") == fold) & explicit).select(
                     "feature", *columns,
-                ).collect(engine="streaming")
+                )
+                if self.compact:
+                    local_scan = local_scan.join(axis.lazy().select("feature"),
+                                                 on="feature", how="semi")
+                local = local_scan.collect(engine="streaming")
                 if local.height * 32 < axis.height:
                     positions = axis["feature"].search_sorted(local["feature"]).to_numpy()
                 else:
@@ -449,7 +520,11 @@ class AAReportWriter:
             pl.lit(tolerance).alias("nonzero_tolerance"),
         ).select(list(_BY_FEATURE_SCHEMA)).cast(pl.Schema(_BY_FEATURE_SCHEMA))
         destination = self.destination / "feature_stability_by_feature.tsv"
-        _sink(frame.sort(["selection_frequency", "retained_frequency", "feature"],
+        detailed = frame
+        if self.compact:
+            keys = pl.scan_parquet(self.path / "*compact_keys.parquet").select("feature")
+            detailed = frame.join(keys, on="feature", how="semi")
+        _sink(detailed.sort(["selection_frequency", "retained_frequency", "feature"],
                          descending=[True, True, False]), destination)
         pair_rows = []
         for a, b in combinations(folds, 2):
@@ -469,8 +544,9 @@ class AAReportWriter:
             })
         pairs = pl.DataFrame(pair_rows, schema=_BY_FOLD_PAIR_SCHEMA)
         pairs.write_csv(self.destination / "feature_stability_by_fold_pair.tsv", separator="\t")
-        numeric = pl.scan_csv(destination, separator="\t",
-                              schema_overrides=_BY_FEATURE_SCHEMA).select(
+        numeric_source = (frame if self.compact else pl.scan_csv(
+            destination, separator="\t", schema_overrides=_BY_FEATURE_SCHEMA))
+        numeric = numeric_source.select(
             pl.len().alias("n_features_evaluated"),
             (pl.col("n_retained_folds") > 0).sum().alias("n_features_ever_retained"),
             (pl.col("n_nonzero_folds") > 0).sum().alias("n_features_ever_selected"),

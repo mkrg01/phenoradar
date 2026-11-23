@@ -8,7 +8,7 @@ import json
 from collections import defaultdict
 from collections.abc import Callable, Generator, Iterable
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,10 +27,13 @@ from phenoradar.amino_acid import (
     AlignmentStore,
 )
 from phenoradar.amino_acid_audits import ColumnarAudits
+from phenoradar.amino_acid_blocks import coefficient_blocks
+from phenoradar.amino_acid_compact_reports import compact_reports, write_dictionary
 from phenoradar.amino_acid_outputs import (
     write_combined_coefficients,
     write_frequency_table,
     write_preprocessing_audits,
+    write_preprocessing_summary,
     write_site_effects,
     write_site_scores,
 )
@@ -415,7 +418,8 @@ def fit_scope(
         _write(tables / "amino_acid_og_qc.tsv", ({**context, **q} for q in fitted.qc))
         if progress:
             progress(f"{scope}: refit matrix ready; write preprocessing audits.")
-        write_preprocessing_audits(tables, fitted, context, expr, audit=audit)
+        if not compact_reports(config):
+            write_preprocessing_audits(tables, fitted, context, expr, audit=audit)
         _write(tables / "representative_sequences.tsv", ({**context, **r} for r in representatives))
         if fitted.representative_columns is not None:
             _write(
@@ -426,6 +430,7 @@ def fit_scope(
                     for column in columns
                 ),
             )
+        sample_members = []
         for result in selected:
             model = _build_estimator(
                 config, config.runtime.seed, y[indices], model_params=result.candidate.params
@@ -462,6 +467,7 @@ def fit_scope(
             model.intercept_ += float(shift @ model.coef_)
             members.append(AAMember(fitted, model, scope, sample_set_id, result.candidate,
                                     expr, aa_std))
+            sample_members.append(members[-1])
             _write(
                 tables / "model_selection_selected.tsv",
                 [
@@ -475,9 +481,24 @@ def fit_scope(
                     }
                 ],
             )
-            write_site_effects(tables, members[-1], matrix, shift, audit=audit)
+            write_site_effects(tables, members[-1], matrix, shift, audit=audit,
+                               compact=compact_reports(config))
             if expr is not None:
-                write_combined_coefficients(tables, members[-1])
+                write_combined_coefficients(tables, members[-1], compact=compact_reports(config))
+        if compact_reports(config):
+            write_preprocessing_summary(tables, fitted, context, audit=audit)
+            selected_indices: set[int] = set()
+            for member in sample_members:
+                start = 0
+                for block, beta, _ in coefficient_blocks(fitted.sites, member.model.coef_,
+                                                        member.expression_width):
+                    selected_indices.update(start + int(i)
+                                            for i in np.flatnonzero(np.any(beta != 0, axis=1)))
+                    start += len(block["column"])
+            selected_transform = replace(fitted, sites=[fitted.sites[i]
+                                                       for i in sorted(selected_indices)])
+            write_preprocessing_audits(tables, selected_transform, context, expr,
+                                       audit=audit, compact=True)
     return members
 
 
@@ -815,7 +836,7 @@ def run_amino_acid(
         Path(config.data.sequence_tpm_cache_dir) if config.data.sequence_tpm_cache_dir else None
     )
     with ExitStack() as stack:
-        reports = stack.enter_context(AAReportWriter(tables))
+        reports = stack.enter_context(AAReportWriter(tables, compact=compact_reports(config)))
         expression = (
             stack.enter_context(ExpressionInput(config, all_species, training_species))
             if config.data.feature_mode == "combined" else None
@@ -946,9 +967,15 @@ def run_amino_acid(
                     config, store, train, "final_refit", model_dir, warnings,
                     expression, progress=progress,
                 )
-                write_site_scores(model_dir, final)
+                if not compact_reports(config):
+                    write_site_scores(model_dir, final)
             else:
                 warnings.extend(final_messages)
+            if compact_reports(config):
+                with AAReportWriter(model_dir, compact=True) as final_report:
+                    final_report.add(final)
+                    write_dictionary(final_report, final_report.features.scan())
+                    final_report.write_site_scores()
             needed = _prediction_orthogroups(config, final)
             target_species = (
                 sorted(set(all_species) - set(training_species))
@@ -1071,6 +1098,7 @@ def run_amino_acid(
         metadata_out = {
             "run_id": run_dir.name,
             "feature_mode": config.data.feature_mode,
+            "amino_acid_tables": "compact" if compact_reports(config) else "full",
             "aggregation": config.preprocess.amino_acid.aggregation,
             "status": "full_run_completed"
             if config.runtime.execution_stage == "full_run"
@@ -1253,10 +1281,10 @@ def predict_amino_acid(
         destination.mkdir(parents=True, exist_ok=True)
         tables = destination / "predict/tables"
         tables.mkdir(parents=True, exist_ok=True)
-        write_site_scores(tables, members)
+        write_site_scores(tables, members, compact=compact_reports(config))
         if expression is not None:
             for member in members:
-                write_combined_coefficients(tables, member)
+                write_combined_coefficients(tables, member, compact=compact_reports(config))
             _write(tables / "expression_input.tsv", [file_identity(Path(config.data.tpm_path))])
         if store.tpm_identity:
             _write(

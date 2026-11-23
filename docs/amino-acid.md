@@ -204,6 +204,34 @@ still include every OOF species, independently of selective decisions.
 
 ## Outputs
 
+AA and combined runs default to `report.amino_acid_tables: compact`. Training,
+candidate selection, coefficients, predictions, and the model bundle are unchanged.
+
+- `model_nonzero_coefficients.parquet` stores every exactly nonzero model coefficient,
+  including values below the stability tolerance. `report_models.parquet` gives its
+  scope, sample, candidate and modality-specific L1 normalization constants.
+- `feature_dictionary.parquet` stores each retained feature once, using
+  `report_orthogroups.tsv` for OG names. Bit `m % 64` of `retained_word_{m // 64}`
+  records retention by model ID `m`; an unset bit denotes exclusion, rather than a
+  fitted zero. `compact_report_manifest.json` describes this format.
+- Coefficient/importance and feature-stability TSVs contain selected features plus
+  plot padding. Fold averages still include all models and zero/absent folds;
+  global stability summaries still count all evaluated features.
+- `amino_acid_site_effects.tsv` keeps every observed residue at each model's selected
+  sites, including zero coefficients, with training means, active-state flags and
+  reference-residue effects. Site QC covers these sites. Unselected-site means and
+  detailed QC are intentionally omitted. `amino_acid_site_qc_summary.tsv` retains
+  all-site counts and QC means/minima/maxima for each training context.
+- `amino_acid_site_scores.tsv` combines PSS and effect range, with their original
+  normalization and ranks. Rows with both scores zero are implicit. OG QC and
+  global site/filter summaries remain available.
+
+For Python analysis, `phenoradar.amino_acid_compact_reports.read_model_coefficients`
+reads the compact coefficients and derives feature names and importance. Request
+`report.amino_acid_tables: full` before a run to retain every preprocessing/audit
+row and the previous dense TSV layout. The following table describes that full
+layout; compact runs retain its small tables and selected-site details as above.
+
 Standard split, CV metric, coefficient, feature-stability, and optional bootstrap
 tables use the normal stage directories. Sequence-specific tables include:
 

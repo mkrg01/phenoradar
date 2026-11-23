@@ -137,6 +137,7 @@ def test_sparse_predictions_match_full_inputs_and_local_explanations(
                  "sequence_tpm_path": str(tpm)},
         "preprocess": {"amino_acid": {"aggregation": aggregation}},
         "figures": {"top_features": 3},
+        "report": {"amino_acid_tables": "full"},
     })
     with AlignmentStore(path, [*train, "held", "absent"],
                         sequence_tpm_path=str(tpm)) as store:

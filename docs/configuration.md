@@ -404,8 +404,10 @@ The other defaults are `branch_length_mode: input`, `model: ER`, and
 `root_prior: equal`. The example `config.yml` uses `unit` for its NCBI taxonomy
 tree. See the
 [phylogenetic guide](phylogenetic-imputation.md) for options and requirements.
-`report: {}` has no configurable fields. Classification uses a fixed probability
-threshold of 0.5 throughout.
+`report.amino_acid_tables` defaults to `compact`: nonzero model coefficients,
+shared feature membership, selected-site details, and global summaries. Use `full`
+for all AA audit rows and the legacy dense TSV tables. This changes reporting only;
+classification uses a fixed probability threshold of 0.5 throughout.
 
 ## Prediction settings
 

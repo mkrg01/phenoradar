@@ -144,7 +144,10 @@ def test_expression_preprocessing_is_training_only(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("aggregation", ["best_covered", "aa_frequency", "tpm_weighted_frequency"])
-def test_combined_full_run_and_frozen_predictions(tmp_path: Path, aggregation: str) -> None:
+@pytest.mark.parametrize("output_mode", ["compact", "full"])
+def test_combined_full_run_and_frozen_predictions(
+    tmp_path: Path, aggregation: str, output_mode: str,
+) -> None:
     config_path = combined_config(tmp_path, aggregation)
     if aggregation == "tpm_weighted_frequency":
         payload = yaml.safe_load(config_path.read_text())
@@ -156,6 +159,7 @@ def test_combined_full_run_and_frozen_predictions(tmp_path: Path, aggregation: s
         payload["data"]["tpm_path"] = str(compressed)
         config_path.write_text(yaml.safe_dump(payload))
     config = load_and_resolve_config([config_path])
+    config.report.amino_acid_tables = output_mode
     messages = []
     destination = run_amino_acid(config, tmp_path / "run", progress=messages.append)
     assert any("prepare inner fold" in message for message in messages)
@@ -173,15 +177,21 @@ def test_combined_full_run_and_frozen_predictions(tmp_path: Path, aggregation: s
         assert member.model.alpha == 1
         assert all(json.loads(f)[0] == "expression" for f in member.expression.features)
     schema = pl.read_csv(destination / "model/tables/feature_schema.tsv", separator="\t")
-    assert set(schema["modality"]) == {"expression", "amino_acid"}
+    assert set(schema["modality"]) == ({"expression", "amino_acid"} if output_mode == "full"
+                                       else {"expression"})
     assert "TARGET_ONLY" not in schema["orthogroup"].to_list()
     for stage in ["cv", "model"]:
         tables = destination / stage / "tables"
         coefficients = pl.read_csv(tables / "combined_coefficients.tsv", separator="\t")
         aa = coefficients.filter(pl.col("modality") == "amino_acid")
         np.testing.assert_array_equal(aa["coefficient"], aa["coefficient_original_unit"])
-        assert (tables / "amino_acid_site_pss.tsv").is_file()
-        assert (tables / "amino_acid_site_effect_range.tsv").is_file()
+        if output_mode == "full":
+            assert (tables / "amino_acid_site_pss.tsv").is_file()
+            assert (tables / "amino_acid_site_effect_range.tsv").is_file()
+        else:
+            assert (tables / "amino_acid_site_scores.tsv").is_file()
+            assert set(pl.read_parquet(tables / "feature_dictionary.parquet")["modality"]) == {
+                "expression", "amino_acid"}
         if stage == "cv":
             for modality in ["expression", "amino_acid"]:
                 assert (tables / f"{modality}_feature_importance.tsv").is_file()

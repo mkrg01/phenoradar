@@ -41,7 +41,7 @@ def write_preprocessing_audits(
     fitted: AATransform,
     context: dict[str, Any],
     expression: ExpressionTransform | None = None,
-    *, audit: ColumnarAudits | None = None,
+    *, audit: ColumnarAudits | None = None, compact: bool = False,
 ) -> None:
     """Write every eligible site and feature without per-residue Python dictionaries."""
     keys = ["feature", "modality", "orthogroup", "alignment_pos_1based", "residue",
@@ -62,6 +62,9 @@ def write_preprocessing_audits(
             "score": block["score"], "n_active_states": np.count_nonzero(active, axis=1),
         })
         _append_frame(destination / "amino_acid_site_qc.tsv", qc, audit)
+        if compact:
+            # Selected sites' means and active states live beside their effects.
+            continue
         rows, states = np.nonzero(active)
         if not len(rows):
             continue
@@ -74,6 +77,35 @@ def write_preprocessing_audits(
         _append_frame(schema_path, frame, audit)
 
 
+def write_preprocessing_summary(
+    destination: Path, fitted: AATransform, context: dict[str, Any],
+    *, audit: ColumnarAudits | None = None,
+) -> None:
+    """Summarize all retained sites before compact reports select their details."""
+    counts = {"n_retained_sites": 0, "n_active_sites": 0, "n_active_features": 0,
+              "n_known_states": 0}
+    columns = ["sample_fraction", "post_aggregation_sample_fraction", "minor_samples",
+               "minor_groups", "score"]
+    totals = {key: [0.0, float("inf"), float("-inf")] for key in columns}
+    for block in site_blocks(fitted.sites):
+        counts["n_retained_sites"] += len(block["column"])
+        counts["n_active_sites"] += int(np.any(block["active"], axis=1).sum())
+        counts["n_active_features"] += int(np.count_nonzero(block["active"]))
+        counts["n_known_states"] += int(np.count_nonzero(block["known"]))
+        for key in columns:
+            values = block[key]
+            totals[key][0] += float(np.sum(values, dtype=np.float64))
+            totals[key][1] = min(totals[key][1], float(np.min(values)))
+            totals[key][2] = max(totals[key][2], float(np.max(values)))
+    row: dict[str, Any] = {**context, **counts}
+    n = counts["n_retained_sites"]
+    for key, (total, minimum, maximum) in totals.items():
+        row.update({f"{key}_mean": total / n if n else None,
+                    f"{key}_min": minimum if n else None,
+                    f"{key}_max": maximum if n else None})
+    _append_frame(destination / "amino_acid_site_qc_summary.tsv", pl.DataFrame([row]), audit)
+
+
 def _member_context(member: AAMember) -> list[pl.Expr]:
     return [pl.lit(member.scope).alias("scope"),
             pl.lit(member.sample_set_id).alias("sample_set_id"),
@@ -82,7 +114,7 @@ def _member_context(member: AAMember) -> list[pl.Expr]:
 
 def write_site_effects(
     destination: Path, member: AAMember, matrix: Any, shift: np.ndarray | None = None,
-    *, audit: ColumnarAudits | None = None,
+    *, audit: ColumnarAudits | None = None, compact: bool = False,
 ) -> None:
     """Retain all known states, computing each site's effect and contribution once."""
     alphabet = np.array(list(ALPHABET))
@@ -93,7 +125,8 @@ def write_site_effects(
         member.transform.sites, member.model.coef_, member.expression_width,
     ):
         known, active = block["known"], block["active"]
-        rows, states = np.nonzero(known)
+        retained = known & np.any(beta != 0, axis=1)[:, None] if compact else known
+        rows, states = np.nonzero(retained)
         if not len(rows):
             continue
         reference = np.argmax(block["mean"], axis=1)
@@ -111,7 +144,7 @@ def write_site_effects(
             contribution[local] = float(np.mean(np.abs(
                 values @ beta[local, active[local]]
             )))
-        frame = feature_axes(block, known, names=False).with_columns(
+        frame = feature_axes(block, retained, names=False).with_columns(
             *_member_context(member),
             pl.Series("coefficient", beta[rows, states]),
             pl.Series("reference_residue", alphabet[reference[rows]]),
@@ -119,10 +152,18 @@ def write_site_effects(
             pl.Series("site_effect_range", effect[rows]),
             pl.Series("mean_abs_site_contribution", contribution[rows]),
         ).select(keys)
+        if compact:
+            frame = frame.with_columns(
+                pl.Series("training_mean", block["mean"][rows, states]),
+                pl.Series("active", active[rows, states]),
+                pl.lit(member.transform.settings.aggregation).alias("aggregation"),
+            )
         _append_frame(destination / "amino_acid_site_effects.tsv", frame, audit)
 
 
-def write_combined_coefficients(destination: Path, member: AAMember) -> None:
+def write_combined_coefficients(
+    destination: Path, member: AAMember, *, compact: bool = False,
+) -> None:
     from phenoradar.cv import _glmnet_candidate_params
 
     expression = member.expression
@@ -144,6 +185,8 @@ def write_combined_coefficients(destination: Path, member: AAMember) -> None:
     keys = ["scope", "sample_set_id", "candidate_index", "feature", "modality", "orthogroup",
             "coefficient", "coefficient_original_unit", "coefficient_standardized",
             "original_unit", "penalty_factor"]
+    if compact:
+        frame = frame.filter(pl.col("coefficient") != 0)
     _append_frame(destination / "combined_coefficients.tsv",
                   frame.with_columns(*_member_context(member)).select(keys))
     for block, beta, offset in coefficient_blocks(member.transform.sites, member.model.coef_, n):
@@ -161,14 +204,16 @@ def write_combined_coefficients(destination: Path, member: AAMember) -> None:
             pl.lit("residue_frequency").alias("original_unit"),
             pl.lit(ratio).alias("penalty_factor"),
         ).select(keys)
+        if compact:
+            frame = frame.filter(pl.col("coefficient") != 0)
         _append_frame(destination / "combined_coefficients.tsv", frame)
 
 
-def write_site_scores(destination: Path, members: list[AAMember]) -> None:
+def write_site_scores(destination: Path, members: list[AAMember], *, compact: bool = False) -> None:
     """Write both scores without accumulating all site dictionaries in memory."""
     from phenoradar.amino_acid_reporting import AAReportWriter
 
-    with AAReportWriter(destination) as writer:
+    with AAReportWriter(destination, compact=compact) as writer:
         writer.add(members, features=False)
         writer.write_site_scores()
 

@@ -27,12 +27,14 @@ def _read(directory: Path, name: str) -> pl.DataFrame | None:
     if not path.exists():
         return None
     return pl.read_csv(path, separator="\t", infer_schema_length=10000,
-                       schema_overrides={"fold_id": pl.String})
+                       schema_overrides={"fold_id": pl.String, "pss": pl.Float64,
+                                         "effect_range": pl.Float64})
 
 
 def _scan(directory: Path, name: str) -> pl.LazyFrame:
     return pl.scan_csv(directory / f"{name}.tsv", separator="\t", infer_schema_length=10000,
-                       schema_overrides={"fold_id": pl.String})
+                       schema_overrides={"fold_id": pl.String, "pss": pl.Float64,
+                                         "effect_range": pl.Float64})
 
 
 def _selection(directory: Path, name: str) -> pl.DataFrame | None:
@@ -143,8 +145,9 @@ def write_amino_acid_figures(
     n_models = counts.group_by("scope").len().lazy()
     top_sites = {}
     for metric in ["pss", "effect_range"]:
-        site_source = (_scan(cv, f"amino_acid_site_{metric}") if report is None
-                       else report.sites.scan())
+        site_source = (report.sites.scan() if report is not None else _scan(
+            cv, "amino_acid_site_scores" if (cv / "amino_acid_site_scores.tsv").exists()
+            else f"amino_acid_site_{metric}"))
         top = site_source.filter(pl.col(metric) > 0).group_by(
             "scope", "orthogroup", "alignment_pos_1based"
         ).agg(pl.col(metric).sum()).join(n_models, on="scope").with_columns(

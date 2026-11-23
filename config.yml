@@ -116,7 +116,8 @@ phylogenetic_imputation:
 summary:
   group_col: family
 
-report: {}
+report:
+  amino_acid_tables: compact  # choices: compact, full
 
 runtime:
   seed: 42
