@@ -107,7 +107,8 @@ def _selections(config: AppConfig, plan: _Scope) -> dict[int, Selection]:
 
 
 def queue_workers(config: AppConfig, usage: SparseUsage, n: int,
-                  p: int, scopes: int, refit_n: int | None = None) -> tuple[int, int, int]:
+                  p: int, scopes: int, refit_n: int | None = None,
+                  packed_refit: bool = False) -> tuple[int, int, int]:
     budget = int(memory_budget() * .8)
     # Inner paths retain compressed coefficients, not dense refit/report models.
     inner = worker_bytes(replace(usage, peak_rss_bytes=0), n, p, retained_matrices=0)
@@ -117,6 +118,20 @@ def queue_workers(config: AppConfig, usage: SparseUsage, n: int,
     while refits and budget - refits * refit < inner:
         refits -= 1
     workers = min(jobs - refits, (budget - refits * refit) // inner)
+    if (packed_refit and 0 < workers < 3 and refits == 2 and jobs >= 5
+            and config.sampling.sampled_set_count == 1
+            and config.model_selection.selected_candidate_count == 1
+            and usage.matrix_bytes > 0 and usage.peak_rss_bytes > 0):
+        # Packed refits keep block references instead of concatenating a second
+        # full matrix. Bound audits/models by twice the measured pilot HWM,
+        # scaled to the largest refit, as well as the allocation estimate.
+        overlap_refit = max(
+            _refit_bytes(usage, n, p, refit_n or n, retained_matrices=0),
+            int(2 * usage.peak_rss_bytes * max(1, (refit_n or n) / n)),
+        )
+        overlap_inner = max(inner, int(1.25 * usage.peak_rss_bytes))
+        if 3 * overlap_inner + refits * overlap_refit <= budget:
+            workers = 3
     return max(1, workers), refits, min(MAX_MATRIX_BUFFER, max(1, inner // 3))
 
 
@@ -125,11 +140,23 @@ def preprocessing_threads(config: AppConfig, scoring: int, refits: int) -> int:
     return max(1, min(4, (_runtime_n_jobs(config) - refits) // scoring))
 
 
-def _refit_bytes(usage: SparseUsage, n: int, p: int, refit_n: int) -> int:
+def _refit_bytes(usage: SparseUsage, n: int, p: int, refit_n: int,
+                 retained_matrices: int = 1) -> int:
     return worker_bytes(replace(usage, matrix_bytes=int(
         usage.matrix_bytes * 1.25 * max(1, refit_n / n)),
                                 metadata_bytes=int(usage.metadata_bytes * 1.25), peak_rss_bytes=0),
-                        refit_n, int(p * 1.25))
+                        refit_n, int(p * 1.25), retained_matrices=retained_matrices)
+
+
+def _packed_refit_path(matrix: Any, plans: list[_Scope]) -> bool:
+    from phenoradar.amino_acid_packed import PackedAAMatrix
+    from phenoradar.glmnet import _PACKED_WORKING_SET_CSC_BYTES
+
+    return (isinstance(matrix, PackedAAMatrix)
+            and matrix.nnz * 12 + (matrix.shape[1] + 1) * 4 >= _PACKED_WORKING_SET_CSC_BYTES
+            and all(float(c.params.get("alpha", 1)) > 0 and float(c.params.get("lambda", 0)) > 0
+                    for plan in plans for source in plan.sources.values()
+                    for c in source.candidates))
 
 
 def _refit(config: AppConfig, plan: _Scope, selections: dict[int, Selection],
@@ -187,7 +214,8 @@ def grid_scopes(config: AppConfig, store: AlignmentStore, expression: Expression
         refit_n = max(len(s.species) for p in plans for s in p.sources.values())
         workers, refits, buffer = queue_workers(config, store._sparse_usage,
                                                 len(pilot.y_train), pilot.x_train.shape[1],
-                                                len(plans), refit_n)
+                                                len(plans), refit_n,
+                                                _packed_refit_path(pilot.x_train, plans))
         refit_bytes = _refit_bytes(store._sparse_usage, len(pilot.y_train),
                                    pilot.x_train.shape[1], refit_n)
         if not refits:
