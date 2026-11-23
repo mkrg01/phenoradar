@@ -20,20 +20,25 @@ def compact_reports(config: AppConfig) -> bool:
 def write_dictionary(writer: AAReportWriter, raw: pl.LazyFrame) -> None:
     """One feature axis, with 64 model-retention bits in each integer word."""
     destination = writer.destination
-    models = pl.DataFrame(writer.model_details).sort("model_id")
+    models = pl.DataFrame(writer.model_details).sort("model_id").with_row_index("retention_index")
+    if models["model_id"].n_unique() != models.height:
+        raise ValueError("Compact report model IDs must be unique")
     models.write_parquet(destination / "report_models.parquet")
     ogs = (raw.filter(pl.col("modality") == "amino_acid").select("orthogroup")
            .unique().sort("orthogroup").collect(engine="streaming")
            .with_row_index("orthogroup_id"))
     ogs.write_csv(destination / "report_orthogroups.tsv", separator="\t")
     keys = ["modality", "orthogroup", "alignment_pos_1based", "residue", "expression_feature"]
-    # Model IDs can contain gaps when workers reserve their IDs before fitting.
-    words = max(int(row["model_id"]) for row in writer.model_details) // 64 + 1
-    masks = [pl.when(pl.col("_model") // 64 == word)
-             .then(pl.lit(2, dtype=pl.UInt64).pow(pl.col("_model") % 64))
+    # Worker IDs reserve million-sized ranges. Only dense retention ordinals
+    # determine bitmap width; external model IDs remain unchanged in all joins.
+    words = max(1, (models.height + 63) // 64)
+    masks = [pl.when(pl.col("retention_index") // 64 == word)
+             .then(pl.lit(2, dtype=pl.UInt64).pow(pl.col("retention_index") % 64))
              .otherwise(pl.lit(0, dtype=pl.UInt64)).bitwise_or()
              .alias(f"retained_word_{word}") for word in range(words)]
-    axis = raw.group_by(keys).agg(masks).join(ogs.lazy(), on="orthogroup", how="left")
+    indexed = raw.join(models.select(pl.col("model_id").alias("_model"),
+                                     "retention_index").lazy(), on="_model", how="left")
+    axis = indexed.group_by(keys).agg(masks).join(ogs.lazy(), on="orthogroup", how="left")
     axis.drop("orthogroup").select(
         "modality", "orthogroup_id", pl.col("alignment_pos_1based").cast(pl.UInt32),
         "residue", "expression_feature", *[f"retained_word_{w}" for w in range(words)],
@@ -47,12 +52,13 @@ def write_dictionary(writer: AAReportWriter, raw: pl.LazyFrame) -> None:
         "coefficient",
     ).sink_parquet(destination / "model_nonzero_coefficients.parquet", engine="streaming")
     manifest = {
-        "format": "phenoradar-aa-compact-1",
+        "format": "phenoradar-aa-compact-2",
         "model_table": "report_models.parquet", "orthogroup_table": "report_orthogroups.tsv",
         "feature_dictionary": "feature_dictionary.parquet",
         "coefficients": "model_nonzero_coefficients.parquet",
         "retained_words": words,
-        "membership": "Feature retained by model m iff retained_word_{m//64} & (1 << (m%64)).",
+        "membership": ("For retention_index r in report_models.parquet, feature retained iff "
+                       "retained_word_{r//64} & (1 << (r%64)). model_id is preserved separately."),
         "zero_coefficients": "Omitted exactly; a retained zero differs from an excluded feature.",
         "importance": "abs(coefficient)/modality_l1; coefficient*0 when importance_zeroed is true.",
         "details": ("Selected features (plus plot padding); "

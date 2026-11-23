@@ -211,9 +211,10 @@ candidate selection, coefficients, predictions, and the model bundle are unchang
   including values below the stability tolerance. `report_models.parquet` gives its
   scope, sample, candidate and modality-specific L1 normalization constants.
 - `feature_dictionary.parquet` stores each retained feature once, using
-  `report_orthogroups.tsv` for OG names. Bit `m % 64` of `retained_word_{m // 64}`
-  records retention by model ID `m`; an unset bit denotes exclusion, rather than a
-  fitted zero. `compact_report_manifest.json` describes this format.
+  `report_orthogroups.tsv` for OG names. Each model has a dense `retention_index`
+  `r` in `report_models.parquet`; bit `r % 64` of `retained_word_{r // 64}` records
+  its retention. External `model_id` values remain unchanged. An unset bit denotes
+  exclusion, rather than a fitted zero. `compact_report_manifest.json` describes the format.
 - Coefficient/importance and feature-stability TSVs contain selected features plus
   plot padding. Fold averages still include all models and zero/absent folds;
   global stability summaries still count all evaluated features.

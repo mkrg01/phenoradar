@@ -11,7 +11,7 @@ from test_amino_acid import settings
 from test_amino_acid_streaming import model
 
 from phenoradar.amino_acid import AASite, AATransform
-from phenoradar.amino_acid_compact_reports import read_model_coefficients
+from phenoradar.amino_acid_compact_reports import read_model_coefficients, write_dictionary
 from phenoradar.amino_acid_outputs import write_site_effects
 from phenoradar.amino_acid_reporting import AAReportWriter
 from phenoradar.amino_acid_run import AAMember
@@ -126,21 +126,41 @@ def test_compact_values_membership_and_global_summaries_match_full(
             sum(p.stat().st_size for p in full.iterdir()) * .15
 
 
-def test_worker_bit_words_and_empty_coefficients_survive_merge(tmp_path: Path) -> None:
+@pytest.mark.parametrize("count", [4, 19, 129])
+@pytest.mark.parametrize("zero", [False, True])
+def test_worker_bit_words_and_empty_coefficients_survive_merge(
+    tmp_path: Path, count: int, zero: bool,
+) -> None:
     member = members_for_test(zero=True)[0]
+    member.transform.sites = member.transform.sites[:1]
+    member.model = model(np.array([0. if zero else 1e-15, 0.]))
     with AAReportWriter(tmp_path / 'merged', compact=True) as merged:
-        for model_id in [0, 63, 64, 128]:
+        for index in range(count):
+            model_id = index * 1_000_000
+            member.scope = f'outer_fold_{index + 1}'
             with AAReportWriter(tmp_path / f'worker{model_id}', model_base=model_id,
                                 compact=True) as writer:
                 writer.add([member])
                 writer.export(tmp_path / f'spool{model_id}')
             merged.merge(tmp_path / f'spool{model_id}')
-        merged.finalize(combined=False, top_features=3)
+        write_dictionary(merged, merged.features.scan())
     dictionary = pl.read_parquet(tmp_path / 'merged/feature_dictionary.parquet')
-    assert dictionary['retained_word_0'].unique().to_list() == [(1 << 63) | 1]
-    assert dictionary['retained_word_1'].unique().to_list() == [1]
-    assert dictionary['retained_word_2'].unique().to_list() == [1]
-    assert read_model_coefficients(tmp_path / 'merged').is_empty()
+    words = (count + 63) // 64
+    assert [c for c in dictionary.columns if c.startswith('retained_word_')] == \
+        [f'retained_word_{i}' for i in range(words)]
+    for i in range(words):
+        assert dictionary[f'retained_word_{i}'].unique().to_list() == \
+            [(1 << min(64, count - i * 64)) - 1]
+    models = pl.read_parquet(tmp_path / 'merged/report_models.parquet')
+    assert models['model_id'].to_list() == [i * 1_000_000 for i in range(count)]
+    assert models['retention_index'].to_list() == list(range(count))
+    coefficients = read_model_coefficients(tmp_path / 'merged')
+    assert coefficients.is_empty() == zero
+    if not zero:
+        assert sorted(coefficients['model_id']) == models['model_id'].to_list()
+        assert all(v.hex() == (1e-15).hex() for v in coefficients['coefficient'])
+    manifest = json.loads((tmp_path / 'merged/compact_report_manifest.json').read_text())
+    assert manifest['format'] == 'phenoradar-aa-compact-2' and manifest['retained_words'] == words
 
 
 def test_selected_site_keeps_zero_alternative_and_training_mean(tmp_path: Path) -> None:
