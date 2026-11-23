@@ -350,7 +350,10 @@ def fit_scope(
     audit: ColumnarAudits | None = None,
     selections: dict[int, tuple[list[SelectedCandidate], list[dict[str, Any]], list[str]]]
     | None = None,
+    preprocessing_jobs: int | None = None,
 ) -> list[AAMember]:
+    if preprocessing_jobs is not None and preprocessing_jobs < 1:
+        raise ValueError("AA preprocessing threads must be positive")
     species, y, groups, pairs = _arrays(rows)
     selection = _select_training_groups(config, y, groups, scope=scope, fold_id=scope)
     _write(tables / "training_group_subsets.tsv", selection.audit_rows)
@@ -391,7 +394,7 @@ def fit_scope(
         fitted, matrices, shift = fit_sparse_encoded(
             store, train_species, config.preprocess.amino_acid, [train_species],
             y=y[indices], groups=groups[indices], contrast_groups=pairs[indices],
-            n_jobs=_runtime_n_jobs(config),
+            n_jobs=(_runtime_n_jobs(config) if preprocessing_jobs is None else preprocessing_jobs),
             packed=config.runtime.amino_acid_matrix == "packed",
         )
         matrix = matrices[0]

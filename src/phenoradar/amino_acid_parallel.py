@@ -71,7 +71,7 @@ def run_fold(config: AppConfig, store: AlignmentStore, expression: ExpressionInp
              manifest: pl.DataFrame, fold: str, directory: Path, model_base: int,
              progress: Callable[[str], None] | None = None,
              selections: dict[int, tuple[list[SelectedCandidate], list[dict[str, Any]], list[str]]]
-             | None = None) -> Path:
+             | None = None, preprocessing_jobs: int | None = None) -> Path:
     from phenoradar.amino_acid_prediction import prediction_members
     from phenoradar.amino_acid_run import fit_scope, predict_members
 
@@ -84,7 +84,7 @@ def run_fold(config: AppConfig, store: AlignmentStore, expression: ExpressionInp
     with ColumnarAudits(tables / ".columnar") as audit:
         members = fit_scope(config, store, train.sort("species"), f"outer_fold_{fold}", tables,
                             warnings, expression, progress=progress, audit=audit,
-                            selections=selections)
+                            selections=selections, preprocessing_jobs=preprocessing_jobs)
     features = max(len(m.model.coef_) for m in members)
     with AAReportWriter(tables, model_base=model_base, compact=compact_reports(config)) as report:
         report.add(members)

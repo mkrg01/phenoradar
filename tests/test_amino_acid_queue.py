@@ -117,9 +117,11 @@ def test_queue_refits_before_later_scores_finish_and_keeps_output_order(
                 raise RuntimeError("test score failure")
         return [(1.0, [])], []
 
-    def refit(config, plan, selections, manifest, actual_payload, matrix_buffer_bytes):
+    def refit(config, plan, selections, manifest, actual_payload, matrix_buffer_bytes,
+              preprocessing_jobs):
         assert actual_payload is payload
         assert matrix_buffer_bytes == 2048
+        assert preprocessing_jobs >= 1
         if plan.name == "outer_fold_1":
             event.set()
         plan.directory.mkdir()
@@ -154,7 +156,8 @@ def test_queue_refits_before_later_scores_finish_and_keeps_output_order(
     assert pools[1][1]["max_tasks_per_child"] == 1
 
 
-def test_refit_loads_its_own_snapshot_before_fitting(tmp_path, monkeypatch):
+@pytest.mark.parametrize('threads', [1, 4])
+def test_refit_loads_its_own_snapshot_before_fitting(tmp_path, monkeypatch, threads):
     import phenoradar.amino_acid_parallel as parallel
     import phenoradar.amino_acid_queue as queue
 
@@ -173,16 +176,18 @@ def test_refit_loads_its_own_snapshot_before_fitting(tmp_path, monkeypatch):
         parallel._WORKER = store, expression
 
     def fit(actual_config, actual_store, actual_expression, actual_manifest,
-            fold, directory, model_base, *, selections):
+            fold, directory, model_base, *, selections, preprocessing_jobs):
         assert events == ["initialize"]
         assert actual_config is config and actual_store is store
         assert actual_expression is expression and actual_manifest is manifest
         assert fold == "1" and directory == plan.directory and model_base == 0
         assert selections == {}
+        assert preprocessing_jobs == threads
         events.append("fit")
         return directory
 
     monkeypatch.setattr(queue, "initialize", initialize)
     monkeypatch.setattr(queue, "run_fold", fit)
-    assert queue._refit(config, plan, selections, manifest, payload, 4096) == plan.directory
+    assert queue._refit(config, plan, selections, manifest, payload, 4096,
+                        threads) == plan.directory
     assert events == ["initialize", "fit"]

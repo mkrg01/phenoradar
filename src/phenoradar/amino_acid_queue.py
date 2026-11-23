@@ -140,6 +140,16 @@ def preprocessing_threads(config: AppConfig, scoring: int, refits: int) -> int:
     return max(1, min(4, (_runtime_n_jobs(config) - refits) // scoring))
 
 
+def refit_preprocessing_threads(config: AppConfig, scoring: int, scoring_threads: int,
+                               refits: int, running: list[int]) -> int:
+    """Reserve CPU slots for live tasks, including refits admitted before a phase change."""
+    available = _runtime_n_jobs(config) - scoring * scoring_threads - sum(running)
+    remaining = refits - len(running)
+    if available < 1 or remaining < 1:
+        return 0
+    return max(1, min(4, available // remaining))
+
+
 def _refit_bytes(usage: SparseUsage, n: int, p: int, refit_n: int,
                  retained_matrices: int = 1) -> int:
     return worker_bytes(replace(usage, matrix_bytes=int(
@@ -160,7 +170,8 @@ def _packed_refit_path(matrix: Any, plans: list[_Scope]) -> bool:
 
 
 def _refit(config: AppConfig, plan: _Scope, selections: dict[int, Selection],
-           manifest: pl.DataFrame, payload: dict[str, Any], matrix_buffer_bytes: int) -> Path:
+           manifest: pl.DataFrame, payload: dict[str, Any], matrix_buffer_bytes: int,
+           preprocessing_jobs: int = 1) -> Path:
     from phenoradar import amino_acid_parallel
     from phenoradar.amino_acid_compact_reports import compact_reports
     from phenoradar.amino_acid_outputs import write_site_scores
@@ -168,19 +179,22 @@ def _refit(config: AppConfig, plan: _Scope, selections: dict[int, Selection],
 
     # Recycled pool workers may wait without receiving a task. Load the large
     # input snapshot only for a dispatched refit, never for an idle replacement.
+    if preprocessing_jobs < 1:
+        raise ValueError("AA preprocessing threads must be positive")
     initialize(payload, 1, matrix_buffer_bytes)
     assert amino_acid_parallel._WORKER is not None
     store, expression = amino_acid_parallel._WORKER
     if plan.name != "final_refit":
         return run_fold(config, store, expression, manifest,
                         plan.name.removeprefix("outer_fold_"), plan.directory,
-                        plan.model_base, selections=selections)
+                        plan.model_base, selections=selections,
+                        preprocessing_jobs=preprocessing_jobs)
     plan.directory.mkdir(parents=True)
     tables = plan.directory / "tables"
     tables.mkdir()
     warnings: list[str] = []
     members = fit_scope(config, store, plan.rows, plan.name, tables, warnings, expression,
-                        selections=selections)
+                        selections=selections, preprocessing_jobs=preprocessing_jobs)
     if not compact_reports(config):
         write_site_scores(tables, members)
     joblib.dump((members, warnings), plan.directory / "members.joblib")
@@ -249,6 +263,7 @@ def grid_scopes(config: AppConfig, store: AlignmentStore, expression: Expression
             max_tasks_per_child=1,
         ) as fitting:
             pending: dict[Future[Any], tuple[int, int | None, int | None]] = {}
+            refit_threads: dict[Future[Any], int] = {}
             future: Future[Any]
             # Start final selection early too; its labels never enter outer-CV
             # preprocessing or model selection, and outputs still merge last.
@@ -288,12 +303,19 @@ def grid_scopes(config: AppConfig, store: AlignmentStore, expression: Expression
                                      f"up to {refits} refit workers "
                                      "after releasing scoring memory.")
                     for index in list(prepared)[:max(0, refits - running)]:
+                        threads = refit_preprocessing_threads(
+                            config, 0 if scoring_finished else workers, preprocessing_jobs,
+                            refits, list(refit_threads.values()),
+                        )
+                        if not threads:
+                            break
                         plan = plans[index]
                         # Pass selection records, never matrices or fitted inner-fold state.
                         task = replace(plan, sources={})
                         future = fitting.submit(_refit, child, task,
                                                 prepared.pop(index), manifest, payload,
-                                                min(MAX_MATRIX_BUFFER, buffer * 2))
+                                                min(MAX_MATRIX_BUFFER, buffer * 2), threads)
+                        refit_threads[future] = threads
                         pending[future] = index, None, None
                         submitted.add(index)
                     done, _ = wait(pending, return_when=FIRST_COMPLETED)
@@ -301,6 +323,7 @@ def grid_scopes(config: AppConfig, store: AlignmentStore, expression: Expression
                         index, source_key, split_index = pending.pop(future)
                         plan = plans[index]
                         if source_key is None:
+                            del refit_threads[future]
                             ready[index] = future.result()
                             if progress:
                                 progress(f"{plan.name}: queued refit completed.")
