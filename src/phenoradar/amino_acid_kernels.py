@@ -117,3 +117,37 @@ def centering_mass(values: np.ndarray, sites: np.ndarray, residues: np.ndarray,
         mass[:, fallback] = _compact_mass(
             raw, local_fallback[local[sites[columns]]], residues[columns], int(fallback.sum()))
     return mass
+
+
+def compact_statistics_native(
+    values: np.ndarray, observed: np.ndarray, sites: np.ndarray, residues: np.ndarray,
+    min_states: int,
+) -> tuple[Any, ...] | None:
+    """Avoid sample-sized temporary arrays for fractional training statistics."""
+    kernel = getattr(native, "compact_statistics", None)
+    if (kernel is None or not np.little_endian or values.dtype != np.float32
+            or observed.dtype != np.bool_ or min_states < 2 or min_states > 20
+            or not 0 < len(values) <= 2**24 or not values.shape[1]):
+        return None
+    steps = np.diff(sites)
+    if (not len(sites) or len(sites) != values.shape[1]
+            or observed.shape[0] != len(values)
+            or np.any(sites < 0) or np.any(sites >= observed.shape[1])
+            or np.any(residues < 0) or np.any(residues >= 20)
+            or not np.all((steps > 0) | ((steps == 0) & (np.diff(residues) > 0)))):
+        return None
+    n = observed.shape[1]
+    counts = np.zeros(n, dtype=np.int64)
+    eligible = np.zeros(n, dtype=bool)
+    known = np.zeros((n, 20), dtype=bool)
+    means = np.zeros((n, 20), dtype=float)
+    active = np.zeros((n, 20), dtype=bool)
+    valid = kernel(np.ascontiguousarray(values), np.ascontiguousarray(observed),
+                   np.ascontiguousarray(sites, dtype=np.int64),
+                   np.ascontiguousarray(residues, dtype=np.int64),
+                   counts, eligible, known, means, active,
+                   len(values), values.shape[1], n, min_states)
+    if not valid:
+        return None
+    return (eligible, np.zeros(n, dtype=int), np.zeros(n, dtype=int),
+            counts / len(values), means, known, active)

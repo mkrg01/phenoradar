@@ -325,6 +325,7 @@ fail:
 }
 
 #include "_aa_packed.h"
+#include "_aa_statistics.h"
 
 static PyMethodDef methods[] = {{"decode", decode, METH_VARARGS, NULL},
     {"decode_compact", decode_compact, METH_VARARGS, NULL},
@@ -336,6 +337,8 @@ static PyMethodDef methods[] = {{"decode", decode, METH_VARARGS, NULL},
     {"pack_mask_columns", pack_mask_columns, METH_VARARGS, NULL},
     {"scan_packed_columns", scan_packed_columns, METH_VARARGS, NULL},
     {"gather_packed_columns", gather_packed_columns, METH_VARARGS, NULL},
-    {"masked_counts", masked_counts, METH_VARARGS, NULL}, {NULL, NULL, 0, NULL}};
+    {"masked_counts", masked_counts, METH_VARARGS, NULL},
+    {"compact_statistics", compact_statistics_kernel, METH_VARARGS, NULL},
+    {NULL, NULL, 0, NULL}};
 static struct PyModuleDef module = {PyModuleDef_HEAD_INIT, "_aa_kernels", NULL, -1, methods};
 PyMODINIT_FUNC PyInit__aa_kernels(void) { return PyModule_Create(&module); }
