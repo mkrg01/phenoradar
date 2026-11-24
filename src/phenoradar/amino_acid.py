@@ -187,6 +187,8 @@ class AlignmentStore:
             release_frequency_maps(self._frequency_directory)
         self._frequency_caches.clear()
         self._site_presence.clear()
+        for arena in self.__dict__.pop("_frequency_arenas", ()):
+            arena.cleanup()
         self._temp.cleanup()
 
     def __enter__(self) -> AlignmentStore:

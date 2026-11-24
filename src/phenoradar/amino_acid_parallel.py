@@ -56,6 +56,9 @@ def fold_workers(config: AppConfig, n_species: int, n_features: int, n_folds: in
 
 
 def snapshot(store: AlignmentStore, expression: ExpressionInput | None) -> dict[str, Any]:
+    from phenoradar.amino_acid_frequency_arena import prepare_snapshot
+
+    prepare_snapshot(store)
     state = {name: getattr(store, name) for name in
              ["ogs", "species", "retained_species", "cache_frequencies",
               "_frequency_caches", "tpm_identity", "_frequency_directory"]}
