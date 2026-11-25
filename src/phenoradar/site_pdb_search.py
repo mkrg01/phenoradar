@@ -6,11 +6,13 @@ import hashlib
 import json
 import re
 from collections import defaultdict
+from collections.abc import Callable
 from importlib import import_module
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+from phenoradar.amino_acid import ALPHABET
 from phenoradar.site_reference_resources import (
     ResourceCache,
     SiteAnnotationError,
@@ -28,6 +30,7 @@ _UNIPROT = "https://rest.uniprot.org/uniprotkb/"
 _ENTITY_BATCH = 40
 _SEARCH_HITS = 100
 _RCSB_MINIMUM_QUERY_LENGTH = 25
+_MAX_SAME_GENE_SUBSTITUTION_FRACTION = 0.02
 
 
 def _pdb_hits(sequence: str, cache: ResourceCache) -> tuple[dict[str, float], int]:
@@ -111,31 +114,105 @@ def _verified_candidate(
     accession: str,
     entry: dict[str, Any],
     member_sequences: dict[str, list[str]],
-    gene_links: dict[str, set[str]],
-    base: str,
-    cache: ResourceCache,
+    gene_details: Callable[[str], dict[str, Any]],
 ) -> dict[str, Any] | None:
     if "sequence" not in entry:
         raise SiteAnnotationError(f"UniProt response lacks sequence: {accession}")
     sequence = entry["sequence"]["value"].upper()
     aliases = {accession, entry["primaryAccession"], *entry.get("secondaryAccessions", [])}
-    genes = []
-    for gene in member_sequences.get(sequence, []):
-        if gene not in gene_links:
-            gene_links[gene] = _orthodb_gene_links(gene, base, cache)
-        if aliases & gene_links[gene]:
-            genes.append(gene)
+    genes = [
+        gene for gene in member_sequences.get(sequence, [])
+        if aliases & _gene_accessions(gene_details(gene))
+    ]
     if not genes:
         return None
     return uniprot_reference(og, accession, entry, sorted(genes), sequence)
 
 
-def _orthodb_gene_links(gene: str, base: str, cache: ResourceCache) -> set[str]:
+def _orthodb_gene_details(gene: str, base: str, cache: ResourceCache) -> dict[str, Any]:
     url = base + "/ogdetails?" + urlencode({"id": gene})
     info = _odb_data(cache.json(url), gene)
-    if info["gene_id"]["id"] != gene:
+    if not isinstance(info, dict) or info["gene_id"]["id"] != gene:
         raise SiteAnnotationError(f"OrthoDB gene identity mismatch: {gene}")
+    return info
+
+
+def _gene_accessions(info: dict[str, Any]) -> set[str]:
     return {link["id"] for link in info.get("uniprot", [])}
+
+
+def _pdb_same_gene_candidate(
+    og: str,
+    accession: str,
+    entry: dict[str, Any],
+    members: list[tuple[str, str]],
+    gene_details: Callable[[str], dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Verify a reviewed PDB reference against a same-taxon member's gene and sequence."""
+    sequence = entry["sequence"]["value"].upper()
+    if entry["entryType"] != "UniProtKB reviewed (Swiss-Prot)" or not sequence:
+        return None
+    if not set(sequence) <= set(ALPHABET):
+        return None
+    symbol = {
+        g["geneName"]["value"].casefold() for g in entry.get("genes", []) if g.get("geneName")
+    }
+    gene_ids = {
+        link["id"] for link in entry.get("uniProtKBCrossReferences", [])
+        if link["database"] == "GeneID"
+    }
+    aliases = {accession, entry["primaryAccession"], *entry.get("secondaryAccessions", [])}
+    mature_chain = any(
+        f["type"] == "Chain"
+        and f["location"]["start"] == {"value": 1, "modifier": "EXACT"}
+        and f["location"]["end"] == {"value": len(sequence), "modifier": "EXACT"}
+        for f in entry.get("features", [])
+    )
+    matches: list[dict[str, Any]] = []
+    for gene, protein in members:
+        if len(protein) == len(sequence):
+            start = 1
+            differences = [
+                i for i, (a, b) in enumerate(zip(sequence, protein, strict=True), 1) if a != b
+            ]
+            if (
+                len(differences) > len(sequence) * _MAX_SAME_GENE_SUBSTITUTION_FRACTION
+                or any(protein[i - 1] not in ALPHABET for i in differences)
+            ):
+                continue
+            method = "same_gene_full_length"
+        elif mature_chain and len(protein) > len(sequence) and protein.endswith(sequence):
+            start = len(protein) - len(sequence) + 1
+            differences = []
+            method = "same_gene_exact_c_terminal_mature_chain"
+        else:
+            continue
+        info = gene_details(gene)
+        # The primary reviewed symbol must match a same-taxon NCBI Gene alias exactly.
+        evidence = [
+            {"database": "NCBI Gene", "id": link["id"], "matched_by": "id"}
+            for link in info.get("entrezgene", []) if link["id"] in gene_ids
+        ]
+        if aliases & _gene_accessions(info):
+            evidence.append({"database": "OrthoDB", "id": gene, "matched_by": "uniprot_xref"})
+        for link in info.get("entrezgene", []):
+            synonyms = (link.get("synonyms") or "").casefold().split("|")
+            for name in sorted(symbol.intersection(synonyms)):
+                evidence.append({
+                    "database": "NCBI Gene", "id": link["id"],
+                    "matched_by": "primary_gene_symbol", "symbol": name,
+                })
+        if evidence:
+            matches.append(dict(
+                method=method, orthodb_gene_id=gene, orthodb_sequence_length=len(protein),
+                orthodb_start_1based=start, orthodb_end_1based=len(protein),
+                differences_at_uniprot_positions_1based=differences, gene_evidence=evidence,
+            ))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    ref = uniprot_reference(og, accession, entry, [match["orthodb_gene_id"]], sequence)
+    return {**ref, "pdb_orthodb_match": match}
 
 
 def _closest_member_sequences(query: str, members: dict[str, list[str]]) -> list[str]:
@@ -175,17 +252,25 @@ def _prepare_og(
     assert members is not None
     sequences_by_gene = read_fasta(members.read_text())
     member_sequences: dict[str, list[str]] = defaultdict(list)
+    members_by_taxon: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for gene, sequence in sequences_by_gene.items():
         member_sequences[sequence].append(gene)
-    gene_links: dict[str, set[str]] = {}
+        members_by_taxon[gene.split("_", 1)[0]].append((gene, sequence))
+    details: dict[str, dict[str, Any]] = {}
+
+    def gene_details(gene: str) -> dict[str, Any]:
+        if gene not in details:
+            details[gene] = _orthodb_gene_details(gene, base, cache)
+        return details[gene]
+
     query_genes = set(member_sequences.get(query, []))
     if alignment_sequence_id is not None and alignment_sequence_id in sequences_by_gene:
         query_genes.add(alignment_sequence_id)
-    for gene in sorted(query_genes):
-        gene_links[gene] = _orthodb_gene_links(gene, base, cache)
     # Query-linked references also give AlphaFold a fallback when PDB has no useful hit.
-    accessions = {chain["accession"] for chain in chains}
-    accessions.update(link for links in gene_links.values() for link in links)
+    pdb_accessions = {chain["accession"] for chain in chains}
+    accessions = pdb_accessions.copy()
+    accessions.update(link for gene in sorted(query_genes)
+                      for link in _gene_accessions(gene_details(gene)))
     verified: dict[str, str] = {}
     refs: dict[str, dict[str, Any]] = {}
 
@@ -195,8 +280,13 @@ def _prepare_og(
             reason = "uniprot_unavailable"
         else:
             ref = _verified_candidate(
-                og, accession, entry, member_sequences, gene_links, base, cache,
+                og, accession, entry, member_sequences, gene_details,
             )
+            if ref is None and accession in pdb_accessions:
+                taxon = str(entry["organism"].get("taxonId", ""))
+                ref = _pdb_same_gene_candidate(
+                    og, accession, entry, members_by_taxon[taxon], gene_details,
+                )
             if ref is not None:
                 if not ref["fragment"]:
                     existing = refs.setdefault(ref["accession"], ref)
@@ -204,6 +294,8 @@ def _prepare_og(
                         raise SiteAnnotationError(
                             "Conflicting UniProt sequences for one accession."
                         )
+                    if "pdb_orthodb_match" in existing and "pdb_orthodb_match" not in ref:
+                        refs[ref["accession"]] = ref
                     verified[accession] = ref["accession"]
                     return
                 reason = "uniprot_fragment"
@@ -213,16 +305,14 @@ def _prepare_og(
 
     for accession in sorted(accessions):
         check(accession)
-    if not refs:
+    if not any("pdb_orthodb_match" not in ref for ref in refs.values()):
         # A transcript query need not match a database sequence exactly.
         for sequence in _closest_member_sequences(query, member_sequences):
             for gene in member_sequences[sequence]:
-                if gene not in gene_links:
-                    gene_links[gene] = _orthodb_gene_links(gene, base, cache)
-                for accession in sorted(gene_links[gene] - accessions):
+                for accession in sorted(_gene_accessions(gene_details(gene)) - accessions):
                     accessions.add(accession)
                     check(accession)
-            if refs:
+            if any("pdb_orthodb_match" not in ref for ref in refs.values()):
                 break
     candidates: dict[tuple[str, str, str], dict[str, Any]] = {}
     for chain in chains:

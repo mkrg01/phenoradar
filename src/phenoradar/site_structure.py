@@ -20,6 +20,10 @@ from phenoradar.site_functional_context import deposited_ligands
 from phenoradar.site_reference_resources import ResourceCache, SiteAnnotationError, sha256
 
 
+class _InconsistentPdbMapping(SiteAnnotationError):
+    """A chain's SIFTS records cannot be reconciled with its coordinates."""
+
+
 def _letter(name: str) -> str:
     from Bio.Data.PDBData import protein_letters_3to1_extended
 
@@ -188,7 +192,7 @@ def pdbe_sifts_mapping(
         position = int(pos)
         label_key = label, seq
         if position in mappings and mappings[position][0] != label_key:
-            raise SiteAnnotationError("Ambiguous SIFTS residue correspondence in PDBe mmCIF.")
+            raise _InconsistentPdbMapping("Ambiguous SIFTS residue correspondence in PDBe mmCIF.")
         key = atom_ids.get(label_key)
         mappings[position] = (label_key, dict(
             reference_pos_1based=position, chain=chain,
@@ -381,7 +385,7 @@ def map_structure_sites(
             and atom_at_residue is not None
             and atom_at_residue["residue"] != residue["residue"]
         ):
-            raise SiteAnnotationError("Observed SIFTS residue differs from structure atoms.")
+            raise _InconsistentPdbMapping("Observed SIFTS residue differs from structure atoms.")
         coordinate_map[residue["reference_pos_1based"]] = {
             **residue,
             "observed": observed,
@@ -453,28 +457,34 @@ def rank_pdb_site_candidates(
         path = coordinates(pdb)
         observed: set[int] = set()
         reason = "coordinates_unavailable"
+        detail = ""
         if path is not None:
             cif_data, atoms, _ = read_structure(path)
-            mapping = pdbe_sifts_mapping(cif_data, atoms, accession, candidate["chain"])
-            rows, _ = map_structure_sites(
-                references[accession], sites_by_accession[accession], candidate, atoms, mapping,
-            )
-            observed = {
-                r["alignment_pos_1based"] for r in rows
-                if r["structure_status"] in {"mapped", "structure_residue_differs"}
-            }
-            reason = "no_observed_sites" if not observed else "required_site_unobserved"
-            if observed and required_sites <= observed:
-                reason = ""
-                eligible.append((len(observed), {
-                    **candidate, "path": str(path), "sha256": sha256(path),
-                    "format": "cif", "sifts_format": "mmcif",
-                }))
+            try:
+                mapping = pdbe_sifts_mapping(cif_data, atoms, accession, candidate["chain"])
+                rows, _ = map_structure_sites(
+                    references[accession], sites_by_accession[accession], candidate, atoms, mapping,
+                )
+            except _InconsistentPdbMapping as exc:
+                reason, detail = "inconsistent_sifts_mapping", str(exc)
+            else:
+                observed = {
+                    r["alignment_pos_1based"] for r in rows
+                    if r["structure_status"] in {"mapped", "structure_residue_differs"}
+                }
+                reason = "no_observed_sites" if not observed else "required_site_unobserved"
+                if observed and required_sites <= observed:
+                    reason = ""
+                    eligible.append((len(observed), {
+                        **candidate, "path": str(path), "sha256": sha256(path),
+                        "format": "cif", "sifts_format": "mmcif",
+                    }))
         audit.append({
             **candidate,
             "n_observed_sites": len(observed),
             "observed_columns": ",".join(map(str, sorted(observed))),
             "exclusion_reason": reason,
+            "exclusion_detail": detail,
         })
     winner = None
     if eligible:

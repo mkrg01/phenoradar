@@ -494,6 +494,9 @@ def test_real_pymol_six_views_and_pdf(tmp_path: Path, source: str) -> None:
         cache=ResourceCache(tmp_path / "empty", offline=True),
     )
     folder = out / "OG1/structure_0000"
+    scene = json.loads((folder / "scene.json").read_text())
+    assert set(scene["site_colors"]) == ({"3"} if source == "pdb" else {"3", "18"})
+    assert len(set(scene["site_colors"].values())) == len(scene["site_colors"])
     render = json.loads((folder / "rendering.json").read_text())
     assert len(render["views"]) == 6
     translations = []

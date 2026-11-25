@@ -385,6 +385,8 @@ def _alphafold_for_sites(
     ranked = []
     for rank, accession in enumerate(accessions):
         reference = references[accession]
+        if "pdb_orthodb_match" in reference:
+            continue
         sites = sites_by_accession[accession]
         target = {r["alignment_pos_1based"]: r["reference_pos_1based"]
                   for r in sites if r["reference_status"] == "mapped"}
@@ -643,7 +645,10 @@ def annotate_sites(
                 ],
             )
             forced = automatic.get(name)
-            eligible = [r for r in ranked if r["qualified"]]
+            eligible = [
+                r for r in ranked
+                if r["qualified"] and "pdb_orthodb_match" not in references[r["accession"]]
+            ]
             choice = (
                 next((r for r in ranked if r["accession"] == forced), None)
                 if forced

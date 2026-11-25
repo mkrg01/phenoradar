@@ -10,6 +10,12 @@ from typing import Any
 
 from phenoradar.site_reference_resources import SiteAnnotationError, write_json
 
+_SITE_COLORS = (
+    "#d62728", "#6941a5", "#007f72", "#9d6500",
+    "#1964ad", "#b02a78", "#617b19", "#49545c",
+)
+_POSITION_STATUSES = {"mapped", "structure_residue_differs"}
+
 # Standalone script: PyMOL may run in a different environment from PhenoRadar.
 _PYMOL_SCRIPT = r"""from pathlib import Path
 import json
@@ -60,7 +66,6 @@ base = list(cmd.get_view())
 # Fixed camera scale for all rotations, with room for the full target chain.
 base[11] *= 1.3
 radius = max(float(np.linalg.norm(x - np.mean(coords, axis=0))) for x in coords) + 5
-cmd.set('label_position', [0, 0, radius + 2])
 base[15], base[16] = -base[11] - 1.5 * radius, -base[11] + 1.5 * radius
 cmd.set_view(base)
 def rx(degrees):
@@ -85,16 +90,23 @@ def selection(site):
                                       (site['insertion_code'] or ''))
 selected = [s for s in scene['sites'] if s['structure_status'] in
             ('mapped', 'structure_residue_differs')]
+site_selections = []
 for site in selected:
     sel = selection(site)
     if cmd.count_atoms(sel + ' and name CA', state=1) != 1:
         raise RuntimeError('Mapped residue does not uniquely identify a CA atom: ' + sel)
     cmd.show('sticks', sel)
     cmd.show('spheres', sel + ' and name CA')
-    cmd.set('sphere_scale', .35, sel)
-    label = '{}{}\nMSA{}'.format(site['reference_residue'],
+    cmd.set('sphere_scale', .5, sel)
+    label = '{}{} / MSA {}'.format(site['reference_residue'],
         site['reference_pos_1based'], site['alignment_pos_1based'])
     cmd.label(sel + ' and name CA', repr(label))
+    name = 'MSA_{}'.format(site['alignment_pos_1based'])
+    cmd.select(name, sel, enable=0)
+    site_selections.append(name)
+if site_selections:
+    cmd.select('selected_sites', ' or '.join('%' + name for name in site_selections), enable=0)
+    cmd.hide('labels', 'selected_sites')
 
 context_layers = []
 def context_layer(name, expression, color, representation):
@@ -166,7 +178,8 @@ for page in pages:
         scales[page] = upper
         for site in selected:
             if page == 'selected':
-                color = '0xd62728'
+                color = '0x' + scene['site_colors'].get(
+                    str(site['alignment_pos_1based']), '#d62728')[1:]
             elif site.get(page) is None:
                 color = 'gray70'
             else:
@@ -206,6 +219,12 @@ def render_structure(
     folder = Path(record["folder"])
     orthogroup = record["sites"][0]["orthogroup"]
     annotation = record.get("orthogroup_annotation")
+    mapped = [site for site in record["sites"] if site["structure_status"] in _POSITION_STATUSES]
+    site_colors = {}
+    if len(mapped) <= len(_SITE_COLORS):
+        site_colors = dict(zip(
+            (site["alignment_pos_1based"] for site in mapped), _SITE_COLORS, strict=False,
+        ))
     group = None
     if annotation:
         name_part = re.sub(r"[^A-Za-z0-9]+", "_", annotation).strip("_")[:55]
@@ -219,6 +238,7 @@ def render_structure(
             chain=record["chain"],
             first_model=record["first_model"],
             sites=record["sites"],
+            site_colors=site_colors,
             functional_sites=record.get("functional_sites", []),
             pdb_ligands=record.get("pdb_ligands", []),
             orthogroup_label=f"{annotation} ({orthogroup})" if annotation else orthogroup,
@@ -242,10 +262,10 @@ def render_structure(
         or not (folder / "sites.pse").is_file()
     ):
         raise SiteAnnotationError(f"PyMOL rendering failed; see {folder / 'pymol.log'}")
-    _write_pdf(record, folder)
+    _write_pdf(record, folder, site_colors)
 
 
-def _write_pdf(record: dict[str, Any], folder: Path) -> None:
+def _write_pdf(record: dict[str, Any], folder: Path, site_colors: dict[int, str]) -> None:
     from html import escape
 
     from reportlab.lib import colors
@@ -300,6 +320,7 @@ def _write_pdf(record: dict[str, Any], folder: Path) -> None:
         confidence="AlphaFold local confidence (pLDDT)",
         functional_context="Functional sites and deposited ligands",
     )
+    mapped = [site for site in record["sites"] if site["structure_status"] in _POSITION_STATUSES]
     for page in rendering["pages"]:
         header(record.get("site_scope", "final") + " | " + labels[page])
         for i, direction in enumerate(names):
@@ -308,15 +329,15 @@ def _write_pdf(record: dict[str, Any], folder: Path) -> None:
                 raise SiteAnnotationError(f"Missing six-view panel: {image}")
             column, row = i % 2, i // 2
             x = 28 + column * (width - 56) / 2
-            y = height - 286 - row * 218
+            y = height - 267 - row * 203
             canvas.setFont("Helvetica", 8)
-            canvas.drawString(x + 10, y + 204, direction.capitalize())
+            canvas.drawString(x + 10, y + 190, direction.capitalize())
             canvas.drawImage(
                 ImageReader(str(image)),
-                x + 23,
+                x + 32,
                 y,
-                width=198,
-                height=198,
+                width=184,
+                height=184,
                 preserveAspectRatio=True,
                 mask="auto",
             )
@@ -330,7 +351,23 @@ def _write_pdf(record: dict[str, Any], folder: Path) -> None:
             canvas.setFillColor(colors.black)
         canvas.setFont("Helvetica", 8)
         if page == "selected":
-            note = "Red: selected sites. Labels: reference residue/position / MSA column."
+            if site_colors:
+                for index, site in enumerate(mapped):
+                    x = 33 + (index % 2) * (width - 56) / 2
+                    y = 157 - (index // 2) * 15
+                    column = site["alignment_pos_1based"]
+                    canvas.setFillColor(colors.HexColor(site_colors[column]))
+                    canvas.circle(x, y + 2.5, 3, stroke=0, fill=1)
+                    canvas.setFillColor(colors.black)
+                    reference = f"{site['reference_residue']}{site['reference_pos_1based']}"
+                    structure = (
+                        f"{site['chain']}:{site['structure_residue']}{site['auth_seq_id']}"
+                        f"{site['insertion_code'] or ''}"
+                    )
+                    canvas.drawString(x + 9, y, f"MSA {column}   |   {reference}   |   {structure}")
+                note = "Site key shows the MSA column, UniProt residue and structure residue."
+            else:
+                note = "Red marks mapped sites. See the site correspondence table for residue IDs."
         elif page == "confidence":
             note = "pLDDT: orange <50; yellow 50-70; cyan 70-90; blue >=90. Not mapping confidence."
         elif page == "functional_context":
@@ -347,14 +384,10 @@ def _write_pdf(record: dict[str, Any], folder: Path) -> None:
                 f"Pale to dark red: 0 to {upper:.4g}; gray: unavailable. Shared scale across views."
             )
         canvas.drawString(28, 90, note)
-        observed = sum(
-            s["structure_status"] in {"mapped", "structure_residue_differs"}
-            for s in record["sites"]
-        )
         canvas.drawString(
             28,
             76,
-            f"{observed}/{len(record['sites'])} selected sites have coordinates; "
+            f"{len(mapped)}/{len(record['sites'])} selected sites have coordinates; "
             f"core coverage {record['core_coverage']:.1%}.",
         )
         canvas.drawString(

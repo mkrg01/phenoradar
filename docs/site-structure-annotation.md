@@ -75,24 +75,37 @@ phenoradar annotate-sites \
 ```
 
 The search screens up to 100 experimentally determined PDB polymer entities per
-query (E-value cutoff 1, sequence identity cutoff 0.25). It verifies candidate
-UniProt accessions using an exact full-length match to a linked member of the OG
-from the run's OrthoDB release. Only candidate chains with verified accessions
-are fetched as SIFTS-enriched PDBe mmCIF files.
+query (E-value cutoff 1, sequence identity cutoff 0.25). It first checks for an
+exact full-length match to a UniProt-linked OG member in the run's OrthoDB
+release. A reviewed experimental reference can also match one member of the
+same NCBI taxon using an accession link, a shared NCBI Gene ID, or its primary
+gene symbol in the member's NCBI Gene aliases. This route requires one of the
+following sequence matches:
+
+- A position-by-position comparison of equal-length proteins with at least 98%
+  identity.
+- An exact C-terminal match to a longer OrthoDB protein, with a reviewed
+  UniProtKB `Chain` feature spanning the entire shorter sequence.
+
+The catalog records the gene evidence, matched OrthoDB interval and sequence
+differences. Site projection uses the actual UniProt sequence. Candidate chains
+with verified accessions are fetched as SIFTS-enriched PDBe mmCIF files.
 
 An eligible chain contains a deposited Cα coordinate at every required site and
 at least one requested site. Among eligible chains, the largest number of
 observed requested sites wins, followed by RCSB sequence-search score and PDB,
-chain and UniProt identifier order. Chain-wide coverage cutoffs are omitted in
-this mode. The `pdb_site_candidates.tsv` table records observed columns and reasons
-for exclusion. Check the local projection for sites interpreted individually.
+chain and UniProt identifier order. The `pdb_site_candidates.tsv` table records
+observed columns and reasons for exclusion, including SIFTS inconsistencies
+specific to individual chains. Check the local projection for sites interpreted
+individually.
 
-When eligible experimental coordinates are unavailable, same-sequence AlphaFold
-models are ranked by observed site coverage and mean pLDDT over mapped sites.
-The catalog includes an exact query-linked UniProt reference where available.
-If no candidate reference is verified, preparation tries closest same-OG members
-by full-length protein alignment. A portable catalog freezes the selected
-structure and the site list. To replay, use the same sites TSV and `--offline`.
+When eligible experimental coordinates are unavailable, AlphaFold models of
+exact full-length linked references are ranked by observed site coverage and
+mean pLDDT over mapped sites. The catalog includes an exact query-linked UniProt
+reference where available. If no exact linked reference is verified,
+preparation tries closest same-OG members by full-length protein alignment.
+A portable catalog freezes the selected structure and the site list. To replay,
+use the same sites TSV and `--offline`.
 
 ## OrthoDB snapshot and complete candidate collection
 
@@ -219,9 +232,14 @@ page text, legends and complete mapping tables are PDF text.
 
 Separate pages show selected sites, mean PSS, and CV selection frequency;
 each quantitative scale is fixed across six views and labeled per structure/OG.
-AlphaFold adds a pLDDT page. Reference residue/position and MSA column appear in
-site labels. The paginated audit lists every requested site, including gaps,
-unobserved coordinates, substitutions in the structure and unavailable confidence.
+AlphaFold adds a pLDDT page. The Selected sites page uses colored markers and a
+key below the views when up to eight sites have coordinates. The key lists the
+MSA column, UniProt residue and structure residue. Larger sets use red markers
+and the paginated audit table. PyMOL hides residue labels by default. Use
+`show labels, selected_sites` to reveal them or an `MSA_<column>` selection to
+locate an individual site. The paginated audit lists every requested site,
+including gaps, unobserved coordinates, substitutions in the structure and
+unavailable confidence.
 PDFs show the reference's automatic/manual status and QC outcome.
 
 SIFTS: https://www.ebi.ac.uk/pdbe/docs/sifts/methodology.html

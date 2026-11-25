@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -19,6 +20,7 @@ from phenoradar.site_reference_resources import (
     sha256,
     write_json,
 )
+from phenoradar.site_structure import rank_pdb_site_candidates
 
 
 class SearchCache(ResourceCache):
@@ -103,6 +105,95 @@ def test_short_alignment_query_can_still_use_orthodb_member_sequence(tmp_path: P
         "query_shorter_than_25_residues"
     )
     assert data["pdb_search"]["candidates"] == {"OG1": []}
+
+
+@pytest.mark.parametrize(
+    "case,accepted",
+    [
+        ("mature", True),
+        ("variant", True),
+        ("stable_gene_id", True),
+        ("wrong_taxon", False),
+        ("wrong_gene", False),
+        ("unannotated_chain", False),
+        ("internal_substring", False),
+        ("ambiguous", False),
+        ("diverged", False),
+    ],
+)
+def test_pdb_same_gene_matches_are_conservative(
+    tmp_path: Path, case: str, accepted: bool,
+) -> None:
+    sequence = REFERENCE * 4
+    if case in {"variant", "stable_gene_id"}:
+        member = "W" + sequence[1:]
+    elif case == "diverged":
+        member = "W" * 10 + sequence[10:]
+    elif case == "internal_substring":
+        member = "MM" + sequence + "VV"
+    else:
+        member = "MM" + sequence
+    genes = ["4577_0:gene1"]
+    if case == "ambiguous":
+        genes.append("4577_0:gene2")
+
+    class SameGeneCache(SearchCache):
+        def fetch(self, url: str, *, missing_ok: bool = False) -> Path | None:
+            path = super().fetch(url, missing_ok=missing_ok)
+            assert path is not None
+            if "/fasta?" in url:
+                with path.open("a") as handle:
+                    for gene in genes:
+                        handle.write(f">{gene}\n{member}\n")
+            return path
+
+        def json(self, url: str, *, missing_ok: bool = False) -> Any:
+            if "/ogdetails" in url:
+                gene = parse_qs(urlsplit(url).query)["id"][0]
+                if gene in genes:
+                    return dict(status="ok", data=dict(
+                        gene_id=dict(id=gene),
+                        entrezgene=[dict(id="123", synonyms="GeneModel|abc1")],
+                    ))
+            result = super().json(url, missing_ok=missing_ok)
+            if not url.endswith("/P00002.json"):
+                return result
+            result["sequence"]["value"] = sequence
+            result["organism"]["taxonId"] = 3702 if case == "wrong_taxon" else 4577
+            result["genes"] = [dict(
+                geneName=dict(value="ABC2" if case in {"wrong_gene", "stable_gene_id"} else "ABC1"),
+            )]
+            if case == "stable_gene_id":
+                result["uniProtKBCrossReferences"] = [dict(database="GeneID", id="123")]
+            if case != "unannotated_chain":
+                result["features"] = [dict(type="Chain", location=dict(
+                    start=dict(value=1, modifier="EXACT"),
+                    end=dict(value=len(sequence), modifier="EXACT"),
+                ))]
+            return result
+
+    queries = tmp_path / "queries.fa"
+    queries.write_text(f">OG1\n{REFERENCE}\n")
+    catalog = tmp_path / "catalog.json"
+    prepare_pdb_catalog(orthogroups=["OG1"], release="v12.2", queries=queries,
+                        out=catalog, cache=SameGeneCache(tmp_path / "cache"))
+    data = json.loads(catalog.read_text())
+    assert {c["accession"] for c in data["pdb_search"]["candidates"]["OG1"]} == (
+        {"P00001", "P00002"} if accepted else {"P00001"}
+    )
+    if accepted:
+        record = next(r for r in data["references"] if r["accession"] == "P00002")
+        assert record["sequence"] == sequence
+        match = record["pdb_orthodb_match"]
+        assert match["orthodb_gene_id"] == genes[0]
+        assert match["orthodb_start_1based"] == (3 if case == "mature" else 1)
+        assert match["orthodb_end_1based"] == len(member)
+        assert match["differences_at_uniprot_positions_1based"] == (
+            [] if case == "mature" else [1]
+        )
+        assert match["gene_evidence"][0]["matched_by"] == (
+            "id" if case == "stable_gene_id" else "primary_gene_symbol"
+        )
 
 
 @pytest.mark.parametrize("fails", [False, True])
@@ -204,6 +295,28 @@ class StructureCache(ResourceCache):
             uniprotStart=1, uniprotEnd=len(REFERENCE), chainId="A", latestVersion=6,
             cifUrl="https://alphafold.ebi.ac.uk/files/alphafold.cif",
         )]
+
+
+def test_inconsistent_sifts_candidate_does_not_discard_other_chains(tmp_path: Path) -> None:
+    cache = StructureCache(tmp_path)
+    bad = cache.files["1abc"]
+    bad.write_text(re.sub(r"^(5 CA) \w+", r"\1 TRP", bad.read_text(), flags=re.MULTILINE))
+    candidates = [
+        dict(accession=acc, source="pdb", structure_id=pdb, chain="A", search_score=score)
+        for acc, pdb, score in [("P00001", "1abc", 1.0), ("P00002", "2abc", 0.5)]
+    ]
+    sites = [
+        dict(alignment_pos_1based=18, reference_pos_1based=20,
+             reference_residue=REFERENCE[19], reference_status="mapped"),
+    ]
+    winner, audit = rank_pdb_site_candidates(
+        candidates, {c["accession"]: reference(c["accession"]) for c in candidates},
+        {c["accession"]: sites for c in candidates}, {18}, cache,
+    )
+    assert winner is not None and winner["structure_id"] == "2abc"
+    assert audit[0]["exclusion_reason"] == "inconsistent_sifts_mapping"
+    assert "differs from structure atoms" in audit[0]["exclusion_detail"]
+    assert audit[1]["selected"]
 
 
 @pytest.mark.skipif(MAFFT is None, reason="optional MAFFT executable unavailable")
