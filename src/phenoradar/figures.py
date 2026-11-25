@@ -131,7 +131,7 @@ _FEATURE_FILTER_FIGURE_STAGE_LABELS = {
     "alignment_sites": "Alignment sites",
     "observed_sites": "Coverage-filtered sites",
     "variable_sites": "Variable sites",
-    "retained_sites": "Model input sites",
+    "retained_sites": "Rank-filtered sites",
     "n_features_before": "Input",
     "n_features_after_sparse_feature_filter": "Sparse feature",
     "n_features_after_low_variance": "Low variance",

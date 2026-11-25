@@ -338,7 +338,10 @@ def write_amino_acid_figures(
             )
         )
     _frequency_by_confusion(run_dir, oof, limit, annotations)
-    _site_filter_funnel(run_dir)
+    _site_filter_funnel(
+        run_dir,
+        ranking_enabled=config.preprocess.amino_acid.ranked_site_filter.method != "none",
+    )
     return warnings
 
 

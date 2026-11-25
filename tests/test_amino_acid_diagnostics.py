@@ -90,6 +90,12 @@ def test_site_funnel_includes_ranking_and_zero_retained_folds(tmp_path: Path) ->
         }
     ).write_csv(cv / "amino_acid_site_qc.tsv", separator="\t")
     write_site_filter_funnel(tmp_path)
+    path = tmp_path / "cv/figures/amino_acid_site_filter_funnel.svg"
+    assert "Rank-filtered sites" not in path.read_text()
+    assert "Model input sites" not in path.read_text()
+    write_site_filter_funnel(tmp_path, ranking_enabled=True)
+    assert "Rank-filtered sites" in path.read_text()
+    assert "Model input sites" not in path.read_text()
     table = pl.read_csv(cv / "amino_acid_site_filter_counts_summary.tsv", separator="\t")
     retained = table.filter(pl.col("stage") == "retained_sites")
     assert retained["n_records"].item() == 2

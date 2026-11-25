@@ -199,6 +199,7 @@ def write_site_filter_funnel(
     run_dir: Path,
     *,
     retained_counts: pl.DataFrame | None = None,
+    ranking_enabled: bool = False,
 ) -> None:
     cv = run_dir / "cv/tables"
     raw = (
@@ -261,6 +262,9 @@ def write_site_filter_funnel(
         )
     summary = pl.DataFrame(rows)
     summary.write_csv(cv / "amino_acid_site_filter_counts_summary.tsv", separator="\t")
+    stages = list(columns)
+    if "retained_sites" in columns and not ranking_enabled:
+        stages.remove("retained_sites")
     figures._feature_filter_funnel(
-        summary, run_dir / "cv/figures/amino_acid_site_filter_funnel.svg", stage_order=list(columns)
+        summary, run_dir / "cv/figures/amino_acid_site_filter_funnel.svg", stage_order=stages
     )
