@@ -46,6 +46,7 @@ from phenoradar.config import (
     write_resolved_config,
 )
 from phenoradar.cv import CVError, RunExpressionCache, run_final_refit, run_outer_cv
+from phenoradar.cv_display import fold_group_labels
 from phenoradar.expression_input_cache import (
     ExpressionCacheError,
     ExpressionSource,
@@ -1724,6 +1725,7 @@ def _run_single(
                     run_dir=run_dir,
                     metrics_cv=cv_artifacts.metrics_cv,
                     oof_predictions=cv_artifacts.oof_predictions,
+                    cv_group_labels=fold_group_labels(split_artifacts.fold_validation_groups) or {},
                     feature_importance=cv_artifacts.feature_importance,
                     coefficients=cv_artifacts.coefficients,
                     feature_importance_by_fold=cv_artifacts.feature_importance_by_fold,
@@ -1852,8 +1854,7 @@ def _run_single(
                     raise typer.BadParameter(str(exc)) from exc
                 figure_warnings.extend(candidate_figure_warnings)
         with timing_recorder.measure(scope="figures", stage="tree_figures"):
-            contrast_group_col = resolved.data.contrast_group_col
-            if tree_path is not None and contrast_group_col is not None:
+            if tree_path is not None:
                 try:
                     tree_warnings = write_run_tree_prediction_artifacts(
                         preserve_missing=resolved.preprocess.expression.missing_expression.method
@@ -1867,7 +1868,7 @@ def _run_single(
                         feature_col=resolved.data.feature_col,
                         value_col=resolved.data.value_col,
                         trait_col=resolved.data.trait_col,
-                        group_col=contrast_group_col,
+                        group_col=resolved.split.group_col,
                         oof_predictions=cv_artifacts.oof_predictions,
                         thresholds=cv_artifacts.thresholds,
                         feature_importance=cv_artifacts.feature_importance,
@@ -1889,10 +1890,6 @@ def _run_single(
                 except TreePredictionError as exc:
                     raise typer.BadParameter(str(exc)) from exc
                 figure_warnings.extend(tree_warnings)
-            elif tree_path is not None:
-                figure_warnings.append(
-                    "Skipped tree prediction artifacts because data.contrast_group_col is null."
-                )
         warnings.extend(figure_warnings)
     timing_recorder.record_since(
         figure_generation_started,

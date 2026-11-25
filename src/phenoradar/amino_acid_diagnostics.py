@@ -65,6 +65,7 @@ def write_site_scores(
     folds: pl.DataFrame,
     metric: str,
     annotations: pl.DataFrame | None,
+    *, unit_label: str = "Fold",
 ) -> None:
     stem = f"amino_acid_site_{metric}_top"
     top.write_csv(run_dir / "cv/tables" / f"{stem}_summary.tsv", separator="\t")
@@ -119,7 +120,7 @@ def write_site_scores(
                 linestyle="none",
                 color=figures._COLOR_BLUE,
                 markersize=3,
-                label="Fold mean",
+                label=f"{unit_label} mean",
             ),
             Line2D(
                 [],
@@ -140,6 +141,7 @@ def write_site_stability(
     run_dir: Path,
     top: pl.DataFrame,
     annotations: pl.DataFrame | None,
+    *, unit_label: str = "Fold",
 ) -> None:
     source = run_dir / "cv/tables/amino_acid_site_stability.tsv"
     if not source.exists() or top.is_empty():
@@ -164,7 +166,9 @@ def write_site_stability(
     ax.set_yticks(ys, labels)
     ax.invert_yaxis()
     ax.set_xlim(0, 1.02)
-    ax.set_xlabel("Fraction of all outer folds")
+    ax.set_xlabel(
+        "Fraction of all groups" if unit_label == "Group" else "Fraction of all outer folds"
+    )
     ax.set_ylabel("Orthogroup / MSA position")
     ax.grid(axis="x", linewidth=0.5)
     ax.set_axisbelow(True)

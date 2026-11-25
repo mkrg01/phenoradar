@@ -37,6 +37,7 @@ from sklearn.metrics import (
 from phenoradar.abstention import prediction_label_expr
 from phenoradar.colors import BINARY_TRAIT_COLORS, CONFUSION_GROUP_COLORS, CONFUSION_GROUP_ORDER
 from phenoradar.config.schema import DEFAULT_TOP_FEATURES
+from phenoradar.cv_display import fold_group_labels
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
@@ -169,6 +170,9 @@ def _prediction_population_figures(
         def render(*args: Any, **kwargs: Any) -> None:
             bound = parameters.bind(*args, **kwargs)
             inputs = {name: bound.arguments[name] for name in prediction_names}
+            if ("fold_groups" in parameters.parameters and "oof_predictions" in inputs
+                    and bound.arguments.get("fold_groups") is None):
+                bound.arguments["fold_groups"] = fold_group_labels(inputs["oof_predictions"]) or {}
             paths = {
                 name: value for name, value in bound.arguments.items() if name.endswith("out_path")
             }
@@ -209,6 +213,10 @@ def _prediction_population_figures(
 
 def _figure_size_inches(width_px: int, height_px: int) -> tuple[float, float]:
     return width_px / _FIG_DPI, height_px / _FIG_DPI
+
+
+def _fold_labels(fold_ids: list[str], fold_groups: dict[str, str] | None) -> list[str]:
+    return [(fold_groups or {}).get(value, value) for value in fold_ids]
 
 
 def _fold_axis_width_px(fold_count: int, *, base_px: int = 140, per_fold_px: int = 44) -> int:
@@ -943,7 +951,9 @@ def _group_bootstrap_metrics_figure(
     _save_svg_figure(fig, out_path)
 
 
-def _cv_loss_by_split(loss_by_split_cv: pl.DataFrame, out_path: Path) -> None:
+def _cv_loss_by_split(
+    loss_by_split_cv: pl.DataFrame, out_path: Path, *, fold_groups: dict[str, str] | None = None,
+) -> None:
     required_columns = {"fold_id", "split", "metric", "metric_value"}
     if not required_columns.issubset(loss_by_split_cv.columns):
         raise FigureError("loss_by_split_cv.tsv schema is invalid for cv_loss_by_split.svg")
@@ -1020,8 +1030,8 @@ def _cv_loss_by_split(loss_by_split_cv: pl.DataFrame, out_path: Path) -> None:
     ax.set_xlim(-0.4, len(fold_ids) - 0.6)
     ax.set_ylim(y_min, y_max)
     ax.set_xticks(x_positions)
-    ax.set_xticklabels([str(fold_id) for fold_id in fold_ids], fontsize=_TICK_FONTSIZE)
-    ax.set_xlabel("CV fold", fontsize=_LABEL_FONTSIZE)
+    ax.set_xticklabels(_fold_labels(fold_ids, fold_groups), fontsize=_TICK_FONTSIZE)
+    ax.set_xlabel("Group" if fold_groups else "CV fold", fontsize=_LABEL_FONTSIZE)
     ax.set_ylabel("Log loss", fontsize=_LABEL_FONTSIZE)
     ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
@@ -1304,6 +1314,7 @@ def _feature_importance_by_fold_heatmap(
     out_path: Path,
     top_features: int = DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
+    fold_groups: dict[str, str] | None = None,
 ) -> None:
     required = {"feature", "importance_mean"}
     if not required.issubset(feature_importance.columns):
@@ -1416,10 +1427,11 @@ def _feature_importance_by_fold_heatmap(
         vmax=max_value,
     )
     ax.set_xticks(np.arange(len(fold_ids), dtype=float))
-    ax.set_xticklabels([str(fold_id) for fold_id in fold_ids], fontsize=_TICK_FONTSIZE)
+    ax.set_xticklabels(_fold_labels(fold_ids, fold_groups), fontsize=_TICK_FONTSIZE)
     ax.set_yticks(np.arange(len(features), dtype=float))
     ax.set_yticklabels(feature_labels, fontsize=_MONO_FONTSIZE, fontfamily="monospace")
-    ax.set_xlabel("CV fold", fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE)
+    ax.set_xlabel("Group" if fold_groups else "CV fold",
+                  fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE)
     ax.set_ylabel(feature_axis_title, fontsize=_FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE)
     ax.set_xticks(np.arange(-0.5, len(fold_ids), 1.0), minor=True)
     ax.set_yticks(np.arange(-0.5, len(features), 1.0), minor=True)
@@ -2599,7 +2611,8 @@ def write_group_probability_figure(
 
 @_prediction_population_figures("oof_predictions")
 def _cv_fold_trait_probability(
-    oof_predictions: pl.DataFrame, out_path: Path, *, trait_name: str = "trait"
+    oof_predictions: pl.DataFrame, out_path: Path, *, trait_name: str = "trait",
+    fold_groups: dict[str, str] | None = None,
 ) -> None:
     required = {"fold_id", "label", "prob"}
     if not required.issubset(oof_predictions.columns):
@@ -2710,8 +2723,8 @@ def _cv_fold_trait_probability(
     ax.set_xlim(0.52, len(fold_ids) + 0.48)
     ax.set_ylim(-0.02, 1.02)
     ax.set_xticks(fold_centers)
-    ax.set_xticklabels([str(fold_id) for fold_id in fold_ids], fontsize=_TICK_FONTSIZE)
-    ax.set_xlabel("CV fold", fontsize=_LABEL_FONTSIZE)
+    ax.set_xticklabels(_fold_labels(fold_ids, fold_groups), fontsize=_TICK_FONTSIZE)
+    ax.set_xlabel("Group" if fold_groups else "CV fold", fontsize=_LABEL_FONTSIZE)
     ax.set_ylabel("Predicted probability", fontsize=_LABEL_FONTSIZE)
     ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
@@ -3634,6 +3647,7 @@ def _model_selection_curve(
     selection_rule: str = "best",
     selection_scope: str = "outer_fold",
     panel_scope_label: str = "fold",
+    fold_groups: dict[str, str] | None = None,
 ) -> None:
     if selection_rule not in {"best", "one_se"}:
         raise FigureError(f"Invalid model-selection rule: {selection_rule}")
@@ -3948,7 +3962,9 @@ def _model_selection_curve(
         ax.set_ylim(y_min, y_max)
         ax.grid(color=_GRID_COLOR, linewidth=0.5)
         ax.set_axisbelow(True)
-        title = f"{panel_scope_label}={panel['fold_id']}"
+        label = "group" if fold_groups and selection_scope == "outer_fold" else panel_scope_label
+        identifier = (fold_groups or {}).get(str(panel["fold_id"]), str(panel["fold_id"]))
+        title = f"{label}={identifier}"
         if int(panel["sample_set_id"]) != 0:
             title += f", sample_set={panel['sample_set_id']}"
         ax.set_title(title, fontsize=_LABEL_FONTSIZE, pad=5.0)
@@ -4197,7 +4213,9 @@ def _feature_filter_funnel(
     _save_svg_figure(fig, out_path)
 
 
-def _non_zero_feature_count_by_fold(model_sparsity: pl.DataFrame, out_path: Path) -> None:
+def _non_zero_feature_count_by_fold(
+    model_sparsity: pl.DataFrame, out_path: Path, *, fold_groups: dict[str, str] | None = None,
+) -> None:
     required = {"scope", "fold_id", "n_nonzero_features"}
     if not required.issubset(model_sparsity.columns):
         raise FigureError(
@@ -4331,8 +4349,8 @@ def _non_zero_feature_count_by_fold(model_sparsity: pl.DataFrame, out_path: Path
     ax.set_xlim(0.52, len(fold_ids) + 0.48)
     ax.set_ylim(0.0, y_max * 1.15)
     ax.set_xticks(fold_centers)
-    ax.set_xticklabels([str(fold_id) for fold_id in fold_ids], fontsize=_TICK_FONTSIZE)
-    ax.set_xlabel("CV fold", fontsize=_LABEL_FONTSIZE)
+    ax.set_xticklabels(_fold_labels(fold_ids, fold_groups), fontsize=_TICK_FONTSIZE)
+    ax.set_xlabel("Group" if fold_groups else "CV fold", fontsize=_LABEL_FONTSIZE)
     ax.set_ylabel("Number of non-zero features per model", fontsize=_LABEL_FONTSIZE)
     ax.yaxis.set_major_locator(MaxNLocator(integer=True))
     ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
@@ -4345,6 +4363,7 @@ def _non_zero_feature_count_by_fold(model_sparsity: pl.DataFrame, out_path: Path
 def _feature_set_jaccard_heatmap(
     feature_stability_by_fold_pair: pl.DataFrame,
     out_path: Path,
+    *, fold_groups: dict[str, str] | None = None,
 ) -> None:
     required = {"fold_id_a", "fold_id_b", "jaccard"}
     if not required.issubset(feature_stability_by_fold_pair.columns):
@@ -4409,11 +4428,11 @@ def _feature_set_jaccard_heatmap(
     )
     positions = np.arange(len(fold_ids), dtype=float)
     ax.set_xticks(positions)
-    ax.set_xticklabels(fold_ids, rotation=90, fontsize=_TICK_FONTSIZE)
+    ax.set_xticklabels(_fold_labels(fold_ids, fold_groups), rotation=90, fontsize=_TICK_FONTSIZE)
     ax.set_yticks(positions)
-    ax.set_yticklabels(fold_ids, fontsize=_TICK_FONTSIZE)
-    ax.set_xlabel("Outer CV fold", fontsize=_LABEL_FONTSIZE)
-    ax.set_ylabel("Outer CV fold", fontsize=_LABEL_FONTSIZE)
+    ax.set_yticklabels(_fold_labels(fold_ids, fold_groups), fontsize=_TICK_FONTSIZE)
+    ax.set_xlabel("Group" if fold_groups else "Outer CV fold", fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel("Group" if fold_groups else "Outer CV fold", fontsize=_LABEL_FONTSIZE)
     ax.set_xticks(np.arange(-0.5, len(fold_ids), 1.0), minor=True)
     ax.set_yticks(np.arange(-0.5, len(fold_ids), 1.0), minor=True)
     ax.grid(which="minor", color="#ffffff", linewidth=0.5)
@@ -4479,6 +4498,7 @@ def write_run_figures(
     timing_recorder: TimingRecorder | None = None,
     workers: FigureWorkers | None = None,
     group_bootstrap_metrics: pl.DataFrame | None = None,
+    cv_group_labels: dict[str, str] | None = None,
 ) -> list[str]:
     """Write run-level SVG figures under <run_dir>/<stage>/figures."""
     stage_dirs = _stage_figure_dirs(run_dir)
@@ -4503,6 +4523,8 @@ def write_run_figures(
         )
     )
     jobs: list[_FigureJob] = []
+    fold_groups = (fold_group_labels(oof_predictions) if cv_group_labels is None
+                   else cv_group_labels) or {}
 
     def add_job(
         name: str,
@@ -4512,7 +4534,10 @@ def write_run_figures(
         *,
         catch_figure_error: bool = False,
     ) -> None:
-        jobs.append((name, func, args, {} if kwargs is None else kwargs, catch_figure_error))
+        options = {} if kwargs is None else dict(kwargs)
+        if "fold_groups" in signature(func).parameters and not name.startswith("final_refit"):
+            options["fold_groups"] = fold_groups
+        jobs.append((name, func, args, options, catch_figure_error))
 
     if "decision_status" in oof_predictions.columns:
         add_job(

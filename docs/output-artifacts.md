@@ -329,11 +329,15 @@ With `data.tree_path`, tree tables include `tree_prediction_cv_annotation.tsv`,
 stage-specific external/predict annotations. They support ggtree reuse; predicted
 species absent from the tree stay in annotation tables.
 
-Toytree figures include `tree_prediction_cv.svg`, `tree_group.svg`,
-`tree_feature_heatmap_log2_tpm.svg`, `tree_feature_heatmap_zscore.svg`, and
-stage-specific prediction trees. Group and CV/external prediction trees are shared
-by expression, AA and combined modes. Expression heatmaps use log2 TPM and z-scores;
+Toytree figures include `tree_feature_heatmap_log2_tpm.svg`,
+`tree_feature_heatmap_zscore.svg`, and stage-specific external/predict trees.
 AA/combined runs instead write `tree_feature_heatmap_amino_acid.svg`.
+Feature heatmaps include colored trait and probability columns, split-group IDs,
+and dashed boundaries between adjacent groups. Fold IDs and distinct fold boundaries
+are also shown when groups and folds do not correspond one-to-one. Group labels
+replace fold labels in CV figures only when that correspondence is verified.
+`tree_group.svg` and `tree_prediction_cv.svg` are retired; regenerating figures
+removes their earlier full and accepted-only variants. Annotation TSVs remain available.
 Heatmap values and annotations are retained in
 the long-form table. Top features follow importance ranking; z-scores are within
 feature across included species. Optional

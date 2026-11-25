@@ -68,6 +68,7 @@ def build_residue_annotation(
                     **site, "feature": json.dumps([og_name, position], separators=(",", ":")),
                     "orthogroup_annotation": lookup.get(og_name),
                     "species": sample, "true_label": meta["label"], "prob": meta["prob"],
+                    **{name: meta[name] for name in ["group_id", "fold_id"] if name in meta},
                     **({"decision_status": meta["decision_status"]}
                        if "decision_status" in meta else {}),
                     "residue": residue, "residue_status": call_status,

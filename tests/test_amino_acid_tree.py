@@ -163,9 +163,11 @@ def test_sequence_modes_write_group_and_cv_prediction_trees(
     path.write_text(yaml.safe_dump(raw))
     out = run_amino_acid(load_and_resolve_config([path]), tmp_path / 'run')
 
-    for name in ['tree_group', 'tree_prediction_cv', 'tree_feature_heatmap_amino_acid']:
-        assert (out / 'cv/figures' / f'{name}.svg').exists()
-    assert (out / 'cv/figures/accepted_only/tree_prediction_cv.svg').exists()
+    for name in ['tree_group', 'tree_prediction_cv']:
+        assert not (out / 'cv/figures' / f'{name}.svg').exists()
+        assert not (out / 'cv/figures/accepted_only' / f'{name}.svg').exists()
+    assert (out / 'cv/figures/tree_feature_heatmap_amino_acid.svg').exists()
+    assert (out / 'cv/figures/accepted_only/tree_feature_heatmap_amino_acid.svg').exists()
     assert not (out / 'cv/tables/tree_feature_heatmap_annotation.tsv').exists()
     for name in ['tree_feature_heatmap_log2_tpm', 'tree_feature_heatmap_zscore']:
         assert not (out / 'cv/figures' / f'{name}.svg').exists()
@@ -179,6 +181,10 @@ def test_sequence_modes_write_group_and_cv_prediction_trees(
     assert tree_table['species'].to_list() == oof['species'].to_list()
     assert tree_table['fold_id'].to_list() == oof['fold_id'].to_list()
     assert tree_table['group_id'].to_list() == tree_table['fold_id'].to_list()
+    heatmap = pl.read_csv(out / 'cv/tables/tree_feature_heatmap_amino_acid_annotation.tsv',
+        separator='\t', schema_overrides={'fold_id': pl.String, 'group_id': pl.String})
+    identities = heatmap.select('species', 'fold_id', 'group_id').unique().sort('species')
+    assert identities.equals(tree_table.select('species', 'fold_id', 'group_id'))
     assert tree_table['true_label'].to_list() == oof['label'].to_list()
     assert tree_table['pred_label'].to_list() == oof['pred_label_selective'].to_list()
     np.testing.assert_allclose(tree_table['prob'], oof['prob'], rtol=0, atol=5e-9)
@@ -213,8 +219,9 @@ def test_sequence_context_trees_fall_back_to_split_group_without_contrast_pairs(
     raw['data']['tree_path'] = str(tree)
     path.write_text(yaml.safe_dump(raw))
     out = run_amino_acid(load_and_resolve_config([path]), tmp_path / 'run')
-    assert (out / 'cv/figures/tree_group.svg').exists()
-    assert (out / 'cv/figures/tree_prediction_cv.svg').exists()
+    assert not (out / 'cv/figures/tree_group.svg').exists()
+    assert not (out / 'cv/figures/tree_prediction_cv.svg').exists()
+    assert (out / 'cv/figures/tree_feature_heatmap_amino_acid.svg').exists()
     annotation = pl.read_csv(out / 'cv/tables/tree_prediction_cv_annotation.tsv', separator='\t')
     oof = pl.read_csv(out / 'cv/tables/prediction_cv.tsv', separator='\t')
     expected = oof.select('species').join(metadata.select('species', 'family'), on='species')

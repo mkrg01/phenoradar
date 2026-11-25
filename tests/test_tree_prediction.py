@@ -529,6 +529,11 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
     tree_path.write_text("(sp1,sp2,sp3);\n", encoding="utf-8")
     figures_dir = tmp_path / "run" / "cv" / "figures"
     figures_dir.mkdir(parents=True)
+    for name in ["tree_group.svg", "tree_prediction_cv.svg",
+                 "tree_prediction_cv_accepted_only.svg"]:
+        (figures_dir / name).write_text("obsolete")
+    (figures_dir / "accepted_only").mkdir()
+    (figures_dir / "accepted_only/tree_prediction_cv.svg").write_text("obsolete")
 
     warnings = write_run_tree_prediction_artifacts(
         run_dir=tmp_path / "run",
@@ -560,31 +565,10 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
     assert (cv_tables_dir / "tree_feature_heatmap_annotation.tsv").exists()
     cv_figures_dir = figures_dir
     assert not (cv_figures_dir / "tree_contrast_pairs.svg").exists()
-    group_svg = cv_figures_dir / "tree_group.svg"
-    if group_svg.exists():
-        group_svg_text = group_svg.read_text(encoding="utf-8")
-        assert "Tree Contrast Pairs" not in group_svg_text
-        assert "The Contrast Pairs" not in group_svg_text
-        assert "rotate(-90.0)" in group_svg_text
-        assert 'rotate(-90.0)"><text x="0"' in group_svg_text
-        assert "rotate(45.0)" not in group_svg_text
-    else:
-        assert any("Toytree is unavailable" in warning for warning in warnings)
-    cv_svg = cv_figures_dir / "tree_prediction_cv.svg"
-    if cv_svg.exists():
-        svg_text = cv_svg.read_text(encoding="utf-8")
-        assert "CV Tree Prediction" not in svg_text
-        assert "rotate(-90.0)" in svg_text
-        assert 'rotate(-90.0)"><text x="0"' in svg_text
-        assert "rotate(45.0)" not in svg_text
-        assert ">trait<" in svg_text
-        assert ">group<" in svg_text
-        assert ">contrast<" not in svg_text
-        assert "toyplot-mark-Point" not in svg_text
-        assert ">0.200<" in svg_text
-        assert ">sp1<" in svg_text
-    else:
-        assert any("Toytree is unavailable" in warning for warning in warnings)
+    assert not (cv_figures_dir / "tree_group.svg").exists()
+    assert not (cv_figures_dir / "tree_prediction_cv.svg").exists()
+    assert not (cv_figures_dir / "tree_prediction_cv_accepted_only.svg").exists()
+    assert not (cv_figures_dir / "accepted_only/tree_prediction_cv.svg").exists()
     log2_heatmap_svg = cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg"
     if log2_heatmap_svg.exists():
         svg_text = log2_heatmap_svg.read_text(encoding="utf-8")
@@ -688,8 +672,9 @@ def test_write_run_tree_prediction_artifacts_parallel_workers_write_outputs(
     assert (cv_tables_dir / "tree_contrast_pairs_annotation.tsv").exists()
     assert (cv_tables_dir / "tree_feature_heatmap_annotation.tsv").exists()
     assert (cv_tables_dir / "tree_prediction_cv_annotation.tsv").exists()
-    if (cv_figures_dir / "tree_prediction_cv.svg").exists():
-        assert (cv_figures_dir / "tree_group.svg").exists()
+    assert not (cv_figures_dir / "tree_group.svg").exists()
+    assert not (cv_figures_dir / "tree_prediction_cv.svg").exists()
+    if (cv_figures_dir / "tree_feature_heatmap_zscore.svg").exists():
         assert (cv_figures_dir / "tree_feature_heatmap_zscore.svg").exists()
         assert (cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg").exists()
         external = tmp_path / "run" / "external_test" / "figures"

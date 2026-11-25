@@ -20,12 +20,14 @@ import polars as pl
 
 from phenoradar.abstention import prediction_label_expr
 from phenoradar.colors import (
+    BINARY_TRAIT_COLORS,
     CONFUSION_GROUP_COLORS,
     CONFUSION_GROUP_LABELS,
     CONFUSION_GROUP_ORDER,
 )
 from phenoradar.config.schema import DEFAULT_TOP_FEATURES
 from phenoradar.contrast_metadata import canonical_metadata
+from phenoradar.cv_display import tree_context_tracks
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
@@ -46,6 +48,9 @@ class TreePredictionError(ValueError):
 
 _MISSING_COLOR = "#eeeeee"
 _TEXT_COLOR = "#000000"
+_PROBABILITY_CMAP = matplotlib.colors.LinearSegmentedColormap.from_list(
+    "trait_probability", [BINARY_TRAIT_COLORS[0], "#ffffff", BINARY_TRAIT_COLORS[1]]
+)
 _SVG_NS = "http://www.w3.org/2000/svg"
 _SVG_BACKGROUND_ID = "phenoradar-svg-background"
 _SVG_BACKGROUND_FILL = "#ffffff"
@@ -73,6 +78,7 @@ def _tree_population_figures(func: Callable[..., list[str]]) -> Callable[..., li
     @wraps(func)
     def render(*, population_suffix: str | None = None, **kwargs: Any) -> list[str]:
         warnings = []
+        kwargs.setdefault("tracks", tree_context_tracks(kwargs["annotation"]))
         populations = (
             _tree_population_inputs(kwargs)
             if population_suffix is None
@@ -180,6 +186,7 @@ def write_run_tree_prediction_artifacts(
 ) -> list[str]:
     """Write run-level tree annotation TSVs and optional Toytree SVG figures."""
     if tree_path is None:
+        remove_retired_cv_tree_figures(run_dir)
         return []
     _require_tree(tree_path)
     metadata = _load_metadata(
@@ -217,19 +224,6 @@ def write_run_tree_prediction_artifacts(
             float_precision=8,
             null_value="NA",
         )
-        add_svg_job(
-            "tree_group",
-            _write_tree_prediction_svg,
-            {
-                "tree_path": tree_path,
-                "annotation": contrast_annotation,
-                "out_path": cv_figures_dir / "tree_group.svg",
-                "title": "",
-                "tracks": ["true_label", "group_id"],
-            },
-        )
-    else:
-        add_warning("Skipped tree_group.svg: metadata contains no non-empty split group.")
 
     if include_feature_heatmaps:
         feature_annotation = build_tree_feature_heatmap_annotation(
@@ -301,26 +295,6 @@ def write_run_tree_prediction_artifacts(
             float_precision=8,
             null_value="NA",
         )
-        add_svg_job(
-            "tree_prediction_cv",
-            _write_tree_prediction_svg,
-            {
-                "tree_path": tree_path,
-                "annotation": cv_annotation,
-                "out_path": cv_figures_dir / "tree_prediction_cv.svg",
-                "title": "",
-                "tracks": [
-                    "true_label",
-                    "prob",
-                    "pred_label",
-                    "uncertainty_std",
-                    "group_id",
-                    "fold_id",
-                ],
-            },
-        )
-    else:
-        add_warning("Skipped tree_prediction_cv.svg: no CV predictions with non-empty split group.")
 
     if pred_external_test is not None and pred_external_test.height > 0:
         external_test_figures_dir = _stage_figures_dir(run_dir, "external_test")
@@ -355,6 +329,7 @@ def write_run_tree_prediction_artifacts(
         timing_recorder=timing_recorder,
         workers=workers,
     )
+    remove_retired_cv_tree_figures(run_dir)
     warnings: list[str] = []
     for step_type, index in ordered_steps:
         if step_type == "warning":
@@ -362,6 +337,17 @@ def write_run_tree_prediction_artifacts(
         else:
             warnings.extend(svg_warnings[index])
     return warnings
+
+
+def remove_retired_cv_tree_figures(run_dir: Path) -> None:
+    """Retire redundant generated trees, including earlier selective variants."""
+    directory = run_dir / "cv/figures"
+    for stem in ["tree_group", "tree_prediction_cv"]:
+        for extension in ["svg", "pdf"]:
+            for path in [directory / f"{stem}.{extension}",
+                         directory / f"{stem}_accepted_only.{extension}",
+                         directory / "accepted_only" / f"{stem}.{extension}"]:
+                path.unlink(missing_ok=True)
 
 
 def write_predict_tree_prediction_artifacts(
@@ -495,6 +481,8 @@ def build_tree_feature_heatmap_annotation(
                     if "decision_status" in oof_predictions.columns
                     else []
                 ),
+                *([pl.col("fold_id").cast(pl.String).first()]
+                  if "fold_id" in oof_predictions.columns else []),
             )
         )
         species_meta = species_meta.join(prediction_probs, on="species", how="left")
@@ -592,6 +580,7 @@ def build_tree_feature_heatmap_annotation(
                 "z_score_log2_tpm",
                 *(["is_missing"] if preserve_missing else []),
                 *(["decision_status"] if "decision_status" in annotated.columns else []),
+                *(["fold_id"] if "fold_id" in annotated.columns else []),
             ]
         )
         .sort(["feature_rank", "group_id", "species"])
@@ -1148,6 +1137,7 @@ def _write_tree_feature_heatmap_svg(
     title: str,
     cmap_name: str,
     annotate_features: bool = False,
+    tracks: list[str] | None = None,
 ) -> list[str]:
     if annotation.height == 0:
         return [f"Skipped {out_path.name}: annotation table is empty."]
@@ -1200,6 +1190,7 @@ def _write_tree_feature_heatmap_svg(
         title=title,
         cmap_name=cmap_name,
         annotate_features=annotate_features,
+        tracks=tree_context_tracks(annotation) if tracks is None else tracks,
         toytree_module=toytree,
     )
     return warnings
@@ -1350,6 +1341,7 @@ def _draw_toytree_feature_heatmap(
     cmap_name: str,
     annotate_features: bool,
     toytree_module: Any,
+    tracks: list[str],
 ) -> None:
     tip_labels = [str(v) for v in tree.get_tip_labels()]
     feature_rows = (
@@ -1381,9 +1373,19 @@ def _draw_toytree_feature_heatmap(
             annotation_limit=80,
         )) for row in feature_records]
     feature_step = 26.0
-    trait_x = 20.0
-    prob_x = 58.0
-    feature_start_x = 96.0
+    context = annotation.unique("species")
+    context_rows = {str(row["species"]): row for row in context.iter_rows(named=True)}
+    context_columns = ["true_label", "prob", *tracks]
+    context_xs = []
+    context_widths = []
+    cursor = 0.0
+    for track in context_columns:
+        values = [_format_cell_value(track, context_rows.get(s, {}).get(track)) for s in tip_labels]
+        cell_width = _text_column_width_px(values, min_width=34, padding=12)
+        context_widths.append(cell_width)
+        context_xs.append(cursor + cell_width / 2)
+        cursor += cell_width
+    feature_start_x = cursor + 18.0
     feature_xs = [
         feature_start_x + feature_index * feature_step
         for feature_index in range(len(feature_labels))
@@ -1395,7 +1397,7 @@ def _draw_toytree_feature_heatmap(
     canvas, axes, headers, width = _tree_table_canvas(
         tree, table_width=int(species_x) + species_width,
         header_height=max(64, feature_label_depth_px + 16), sidebar_width=285,
-        minimum_height=420 if value_col == "residue" else 0,
+        minimum_height=680 if value_col == "residue" else 540,
     )
 
     from phenoradar.residue_colors import residue_color
@@ -1428,45 +1430,33 @@ def _draw_toytree_feature_heatmap(
     residues = value_col == "residue"
     finite_values = [] if residues else _finite_values(annotation, value_col)
     vmin, vmax = (0.0, 1.0) if residues else _heatmap_domain(value_col, finite_values)
-    trait_values = [
-        _format_cell_value("true_label", trait_lookup.get(species)) for species in tip_labels
-    ]
-    axes.text(
-        [trait_x] * len(tip_labels),
-        list(range(len(tip_labels))),
-        trait_values,
-        color=_TEXT_COLOR,
-        title=[
-            f"{species} trait={_format_value(trait_lookup.get(species))}" for species in tip_labels
-        ],
-        style={"font-size": "9px", "text-anchor": "middle"},
-    )
-    headers.text(
-        trait_x,
-        0,
-        "trait",
-        angle=90,
-        color=_TEXT_COLOR,
-        style={"font-size": "9px", "text-anchor": "start"},
-    )
-    prob_values = [_format_heatmap_prob_value(prob_lookup.get(species)) for species in tip_labels]
-    axes.text(
-        [prob_x] * len(tip_labels),
-        list(range(len(tip_labels))),
-        prob_values,
-        color=_TEXT_COLOR,
-        title=[
-            f"{species} prob={_format_value(prob_lookup.get(species))}" for species in tip_labels
-        ],
-        style={"font-size": "9px", "text-anchor": "middle"},
-    )
-    headers.text(
-        prob_x,
-        0,
-        "prob",
-        angle=90,
-        color=_TEXT_COLOR,
-        style={"font-size": "9px", "text-anchor": "start"},
+    for x, cell_width, track in zip(context_xs, context_widths, context_columns, strict=True):
+        raw_values = [context_rows.get(s, {}).get(track) for s in tip_labels]
+        cell_colors = ([_trait_color(v) for v in raw_values] if track == "true_label" else
+                  [_continuous_color(v, vmin=0, vmax=1, cmap_name=_PROBABILITY_CMAP)
+                   for v in raw_values] if track == "prob" else [])
+        cell_titles = [f"{s} {_track_label(track)}={_format_value(v)}"
+                       for s, v in zip(tip_labels, raw_values, strict=True)]
+        if cell_colors:
+            axes.rectangle(
+                [x - cell_width / 2 + 2] * len(tip_labels),
+                [x + cell_width / 2 - 2] * len(tip_labels),
+                [i - .44 for i in range(len(tip_labels))],
+                [i + .44 for i in range(len(tip_labels))],
+                color=cell_colors, title=cell_titles, style={"stroke": "none"},
+            )
+        texts = [(_format_heatmap_prob_value(v) if track == "prob" else
+                  _format_cell_value(track, v)) for v in raw_values]
+        axes.text(
+            [x] * len(tip_labels), list(range(len(tip_labels))),
+            texts,
+            color=[_cell_text_color(c) for c in cell_colors] if cell_colors else _TEXT_COLOR,
+            title=cell_titles, style={"font-size": "9px", "text-anchor": "middle"},
+        )
+        headers.text(x, 0, _track_label(track), angle=90, color=_TEXT_COLOR,
+                     style={"font-size": "9px", "text-anchor": "start"})
+    boundaries = _draw_context_boundaries(
+        axes, tip_labels, context_rows, tracks, end_x=species_x + species_width - 12,
     )
     for x, feature, feature_label, feature_title in zip(
         feature_xs,
@@ -1528,14 +1518,17 @@ def _draw_toytree_feature_heatmap(
     )
     if residues:
         _draw_residue_legend(
-            canvas=canvas, width=width,
+            canvas=canvas, width=width, y_offset=170,
         )
     else:
         _draw_heatmap_legend(
             canvas=canvas, width=width, value_col=value_col,
             vmin=vmin, vmax=vmax, cmap_name=cmap_name,
+            y_offset=170,
         )
-    _draw_confusion_group_legend(canvas=canvas, width=width, y_offset=140 if residues else 0)
+    _draw_context_legend(canvas=canvas, width=width)
+    _draw_confusion_group_legend(canvas=canvas, width=width, y_offset=310 if residues else 170)
+    _draw_boundary_legend(canvas, width, boundaries, y=610 if residues else 470)
     _save_toytree_svg(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
 
 
@@ -1596,6 +1589,72 @@ def _xml_local_name(tag: str) -> str:
     return tag
 
 
+def _trait_color(value: object) -> str:
+    try:
+        numeric = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return _MISSING_COLOR
+    return BINARY_TRAIT_COLORS[int(numeric)] if numeric in {0, 1} else _MISSING_COLOR
+
+
+def _cell_text_color(color: str) -> str:
+    channels = matplotlib.colors.to_rgb(color)
+    linear = [v / 12.92 if v <= .04045 else ((v + .055) / 1.055) ** 2.4 for v in channels]
+    luminance = sum(v * weight for v, weight in zip(linear, [.2126, .7152, .0722], strict=True))
+    return "#000000" if luminance > .179 else "#ffffff"
+
+
+def _draw_context_legend(*, canvas: Any, width: int) -> None:
+    legend = canvas.cartesian(bounds=(width - 270, width - 35, 25, 85),
+                              show=False, xmin=0, xmax=1, ymin=0, ymax=1)
+    for value, x in [(0, .02), (1, .50)]:
+        legend.rectangle(x, x + .07, .35, .65, color=BINARY_TRAIT_COLORS[value],
+                         style={"stroke": "none"})
+        legend.text(x + .10, .5, f"Trait {value}", color=_TEXT_COLOR,
+                    style={"font-size": "9px", "text-anchor": "start"})
+    locator = importlib.import_module("toyplot.locator")
+    canvas.color_scale(
+        _toyplot_linear_colormap(cmap_name=_PROBABILITY_CMAP, vmin=0, vmax=1),
+        x1=width - 270, x2=width - 80, y1=125, y2=125, width=12,
+        label="Predicted probability", min=0, max=1,
+        ticklocator=locator.Explicit([0, .5, 1], ["0", "0.5", "1"]),
+    )
+
+
+_BOUNDARY_STYLES = {
+    "group_id": {"stroke": "#b0b0b0", "stroke-width": "0.6px", "stroke-dasharray": "2,2"},
+    "fold_id": {"stroke": "#555555", "stroke-width": "0.8px", "stroke-dasharray": "5,3"},
+}
+
+
+def _draw_context_boundaries(
+    axes: Any, species: list[str], rows: dict[str, dict[str, Any]], tracks: list[str],
+    *, end_x: float,
+) -> list[str]:
+    used: set[str] = set()
+    for i in range(1, len(species)):
+        changed = [track for track in tracks
+                   if _has_text(rows.get(species[i - 1], {}).get(track))
+                   and _has_text(rows.get(species[i], {}).get(track))
+                   and rows[species[i - 1]].get(track) != rows[species[i]].get(track)]
+        if changed:
+            track = "fold_id" if "fold_id" in changed else changed[0]
+            axes.plot([0, end_x], [i - .5, i - .5], style=_BOUNDARY_STYLES[track])
+            used.add(track)
+    return [track for track in tracks if track in used]
+
+
+def _draw_boundary_legend(canvas: Any, width: int, tracks: list[str], *, y: int) -> None:
+    if not tracks:
+        return
+    legend = canvas.cartesian(bounds=(width - 270, width - 35, y, y + 44),
+                              show=False, xmin=0, xmax=1, ymin=0, ymax=2)
+    for i, track in enumerate(tracks):
+        legend.plot([.02, .18], [1.5 - i, 1.5 - i], style=_BOUNDARY_STYLES[track])
+        legend.text(.23, 1.5 - i, f"{_track_label(track).capitalize()} boundary",
+                    color=_TEXT_COLOR, style={"font-size": "9px", "text-anchor": "start"})
+
+
 def _draw_heatmap_legend(
     *,
     canvas: Any,
@@ -1604,6 +1663,7 @@ def _draw_heatmap_legend(
     vmin: float,
     vmax: float,
     cmap_name: str,
+    y_offset: int = 0,
 ) -> None:
     toyplot_locator = importlib.import_module("toyplot.locator")
     tick_locations = [vmin] if vmin == vmax else [vmin, vmax]
@@ -1611,9 +1671,9 @@ def _draw_heatmap_legend(
     canvas.color_scale(
         _toyplot_linear_colormap(cmap_name=cmap_name, vmin=vmin, vmax=vmax),
         x1=width - 270,
-        y1=82,
+        y1=82 + y_offset,
         x2=width - 105,
-        y2=82,
+        y2=82 + y_offset,
         width=12,
         label=_heatmap_legend_label(value_col),
         min=vmin,
@@ -1621,7 +1681,7 @@ def _draw_heatmap_legend(
         ticklocator=toyplot_locator.Explicit(tick_locations, tick_labels),
     )
     missing_axes = canvas.cartesian(
-        bounds=(width - 92, width - 35, 50, 112),
+        bounds=(width - 92, width - 35, 50 + y_offset, 112 + y_offset),
         show=False,
         xmin=0,
         xmax=1,
@@ -1647,10 +1707,10 @@ def _draw_heatmap_legend(
     )
 
 
-def _draw_residue_legend(*, canvas: Any, width: int) -> None:
+def _draw_residue_legend(*, canvas: Any, width: int, y_offset: int = 0) -> None:
     from phenoradar.residue_colors import ZAPPO_GROUPS
 
-    legend = canvas.cartesian(bounds=(width - 270, width - 20, 35, 270),
+    legend = canvas.cartesian(bounds=(width - 270, width - 20, 35 + y_offset, 270 + y_offset),
                               show=False, xmin=0, xmax=1, ymin=0, ymax=11)
     legend.text(.02, 10.6, "Residues (Zappo)", color=_TEXT_COLOR,
                 style={"font-size": "10px", "font-weight": "bold", "text-anchor": "start"})
@@ -1725,9 +1785,11 @@ def _heatmap_legend_label(value_col: str) -> str:
     }.get(value_col, value_col)
 
 
-def _toyplot_linear_colormap(*, cmap_name: str, vmin: float, vmax: float) -> Any:
+def _toyplot_linear_colormap(
+    *, cmap_name: str | matplotlib.colors.Colormap, vmin: float, vmax: float,
+) -> Any:
     toyplot_color = importlib.import_module("toyplot.color")
-    cmap = matplotlib.colormaps[cmap_name]
+    cmap = matplotlib.colormaps[cmap_name] if isinstance(cmap_name, str) else cmap_name
     colors = [matplotlib.colors.to_hex(cmap(index / 255.0)) for index in range(256)]
     palette = toyplot_color.Palette(colors)
     return toyplot_color.LinearMap(
@@ -1737,15 +1799,18 @@ def _toyplot_linear_colormap(*, cmap_name: str, vmin: float, vmax: float) -> Any
     )
 
 
-def _continuous_color(value: object, *, vmin: float, vmax: float, cmap_name: str) -> str:
+def _continuous_color(
+    value: object, *, vmin: float, vmax: float,
+    cmap_name: str | matplotlib.colors.Colormap,
+) -> str:
     try:
         numeric = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return _MISSING_COLOR
-    if numeric != numeric:
+    if not math.isfinite(numeric):
         return _MISSING_COLOR
     ratio = 0.0 if vmax <= vmin else min(max((numeric - vmin) / (vmax - vmin), 0.0), 1.0)
-    cmap = matplotlib.colormaps[cmap_name]
+    cmap = matplotlib.colormaps[cmap_name] if isinstance(cmap_name, str) else cmap_name
     return matplotlib.colors.to_hex(cmap(ratio))
 
 

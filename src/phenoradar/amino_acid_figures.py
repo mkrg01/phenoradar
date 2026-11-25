@@ -22,6 +22,7 @@ from phenoradar.amino_acid_diagnostics import (
     write_site_filter_funnel as _site_filter_funnel,
 )
 from phenoradar.config import AppConfig
+from phenoradar.cv_display import fold_group_labels, with_cv_groups
 from phenoradar.group_summary_outputs import write_group_summary_artifacts
 from phenoradar.metrics import (
     FIXED_PROBABILITY_THRESHOLD_NAME,
@@ -196,6 +197,10 @@ def write_amino_acid_figures(
     )
     oof = _read(cv, "prediction_cv")
     assert oof is not None
+    oof = with_cv_groups(
+        oof, metadata_path=Path(config.data.metadata_path), species_col=config.data.species_col,
+        group_col=config.split.group_col,
+    )
     coefficient_source = (
         _scan(cv, "coefficients_by_fold")
         if means is None
@@ -297,8 +302,10 @@ def write_amino_acid_figures(
                 )
             )
     for metric, top in top_sites.items():
-        write_site_scores(run_dir, top, site_folds[metric], metric, annotations)
-    write_site_stability(run_dir, top_sites["pss"], annotations)
+        write_site_scores(run_dir, top, site_folds[metric], metric, annotations,
+                          unit_label="Group" if fold_group_labels(oof) else "Fold")
+    write_site_stability(run_dir, top_sites["pss"], annotations,
+                         unit_label="Group" if fold_group_labels(oof) else "Fold")
     warnings.extend(
         write_run_tree_prediction_artifacts(
             run_dir=run_dir,
@@ -309,7 +316,7 @@ def write_amino_acid_figures(
             feature_col=config.data.feature_col,
             value_col=config.data.value_col,
             trait_col=config.data.trait_col,
-            group_col=config.data.contrast_group_col or config.split.group_col,
+            group_col=config.split.group_col,
             oof_predictions=oof,
             thresholds=pl.DataFrame(
                 {
