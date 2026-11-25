@@ -17,6 +17,7 @@ from phenoradar.amino_acid import AlignmentStore
 from phenoradar.amino_acid_inner import Score, _score, _task
 from phenoradar.amino_acid_parallel import _worker_threads, initialize, run_fold, snapshot
 from phenoradar.amino_acid_resources import MAX_MATRIX_BUFFER, SparseUsage, worker_bytes
+from phenoradar.amino_acid_worker_metadata import compact_alignment_metadata
 from phenoradar.combined import ExpressionInput
 from phenoradar.config import AppConfig
 from phenoradar.cv import (
@@ -254,7 +255,7 @@ def grid_scopes(config: AppConfig, store: AlignmentStore, expression: Expression
                      f"{refits} short-lived refit workers; "
                      f"matrix buffer {buffer / 1024**3:.2f} GiB/scoring worker; "
                      f"{preprocessing_jobs} OG preprocessing threads/scoring worker.")
-        payload = snapshot(store, expression)
+        payload = compact_alignment_metadata(snapshot(store, expression))
         with _worker_threads(1), ProcessPoolExecutor(
             max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
             initializer=initialize, initargs=(payload, 1, buffer),

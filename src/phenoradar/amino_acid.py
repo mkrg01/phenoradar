@@ -71,8 +71,8 @@ class AlignmentOG:
     width: int
     cache: str
     mask_cache: str
-    sequence_ids: list[str]
-    sequence_hashes: list[str]
+    sequence_ids: Sequence[str]
+    sequence_hashes: Sequence[str]
     species_rows: dict[str, list[int]]
     mask_rows: dict[str, int]
     tpm: np.ndarray | None = None

@@ -103,7 +103,7 @@ def test_queue_refits_before_later_scores_finish_and_keeps_output_order(
     manifest = build_split_artifacts(config).split_manifest
     event = Event()
     pools = []
-    payload = {"input_snapshot": object()}
+    payload = {"store": {"ogs": {}}, "expression": None}
 
     class Executor(ThreadPoolExecutor):
         def __init__(self, max_workers, **kwargs):
