@@ -151,6 +151,37 @@ def _odb_data(value: Any, label: str) -> Any:
     return value["data"]
 
 
+def orthodb_api(release: str, cache: ResourceCache) -> tuple[str, str]:
+    if not re.fullmatch(r"v?\d+\.\d+", release):
+        raise SiteAnnotationError("An exact OrthoDB release is required, e.g. v12.2.")
+    release = "v" + release.removeprefix("v")
+    base = "https://data.orthodb.org/" + release.split(".")[0]
+    actual = cache.json(base + "/orthodb_release_id")
+    if actual != release:
+        raise SiteAnnotationError(f"OrthoDB release mismatch: requested {release}, got {actual}")
+    return release, base
+
+
+def uniprot_reference(
+    og: str, requested: str, entry: dict[str, Any], genes: list[str], sequence: str,
+) -> dict[str, Any]:
+    return dict(
+        orthogroup=og,
+        accession=entry["primaryAccession"],
+        requested_accession=requested,
+        sequence=sequence,
+        sequence_sha256=hashlib.sha256(sequence.encode()).hexdigest(),
+        sequence_version=entry["entryAudit"]["sequenceVersion"],
+        reviewed=entry["entryType"] == "UniProtKB reviewed (Swiss-Prot)",
+        fragment=str(entry.get("proteinDescription", {}).get("flag", "")).lower()
+        in {"fragment", "fragments"}
+        or any(x.get("type") == "Non-terminal residue" for x in entry.get("features", [])),
+        organism=entry["organism"]["scientificName"],
+        orthodb_gene_ids=genes,
+        membership_verified=True,
+    )
+
+
 def _table_members(
     ogs: set[str],
     members: Path,
@@ -187,13 +218,7 @@ def prepare_reference_catalog(
     """Enumerate all same-release members, then freeze all available UniProt candidates."""
     if out.exists():
         raise SiteAnnotationError(f"Output already exists: {out}")
-    if not re.fullmatch(r"v?\d+\.\d+", release):
-        raise SiteAnnotationError("An exact OrthoDB release is required, e.g. v12.2.")
-    release = "v" + release.removeprefix("v")
-    base = "https://data.orthodb.org/" + release.split(".")[0]
-    actual = cache.json(base + "/orthodb_release_id")
-    if actual != release:
-        raise SiteAnnotationError(f"OrthoDB release mismatch: requested {release}, got {actual}")
+    release, base = orthodb_api(release, cache)
     ogs = sorted(set(orthogroups))
     sources: list[dict[str, Any]] = []
     if (members is None) != (xrefs is None):
@@ -257,26 +282,7 @@ def prepare_reference_catalog(
                     )
                 )
                 continue
-            primary = entry["primaryAccession"]
-            references.append(
-                dict(
-                    orthogroup=og,
-                    accession=primary,
-                    requested_accession=accession,
-                    sequence=sequence,
-                    sequence_sha256=hashlib.sha256(sequence.encode()).hexdigest(),
-                    sequence_version=entry["entryAudit"]["sequenceVersion"],
-                    reviewed=entry["entryType"] == "UniProtKB reviewed (Swiss-Prot)",
-                    fragment=str(entry.get("proteinDescription", {}).get("flag", "")).lower()
-                    in {"fragment", "fragments"}
-                    or any(
-                        x.get("type") == "Non-terminal residue" for x in entry.get("features", [])
-                    ),
-                    organism=entry["organism"]["scientificName"],
-                    orthodb_gene_ids=matching,
-                    membership_verified=True,
-                )
-            )
+            references.append(uniprot_reference(og, accession, entry, matching, sequence))
     # Aliases may resolve to the same current accession, but never to conflicting sequences.
     unique: dict[tuple[str, str], dict[str, Any]] = {}
     for record in references:

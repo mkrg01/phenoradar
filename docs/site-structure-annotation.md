@@ -24,6 +24,47 @@ uses sites with PSS > 1e-12 in the final ensemble; `--scope cv` uses the outer-C
 union. Scope is explicit and defaults to final, including for cv-only runs.
 All requested sites are retained in the correspondence tables.
 
+## Prioritize experimental structures at selected sites
+
+Supply a FASTA with one full-length, unaligned protein sequence per OG. Use the
+OG ID as the first token of the header and include the source sequence ID in the
+description. The query sequence is sent to the RCSB PDB sequence-search service.
+An optional sites TSV has the columns `orthogroup`, `alignment_pos_1based`, and
+`required` (optional, `true` or `false`). Use the column numbers in the exact MSA
+used by the run. With no sites TSV, selection uses all sites in the requested scope.
+
+```bash
+phenoradar prepare-site-references \
+  --run-dir RUN --orthodb-release v12.2 --pdb-query-fasta queries.fa \
+  --cache-dir site_resource_cache --out pdb_candidates.json
+
+phenoradar annotate-sites \
+  --run-dir RUN --catalog pdb_candidates.json --sites sites.tsv \
+  --cache-dir site_resource_cache --out site_annotations --no-render
+```
+
+The search screens up to 100 experimentally determined PDB polymer entities per
+query (E-value cutoff 1, sequence identity cutoff 0.25). It verifies candidate
+UniProt accessions using an exact full-length match to a linked member of the OG
+from the run's OrthoDB release. Only candidate chains with verified accessions
+are fetched as SIFTS-enriched PDBe mmCIF files.
+
+An eligible chain contains a deposited Cα coordinate at every required site and
+at least one requested site. Among eligible chains, the largest number of
+observed requested sites wins, followed by RCSB sequence-search score and PDB,
+chain and UniProt identifier order. Chain-wide coverage cutoffs are omitted in
+this mode. The `pdb_site_candidates.tsv` table records observed columns and reasons
+for exclusion. Check the local projection for sites interpreted individually.
+
+When eligible experimental coordinates are unavailable, same-sequence AlphaFold
+models are ranked by observed site coverage and mean pLDDT over mapped sites.
+The catalog includes an exact query-linked UniProt reference where available.
+If no candidate reference is verified, preparation tries closest same-OG members
+by full-length protein alignment. A portable catalog freezes the selected
+structure and the site list. To replay, use the same sites TSV and `--offline`.
+
+## OrthoDB snapshot and complete candidate collection
+
 An exact OrthoDB release is required. Annotation checks it against the run's
 `odb12v2_OGs`-style annotation filename; when that information is absent, supply
 `--orthodb-release` explicitly. OG identifiers are not portable across releases.

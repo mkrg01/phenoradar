@@ -2902,6 +2902,11 @@ def prepare_site_references_command(
     ),
     og2genes: Annotated[Path | None, typer.Option("--og2genes", exists=True)] = None,
     gene_xrefs: Annotated[Path | None, typer.Option("--gene-xrefs", exists=True)] = None,
+    pdb_query_fasta: Annotated[
+        Path | None,
+        typer.Option("--pdb-query-fasta", exists=True, dir_okay=False,
+                     help="Search RCSB with one full-length protein FASTA record per OG."),
+    ] = None,
     offline: Annotated[bool, typer.Option("--offline")] = False,
 ) -> None:
     """Freeze same-release OrthoDB/UniProt candidates for selected AA sites."""
@@ -2916,18 +2921,29 @@ def prepare_site_references_command(
         _run_inputs(run_dir)
         sites = selected_sites(run_dir, scope)
         names = sorted(set(sites["orthogroup"]))
+        if pdb_query_fasta is not None and orthogroup is None:
+            from phenoradar.site_reference_resources import read_fasta
+
+            orthogroup = list(read_fasta(pdb_query_fasta.read_text()))
         if orthogroup:
             if set(orthogroup) - set(names):
                 raise SiteAnnotationError("Requested OG has no selected sites in this scope.")
             names = sorted(set(orthogroup))
-        prepare_reference_catalog(
-            orthogroups=names,
-            release=orthodb_release,
-            out=out,
-            cache=ResourceCache(cache_dir, offline=offline),
-            members=og2genes,
-            xrefs=gene_xrefs,
-        )
+        cache = ResourceCache(cache_dir, offline=offline)
+        if pdb_query_fasta is None:
+            prepare_reference_catalog(
+                orthogroups=names, release=orthodb_release, out=out, cache=cache,
+                members=og2genes, xrefs=gene_xrefs,
+            )
+        else:
+            from phenoradar.site_pdb_search import prepare_pdb_catalog
+
+            if og2genes is not None or gene_xrefs is not None:
+                raise SiteAnnotationError("PDB queries use targeted OrthoDB requests.")
+            prepare_pdb_catalog(
+                orthogroups=names, release=orthodb_release, queries=pdb_query_fasta,
+                out=out, cache=cache,
+            )
     except (ValueError, OSError, pl.exceptions.PolarsError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo(f"Wrote frozen reference candidates: {out}")
@@ -2944,6 +2960,11 @@ def annotate_sites_command(
     orthogroup: Annotated[list[str] | None, typer.Option("--orthogroup")] = None,
     orthodb_release: Annotated[str | None, typer.Option("--orthodb-release")] = None,
     policy: Annotated[Path | None, typer.Option("--policy", exists=True, dir_okay=False)] = None,
+    sites: Annotated[
+        Path | None,
+        typer.Option("--sites", exists=True, dir_okay=False,
+                     help="TSV with orthogroup, alignment_pos_1based, and optional required."),
+    ] = None,
     reference_overrides: Annotated[
         Path | None, typer.Option("--reference-overrides", exists=True)
     ] = None,
@@ -2974,6 +2995,7 @@ def annotate_sites_command(
             render=render,
             overrides=reference_overrides,
             orthodb_release=orthodb_release,
+            sites_path=sites,
         )
     except (ValueError, TypeError, OSError, pl.exceptions.PolarsError) as exc:
         raise typer.BadParameter(str(exc)) from exc

@@ -10,6 +10,7 @@ import json
 import math
 import re
 import shutil
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -20,7 +21,7 @@ from phenoradar.site_reference_resources import ResourceCache, SiteAnnotationErr
 def _letter(name: str) -> str:
     from Bio.Data.PDBData import protein_letters_3to1_extended
 
-    return protein_letters_3to1_extended.get(name.upper(), "X")
+    return str(protein_letters_3to1_extended.get(name.upper(), "X"))
 
 
 def _residue_id(value: str) -> tuple[int, str]:
@@ -75,16 +76,20 @@ def sifts_mapping(path: Path, accession: str, chain: str) -> list[dict[str, Any]
     return rows
 
 
-def structure_atoms(path: Path) -> tuple[dict[tuple[str, int, str], dict[str, Any]], int]:
+def structure_atoms(
+    path: Path, *, coordinate_format: str | None = None,
+    cif_data: dict[str, Any] | None = None,
+) -> tuple[dict[tuple[str, int, str], dict[str, Any]], int]:
     """First model's CA atoms; author chains, residue IDs, and insertion codes stay distinct."""
     cif_module: Any = importlib.import_module("Bio.PDB.MMCIF2Dict")
 
     atoms = {}
-    if path.suffix.lower() in {".cif", ".mmcif"}:
-        data = cif_module.MMCIF2Dict(str(path))
+    if (coordinate_format or path.suffix.lower().removeprefix(".")) in {"cif", "mmcif"}:
+        data = cif_data if cif_data is not None else cif_module.MMCIF2Dict(str(path))
         count = len(data["_atom_site.id"])
         model_numbers = data.get("_atom_site.pdbx_PDB_model_num", ["1"] * count)
         first = int(model_numbers[0])
+        label_chains = data.get("_atom_site.label_asym_id", data["_atom_site.auth_asym_id"])
         for i in range(count):
             if data["_atom_site.label_atom_id"][i] != "CA" or int(model_numbers[i]) != first:
                 continue
@@ -99,6 +104,7 @@ def structure_atoms(path: Path) -> tuple[dict[tuple[str, int, str], dict[str, An
             record = dict(
                 residue=_letter(data["_atom_site.label_comp_id"][i]),
                 label_seq_id=int(label),
+                label_chain=label_chains[i],
                 b=float(data["_atom_site.B_iso_or_equiv"][i]),
                 xyz=[float(data[f"_atom_site.Cartn_{a}"][i]) for a in "xyz"],
             )
@@ -144,6 +150,54 @@ def structure_atoms(path: Path) -> tuple[dict[tuple[str, int, str], dict[str, An
     return atoms, first
 
 
+def pdbe_cif_sites(
+    path: Path,
+) -> tuple[dict[str, Any], dict[tuple[str, int, str], dict[str, Any]], int]:
+    """Load the PDBe mmCIF file containing coordinates together with residue-level SIFTS."""
+    cif_module: Any = importlib.import_module("Bio.PDB.MMCIF2Dict")
+    data = cif_module.MMCIF2Dict(str(path))
+    atoms, first = structure_atoms(path, coordinate_format="cif", cif_data=data)
+    return data, atoms, first
+
+
+def pdbe_sifts_mapping(
+    data: dict[str, Any],
+    atoms: dict[tuple[str, int, str], dict[str, Any]],
+    accession: str,
+    chain: str,
+) -> list[dict[str, Any]]:
+    prefix = "_pdbx_sifts_xref_db."
+    if prefix + "unp_acc" not in data:
+        return []
+    scheme = "_pdbx_poly_seq_scheme."
+    label_chains = {label for label, author in zip(
+        data[scheme + "asym_id"], data[scheme + "pdb_strand_id"], strict=True,
+    ) if author == chain}
+    atom_ids = {(atom["label_chain"], str(atom["label_seq_id"])): key
+                for key, atom in atoms.items() if key[0] == chain}
+    mappings: dict[int, tuple[tuple[str, str], dict[str, Any]]] = {}
+    columns = ["unp_acc", "asym_id", "seq_id", "unp_num", "mon_id", "observed"]
+    uniprot_residues = data.get(prefix + "unp_res", ["?"] * len(data[prefix + "unp_acc"]))
+    for acc, label, seq, pos, residue, observed, uniprot_residue in zip(
+        *(data[prefix + name] for name in columns), uniprot_residues, strict=True,
+    ):
+        if acc != accession or label not in label_chains or pos in {".", "?"}:
+            continue
+        position = int(pos)
+        label_key = label, seq
+        if position in mappings and mappings[position][0] != label_key:
+            raise SiteAnnotationError("Ambiguous SIFTS residue correspondence in PDBe mmCIF.")
+        key = atom_ids.get(label_key)
+        mappings[position] = (label_key, dict(
+            reference_pos_1based=position, chain=chain,
+            auth_seq_id=key[1] if key is not None else None,
+            insertion_code=key[2] if key is not None else "",
+            residue=_letter(residue), observed=observed == "y" and key is not None,
+            uniprot_residue=uniprot_residue if uniprot_residue not in {".", "?", "X"} else None,
+        ))
+    return [row for _, row in mappings.values()]
+
+
 def _coverage(rows: list[dict[str, Any]], core: set[int]) -> float:
     observed = {r["reference_pos_1based"] for r in rows if r["observed"]}
     return len(observed & core) / len(core) if core else 0.0
@@ -177,12 +231,17 @@ def acquire_structures(
     cache: ResourceCache,
     core: set[int],
     minimum_coverage: float,
+    *,
+    include_pdb: bool = True,
+    required_positions: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Screen all PDB/SIFTS candidates; fetch coordinates only for chosen method representatives."""
     accession = reference["accession"]
-    best = cache.json(
-        "https://www.ebi.ac.uk/pdbe/api/mappings/best_structures/" + accession, missing_ok=True
-    )
+    best = None
+    if include_pdb:
+        best = cache.json(
+            "https://www.ebi.ac.uk/pdbe/api/mappings/best_structures/" + accession, missing_ok=True
+        )
     candidates = []
     if best is not None:
         if not isinstance(best, dict) or accession not in best:
@@ -227,6 +286,7 @@ def acquire_structures(
     if af is not None:
         if not isinstance(af, list):
             raise SiteAnnotationError("Unexpected AlphaFold API response.")
+        target_positions = core if required_positions is None else required_positions
         for row in sorted(af, key=lambda r: r["entryId"]):
             if row.get("uniprotAccession") != accession:
                 raise SiteAnnotationError("AlphaFold accession differs from selected reference.")
@@ -249,7 +309,7 @@ def acquire_structures(
                     sequence_identity=1.0,
                 )
             )
-            if not core.intersection(range(start, end + 1)):
+            if not target_positions.intersection(range(start, end + 1)):
                 continue
             path = cache.fetch(row["cifUrl"])
             assert path is not None
@@ -271,6 +331,162 @@ def acquire_structures(
             )
     reference["_structure_screening"] = candidates
     return results
+
+
+def map_structure_sites(
+    reference: dict[str, Any],
+    sites: list[dict[str, Any]],
+    record: dict[str, Any],
+    atoms: dict[tuple[str, int, str], dict[str, Any]],
+    pdb_mapping: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
+    """Map one chain and reconcile SIFTS observation flags with deposited CA atoms."""
+    chain = record["chain"]
+    if record["source"] == "pdb":
+        if pdb_mapping is None:
+            raise SiteAnnotationError("PDB structure has no SIFTS mapping.")
+        mapping = pdb_mapping
+    elif record["source"] == "alphafold":
+        start, end = int(record["reference_start"]), int(record["reference_end"])
+        if not 1 <= start <= end <= len(reference["sequence"]):
+            raise SiteAnnotationError("Invalid AlphaFold reference interval.")
+        mapping = []
+        for (atom_chain, number, insertion), atom in atoms.items():
+            if atom_chain != chain:
+                continue
+            position = start + atom["label_seq_id"] - 1
+            if position > end or atom["residue"] != reference["sequence"][position - 1]:
+                raise SiteAnnotationError("AlphaFold coordinates/reference sequence disagree.")
+            mapping.append(
+                dict(
+                    reference_pos_1based=position,
+                    chain=chain,
+                    auth_seq_id=number,
+                    insertion_code=insertion,
+                    observed=True,
+                    residue=atom["residue"],
+                )
+            )
+    else:
+        raise SiteAnnotationError("Structure source must be pdb or alphafold.")
+    coordinate_map = {}
+    for residue in mapping:
+        key = residue["chain"], residue["auth_seq_id"], residue["insertion_code"]
+        atom_at_residue = atoms.get(key)
+        observed = residue["observed"] and atom_at_residue is not None
+        if (
+            observed
+            and atom_at_residue is not None
+            and atom_at_residue["residue"] != residue["residue"]
+        ):
+            raise SiteAnnotationError("Observed SIFTS residue differs from structure atoms.")
+        coordinate_map[residue["reference_pos_1based"]] = {
+            **residue,
+            "observed": observed,
+            "plddt": atom_at_residue["b"]
+            if observed and atom_at_residue is not None and record["source"] == "alphafold"
+            else None,
+        }
+    rows = []
+    for site in sites:
+        site_residue = coordinate_map.get(site["reference_pos_1based"])
+        observed = site_residue is not None and site_residue["observed"]
+        status = (
+            site["reference_status"]
+            if site["reference_status"] != "mapped"
+            else "outside_structure"
+            if site_residue is None
+            else "unobserved"
+            if not observed
+            else "sifts_reference_differs"
+            if site_residue.get("uniprot_residue") not in {None, site["reference_residue"]}
+            else "structure_residue_differs"
+            if site_residue["residue"] != site["reference_residue"]
+            else "mapped"
+        )
+        rows.append(
+            dict(
+                **site,
+                structure_id=record["structure_id"],
+                source=record["source"],
+                chain=chain,
+                auth_seq_id=site_residue["auth_seq_id"] if site_residue is not None else None,
+                insertion_code=site_residue["insertion_code"]
+                if site_residue is not None
+                else None,
+                structure_residue=site_residue["residue"] if site_residue is not None else None,
+                plddt=site_residue["plddt"] if observed and site_residue is not None else None,
+                structure_status=status,
+            )
+        )
+    return rows, coordinate_map
+
+
+def rank_pdb_site_candidates(
+    candidates: list[dict[str, Any]],
+    references: dict[str, dict[str, Any]],
+    sites_by_accession: dict[str, list[dict[str, Any]]],
+    required_sites: set[int],
+    cache: ResourceCache,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Rank chains with SIFTS and verified coordinates at requested sites."""
+
+    @lru_cache(maxsize=2)
+    def coordinates(pdb: str) -> Path | None:
+        return cache.fetch(
+            f"https://www.ebi.ac.uk/pdbe/entry-files/download/{pdb}_updated.cif", missing_ok=True
+        )
+
+    @lru_cache(maxsize=2)
+    def read_structure(
+        path: Path,
+    ) -> tuple[dict[str, Any], dict[tuple[str, int, str], dict[str, Any]], int]:
+        return pdbe_cif_sites(path)
+
+    audit = []
+    eligible = []
+    for candidate in sorted(candidates, key=lambda r: (r["structure_id"], r["chain"])):
+        accession = candidate["accession"]
+        pdb = candidate["structure_id"]
+        path = coordinates(pdb)
+        observed: set[int] = set()
+        reason = "coordinates_unavailable"
+        if path is not None:
+            cif_data, atoms, _ = read_structure(path)
+            mapping = pdbe_sifts_mapping(cif_data, atoms, accession, candidate["chain"])
+            rows, _ = map_structure_sites(
+                references[accession], sites_by_accession[accession], candidate, atoms, mapping,
+            )
+            observed = {
+                r["alignment_pos_1based"] for r in rows
+                if r["structure_status"] in {"mapped", "structure_residue_differs"}
+            }
+            reason = "no_observed_sites" if not observed else "required_site_unobserved"
+            if observed and required_sites <= observed:
+                reason = ""
+                eligible.append((len(observed), {
+                    **candidate, "path": str(path), "sha256": sha256(path),
+                    "format": "cif", "sifts_format": "mmcif",
+                }))
+        audit.append({
+            **candidate,
+            "n_observed_sites": len(observed),
+            "observed_columns": ",".join(map(str, sorted(observed))),
+            "exclusion_reason": reason,
+        })
+    winner = None
+    if eligible:
+        _, winner = min(eligible, key=lambda item: (
+            -item[0], -item[1]["search_score"], item[1]["structure_id"], item[1]["chain"],
+            item[1]["accession"],
+        ))
+    for row in audit:
+        row["selected"] = winner is not None and all(
+            row[key] == winner[key] for key in ("accession", "structure_id", "chain")
+        )
+        if not row["selected"] and not row["exclusion_reason"]:
+            row["exclusion_reason"] = "lower_site_coverage_or_search_rank"
+    return winner, audit
 
 
 def structure_annotations(
@@ -298,85 +514,21 @@ def structure_annotations(
             raise SiteAnnotationError("Structure format must be cif, mmcif, or pdb.")
         path = folder / ("structure." + suffix)
         shutil.copyfile(source_path, path)
-        atoms, first_model = structure_atoms(path)
-        chain = record["chain"]
-        if record["source"] == "pdb":
+        pdb_mapping = None
+        if record["source"] == "pdb" and record.get("sifts_format") == "mmcif":
+            cif_data, atoms, first_model = pdbe_cif_sites(path)
+            pdb_mapping = pdbe_sifts_mapping(
+                cif_data, atoms, reference["accession"], record["chain"],
+            )
+        else:
+            atoms, first_model = structure_atoms(path)
+        if record["source"] == "pdb" and pdb_mapping is None:
             sifts_path = (catalog_dir / record["sifts_path"]).resolve()
             if sha256(sifts_path) != record["sifts_sha256"]:
                 raise SiteAnnotationError("SIFTS checksum differs from its catalog.")
-            mapping = sifts_mapping(sifts_path, reference["accession"], chain)
+            pdb_mapping = sifts_mapping(sifts_path, reference["accession"], record["chain"])
             shutil.copyfile(sifts_path, folder / "sifts.xml.gz")
-        elif record["source"] == "alphafold":
-            start, end = int(record["reference_start"]), int(record["reference_end"])
-            if not 1 <= start <= end <= len(reference["sequence"]):
-                raise SiteAnnotationError("Invalid AlphaFold reference interval.")
-            mapping = []
-            for (atom_chain, number, insertion), atom in atoms.items():
-                if atom_chain != chain:
-                    continue
-                position = start + atom["label_seq_id"] - 1
-                if position > end or atom["residue"] != reference["sequence"][position - 1]:
-                    raise SiteAnnotationError("AlphaFold coordinates/reference sequence disagree.")
-                mapping.append(
-                    dict(
-                        reference_pos_1based=position,
-                        chain=chain,
-                        auth_seq_id=number,
-                        insertion_code=insertion,
-                        observed=True,
-                        residue=atom["residue"],
-                    )
-                )
-        else:
-            raise SiteAnnotationError("Structure source must be pdb or alphafold.")
-        coordinate_map = {}
-        for residue in mapping:
-            key = residue["chain"], residue["auth_seq_id"], residue["insertion_code"]
-            atom_at_residue = atoms.get(key)
-            observed = residue["observed"] and atom_at_residue is not None
-            if (
-                observed
-                and atom_at_residue is not None
-                and atom_at_residue["residue"] != residue["residue"]
-            ):
-                raise SiteAnnotationError("Observed SIFTS residue differs from structure atoms.")
-            coordinate_map[residue["reference_pos_1based"]] = {
-                **residue,
-                "observed": observed,
-                "plddt": atom_at_residue["b"]
-                if observed and atom_at_residue is not None and record["source"] == "alphafold"
-                else None,
-            }
-        rows = []
-        for site in sites:
-            site_residue = coordinate_map.get(site["reference_pos_1based"])
-            observed = site_residue is not None and site_residue["observed"]
-            status = (
-                site["reference_status"]
-                if site["reference_status"] != "mapped"
-                else "outside_structure"
-                if site_residue is None
-                else "unobserved"
-                if not observed
-                else "structure_residue_differs"
-                if site_residue["residue"] != site["reference_residue"]
-                else "mapped"
-            )
-            rows.append(
-                dict(
-                    **site,
-                    structure_id=record["structure_id"],
-                    source=record["source"],
-                    chain=chain,
-                    auth_seq_id=site_residue["auth_seq_id"] if site_residue is not None else None,
-                    insertion_code=site_residue["insertion_code"]
-                    if site_residue is not None
-                    else None,
-                    structure_residue=site_residue["residue"] if site_residue is not None else None,
-                    plddt=site_residue["plddt"] if observed and site_residue is not None else None,
-                    structure_status=status,
-                )
-            )
+        rows, coordinate_map = map_structure_sites(reference, sites, record, atoms, pdb_mapping)
         record.update(
             folder=str(folder),
             path=str(path),
