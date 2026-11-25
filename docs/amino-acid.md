@@ -469,6 +469,15 @@ OG/site/residue order; training reductions and representative choices are unchan
 Audit and interpretation tables use columnar
 blocks, including zero coefficients and all eligible sites.
 
+## CV loss diagnostics
+
+`cv/figures/cv_loss_by_split.svg` compares training and validation log loss for
+each outer fold. Training loss uses only the species actually sampled for that
+fit. Selected models are combined with `ensemble.probability_aggregation` within
+each sampled set, then losses are averaged across sampled sets, as in expression
+mode. The values are saved in `cv/tables/loss_by_split_cv.tsv`; per-set training
+losses and species counts are retained in `training_loss_by_sample_set.tsv`.
+
 ## Tree residue heatmap and annotation labels
 
 `cv/figures/amino_acid_group_trait_composition.svg` summarizes the same PSS-ranked

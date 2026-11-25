@@ -434,6 +434,7 @@ def fit_scope(
                 ),
             )
         sample_members = []
+        train_probabilities = []
         for result in selected:
             model = _build_estimator(
                 config, config.runtime.seed, y[indices], model_params=result.candidate.params
@@ -466,6 +467,8 @@ def fit_scope(
                     if expr is not None else None
                 ),
             )
+            # The fit matrix is Z=X+c. Evaluate it before converting the intercept to X.
+            train_probabilities.append(model.predict_proba(matrix)[:, 1])
             # Native fitting uses Z=X+c; all saved models and reports use X.
             model.intercept_ += float(shift @ model.coef_)
             members.append(AAMember(fitted, model, scope, sample_set_id, result.candidate,
@@ -488,6 +491,11 @@ def fit_scope(
                                compact=compact_reports(config))
             if expr is not None:
                 write_combined_coefficients(tables, members[-1], compact=compact_reports(config))
+        _write(tables / "training_loss_by_sample_set.tsv", [{
+            **context, "metric": "log_loss", "n_species": len(indices),
+            "metric_value": binary_log_loss(y[indices], _aggregate_probabilities(
+                train_probabilities, config.ensemble.probability_aggregation)),
+        }])
         if compact_reports(config):
             write_preprocessing_summary(tables, fitted, context, audit=audit)
             selected_indices: set[int] = set()
@@ -828,7 +836,6 @@ def run_amino_acid(
     warnings: list[str] = []
     oof = []
     metrics = []
-    losses = []
     fold_values = []
     coordinate_members: list[AAMember] = []
     if progress:
@@ -901,8 +908,6 @@ def run_amino_acid(
             fold_values.append(values)
             positive = int(pred["label"].sum())
             metrics.extend(_metric_rows(fold, "NA", values, positive, len(pred) - positive, 1))
-            losses.append({"fold_id": fold, "split": "validation", "metric": "log_loss",
-                           "metric_value": values["log_loss"]})
             if progress:
                 progress(f"Outer CV fold {fold} completed.")
         predictions = pl.concat(oof).sort("species")
@@ -927,7 +932,6 @@ def run_amino_acid(
                 )
             )
         _metrics_dataframe(metrics).write_csv(tables / "metrics_cv.tsv", separator="\t")
-        _write(tables / "loss_by_split_cv.tsv", losses)
         if progress:
             progress("Finalize disk-backed feature and site interpretation tables.")
         importance = (reports.finalize_isolated(

@@ -14,6 +14,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 import joblib
+import numpy as np
 import polars as pl
 
 from phenoradar.amino_acid import AlignmentStore
@@ -30,6 +31,7 @@ from phenoradar.amino_acid_resources import (
 from phenoradar.combined import ExpressionInput
 from phenoradar.config import AppConfig
 from phenoradar.cv import SelectedCandidate, _runtime_n_jobs
+from phenoradar.metrics import binary_log_loss
 from phenoradar.resource_budget import memory_budget
 
 
@@ -97,6 +99,28 @@ def run_fold(config: AppConfig, store: AlignmentStore, expression: ExpressionInp
                                  tables=tables, expression=expression)
     prediction = prediction.join(valid.select("species", "label", "group_id"), on="species")
     prediction = prediction.with_columns(pl.lit(fold).alias("fold_id"))
+    training_losses = pl.read_csv(tables / "training_loss_by_sample_set.tsv", separator="\t")
+    sample_ids = sorted({member.sample_set_id for member in compact})
+    validation_losses = []
+    for sample_id in sample_ids:
+        if len(sample_ids) == 1:
+            sample_prediction = prediction
+        else:
+            sample_prediction = predict_members(
+                config, store, valid["species"].to_list(),
+                [member for member in compact if member.sample_set_id == sample_id],
+                expression=expression,
+            ).join(valid.select("species", "label"), on="species")
+        validation_losses.append(binary_log_loss(sample_prediction["label"].to_numpy(),
+                                                sample_prediction["prob"].to_numpy()))
+    # Match expression mode: ensemble within each sampled set, then average the losses.
+    losses = []
+    for split, values in [("train", training_losses["metric_value"].to_numpy()),
+                          ("validation", np.asarray(validation_losses))]:
+        finite = values[np.isfinite(values)]
+        losses.append({"fold_id": fold, "split": split, "metric": "log_loss",
+                       "metric_value": float(np.mean(finite)) if len(finite) else float("nan")})
+    pl.DataFrame(losses).write_csv(tables / "loss_by_split_cv.tsv", separator="\t")
     usage = getattr(store, "_sparse_usage", SparseUsage())
     usage.peak_rss_bytes = max(usage.peak_rss_bytes, process_peak_rss())
     (directory / "resources.json").write_text(json.dumps(asdict(usage)))

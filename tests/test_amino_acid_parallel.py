@@ -75,6 +75,7 @@ def test_process_outer_folds_match_serial_and_render_common_figures(
     assert later_sites["scope"].n_unique() == 2
     for stage, names in {
         "cv": ["prediction_cv", "model_selection_trials", "model_selection_selected",
+               "loss_by_split_cv", "training_loss_by_sample_set",
                "feature_importance", "coefficients", "coefficients_by_fold", "amino_acid_site_pss",
                "amino_acid_site_effect_range", "amino_acid_site_stability",
                "selected_site_sequence_map", "amino_acid_site_effects"],
@@ -92,6 +93,11 @@ def test_process_outer_folds_match_serial_and_render_common_figures(
                  "amino_acid_frequency_by_confusion", "amino_acid_site_filter_funnel"]:
         assert (second / "cv/figures" / f"{name}.svg").exists(), name
     for root in [first, second]:
+        losses = pl.read_csv(root / "cv/tables/loss_by_split_cv.tsv", separator="\t")
+        assert set(losses["split"]) == {"train", "validation"}
+        assert losses.height == 2 * validation["fold_id"].n_unique()
+        text = (root / "cv/figures/cv_loss_by_split.svg").read_text()
+        assert ">train<" in text and ">validation<" in text
         assert not (root / "cv/figures/feature_stability_top.svg").exists()
         assert (root / "cv/tables/feature_stability_by_feature.tsv").exists()
     np.testing.assert_array_equal(
