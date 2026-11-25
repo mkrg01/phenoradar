@@ -1207,6 +1207,7 @@ def _write_tree_feature_heatmap_svg(
 
 def _tree_table_canvas(
     tree: Any, *, table_width: int, header_height: int, sidebar_width: int = 0,
+    minimum_height: int = 0,
 ) -> tuple[Any, Any, Any, int]:
     """Use separate, aligned tree and table axes with dimensions in pixels.
 
@@ -1215,7 +1216,8 @@ def _tree_table_canvas(
     """
     toyplot = importlib.import_module("toyplot")
     width = 260 + table_width + sidebar_width
-    height = max(280 if sidebar_width else 0, header_height + 18 * tree.ntips + 24)
+    height = max(minimum_height, 280 if sidebar_width else 0,
+                 header_height + 18 * tree.ntips + 24)
     canvas = toyplot.Canvas(width=width, height=height, style={"background-color": "white"})
     tree_axes = canvas.cartesian(bounds=(12, 236, header_height, height - 16), padding=0)
     tree.draw(axes=tree_axes, layout="r", tip_labels=False, node_sizes=0, scale_bar=False)
@@ -1302,14 +1304,6 @@ def _draw_toytree_heatmap(
         title=tip_labels,
         style={"font-size": "9px", "text-anchor": "start"},
     )
-    if title:
-        headers.text(
-            0,
-            1,
-            title,
-            color=_TEXT_COLOR,
-            style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
-        )
     _save_toytree_svg(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
 
 
@@ -1400,8 +1394,8 @@ def _draw_toytree_feature_heatmap(
     species_width = _text_column_width_px(tip_labels, min_width=120, padding=60)
     canvas, axes, headers, width = _tree_table_canvas(
         tree, table_width=int(species_x) + species_width,
-        header_height=max(520 if value_col == "residue" else 64,
-                          feature_label_depth_px + 16), sidebar_width=285,
+        header_height=max(64, feature_label_depth_px + 16), sidebar_width=285,
+        minimum_height=420 if value_col == "residue" else 0,
     )
 
     from phenoradar.residue_colors import residue_color
@@ -1535,22 +1529,13 @@ def _draw_toytree_feature_heatmap(
     if residues:
         _draw_residue_legend(
             canvas=canvas, width=width,
-            selection=str(annotation["representative_selection"][0]),
         )
     else:
         _draw_heatmap_legend(
             canvas=canvas, width=width, value_col=value_col,
             vmin=vmin, vmax=vmax, cmap_name=cmap_name,
         )
-    _draw_confusion_group_legend(canvas=canvas, width=width, y_offset=260 if residues else 0)
-    if title:
-        headers.text(
-            0,
-            .96 if residues else 1,
-            title,
-            color=_TEXT_COLOR,
-            style={"font-size": "15px", "font-weight": "bold", "text-anchor": "start"},
-        )
+    _draw_confusion_group_legend(canvas=canvas, width=width, y_offset=140 if residues else 0)
     _save_toytree_svg(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
 
 
@@ -1662,12 +1647,12 @@ def _draw_heatmap_legend(
     )
 
 
-def _draw_residue_legend(*, canvas: Any, width: int, selection: str) -> None:
+def _draw_residue_legend(*, canvas: Any, width: int) -> None:
     from phenoradar.residue_colors import ZAPPO_GROUPS
 
     legend = canvas.cartesian(bounds=(width - 270, width - 20, 35, 270),
                               show=False, xmin=0, xmax=1, ymin=0, ymax=11)
-    legend.text(.02, 10.6, "Zappo: representative amino acid", color=_TEXT_COLOR,
+    legend.text(.02, 10.6, "Residues (Zappo)", color=_TEXT_COLOR,
                 style={"font-size": "10px", "font-weight": "bold", "text-anchor": "start"})
     groups = [*ZAPPO_GROUPS, ("- .", "Gap", "#ffffff"),
               ("Other", "Unknown residue", "#dddddd"), ("?", "Unavailable", "#dddddd")]
@@ -1677,17 +1662,6 @@ def _draw_residue_legend(*, canvas: Any, width: int, selection: str) -> None:
                          style={"stroke": "#999999", "stroke-width": ".5px"})
         legend.text(.12, y, f"{letters}: {label}", color=_TEXT_COLOR,
                     style={"font-size": "9px", "text-anchor": "start"})
-
-    note = canvas.cartesian(bounds=(width - 270, width - 20, 280, 365),
-                            show=False, xmin=0, xmax=1, ymin=0, ymax=1)
-    rule = "Highest TPM" if selection == "max_tpm" else "Maximum input-MSA coverage"
-    note.text(.02, .85, f"{rule} per species/OG", color=_TEXT_COLOR,
-              style={"font-size": "9px", "text-anchor": "start"})
-    note.text(.02, .55, "Ties: sequence ID; no per-site substitution", color=_TEXT_COLOR,
-              style={"font-size": "9px", "text-anchor": "start"})
-    note.text(.02, .25, "Labels: OG ID : input MSA site (1-based)", color=_TEXT_COLOR,
-              style={"font-size": "9px", "text-anchor": "start"})
-
 
 def _draw_confusion_group_legend(*, canvas: Any, width: int, y_offset: int = 0) -> None:
     legend_axes = canvas.cartesian(
@@ -1702,7 +1676,7 @@ def _draw_confusion_group_legend(*, canvas: Any, width: int, y_offset: int = 0) 
     legend_axes.text(
         0.02,
         0.92,
-        "OOF confusion group",
+        "Classification outcome",
         color=_TEXT_COLOR,
         style={"font-size": "9px", "font-weight": "bold", "text-anchor": "start"},
     )

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.text import Text
 
@@ -28,8 +29,10 @@ def rendered(monkeypatch: pytest.MonkeyPatch) -> list[Figure]:
 
 
 def assert_text_inside_canvas(fig: Figure) -> None:
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
+    # New Matplotlib releases detach the renderer when pyplot closes a figure.
+    canvas_agg = FigureCanvasAgg(fig)
+    canvas_agg.draw()
+    renderer = canvas_agg.get_renderer()
     canvas = fig.bbox.padded(1)
     artists = list(fig.texts)
     for ax in fig.axes:

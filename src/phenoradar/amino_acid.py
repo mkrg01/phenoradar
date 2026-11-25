@@ -878,7 +878,7 @@ class AATransform:
 def _site_statistics(
     raw: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Fit all site moments in a block, preserving float32 variance semantics."""
+    """Fit means and retain every residue state observed in training."""
     observed = np.isfinite(raw[:, :, 0])
     counts = observed.sum(axis=0)
     values = np.nan_to_num(raw)
@@ -887,19 +887,8 @@ def _site_statistics(
         values.sum(axis=0, dtype=np.float64), counts[:, None],
         out=means, where=counts[:, None] > 0,
     )
-    mean32 = np.zeros(raw.shape[1:], dtype=np.float32)
-    np.divide(
-        values.sum(axis=0, dtype=np.float32), counts[:, None],
-        out=mean32, where=counts[:, None] > 0,
-    )
-    differences = values - mean32[None, :, :]
-    differences[~observed] = 0
-    variance = np.zeros_like(mean32)
-    np.divide(
-        np.sum(differences * differences, axis=0, dtype=np.float32), counts[:, None],
-        out=variance, where=counts[:, None] > 0,
-    )
-    return counts / raw.shape[0], means, np.any(values > 0, axis=0), variance > 1e-12
+    known = np.any(values > 0, axis=0)
+    return counts / raw.shape[0], means, known, known.copy()
 
 
 def _quality_summary(
@@ -1150,10 +1139,6 @@ def fit_amino_acid(
         }
     fitted = AATransform(settings.model_copy(deep=True), sites, qc, representative_columns)
     if isinstance(sites, AASiteTable):
-        if not np.any(sites.active) and not _allow_empty:
-            raise AlignmentError(
-                "AA aggregation produced no variable features in this training fold"
-            )
         return fitted
     for indices, raw, _ in fitted.raw_blocks(store, species):
         fractions, means, known, active = _site_statistics(raw)
@@ -1163,6 +1148,4 @@ def fit_amino_acid(
             site.mean = means[k]
             site.known = known[k]
             site.active = active[k]
-    if not _allow_empty and not any(np.any(site.active) for site in sites):
-        raise AlignmentError("AA aggregation produced no variable features in this training fold")
     return fitted

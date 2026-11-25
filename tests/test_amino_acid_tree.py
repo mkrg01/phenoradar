@@ -248,5 +248,6 @@ def test_tree_site_identifiers_survive_long_annotations_and_ids(tmp_path: Path) 
     visible = [''.join(element.itertext()) for element in xml.getroot().iter()
                if element.tag.endswith('text')]
     assert any(f'{og}:123456:' in label and '…' in label for label in visible)
-    assert any('input MSA site (1-based)' in label for label in visible)
+    assert not any('input MSA site (1-based)' in label for label in visible)
+    assert not path.with_suffix('.caption.txt').exists()
     assert annotation.strip() in path.read_text()  # Tooltips keep the complete annotation.

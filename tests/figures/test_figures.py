@@ -23,7 +23,9 @@ def _svg_text_y_and_viewbox_height(svg_path: Path, text: str) -> tuple[float, fl
     viewbox_height = float(root.attrib["viewBox"].split()[3])
     for element in root.iter():
         if element.tag.endswith("text") and "".join(element.itertext()) == text:
-            return float(element.attrib["y"]), viewbox_height
+            if "y" in element.attrib:
+                return float(element.attrib["y"]), viewbox_height
+            return min(_svg_text_translate_y_values(svg_path, text)), viewbox_height
     raise AssertionError(f"{text!r} not found in {svg_path}")
 
 
@@ -498,21 +500,21 @@ def test_write_run_figures_writes_top_feature_expression_by_confusion(
     assert "log2(TPM + 1)" in svg_text
     assert "beta carbonic anhydrase" in svg_text
     assert "photosynthetic annotation" in svg_text
-    assert "(OG1)" in svg_text
+    assert "OG1" in svg_text
     assert "importance=" not in svg_text
     assert "β=" not in svg_text
     assert "higher" not in svg_text
     assert "C4=1" not in svg_text
     for group in ["TP", "FN", "TN", "FP"]:
         assert group in svg_text
-    upper_label_y = _svg_text_translate_y_values(
-        figure_path,
-        "beta carbonic anhydrase with a",
+    annotation_line = next(
+        text for text in _svg_text_values(figure_path) if "beta carbonic anhydrase" in text
     )
-    count_label_y = _svg_text_translate_y_values(figure_path, "n=1")
+    upper_label_y = _svg_text_translate_y_values(figure_path, annotation_line)
+    count_label_y = _svg_text_translate_y_values(figure_path, "n=1/1")
     x_label_y, viewbox_height = _svg_text_y_and_viewbox_height(
         figure_path,
-        "OOF confusion group",
+        "Classification outcome",
     )
     assert upper_label_y and min(upper_label_y) > 0
     assert count_label_y and max(count_label_y) + 8 < x_label_y < viewbox_height
@@ -552,8 +554,9 @@ def test_write_run_figures_writes_group_bootstrap_confidence_intervals(
     figure_path = tmp_path / "run" / "cv" / "figures" / "group_bootstrap_metrics.svg"
     assert figure_path.exists()
     svg_text = figure_path.read_text(encoding="utf-8")
-    assert "OOF group-bootstrap confidence intervals" in svg_text
-    assert "95% group-bootstrap CI" in svg_text
+    assert "OOF group-bootstrap confidence intervals" not in svg_text
+    assert "Metric value" in svg_text
+    assert not figure_path.with_suffix(".caption.txt").exists()
     for metadata in ("group_col=", "groups=", "resamples=", "minimum valid"):
         assert metadata not in svg_text
     assert warnings == []
@@ -1627,7 +1630,7 @@ def test_feature_importance_top_writes_annotation_labels(tmp_path: Path) -> None
     svg_text = out_path.read_text(encoding="utf-8")
     assert "Orthogroup" in svg_text
     assert "beta carbonic anhydrase" in svg_text
-    assert "(OG1)" in svg_text
+    assert "OG1" in svg_text
     assert "carbonic" in svg_text
     assert "photosynthetic" in svg_text
     assert "annotation" in svg_text
@@ -1673,7 +1676,7 @@ def test_feature_importance_by_fold_heatmap_writes_annotation_labels(
     svg_text = out_path.read_text(encoding="utf-8")
     assert "Orthogroup" in svg_text
     assert "beta carbonic anhydrase" in svg_text
-    assert "(OG1)" in svg_text
+    assert "OG1" in svg_text
     assert "carbonic" in svg_text
     assert "photosynthetic" in svg_text
 
@@ -1819,7 +1822,7 @@ def test_coefficients_signed_top_writes_annotation_labels(tmp_path: Path) -> Non
     svg_text = out_path.read_text(encoding="utf-8")
     assert "Orthogroup" in svg_text
     assert "beta carbonic anhydrase" in svg_text
-    assert "(OG1)" in svg_text
+    assert "OG1" in svg_text
     assert "carbonic" in svg_text
     assert "photosynthetic" in svg_text
 

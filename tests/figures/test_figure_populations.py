@@ -43,7 +43,9 @@ def test_confusion_and_comparison_evaluate_the_same_population(
         save_svg(fig, path)
 
     monkeypatch.setattr(figures, "_save_svg_figure", capture)
-    figures._external_confusion_matrix(external, tmp_path / "confusion.svg")
+    figures._prediction_confusion_matrix(
+        external, tmp_path / "confusion.svg", label_col="true_label"
+    )
     figures._cv_external_comparison_by_population(cv, external, tmp_path / "comparison.svg")
     assert external.equals(original)
     for subdir, matrix, precision in (
@@ -78,7 +80,7 @@ def test_accepted_curves_explain_undefined_populations(tmp_path: Path, all_absta
         assert (tmp_path / f"{name}.svg").exists()
         messages = " ".join(text(tmp_path / "accepted_only" / f"{name}.svg"))
         assert ("No accepted species" if all_abstained else "fewer than two labels") in messages
-    figures._external_confusion_matrix(frame, tmp_path / "confusion.svg")
+    figures._prediction_confusion_matrix(frame, tmp_path / "confusion.svg", label_col="true_label")
     if all_abstained:
         assert "Accuracy = 1.000" not in text(tmp_path / "accepted_only/confusion.svg")
 
@@ -149,10 +151,11 @@ def test_expression_confusion_uses_raw_decisions_and_external_axis(tmp_path: Pat
     )
     for subdir in ("", "accepted_only"):
         values = text(tmp_path / subdir / "expression.svg")
-        assert "External-test confusion group" in values
+        assert "Classification outcome" in values
+        assert not (tmp_path / subdir / "expression.caption.txt").exists()
         assert "OOF confusion group" not in values
         assert "FP" in values
-        assert ("n=0" in values) == bool(subdir)
+        assert (any(value.startswith("n=0/") for value in values)) == bool(subdir)
 
 
 def test_tree_population_filters_tips_and_restores_raw_labels(tmp_path: Path) -> None:

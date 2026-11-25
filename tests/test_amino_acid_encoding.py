@@ -62,7 +62,7 @@ def test_frequency_mapping_cache_is_bounded_and_released(tmp_path: Path, monkeyp
 
 
 @pytest.mark.parametrize("n", [7, 64, 113])
-def test_compact_moments_keep_float32_variance_and_missing_semantics(n: int) -> None:
+def test_compact_statistics_keep_training_states_means_and_missing_semantics(n: int) -> None:
     from phenoradar.amino_acid import _quality_summary, _site_statistics
     from phenoradar.amino_acid_encoding import compact_statistics
 
@@ -73,7 +73,7 @@ def test_compact_moments_keep_float32_variance_and_missing_semantics(n: int) -> 
         raw[:, j, states] = rng.dirichlet(np.full(len(states), .2), size=n)
     raw[rng.random(raw.shape[:2]) < .15] = np.nan
     raw[:, 0] = 0
-    raw[:, 0, :2] = [.1, .9]  # A constant composition close to float32 variance tolerance.
+    raw[:, 0, :2] = [.1, .9]  # Constant observed states remain encoded.
     sites, aa = np.nonzero(np.any(raw > 0, axis=0))
     observed = np.isfinite(raw[:, :, 0])
     groups = np.array([str(i % 3) for i in range(n)])

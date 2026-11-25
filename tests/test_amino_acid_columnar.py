@@ -52,7 +52,7 @@ def test_columnar_sites_match_sitewise_statistics_and_serialized_predictions(
             observed = np.isfinite(raw[:, j, 0])
             values = raw[observed, j]
             np.testing.assert_array_equal(site.mean, values.mean(axis=0, dtype=np.float64))
-            np.testing.assert_array_equal(site.active, values.var(axis=0) > 1e-12)
+            np.testing.assert_array_equal(site.active, np.any(values > 0, axis=0))
             assert site.post_aggregation_sample_fraction == np.mean(observed)
         plain = replace(fitted, sites=list(fitted.sites))
         target = ["held", "absent", "s2", "s1"]

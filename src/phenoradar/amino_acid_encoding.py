@@ -230,22 +230,11 @@ def compact_statistics(
     if selected.any():
         state_sites = sites[selected]
         aa = residues[selected]
-        # Two or more states per eligible site keep axis 0 as the same strided
-        # float32 reduction used by the original (sample, site, 20) design.
         data = np.ascontiguousarray(np.nan_to_num(raw[:, selected], copy=False))
         denominator = counts[state_sites]
         mean = np.zeros(data.shape[1], dtype=float)
         np.divide(data.sum(axis=0, dtype=np.float64), denominator, out=mean,
                   where=denominator > 0)
-        mean32 = np.zeros(data.shape[1], dtype=np.float32)
-        np.divide(data.sum(axis=0, dtype=np.float32), denominator, out=mean32,
-                  where=denominator > 0)
-        data -= mean32
-        data[~observed[:, state_sites]] = 0
-        np.square(data, out=data)
-        variance = np.zeros_like(mean32)
-        np.divide(np.sum(data, axis=0, dtype=np.float32), denominator,
-                  out=variance, where=denominator > 0)
         means[state_sites, aa] = mean
-        active[state_sites, aa] = variance > 1e-12
+        active[state_sites, aa] = known[state_sites, aa]
     return eligible, minor_samples, minor_groups, counts / len(raw), means, known, active

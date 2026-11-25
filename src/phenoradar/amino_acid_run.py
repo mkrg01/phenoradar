@@ -1061,7 +1061,7 @@ def run_amino_acid(
             progress("Generate evaluation, selection and interpretation figures.")
         warnings.extend(write_amino_acid_figures(
             run_dir, config, final if config.runtime.execution_stage == "full_run" else None,
-            report=reports, store=store,
+            report=reports, store=store, expression=expression,
         ))
         _write(
             model_dir / "thresholds.tsv",

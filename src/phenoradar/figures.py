@@ -20,6 +20,7 @@ import matplotlib
 import numpy as np
 import polars as pl
 from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.colors import LinearSegmentedColormap, to_rgba
 from matplotlib.figure import Figure
 from matplotlib.font_manager import FontProperties
@@ -105,8 +106,6 @@ _COLOR_PURPLE = "#CC79A7"
 _UNANNOTATED_COLOR = "#6f6f6f"
 _PROBABILITY_THRESHOLD_COLOR = "#999999"
 _MODEL_SELECTION_SAMPLE_SET_LIMIT = 1
-_CONFUSION_GROUP_ORDER = CONFUSION_GROUP_ORDER
-_CONFUSION_GROUP_COLORS = CONFUSION_GROUP_COLORS
 _FEATURE_IMPORTANCE_TOP_WIDTH_PX = _NATURE_DOUBLE_COLUMN_WIDTH_PX
 _FEATURE_IMPORTANCE_AXIS_LABEL_FONTSIZE = _LABEL_FONTSIZE
 _FEATURE_ANNOTATION_LABEL_PADDING_PX = 40
@@ -130,8 +129,9 @@ _FEATURE_FILTER_FIGURE_DEFAULT_STAGE_ORDER = (
 )
 _FEATURE_FILTER_FIGURE_STAGE_LABELS = {
     "alignment_sites": "Alignment sites",
-    "observed_sites": "Callable sites",
+    "observed_sites": "Coverage-filtered sites",
     "variable_sites": "Variable sites",
+    "retained_sites": "Model input sites",
     "n_features_before": "Input",
     "n_features_after_sparse_feature_filter": "Sparse feature",
     "n_features_after_low_variance": "Low variance",
@@ -809,7 +809,12 @@ def _cv_metrics_overview(metrics_cv: pl.DataFrame, out_path: Path) -> None:
     ax.set_xlim(-0.75, len(metrics) - 0.25)
     ax.set_ylim(y_min, y_max)
     ax.set_xticks(x_pos)
-    ax.set_xticklabels(metrics, fontsize=_TICK_FONTSIZE)
+    metric_labels = []
+    for metric in metrics:
+        contract = metric_contract(metric)
+        name = {"mcc": "MCC", "brier": "Brier score"}.get(metric, contract["display_name"])
+        metric_labels.append(name)
+    ax.set_xticklabels(metric_labels, fontsize=_TICK_FONTSIZE)
     ax.set_xlabel("Metric", fontsize=_LABEL_FONTSIZE)
     ax.set_ylabel("Score", fontsize=_LABEL_FONTSIZE)
     _place_x_axis_at_zero(ax)
@@ -923,15 +928,9 @@ def _group_bootstrap_metrics_figure(
     ax.set_xlim(x_min, x_max)
     if x_min <= 0.0 <= x_max:
         ax.axvline(0.0, color=_MUTED_TEXT_COLOR, linewidth=0.7)
-    confidence_level = float(rows[0]["confidence_level"])
-    confidence_percent = confidence_level * 100.0
-    ax.set_xlabel(
-        f"Metric value ({confidence_percent:g}% group-bootstrap CI)",
-        fontsize=_LABEL_FONTSIZE,
-    )
+    ax.set_xlabel("Metric value", fontsize=_LABEL_FONTSIZE)
     ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.set_title("OOF group-bootstrap confidence intervals", pad=8.0)
     fig.subplots_adjust(left=0.31, right=0.985, top=0.89, bottom=0.16)
     _save_svg_figure(fig, out_path)
 
@@ -1667,7 +1666,210 @@ def _coefficients_signed_top(
     _save_svg_figure(fig, out_path)
 
 
-@_prediction_population_figures("oof_predictions")
+def _feature_detail_labels(
+    features: list[str],
+    annotations: pl.DataFrame | None,
+) -> list[str]:
+    """Keep feature coordinates separate from wrapped biological descriptions."""
+    lookup = _orthogroup_annotation_lookup(annotations)
+    labels = []
+    for feature in features:
+        og, display = _feature_address(feature)
+        annotation = lookup.get(feature, lookup.get(og))
+        labels.append(
+            display
+            + ("\n" + textwrap.fill(" ".join(annotation.split()), width=48) if annotation else "")
+        )
+    return labels
+
+
+def _feature_values_by_confusion_figure(
+    values: pl.DataFrame,
+    predictions: pl.DataFrame,
+    features: list[str],
+    *,
+    value_label: str,
+    value_limits: tuple[float, float] | None,
+    orthogroup_annotations: pl.DataFrame | None,
+    label_col: str,
+) -> Figure:
+    """Render the same distributions for expression and residue-frequency inputs."""
+    required = {"species", label_col, "prob"}
+    if not required.issubset(predictions.columns):
+        raise FigureError("Feature distributions require species, labels and probabilities")
+    if not {"species", "feature", "value"}.issubset(values.columns):
+        raise FigureError("Feature distributions require species, feature and value columns")
+    predictions = predictions.select(
+        pl.col("species").cast(pl.String).str.strip_chars(),
+        pl.col(label_col).cast(pl.Int64, strict=False).alias("label"),
+        pl.col("prob").cast(pl.Float64, strict=False),
+    ).filter(
+        pl.col("species").is_not_null()
+        & (pl.col("species") != "")
+        & pl.col("label").is_not_null()
+        & pl.col("prob").is_finite()
+        & pl.col("prob").is_between(0, 1)
+    )
+    if predictions["species"].n_unique() != predictions.height:
+        raise FigureError("Feature distributions must contain one row per species")
+    _binary_trait_color_map(
+        predictions["label"].to_list(),
+        source_table_name="predictions",
+        figure_name="feature distributions",
+    )
+    if predictions.is_empty():
+        fig, axis = plt.subplots(figsize=(7.2, 2.2))
+        axis.axis("off")
+        axis.text(
+            0.02, 0.5, "No species with usable labels and probabilities.\nNo data to evaluate."
+        )
+        return fig
+    values = values.select(
+        pl.col("species").cast(pl.String).str.strip_chars(),
+        pl.col("feature").cast(pl.String),
+        pl.col("value").cast(pl.Float64, strict=False),
+    ).filter(pl.col("feature").is_in(features))
+    if values.select("species", "feature").is_duplicated().any():
+        raise FigureError("Feature distributions require one value per species and feature")
+    targets = {"TP": (1, True), "FN": (1, False), "TN": (0, False), "FP": (0, True)}
+    groups = [(group, *targets[group]) for group in CONFUSION_GROUP_ORDER]
+    data = values.join(predictions, on="species")
+    totals = [
+        predictions.filter(
+            (pl.col("label") == label)
+            & ((pl.col("prob") >= FIXED_PROBABILITY_THRESHOLD_VALUE) == pred)
+        ).height
+        for _, label, pred in groups
+    ]
+    ncols = min(2, len(features))
+    nrows = (len(features) + ncols - 1) // ncols
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(7.2, max(2.4, 2.0 * nrows + 0.8)), squeeze=False
+    )
+    titles = _feature_detail_labels(features, orthogroup_annotations)
+    for axis, feature, title in zip(axes.flat, features, titles, strict=False):
+        rows = data.filter((pl.col("feature") == feature) & pl.col("value").is_finite())
+        observed = [
+            rows.filter(
+                (pl.col("label") == label)
+                & ((pl.col("prob") >= FIXED_PROBABILITY_THRESHOLD_VALUE) == pred)
+            )
+            .sort(["value", "species"])["value"]
+            .to_numpy()
+            for _, label, pred in groups
+        ]
+        for position, ((group, _, _), frequencies) in enumerate(
+            zip(groups, observed, strict=True), 1
+        ):
+            color = CONFUSION_GROUP_COLORS[group]
+            if len(frequencies) >= 3:
+                axis.boxplot(
+                    [frequencies],
+                    positions=[position],
+                    widths=0.55,
+                    patch_artist=True,
+                    showfliers=False,
+                    boxprops={"facecolor": color, "alpha": 0.18, "edgecolor": color},
+                    medianprops={"color": "#222222", "linewidth": 0.8},
+                    whiskerprops={"color": color, "linewidth": 0.6},
+                    capprops={"color": color, "linewidth": 0.6},
+                )
+            if len(frequencies):
+                kwargs = (
+                    {"marker": "x"}
+                    if group in {"FP", "FN"}
+                    else {
+                        "marker": "o",
+                        "edgecolors": "none",
+                    }
+                )
+                axis.scatter(
+                    position + _deterministic_offsets(len(frequencies), 0.18),
+                    frequencies,
+                    s=9,
+                    color=color,
+                    alpha=0.55,
+                    linewidths=0.35,
+                    zorder=3,
+                    **kwargs,
+                )
+        axis.set_xticks(
+            range(1, 5),
+            [
+                f"{group}\nn={len(frequencies)}/{total}"
+                for (group, _, _), frequencies, total in zip(groups, observed, totals, strict=True)
+            ],
+        )
+        axis.set_xlim(0.55, 4.45)
+        if value_limits is not None:
+            axis.set_ylim(*value_limits)
+            axis.set_yticks([0, 0.5, 1])
+        else:
+            axis.set_ylim(bottom=0)
+        axis.set_ylabel(value_label)
+        axis.set_title(title, fontsize=7, loc="left")
+    for axis in list(axes.flat)[len(features) :]:
+        axis.set_visible(False)
+    fig.supxlabel("Classification outcome", fontsize=_LABEL_FONTSIZE)
+    return fig
+
+
+def _write_feature_values_by_confusion(
+    *,
+    values: pl.DataFrame,
+    predictions: pl.DataFrame,
+    features: list[str],
+    out_path: Path,
+    value_label: str,
+    value_limits: tuple[float, float] | None = None,
+    orthogroup_annotations: pl.DataFrame | None = None,
+    label_col: str = "label",
+    context: str = "OOF",
+) -> None:
+    """Share population selection, SVG layout and six-panel PDF pages across modes."""
+    if not features:
+        raise FigureError("Feature distributions require at least one feature")
+    for suffix, frames in prediction_figure_populations({"predictions": predictions}):
+        path = population_figure_path(out_path, suffix)
+        frame = frames["predictions"]
+
+        def render(
+            selected: list[str],
+            *,
+            frame: pl.DataFrame = frame,
+            suffix: str = suffix,
+        ) -> Figure:
+            if suffix and frame.is_empty():
+                fig, axis = plt.subplots(figsize=(7.2, 2.2))
+                axis.axis("off")
+                axis.text(0.02, 0.5, "No accepted species. No data to evaluate.")
+                return fig
+            return _feature_values_by_confusion_figure(
+                values,
+                frame,
+                selected,
+                value_label=value_label,
+                value_limits=value_limits,
+                orthogroup_annotations=orthogroup_annotations,
+                label_col=label_col,
+            )
+
+        _save_svg_figure(render(features), path)
+        with PdfPages(
+            path.with_suffix(".pdf"),
+            metadata={
+                "CreationDate": None,
+                "ModDate": None,
+                "Title": f"{context} feature distributions",
+            },
+        ) as pdf:
+            for start in range(0, len(features) if not frame.is_empty() else 1, 6):
+                page = render(features[start : start + 6])
+                _publication_layout(page)
+                pdf.savefig(page)
+                plt.close(page)
+
+
 def _top_feature_expression_by_confusion(
     *,
     oof_predictions: pl.DataFrame,
@@ -1696,44 +1898,6 @@ def _top_feature_expression_by_confusion(
     if top_features < 1:
         raise FigureError("figures.top_features must be >= 1")
 
-    predictions = (
-        oof_predictions.select(
-            pl.col("species").cast(pl.String, strict=False).str.strip_chars().alias("__species"),
-            pl.col(label_col).cast(pl.Int8, strict=False).alias("__label"),
-            pl.col("prob").cast(pl.Float64, strict=False).alias("__prob"),
-        )
-        .filter(
-            pl.col("__species").is_not_null()
-            & (pl.col("__species") != "")
-            & pl.col("__label").is_not_null()
-            & pl.col("__prob").is_not_null()
-            & pl.col("__prob").is_finite()
-        )
-        .sort("__species")
-    )
-    if predictions.height == 0:
-        raise FigureError(f"{source_table_name} is empty; cannot draw {figure_name}")
-    labels = [int(value) for value in predictions.get_column("__label").to_list()]
-    _binary_trait_color_map(
-        labels,
-        source_table_name=source_table_name,
-        figure_name=figure_name,
-    )
-    if predictions.get_column("__species").n_unique() != predictions.height:
-        raise FigureError(f"{source_table_name} must contain one row per species for {figure_name}")
-    predictions = predictions.with_columns(
-        (pl.col("__prob") >= FIXED_PROBABILITY_THRESHOLD_VALUE).alias("__pred_label")
-    ).with_columns(
-        pl.when((pl.col("__label") == 1) & pl.col("__pred_label"))
-        .then(pl.lit("TP"))
-        .when((pl.col("__label") == 1) & ~pl.col("__pred_label"))
-        .then(pl.lit("FN"))
-        .when((pl.col("__label") == 0) & ~pl.col("__pred_label"))
-        .then(pl.lit("TN"))
-        .otherwise(pl.lit("FP"))
-        .alias("__confusion_group")
-    )
-
     top = (
         feature_importance.select(
             pl.col("feature").cast(pl.String, strict=False).str.strip_chars().alias("__feature"),
@@ -1751,7 +1915,6 @@ def _top_feature_expression_by_confusion(
     features = [str(value) for value in top.get_column("__feature").to_list()]
     if not features:
         raise FigureError(f"feature_importance.tsv is empty; cannot draw {figure_name}")
-    annotation_lookup = _orthogroup_annotation_lookup(orthogroup_annotations)
     if "is_missing" in top_feature_expression.columns:
         top_feature_expression = top_feature_expression.filter(~pl.col("is_missing"))
     expression = top_feature_expression.select(
@@ -1767,151 +1930,21 @@ def _top_feature_expression_by_confusion(
     )
     if expression.filter(pl.col("__tpm") < 0.0).height > 0:
         raise FigureError(f"top-feature expression contains negative TPM values for {figure_name}")
-    data = (
-        expression.join(
-            predictions.select(["__species", "__confusion_group"]),
-            on="__species",
-            how="inner",
-        )
-        .with_columns((pl.col("__tpm") + 1.0).log(base=2.0).alias("__log2_tpm"))
-        .sort(["__feature", "__confusion_group", "__species"])
+    values = expression.select(
+        pl.col("__species").alias("species"),
+        pl.col("__feature").alias("feature"),
+        (pl.col("__tpm") + 1.0).log(base=2.0).alias("value"),
     )
-    available_features = set(data.get_column("__feature").unique().to_list())
-    features = [feature for feature in features if feature in available_features]
-    if not features:
-        raise FigureError(
-            f"No top-feature expression rows overlap prediction species for {figure_name}"
-        )
-
-    title_lines_by_feature: dict[str, list[str]] = {}
-    for feature in features:
-        annotation = annotation_lookup.get(feature)
-        title_lines = (
-            textwrap.wrap(
-                " ".join(annotation.split()),
-                width=36,
-                break_long_words=False,
-            )
-            if annotation is not None
-            else []
-        )
-        title_lines.append(f"({feature})")
-        title_lines_by_feature[feature] = title_lines
-
-    n_columns = min(5, len(features))
-    n_rows = int(np.ceil(len(features) / n_columns))
-    width_px = max(_NATURE_DOUBLE_COLUMN_WIDTH_PX, 210 * n_columns)
-    max_title_lines = max(len(lines) for lines in title_lines_by_feature.values())
-    top_padding_px = max(42, 12 + 9 * max_title_lines)
-    bottom_padding_px = 60
-    height_px = max(
-        430,
-        145 + 205 * n_rows + max(0, top_padding_px - 57),
+    _write_feature_values_by_confusion(
+        values=values,
+        predictions=oof_predictions,
+        features=features,
+        out_path=out_path,
+        value_label="log2(TPM + 1)",
+        orthogroup_annotations=orthogroup_annotations,
+        label_col=label_col,
+        context="OOF" if label_col == "label" else "External-test",
     )
-    fig, axes = plt.subplots(
-        n_rows,
-        n_columns,
-        figsize=_figure_size_inches(width_px, height_px),
-        dpi=_FIG_DPI,
-        squeeze=False,
-    )
-    fig.patch.set_facecolor("white")
-    flat_axes = np.asarray(axes, dtype=object).reshape(-1)
-    positions = np.arange(1, len(_CONFUSION_GROUP_ORDER) + 1, dtype=float)
-
-    for axis_index, feature in enumerate(features):
-        ax = flat_axes[axis_index]
-        feature_data = data.filter(pl.col("__feature") == feature)
-        values_by_group: dict[str, np.ndarray] = {}
-        for group in _CONFUSION_GROUP_ORDER:
-            group_data = feature_data.filter(pl.col("__confusion_group") == group).sort("__species")
-            values_by_group[group] = np.asarray(
-                group_data.get_column("__log2_tpm").to_list(), dtype=float
-            )
-
-        nonempty_groups = [
-            group for group in _CONFUSION_GROUP_ORDER if values_by_group[group].size > 0
-        ]
-        if nonempty_groups:
-            box = ax.boxplot(
-                [values_by_group[group].tolist() for group in nonempty_groups],
-                positions=[
-                    float(_CONFUSION_GROUP_ORDER.index(group) + 1) for group in nonempty_groups
-                ],
-                widths=0.56,
-                patch_artist=True,
-                showmeans=True,
-                showfliers=False,
-                manage_ticks=False,
-                meanprops={
-                    "marker": "D",
-                    "markerfacecolor": _AXIS_COLOR,
-                    "markeredgecolor": _AXIS_COLOR,
-                    "markersize": 2.4,
-                },
-                medianprops={"linewidth": 0.8, "color": _AXIS_COLOR},
-                whiskerprops={"linewidth": 0.7, "color": _MUTED_TEXT_COLOR},
-                capprops={"linewidth": 0.7, "color": _MUTED_TEXT_COLOR},
-            )
-            for patch, group in zip(box["boxes"], nonempty_groups, strict=True):
-                color = _CONFUSION_GROUP_COLORS[group]
-                patch.set_facecolor(color)
-                patch.set_alpha(0.22)
-                patch.set_edgecolor(color)
-                patch.set_linewidth(0.8)
-
-        for group_index, group in enumerate(_CONFUSION_GROUP_ORDER):
-            values = values_by_group[group]
-            if values.size == 0:
-                continue
-            offsets = _deterministic_offsets(values.size, 0.18)
-            x_values = np.full(values.size, positions[group_index], dtype=float) + offsets
-            scatter_kwargs: dict[str, Any] = {
-                "s": 8,
-                "color": _CONFUSION_GROUP_COLORS[group],
-                "linewidths": 0.45,
-                "alpha": 0.64,
-                "zorder": 3,
-            }
-            if group in {"FN", "FP"}:
-                scatter_kwargs["marker"] = "x"
-            else:
-                scatter_kwargs["marker"] = "o"
-                scatter_kwargs["edgecolors"] = "white"
-            ax.scatter(x_values, values, **scatter_kwargs)
-
-        ax.set_title(
-            "\n".join(title_lines_by_feature[feature]),
-            fontsize=_SUBTITLE_FONTSIZE,
-            pad=3.0,
-        )
-        ax.axvline(2.5, color="#d0d0d0", linewidth=0.6, linestyle=(0, (3, 3)))
-        ax.set_xlim(0.55, 4.45)
-        ax.set_xticks(positions)
-        ax.set_xticklabels(
-            [f"{group}\nn={values_by_group[group].size}" for group in _CONFUSION_GROUP_ORDER],
-            fontsize=_TICK_FONTSIZE,
-        )
-        ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
-        ax.set_axisbelow(True)
-
-    for axis_index in range(len(features), flat_axes.size):
-        flat_axes[axis_index].set_visible(False)
-
-    fig.supxlabel(
-        "OOF confusion group" if label_col == "label" else "External-test confusion group",
-        fontsize=_LABEL_FONTSIZE,
-    )
-    fig.supylabel("log2(TPM + 1)", fontsize=_LABEL_FONTSIZE)
-    fig.subplots_adjust(
-        left=0.055,
-        right=0.995,
-        top=1.0 - top_padding_px / height_px,
-        bottom=bottom_padding_px / height_px,
-        wspace=0.32,
-        hspace=0.88,
-    )
-    _save_svg_figure(fig, out_path)
 
 
 @_prediction_population_figures("pred_predict")
@@ -2918,6 +2951,70 @@ def _external_roc_pr_curves(
     _pr_curve_external(y_true, prob, pr_out_path)
 
 
+def _calibration_bins(predictions: pl.DataFrame, *, label_col: str = "label") -> pl.DataFrame:
+    """Ten equal-width probability bins; preserve empty bins and include p=1."""
+    if not {label_col, "prob"}.issubset(predictions.columns):
+        raise FigureError("Calibration requires observed labels and probabilities")
+    valid = predictions.filter(
+        pl.col(label_col).is_in([0, 1])
+        & pl.col("prob").is_finite()
+        & pl.col("prob").is_between(0, 1)
+    ).with_columns((pl.col("prob") * 10).floor().clip(0, 9).cast(pl.Int64).alias("bin"))
+    grouped = valid.group_by("bin").agg(
+        pl.len().alias("n_species"),
+        pl.col("prob").mean().alias("mean_probability"),
+        pl.col(label_col).mean().alias("observed_fraction"),
+    )
+    return (
+        pl.DataFrame({"bin": range(10)})
+        .join(grouped, on="bin", how="left")
+        .with_columns(pl.col("n_species").fill_null(0))
+        .sort("bin")
+    )
+
+
+@_prediction_population_figures("predictions")
+def _prediction_calibration(
+    predictions: pl.DataFrame,
+    out_path: Path,
+    *,
+    label_col: str = "label",
+) -> None:
+    bins = _calibration_bins(predictions, label_col=label_col)
+    if bins["n_species"].sum() == 0:
+        _write_message_figure(
+            title="Probability calibration",
+            message="No usable labels and probabilities.",
+            out_path=out_path,
+            width_px=350,
+            height_px=220,
+        )
+        return
+    fig, (axis, counts) = plt.subplots(
+        2, 1, figsize=(3.5, 4.3), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
+    )
+    axis.plot(
+        [0, 1], [0, 1], color="#999999", linestyle="--", linewidth=0.7, label="Perfect calibration"
+    )
+    axis.plot(
+        bins["mean_probability"].to_numpy(),
+        bins["observed_fraction"].to_numpy(),
+        "o-",
+        color=_COLOR_BLUE,
+        markersize=3,
+        linewidth=0.8,
+    )
+    axis.set_ylim(-0.03, 1.03)
+    axis.set_ylabel("Observed positive fraction")
+    axis.legend(loc="upper left", frameon=False)
+    counts.bar((np.arange(10) + 0.5) / 10, bins["n_species"], width=0.085, color=_COLOR_BLUE)
+    counts.set_yscale("symlog", linthresh=1)
+    counts.set_ylabel("Species count")
+    counts.set_xlim(0, 1)
+    counts.set_xlabel("Predicted probability")
+    _save_svg_figure(fig, out_path)
+
+
 def _binary_metric_summary_from_counts(
     *, tn: int, fp: int, fn: int, tp: int
 ) -> dict[str, float | None]:
@@ -2951,32 +3048,39 @@ def _binary_metric_summary_from_counts(
     }
 
 
-@_prediction_population_figures("pred_external_test")
-def _external_confusion_matrix(pred_external_test: pl.DataFrame, out_path: Path) -> None:
-    required = {"true_label", "pred_label_fixed_threshold"}
-    if not required.issubset(pred_external_test.columns):
-        raise FigureError(
-            "prediction_external_test.tsv schema is invalid for external_confusion_matrix.svg"
+@_prediction_population_figures("predictions")
+def _prediction_confusion_matrix(
+    predictions: pl.DataFrame,
+    out_path: Path,
+    *,
+    label_col: str = "label",
+) -> None:
+    source = "prediction_cv.tsv" if label_col == "label" else "prediction_external_test.tsv"
+    if "prob" in predictions.columns:
+        predictions = predictions.filter(
+            pl.col("prob").is_finite() & pl.col("prob").is_between(0, 1)
+        ).with_columns(
+            (pl.col("prob") >= FIXED_PROBABILITY_THRESHOLD_VALUE)
+            .cast(pl.Int64)
+            .alias("pred_label_fixed_threshold")
         )
+    required = {label_col, "pred_label_fixed_threshold"}
+    if not required.issubset(predictions.columns):
+        raise FigureError(f"{source} schema is invalid for {out_path.name}")
 
-    data = pred_external_test.select(
-        pl.col("true_label").cast(pl.Int64, strict=False).alias("__true_label"),
-        prediction_label_expr(pred_external_test).alias("__pred_label"),
+    data = predictions.select(
+        pl.col(label_col).cast(pl.Int64, strict=False).alias("__true_label"),
+        prediction_label_expr(predictions).alias("__pred_label"),
     ).filter(pl.col("__true_label").is_not_null() & pl.col("__pred_label").is_not_null())
-    if data.height == 0 and "decision_status" not in pred_external_test.columns:
-        raise FigureError(
-            "prediction_external_test.tsv is empty; cannot draw external_confusion_matrix.svg"
-        )
+    if data.height == 0 and "decision_status" not in predictions.columns:
+        raise FigureError(f"{source} is empty; cannot draw {out_path.name}")
 
     true_labels = [int(v) for v in data.select("__true_label").to_series().to_list()]
     pred_labels = [int(v) for v in data.select("__pred_label").to_series().to_list()]
     non_binary = sorted({value for value in [*true_labels, *pred_labels] if value not in (0, 1)})
     if non_binary:
         values = ", ".join(str(value) for value in non_binary)
-        raise FigureError(
-            "prediction_external_test.tsv contains non-binary labels for "
-            f"external_confusion_matrix.svg: {values}"
-        )
+        raise FigureError(f"{source} contains non-binary labels for {out_path.name}: {values}")
 
     matrix = np.zeros((2, 2), dtype=int)
     for true_label, pred_label in zip(true_labels, pred_labels, strict=True):
@@ -2994,8 +3098,6 @@ def _external_confusion_matrix(pred_external_test: pl.DataFrame, out_path: Path)
     ax.set_yticks([0, 1])
     ax.set_yticklabels(["0", "1"], fontsize=_TICK_FONTSIZE)
     ax.set_xlabel("Predicted label", fontsize=_LABEL_FONTSIZE)
-    if "pred_label_selective" in pred_external_test.columns:
-        ax.set_title("Accepted decisions", fontsize=_TITLE_FONTSIZE)
     ax.set_ylabel("True label", fontsize=_LABEL_FONTSIZE)
     ax.set_xticks(np.arange(-0.5, 2.0, 1.0), minor=True)
     ax.set_yticks(np.arange(-0.5, 2.0, 1.0), minor=True)
@@ -4045,8 +4147,10 @@ def _feature_filter_funnel(
         [_FEATURE_FILTER_FIGURE_STAGE_LABELS[stage] for stage in stage_order],
         fontsize=_TICK_FONTSIZE,
     )
-    site_units = any(stage in {"alignment_sites", "observed_sites", "variable_sites"}
-                     for stage in stage_order)
+    site_units = any(
+        stage in {"alignment_sites", "observed_sites", "variable_sites", "retained_sites"}
+        for stage in stage_order
+    )
     ax.set_xlabel("Site filtering step" if site_units else "Feature selection step",
                   fontsize=_LABEL_FONTSIZE)
     ax.set_ylabel("Number of sites" if site_units else "Number of selected features",
@@ -4414,6 +4518,18 @@ def write_run_figures(
             _cv_metrics_overview,
             (metrics_cv, cv_dir / "cv_metrics_overview.svg"),
         )
+    add_job(
+        "cv_confusion_matrix",
+        _prediction_confusion_matrix,
+        (oof_predictions, cv_dir / "cv_confusion_matrix.svg"),
+        catch_figure_error=True,
+    )
+    add_job(
+        "cv_calibration",
+        _prediction_calibration,
+        (oof_predictions, cv_dir / "cv_calibration.svg"),
+        catch_figure_error=True,
+    )
     if group_bootstrap_metrics is not None:
         add_job(
             "group_bootstrap_metrics",
@@ -4699,9 +4815,15 @@ def write_run_figures(
             )
         add_job(
             "external_confusion_matrix",
-            _external_confusion_matrix,
+            _prediction_confusion_matrix,
             (pred_external_test, external_test_dir / "external_confusion_matrix.svg"),
+            {"label_col": "true_label"},
             catch_figure_error=True,
+        )
+        add_job(
+            "external_calibration", _prediction_calibration,
+            (pred_external_test, external_test_dir / "external_calibration.svg"),
+            {"label_col": "true_label"}, catch_figure_error=True,
         )
         add_job(
             "external_species_probability_by_trait",
@@ -4825,7 +4947,7 @@ def _candidate_feature_labels(
         _orthogroup_annotation_lookup(orthogroup_annotations)
         if orthogroup_annotations is not None and orthogroup_annotations.height else {}
     )
-    renderer = FigureCanvasAgg(fig).get_renderer()
+    renderer = cast(Any, FigureCanvasAgg(fig)).get_renderer()
     font = FontProperties(size=fontsize)
     labels: list[str] = []
     for feature in features:

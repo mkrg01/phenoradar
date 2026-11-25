@@ -103,6 +103,6 @@ def write_residue_tree(
     return _write_tree_feature_heatmap_svg(
         tree_path=tree_path, annotation=table, value_col="residue", cmap_name="",
         out_path=run_dir / "cv/figures/tree_feature_heatmap_amino_acid.svg",
-        title="Representative residues (sites ranked by mean OOF PSS)",
+        title="Representative residues (sites ranked by mean outer-fold PSS)",
         annotate_features=True,
     )

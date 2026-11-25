@@ -609,7 +609,7 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
         assert ">4.00<" in svg_text
         assert "Missing value" in svg_text
         assert ">NA<" in svg_text
-        assert "OOF confusion group" in svg_text
+        assert "Classification outcome" in svg_text
         assert "TP: true positive" in svg_text
         assert "FN: false negative" in svg_text
         assert "TN: true negative" in svg_text
@@ -617,7 +617,7 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
         assert "sp1 OOF confusion group=TN" in svg_text
         assert "sp2 OOF confusion group=TP" in svg_text
         heatmap_legend_y = _svg_text_absolute_y(svg_text, "log2(TPM + 1)")
-        confusion_legend_y = _svg_text_absolute_y(svg_text, "OOF confusion group")
+        confusion_legend_y = _svg_text_absolute_y(svg_text, "Classification outcome")
         assert confusion_legend_y - heatmap_legend_y >= 30
         svg_root = ET.fromstring(svg_text)
         text_styles = {

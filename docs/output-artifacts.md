@@ -233,9 +233,12 @@ selection records the derived requested count. See
 Most figures are SVGs under the matching stage. `figures.top_features` limits
 global or species-local features; optional OG annotations replace ID-only labels.
 
+Artwork keeps axis labels, units, panel identifiers and graphical keys; explanatory
+prose is omitted from the figure canvas.
+
 | Purpose | Figures under `cv/figures/` |
 | --- | --- |
-| Performance | `cv_metrics_overview.svg`, `roc_curve_cv.svg`, `pr_curve_cv.svg`, optional `group_bootstrap_metrics.svg` |
+| Performance | `cv_metrics_overview.svg`, `cv_confusion_matrix.svg`, `cv_calibration.svg`, `roc_curve_cv.svg`, `pr_curve_cv.svg`, optional `group_bootstrap_metrics.svg` |
 | Training gap | `cv_loss_by_split.svg` |
 | Probability distributions | `cv_species_probability_by_trait.svg`, `cv_fold_trait_probability.svg`, `probability_by_<group>.svg` |
 | Feature reliance | `feature_importance_top.svg`, `feature_importance_by_fold_heatmap.svg`, `coefficients_signed_top.svg` |
@@ -250,7 +253,7 @@ figures under `model/figures/` use the `final_refit_` prefix and summarize final
 ensemble members.
 
 External-test figures include probability distributions, confusion matrix,
-ROC/PR curves, CV/external metric comparison, top-feature expression, and
+`external_calibration.svg`, ROC/PR curves, CV/external metric comparison, top-feature expression, and
 `final_refit_loss_by_split.svg`. Inference figures include
 `inference_probability_distribution.svg` and
 `species_probability_cv_and_inference.svg`. Group plots require the configured
@@ -258,6 +261,17 @@ metadata column; ROC/PR plots require a usable label population.
 
 The confusion matrix shows cell counts and within-label percentages. Use the
 classification or abstention summary tables for exact scores and decision counts.
+These evaluation figures use the same implementation in expression, amino-acid,
+and combined modes. Calibration uses ten equal-width probability bins and shows
+the mean prediction, observed positive fraction, and species counts per bin.
+
+Expression and residue-frequency distributions also share their renderer: two
+columns, TP/FN/TN/FP order (also used by tree legends), one point per observed species,
+available / total counts,
+and matching PDFs with at most six panels per page. Expression uses `log2(TPM + 1)`;
+AA uses residue frequency (0–1). Missing observations are excluded from the plotted
+values. Boxes require at least three observations. Combined runs show both input
+types; their expression plots use the existing raw-expression cache.
 
 ### Local evidence PDFs
 

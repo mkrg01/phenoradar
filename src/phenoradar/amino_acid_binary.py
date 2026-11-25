@@ -111,9 +111,7 @@ def _statistics(binary: _Binary, species: list[str], groups: np.ndarray,
     keep = eligible[binary.sites]
     sites, aa = binary.sites[keep], binary.residues[keep]
     mean[sites, aa] = positives[keep] / counts[sites]
-    # For at most 2**24 samples, a varying binary column's float32 variance is
-    # far above 1e-12; constant columns have exactly zero variance.
-    active[sites, aa] = (positives[keep] > 0) & (positives[keep] < counts[sites])
+    active[sites, aa] = known[sites, aa]
     minor = np.zeros(n, dtype=int)
     minor_groups = np.zeros(n, dtype=int)
     if audit:

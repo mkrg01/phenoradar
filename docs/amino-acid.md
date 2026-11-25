@@ -126,9 +126,10 @@ Processing order:
    imposes a direction. Ties use OG ID and input column order. With `none`,
    neither ranking nor the `max_sites` limit applies: all quality-passing sites
    are retained.
-5. Freeze model sites, center states on training means, and drop constant state
-   columns. Missing or previously unseen state mass receives the mean and has
-   zero contribution; known mass in a partly novel composition retains its effect.
+5. Freeze model sites, encode all training-observed residue states, and center
+   frequencies on training means. Missing or previously unseen state mass receives
+   the mean and has zero contribution; known mass in a partly novel composition
+   retains its effect.
 
 Sequence features are centered without variance scaling. `best_covered` uses the
 same representatives for ranking and fitting, even after sites are removed.
@@ -423,12 +424,25 @@ No sites, candidates or CV folds are removed to reduce resource use.
 AA runs also write the shared evaluation, model-selection, coefficient,
 importance and stability SVGs under each stage's `figures/` directory.
 `amino_acid_site_pss_top.svg` and `amino_acid_site_effect_range_top.svg` show
-separate site scores. Frequency plots use raw residue frequencies (0–1), with
-unavailable values excluded from the confusion-group distributions.
-The site-filter funnel counts alignment sites, rather than residue features.
+per-fold scores (blue points) and their mean (black diamonds). Scores describe
+training coefficients: PSS sums absolute residue coefficients; R is their range.
+Models are averaged within folds, then folds receive equal weight; absent sites
+count as zero. Bounded `*_top_summary.tsv` and `*_top_by_fold.tsv` tables save the
+displayed values. `amino_acid_site_stability_top.svg` shows the eligible and
+selected fractions of all outer folds for the same top-PSS sites.
+
+The site-filter funnel counts sites, including the final sites with active encoded
+residue features after ranking, when site QC is available. It excludes final-refit
+and inner-CV records.
+
+Evaluation and expression/residue distribution figures share the
+[common figure implementation](output-artifacts.md#figures-and-species-evidence)
+across all three feature modes. Combined runs additionally write expression
+distributions for CV and external-test species, plus their bounded raw values in
+`top_feature_expression.tsv` under the corresponding stage's tables.
 
 Temporary arithmetic skips canonical states absent from the cached compositions.
-Training means, known states and the float32 variance threshold remain unchanged;
+Training means and known states use the same training-only statistics;
 known-residue mass keeps the original 20-state reduction for partial sums and
 rounding boundaries; provably clipped zero/one sums use compact arithmetic. Encoded columns retain
 the original site/residue order. Wide-path scoring checks the full validation
@@ -484,9 +498,14 @@ coefficient, frequency and PSS/R figures include the annotation name
 alongside the OG/site/residue ID. Tree headers may shorten the annotation text; OG IDs and input-MSA site numbers
 are always kept in full. SVG tooltips and the annotation TSV retain the complete name. Missing annotations retain IDs.
 
-`amino_acid_frequency_by_confusion.svg` overlays one point per species with an
-available OOF residue frequency on each boxplot. Horizontal offsets are fixed by
-species order; each group reports its observed species count (`n`).
+`amino_acid_frequency_by_confusion.svg` uses two columns of panels, with one point
+per species having an available OOF residue frequency (0–1). Horizontal offsets
+are fixed by species order. Each group reports available / total species, so
+missing observations remain visible in the counts; missing values are excluded
+from distributions. Boxes require at least three observations and show median,
+IQR and 1.5-IQR whiskers. The matching PDF has at most six panels per page.
+Both formats also have accepted-only variants. All-species groups use raw
+fixed-0.5 decisions, including decisions withheld by abstention.
 
 `top_amino_acid_frequencies.tsv` contains the OOF residue frequencies used in
 `amino_acid_frequency_by_confusion.svg`.

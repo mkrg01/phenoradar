@@ -1,6 +1,8 @@
 """Expression-equivalent figures from bounded slices of amino-acid output tables."""
+
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -8,6 +10,17 @@ import numpy as np
 import polars as pl
 
 from phenoradar import figures
+from phenoradar.amino_acid_diagnostics import (
+    site_score_summary,
+    write_site_scores,
+    write_site_stability,
+)
+from phenoradar.amino_acid_diagnostics import (
+    write_frequency_by_confusion as _frequency_by_confusion,
+)
+from phenoradar.amino_acid_diagnostics import (
+    write_site_filter_funnel as _site_filter_funnel,
+)
 from phenoradar.config import AppConfig
 from phenoradar.group_summary_outputs import write_group_summary_artifacts
 from phenoradar.metrics import (
@@ -20,6 +33,7 @@ if TYPE_CHECKING:
     from phenoradar.amino_acid import AlignmentStore
     from phenoradar.amino_acid_reporting import AAReportWriter
     from phenoradar.amino_acid_run import AAMember
+    from phenoradar.combined import ExpressionInput
 
 
 def _read(directory: Path, name: str) -> pl.DataFrame | None:
@@ -47,8 +61,10 @@ def _selection(directory: Path, name: str) -> pl.DataFrame | None:
         )
     return frame.with_columns(
         pl.col("scope").str.replace("^outer_fold_", "").alias("fold_id"),
-        pl.when(pl.col("scope") == "final_refit").then(pl.lit("final_refit"))
-        .otherwise(pl.lit("outer_fold")).alias("selection_scope"),
+        pl.when(pl.col("scope") == "final_refit")
+        .then(pl.lit("final_refit"))
+        .otherwise(pl.lit("outer_fold"))
+        .alias("selection_scope"),
     )
 
 
@@ -70,33 +86,59 @@ def _final_features(members: list[AAMember]) -> tuple[pl.DataFrame, pl.DataFrame
                 importance[i, cols[start:end]] = values / total
     common = {"feature": names, "n_models": [len(members)] * len(names)}
     return (
-        pl.DataFrame({**common, "importance_mean": importance.mean(axis=0),
-                      "importance_std": importance.std(axis=0), "method": "coef_abs_l1_norm"}),
-        pl.DataFrame({**common, "coef_mean": beta.mean(axis=0), "coef_std": beta.std(axis=0),
-                      "method": "coef_signed", "reason": "NA"}),
+        pl.DataFrame(
+            {
+                **common,
+                "importance_mean": importance.mean(axis=0),
+                "importance_std": importance.std(axis=0),
+                "method": "coef_abs_l1_norm",
+            }
+        ),
+        pl.DataFrame(
+            {
+                **common,
+                "coef_mean": beta.mean(axis=0),
+                "coef_std": beta.std(axis=0),
+                "method": "coef_signed",
+                "reason": "NA",
+            }
+        ),
     )
 
 
 def write_amino_acid_figures(
-    run_dir: Path, config: AppConfig, members: list[AAMember] | None = None,
-    *, report: AAReportWriter | None = None, store: AlignmentStore | None = None,
+    run_dir: Path,
+    config: AppConfig,
+    members: list[AAMember] | None = None,
+    *,
+    report: AAReportWriter | None = None,
+    store: AlignmentStore | None = None,
+    expression: ExpressionInput | None = None,
 ) -> list[str]:
     """Reuse common plots, without loading millions of zero coefficients into RAM."""
     cv = run_dir / "cv/tables"
     model = run_dir / "model/tables"
     limit = config.figures.top_features
-    importance = _scan(cv, "feature_importance").sort(
-        ["importance_mean", "feature"], descending=[True, False]
-    ).head(limit).collect(engine="streaming")
-    coefficients = _scan(cv, "coefficients").with_columns(
-        pl.col("coef_mean").abs().alias("_abs")
-    ).sort(["_abs", "feature"], descending=[True, False]).head(limit).drop("_abs").collect(
-        engine="streaming")
+    importance = (
+        _scan(cv, "feature_importance")
+        .sort(["importance_mean", "feature"], descending=[True, False])
+        .head(limit)
+        .collect(engine="streaming")
+    )
+    coefficients = (
+        _scan(cv, "coefficients")
+        .with_columns(pl.col("coef_mean").abs().alias("_abs"))
+        .sort(["_abs", "feature"], descending=[True, False])
+        .head(limit)
+        .drop("_abs")
+        .collect(engine="streaming")
+    )
     requested = sorted(set(importance["feature"]) | set(coefficients["feature"]))
     if report is None:
         by_fold = {
-            name: _scan(cv, name).filter(pl.col("feature").is_in(requested)).collect(
-                engine="streaming")
+            name: _scan(cv, name)
+            .filter(pl.col("feature").is_in(requested))
+            .collect(engine="streaming")
             for name in ["feature_importance_by_fold", "coefficients_by_fold"]
         }
         means = None
@@ -105,9 +147,12 @@ def write_amino_acid_figures(
         fold_model_counts: dict[str, int] = {}
         for fold, _, _ in report.models:
             fold_model_counts[fold] = fold_model_counts.get(fold, 0) + 1
-        axes = pl.DataFrame({
-            "fold_id": list(fold_model_counts), "n_models": list(fold_model_counts.values()),
-        }).lazy()
+        axes = pl.DataFrame(
+            {
+                "fold_id": list(fold_model_counts),
+                "n_models": list(fold_model_counts.values()),
+            }
+        ).lazy()
         axes = axes.join(pl.DataFrame({"feature": requested}).lazy(), how="cross")
         selected_means = means.filter(pl.col("feature").is_in(requested))
         grid = axes.join(selected_means, on=["fold_id", "feature"], how="left")
@@ -116,217 +161,242 @@ def write_amino_acid_figures(
             ("feature_importance_by_fold", "importance", "importance_mean", "coef_abs_l1_norm"),
             ("coefficients_by_fold", "coefficient", "coef_mean", "coef_signed"),
         ]:
-            frame = grid.select("fold_id", "feature", "n_models",
-                                pl.col(column).fill_null(0).alias(label),
-                                pl.lit(method).alias("method"))
+            frame = grid.select(
+                "fold_id",
+                "feature",
+                "n_models",
+                pl.col(column).fill_null(0).alias(label),
+                pl.lit(method).alias("method"),
+            )
             if column == "coefficient":
                 frame = frame.with_columns(pl.lit("NA").alias("reason"))
             by_fold[name] = frame.collect(engine="streaming")
     selected = _selection(cv, "model_selection_selected")
     final_selected = _selection(model, "model_selection_selected")
     if final_selected is not None:
-        selected = (final_selected if selected is None else
-                    pl.concat([selected, final_selected], how="diagonal_relaxed"))
+        selected = (
+            final_selected
+            if selected is None
+            else pl.concat([selected, final_selected], how="diagonal_relaxed")
+        )
     final_trials = _selection(model, "model_selection_trials")
-    final_summary = (None if final_trials is None else
-                     figures._summarize_model_selection_trials_for_figure(final_trials))
+    final_summary = (
+        None
+        if final_trials is None
+        else figures._summarize_model_selection_trials_for_figure(final_trials)
+    )
     final_importance, final_coefficients = _final_features(members) if members else (None, None)
+    expression_importance = (
+        _scan(cv, "expression_feature_importance")
+        .sort(["importance_mean", "feature"], descending=[True, False])
+        .head(limit)
+        .collect(engine="streaming")
+        if expression is not None
+        else None
+    )
     oof = _read(cv, "prediction_cv")
     assert oof is not None
-    coefficient_source = (_scan(cv, "coefficients_by_fold") if means is None else
-                          means.rename({"coefficient": "coef_mean"}))
-    sparsity = coefficient_source.group_by("fold_id").agg(
-        (pl.col("coef_mean").abs() > 1e-12).sum().alias("n_nonzero_features")
-    ).with_columns(pl.lit("outer_fold").alias("scope")).collect(engine="streaming")
-    # Site scores are aggregated after filtering zeros; denominator includes all
-    # models, including sites absent from individual fitted feature schemas.
+    coefficient_source = (
+        _scan(cv, "coefficients_by_fold")
+        if means is None
+        else means.rename({"coefficient": "coef_mean"})
+    )
+    sparsity = (
+        coefficient_source.group_by("fold_id")
+        .agg((pl.col("coef_mean").abs() > 1e-12).sum().alias("n_nonzero_features"))
+        .with_columns(pl.lit("outer_fold").alias("scope"))
+        .collect(engine="streaming")
+    )
     counts = _selection(cv, "model_selection_selected")
     assert counts is not None
-    n_models = counts.group_by("scope").len().lazy()
     top_sites = {}
+    site_folds = {}
     for metric in ["pss", "effect_range"]:
-        site_source = (report.sites.scan() if report is not None else _scan(
-            cv, "amino_acid_site_scores" if (cv / "amino_acid_site_scores.tsv").exists()
-            else f"amino_acid_site_{metric}"))
-        top = site_source.filter(pl.col(metric) > 0).group_by(
-            "scope", "orthogroup", "alignment_pos_1based"
-        ).agg(pl.col(metric).sum()).join(n_models, on="scope").with_columns(
-            (pl.col(metric) / pl.col("len")).alias(metric)
-        ).group_by("orthogroup", "alignment_pos_1based").agg(
-            (pl.col(metric).sum() / counts["scope"].n_unique()).alias(metric)
-        ).sort([metric, "orthogroup", "alignment_pos_1based"],
-               descending=[True, False, False]).head(limit).collect(engine="streaming")
-        top_sites[metric] = top
+        site_source = (
+            report.sites.scan() if report is not None else _scan(
+                cv, "amino_acid_site_scores" if (cv / "amino_acid_site_scores.tsv").exists()
+                else f"amino_acid_site_{metric}",
+            )
+        )
+        top_sites[metric], site_folds[metric] = site_score_summary(
+            site_source, counts, metric, limit,
+        )
     from phenoradar.orthogroup_annotation import load_orthogroup_annotations
 
     annotation_features = set(requested)
-    for annotation_frame in [final_importance, final_coefficients,
-                             _read(cv, "top_amino_acid_frequencies")]:
+    for annotation_frame in [
+        expression_importance,
+        final_importance,
+        final_coefficients,
+        _read(cv, "top_amino_acid_frequencies"),
+    ]:
         if annotation_frame is not None:
             annotation_features.update(annotation_frame["feature"])
     ogs = {figures._feature_address(f)[0] for f in annotation_features}
     for top in top_sites.values():
         ogs.update(top["orthogroup"])
     annotations = load_orthogroup_annotations(
-        Path(config.data.orthogroup_annotation_path) if config.data.orthogroup_annotation_path
-        else None, feature_names=sorted(ogs),
+        Path(config.data.orthogroup_annotation_path)
+        if config.data.orthogroup_annotation_path
+        else None,
+        feature_names=sorted(ogs),
     )
     metrics = _read(cv, "metrics_cv")
     assert metrics is not None
     external = _read(run_dir / "external_test/tables", "pred_external_test")
     inference = _read(run_dir / "inference/tables", "pred_inference")
     warnings = figures.write_run_figures(
-        run_dir=run_dir, metrics_cv=metrics, oof_predictions=oof,
-        feature_importance=importance, coefficients=coefficients, ensemble_model_probs=None,
+        run_dir=run_dir,
+        metrics_cv=metrics,
+        oof_predictions=oof,
+        feature_importance=importance,
+        coefficients=coefficients,
+        ensemble_model_probs=None,
         model_selection_trials=_selection(cv, "model_selection_trials"),
-        model_selection_selected=selected, feature_importance_by_fold=by_fold[
-            "feature_importance_by_fold"], coefficients_by_fold=by_fold["coefficients_by_fold"],
+        model_selection_selected=selected,
+        feature_importance_by_fold=by_fold["feature_importance_by_fold"],
+        coefficients_by_fold=by_fold["coefficients_by_fold"],
         feature_stability_by_fold_pair=_read(cv, "feature_stability_by_fold_pair"),
-        loss_by_split_cv=_read(cv, "loss_by_split_cv"), model_sparsity=sparsity,
+        loss_by_split_cv=_read(cv, "loss_by_split_cv"),
+        model_sparsity=sparsity,
         final_refit_feature_importance=final_importance,
         final_refit_coefficients=final_coefficients,
         final_refit_model_selection_trials_summary=final_summary,
         group_bootstrap_metrics=_read(cv, "group_bootstrap_metrics"),
         pred_external_test=external,
         pred_inference=inference,
-        trait_name=config.data.trait_col, top_features=limit,
+        trait_name=config.data.trait_col,
+        top_features=limit,
         orthogroup_annotations=annotations,
     )
+    if expression is not None and expression_importance is not None:
+        _write_combined_expression_figures(
+            run_dir,
+            config,
+            expression,
+            oof,
+            external,
+            expression_importance,
+            final_importance,
+            final_coefficients,
+            annotations,
+        )
     for stage, predictions, source in [
         ("cv", oof, "prediction_cv.tsv"),
         ("external_test", external, "pred_external_test.tsv"),
         ("inference", inference, "pred_inference.tsv"),
     ]:
         if predictions is not None and predictions.height:
-            warnings.extend(write_group_summary_artifacts(
-                run_dir=run_dir, stage=stage, predictions=predictions,
-                source_table_name=source, config=config,
-            ))
+            warnings.extend(
+                write_group_summary_artifacts(
+                    run_dir=run_dir,
+                    stage=stage,
+                    predictions=predictions,
+                    source_table_name=source,
+                    config=config,
+                )
+            )
     for metric, top in top_sites.items():
-        path = run_dir / "cv/figures" / f"amino_acid_site_{metric}_top.svg"
-        _site_bar(top, metric, path, annotations)
-    warnings.extend(write_run_tree_prediction_artifacts(
-        run_dir=run_dir,
-        tree_path=Path(config.data.tree_path) if config.data.tree_path else None,
-        metadata_path=Path(config.data.metadata_path),
-        tpm_path=Path(config.data.tpm_path),
-        species_col=config.data.species_col,
-        feature_col=config.data.feature_col,
-        value_col=config.data.value_col,
-        trait_col=config.data.trait_col,
-        group_col=config.data.contrast_group_col or config.split.group_col,
-        oof_predictions=oof,
-        thresholds=pl.DataFrame({
-            "threshold_name": [FIXED_PROBABILITY_THRESHOLD_NAME],
-            "threshold_value": [FIXED_PROBABILITY_THRESHOLD_VALUE],
-        }),
-        feature_importance=importance,
-        coefficients=coefficients,
-        pred_external_test=external,
-        include_feature_heatmaps=False,
-    ))
+        write_site_scores(run_dir, top, site_folds[metric], metric, annotations)
+    write_site_stability(run_dir, top_sites["pss"], annotations)
+    warnings.extend(
+        write_run_tree_prediction_artifacts(
+            run_dir=run_dir,
+            tree_path=Path(config.data.tree_path) if config.data.tree_path else None,
+            metadata_path=Path(config.data.metadata_path),
+            tpm_path=Path(config.data.tpm_path),
+            species_col=config.data.species_col,
+            feature_col=config.data.feature_col,
+            value_col=config.data.value_col,
+            trait_col=config.data.trait_col,
+            group_col=config.data.contrast_group_col or config.split.group_col,
+            oof_predictions=oof,
+            thresholds=pl.DataFrame(
+                {
+                    "threshold_name": [FIXED_PROBABILITY_THRESHOLD_NAME],
+                    "threshold_value": [FIXED_PROBABILITY_THRESHOLD_VALUE],
+                }
+            ),
+            feature_importance=importance,
+            coefficients=coefficients,
+            pred_external_test=external,
+            include_feature_heatmaps=False,
+        )
+    )
     if store is not None:
         from phenoradar.amino_acid_tree import write_residue_tree
 
-        warnings.extend(write_residue_tree(
-            run_dir, Path(config.data.tree_path) if config.data.tree_path else None,
-            store, top_sites["pss"], oof,
-            aggregation=config.preprocess.amino_acid.aggregation, annotations=annotations,
-        ))
+        warnings.extend(
+            write_residue_tree(
+                run_dir,
+                Path(config.data.tree_path) if config.data.tree_path else None,
+                store,
+                top_sites["pss"],
+                oof,
+                aggregation=config.preprocess.amino_acid.aggregation,
+                annotations=annotations,
+            )
+        )
     _frequency_by_confusion(run_dir, oof, limit, annotations)
     _site_filter_funnel(run_dir)
     return warnings
 
 
-def _frequency_by_confusion(
-    run_dir: Path, oof: pl.DataFrame, limit: int, annotations: pl.DataFrame | None = None,
+def _write_combined_expression_figures(
+    run_dir: Path,
+    config: AppConfig,
+    expression: ExpressionInput,
+    oof: pl.DataFrame,
+    external: pl.DataFrame | None,
+    importance: pl.DataFrame,
+    final_importance: pl.DataFrame | None,
+    final_coefficients: pl.DataFrame | None,
+    annotations: pl.DataFrame | None,
 ) -> None:
-    import matplotlib.pyplot as plt
+    """Adapt the existing raw-expression cache to the shared distribution writer."""
+    from phenoradar.cv import _build_top_feature_expression_from_matrix
+    from phenoradar.missing_expression import mark_expression_observations
 
-    from phenoradar.colors import CONFUSION_GROUP_COLORS
-
-    data = _read(run_dir / "cv/tables", "top_amino_acid_frequencies")
-    if data is None:
-        return
-    data = data.join(oof.select("species", "label", "prob"), on="species")
-    names = data["feature"].unique(maintain_order=True).head(limit).to_list()
-    if not names:
-        return
-    figure, axes = plt.subplots(
-        len(names), 1, figsize=(7, max(2, 1.4 * len(names))), squeeze=False
+    cv_coefficients = (
+        _scan(run_dir / "cv/tables", "expression_coefficients")
+        .filter(pl.col("feature").is_in(importance["feature"].to_list()))
+        .collect(engine="streaming")
     )
-    groups = [("TN", 0, False), ("FP", 0, True), ("FN", 1, False), ("TP", 1, True)]
-    for axis, name in zip(axes[:, 0], names, strict=True):
-        rows = data.filter((pl.col("feature") == name) & pl.col("frequency").is_finite())
-        group_rows = [
-            rows.filter((pl.col("label") == label) & ((pl.col("prob") >= .5) == pred))
-            .sort("species") for _, label, pred in groups
+    pools = [("cv", oof, importance, cv_coefficients, "label")]
+    if external is not None and final_importance is not None and final_coefficients is not None:
+        expression_keys = [
+            name for name in final_importance["feature"] if json.loads(name)[0] == "expression"
         ]
-        values = [frame["frequency"].to_numpy() for frame in group_rows]
-        box = axis.boxplot(values, widths=.6, patch_artist=True, showfliers=False)
-        for patch, (group, _, _) in zip(box["boxes"], groups, strict=True):
-            patch.set_facecolor(CONFUSION_GROUP_COLORS[group])
-            patch.set_edgecolor(CONFUSION_GROUP_COLORS[group])
-            patch.set_alpha(.22)
-        for position, ((group, _, _), observed) in enumerate(zip(groups, values, strict=True), 1):
-            if not len(observed):
-                continue
-            offsets = figures._deterministic_offsets(len(observed), .18)
-            kwargs = ({"marker": "x"} if group in {"FP", "FN"}
-                      else {"marker": "o", "edgecolors": "white"})
-            axis.scatter(
-                position + offsets, observed, s=12, color=CONFUSION_GROUP_COLORS[group],
-                linewidths=.45, alpha=.64, zorder=3, **kwargs,
-            )
-        axis.set_xticks(range(1, 5), [f"{group}\nn={len(observed)}" for
-                                    (group, _, _), observed in zip(groups, values, strict=True)])
-        axis.set_xlim(.55, 4.45)
-        axis.set_ylim(-.05, 1.05)
-        axis.set_ylabel("Frequency")
-        axis.set_title(figures._feature_axis_labels([name], annotations)[0], fontsize=9)
-    figure.supxlabel("OOF confusion group; each point = one species", fontsize=7)
-    figure.tight_layout()
-    figures._save_svg_figure(figure, run_dir / "cv/figures/amino_acid_frequency_by_confusion.svg")
-
-
-def _site_filter_funnel(run_dir: Path) -> None:
-    cv = run_dir / "cv/tables"
-    raw = _scan(cv, "amino_acid_og_qc").group_by("scope", "sample_set_id").agg(
-        pl.col("n_columns").sum(), pl.col("n_after_call_filter").sum(),
-        pl.col("n_after_variant_filter").sum(),
-    ).collect(engine="streaming")
-    stages = ["alignment_sites", "observed_sites", "variable_sites"]
-    rows = []
-    for stage, column in zip(stages, ["n_columns", "n_after_call_filter", "n_after_variant_filter"],
-                             strict=True):
-        values = raw[column].to_numpy()
-        quantiles = np.quantile(values, [0, .25, .5, .75, 1])
-        rows.append({"scope": "outer_fold", "stage": stage, "n_records": len(values),
-                     **dict(zip(["n_features_min", "n_features_q1", "n_features_median",
-                                 "n_features_q3", "n_features_max"], quantiles, strict=True))})
-    summary = pl.DataFrame(rows)
-    summary.write_csv(cv / "amino_acid_site_filter_counts_summary.tsv", separator="\t")
-    figures._feature_filter_funnel(
-        summary, run_dir / "cv/figures/amino_acid_site_filter_funnel.svg", stage_order=stages,
-    )
-
-
-def _site_bar(
-    frame: pl.DataFrame, metric: str, path: Path, annotations: pl.DataFrame | None = None,
-) -> None:
-    import json
-
-    import matplotlib.pyplot as plt
-
-    features = [json.dumps([og, position]) for og, position in
-                frame.select("orthogroup", "alignment_pos_1based").iter_rows()]
-    labels = figures._feature_axis_labels(features, annotations)
-    figure, axis = plt.subplots(figsize=(7, max(2, len(labels) * .24)))
-    axis.barh(np.arange(len(labels)), frame[metric].to_numpy(), color="#4477aa")
-    axis.set_yticks(np.arange(len(labels)), labels)
-    axis.invert_yaxis()
-    label = "PSS" if metric == "pss" else "R (coefficient range)"
-    axis.set_xlabel(f"Mean site {label} across outer folds (absent sites = 0)")
-    axis.set_ylabel("Orthogroup / alignment site\n(input MSA, 1-based)")
-    figure.tight_layout()
-    figures._save_svg_figure(figure, path)
+        final_top = (
+            final_importance.filter(pl.col("feature").is_in(expression_keys))
+            .sort(["importance_mean", "feature"], descending=[True, False])
+            .head(config.figures.top_features)
+        )
+        pools.append(("external_test", external, final_top, final_coefficients, "true_label"))
+    for stage, predictions, top, coefficients, label in pools:
+        if top.is_empty() or predictions.is_empty():
+            continue
+        names = top["feature"].to_list()
+        species = predictions["species"].to_list()
+        matrix = expression.matrix(species, [json.loads(name)[1] for name in names])
+        raw = _build_top_feature_expression_from_matrix(
+            species_order=species,
+            matrix=matrix,
+            feature_names=names,
+            feature_importance=top,
+            feature_limit=config.figures.top_features,
+        )
+        missing = config.preprocess.expression.missing_expression
+        if missing.method == "neutral":
+            raw = mark_expression_observations(raw, zero_as_missing=missing.zero_as_missing)
+        raw.write_csv(run_dir / stage / "tables/top_feature_expression.tsv", separator="\t")
+        figures._top_feature_expression_by_confusion(
+            oof_predictions=predictions,
+            top_feature_expression=raw,
+            feature_importance=top,
+            coefficients=coefficients,
+            out_path=run_dir / stage / "figures/top_feature_expression_by_confusion.svg",
+            top_features=config.figures.top_features,
+            orthogroup_annotations=annotations,
+            label_col=label,
+        )

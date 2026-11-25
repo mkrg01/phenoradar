@@ -41,24 +41,25 @@ def test_confusion_points_preserve_species_values_counts_and_deterministic_posit
     _frequency_by_confusion(tmp_path, oof, 2, annotations)
     axes = captured[-1].axes
     offsets = [np.asarray(points.get_offsets()) for points in axes[0].collections]
-    assert [len(values) for values in offsets] == [2, 1, 1, 1]
+    assert [len(values) for values in offsets] == [1, 1, 2, 1]
     for position, (actual, expected) in enumerate(
-        zip(offsets, [[0., 0.], [1.], [.4], [.4]], strict=True), 1,
+        zip(offsets, [[.4], [.4], [0., 0.], [1.]], strict=True), 1,
     ):
         np.testing.assert_array_equal(actual[:, 1], expected)
         assert np.all(np.abs(actual[:, 0] - position) <= .18 + 1e-12)
-    assert offsets[0][0, 0] != offsets[0][1, 0]  # Coincident residues remain visible.
+    assert offsets[2][0, 0] != offsets[2][1, 0]  # Coincident residues remain visible.
     assert [tick.get_text() for tick in axes[0].get_xticklabels()] == [
-        "TN\nn=2", "FP\nn=1", "FN\nn=1", "TP\nn=1",
+        "TP\nn=1/3", "FN\nn=1/2", "TN\nn=2/2", "FP\nn=1/1",
     ]
     assert len(axes[1].collections) == 1  # The other three groups are empty.
-    np.testing.assert_array_equal(axes[1].collections[0].get_offsets(), [[1., .5]])
+    np.testing.assert_array_equal(axes[1].collections[0].get_offsets(), [[3., .5]])
     svg = (tmp_path / "cv/figures/amino_acid_frequency_by_confusion.svg").read_text()
-    assert "Test kinase" in svg and "n=0" in svg
+    assert "Test kinase" in svg and "0/3" in svg
+    assert (tmp_path / "cv/figures/amino_acid_frequency_by_confusion.pdf").stat().st_size > 0
 
     # Input row order must not change horizontal placement within a species group.
     data.reverse().write_csv(source, separator="\t")
     _frequency_by_confusion(tmp_path, oof.reverse(), 2, annotations)
-    first = next(axis for axis in captured[-1].axes if "OG1:2 A" in axis.get_title())
+    first = next(axis for axis in captured[-1].axes if "OG1:2 A" in axis.get_title(loc="left"))
     for actual, expected in zip(first.collections, offsets, strict=True):
         np.testing.assert_array_equal(actual.get_offsets(), expected)

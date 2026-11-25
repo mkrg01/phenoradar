@@ -124,7 +124,9 @@ def compact_statistics_native(
     min_states: int,
 ) -> tuple[Any, ...] | None:
     """Avoid sample-sized temporary arrays for fractional training statistics."""
-    kernel = getattr(native, "compact_statistics", None)
+    # Older compiled extensions apply variance screening; use the NumPy path
+    # until an extension with the observed-state policy has been rebuilt.
+    kernel = getattr(native, "observed_state_statistics", None)
     if (kernel is None or not np.little_endian or values.dtype != np.float32
             or observed.dtype != np.bool_ or min_states < 2 or min_states > 20
             or not 0 < len(values) <= 2**24 or not values.shape[1]):

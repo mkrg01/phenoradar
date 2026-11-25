@@ -288,15 +288,24 @@ def test_representatives_are_frozen_before_ranking_and_ignore_held_out(tmp_path:
     assert signatures[0] == signatures[1]
 
 
-def test_constant_composition_is_not_a_variable_feature(tmp_path: Path) -> None:
-    path = alignment(tmp_path / "aa", [("s1_a", "A"), ("s1_v", "V"), ("s2_a", "A"), ("s2_v", "V")])
-    with (
-        AlignmentStore(path, ["s1", "s2"]) as store,
-        pytest.raises(AlignmentError, match="no variable features"),
-    ):
-        fit_amino_acid(
-            store, ["s1", "s2"], settings(), y=np.array([0, 1]), groups=np.array(["a", "b"])
+def test_constant_composition_is_retained_for_intercept_only_fitting(tmp_path: Path) -> None:
+    from phenoradar.glmnet import GlmnetLogisticRegression
+
+    path = alignment(tmp_path / "aa", [
+        ("s1_a", "A"), ("s1_v", "V"), ("s2_a", "A"), ("s2_v", "V"),
+        ("held_a", "A"),
+    ])
+    with AlignmentStore(path, ["s1", "s2", "held"]) as store:
+        fitted = fit_amino_acid(
+            store, ["s1", "s2"], settings(), y=np.array([0, 1]),
+            groups=np.array(["a", "b"]),
         )
+        matrix = fitted.matrix(store, ["s1", "s2"])
+        assert matrix.shape == (2, 2)
+        np.testing.assert_array_equal(matrix, 0)
+        model = GlmnetLogisticRegression().fit(matrix, np.array([0, 1]))
+        np.testing.assert_array_equal(model.coef_, 0)
+        np.testing.assert_allclose(model.predict_proba(fitted.matrix(store, ["held"])), .5)
 
 
 @pytest.mark.parametrize(
@@ -994,7 +1003,7 @@ def test_prediction_store_computes_only_requested_species_without_frequency_cach
         np.testing.assert_array_equal(q[0, :, 0], [1, 1])
 
 
-def test_block_statistics_match_observed_only_float32_reference() -> None:
+def test_block_statistics_keep_observed_states_and_training_means() -> None:
     from phenoradar.amino_acid import _site_statistics
 
     rng = np.random.default_rng(271)
@@ -1004,7 +1013,7 @@ def test_block_statistics_match_observed_only_float32_reference() -> None:
     raw[:, 1] = np.eye(20, dtype=np.float32)[0]
     raw[:, 2] = np.nan
     raw[0, 2] = np.eye(20, dtype=np.float32)[1]
-    # Include variation near the active-state cutoff.
+    # Include tiny variation that must remain in the encoded features.
     raw[:, 3] = np.eye(20, dtype=np.float32)[0]
     raw[::2, 3, 0] -= np.float32(2e-6)
     raw[::2, 3, 1] = np.float32(2e-6)
@@ -1013,8 +1022,7 @@ def test_block_statistics_match_observed_only_float32_reference() -> None:
         observed = np.isfinite(raw[:, j, 0])
         expected_mean = (raw[observed, j].mean(axis=0, dtype=np.float64)
                          if observed.any() else np.zeros(20))
-        expected_active = (raw[observed, j].var(axis=0) > 1e-12
-                           if observed.any() else np.zeros(20, dtype=bool))
+        expected_active = np.any(np.nan_to_num(raw[:, j]) > 0, axis=0)
         assert fractions[j] == np.mean(observed)
         np.testing.assert_array_equal(means[j], expected_mean)
         np.testing.assert_array_equal(known[j], np.any(np.nan_to_num(raw[:, j]) > 0, axis=0))
