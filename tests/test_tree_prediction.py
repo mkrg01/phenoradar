@@ -593,28 +593,16 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
         assert ">4.00<" in svg_text
         assert "Missing value" in svg_text
         assert ">NA<" in svg_text
-        assert "Classification outcome" in svg_text
-        assert "TP: true positive" in svg_text
-        assert "FN: false negative" in svg_text
-        assert "TN: true negative" in svg_text
-        assert "FP: false positive" in svg_text
-        assert "sp1 OOF confusion group=TN" in svg_text
-        assert "sp2 OOF confusion group=TP" in svg_text
-        heatmap_legend_y = _svg_text_absolute_y(svg_text, "log2(TPM + 1)")
-        confusion_legend_y = _svg_text_absolute_y(svg_text, "Classification outcome")
-        assert confusion_legend_y - heatmap_legend_y >= 30
+        assert "Classification outcome" not in svg_text
+        assert "OOF confusion group" not in svg_text
         svg_root = ET.fromstring(svg_text)
         text_styles = {
             element.text: element.get("style", "")
             for element in svg_root.iter()
             if element.tag.endswith("text") and element.text is not None
         }
-        assert "fill:rgb(0%,62%,45.1%)" in text_styles["sp1"]
-        assert "fill:rgb(0%,44.7%,69.8%)" in text_styles["sp2"]
-        assert "fill:rgb(0%,44.7%,69.8%)" in text_styles["TP: true positive"]
-        assert "fill:rgb(80%,47.5%,65.5%)" in text_styles["FN: false negative"]
-        assert "fill:rgb(0%,62%,45.1%)" in text_styles["TN: true negative"]
-        assert "fill:rgb(90.2%,62.4%,0%)" in text_styles["FP: false positive"]
+        assert "fill:rgb(0%,0%,0%)" in text_styles["sp1"]
+        assert "fill:rgb(0%,0%,0%)" in text_styles["sp2"]
     else:
         assert any("Toytree is unavailable" in warning for warning in warnings)
 

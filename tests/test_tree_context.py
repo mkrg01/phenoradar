@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -45,6 +46,8 @@ def test_tree_context_color_and_partition_identity(tmp_path: Path, shared: bool)
     assert annotation.equals(original)
     for path in [output, tmp_path / "accepted_only/heatmap.svg"]:
         text = visible(path)
+        assert "Classification outcome" not in text
+        assert "OOF confusion group" not in path.read_text()
         assert {"trait", "prob", "group", "Trait 0", "Trait 1", "Predicted probability"} <= text
         assert ("fold" in text) != shared
         # Non-LOGO must retain Fold even when the accepted subset happens to be bijective.
@@ -56,6 +59,17 @@ def test_tree_context_color_and_partition_identity(tmp_path: Path, shared: bool)
             for child in e)]
         assert len(context_cells) == (6 if path.parent.name == "accepted_only" else 8)
         assert len({e.get("style") for e in context_cells}) >= 4
+        root = ET.parse(path).getroot()
+        tree_ys = {float(e.get("y1")) for e in root.iter()
+                   if e.tag.endswith("}line") and "stroke-dasharray" in e.get("style", "")
+                   and e.get("y1") == e.get("y2")}
+        segments = [re.fullmatch(r"M ([\d.-]+) ([\d.-]+) L ([\d.-]+) ([\d.-]+)", e.get("d", ""))
+                    for e in root.iter()
+                    if e.tag.endswith("}path") and "stroke-dasharray" in e.get("style", "")]
+        lines = [tuple(map(float, match.groups())) for match in segments if match]
+        start_x = min(line[0] for line in lines)
+        table_ys = {line[1] for line in lines if line[0] == start_x and line[1] == line[3]}
+        assert tree_ys and tree_ys == table_ys
 
 
 def test_probability_axis_uses_actual_group_ids_and_freezes_population_mapping(

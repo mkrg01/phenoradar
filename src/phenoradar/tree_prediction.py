@@ -19,12 +19,7 @@ import matplotlib.colors
 import polars as pl
 
 from phenoradar.abstention import prediction_label_expr
-from phenoradar.colors import (
-    BINARY_TRAIT_COLORS,
-    CONFUSION_GROUP_COLORS,
-    CONFUSION_GROUP_LABELS,
-    CONFUSION_GROUP_ORDER,
-)
+from phenoradar.colors import BINARY_TRAIT_COLORS
 from phenoradar.config.schema import DEFAULT_TOP_FEATURES
 from phenoradar.contrast_metadata import canonical_metadata
 from phenoradar.cv_display import tree_context_tracks
@@ -1199,7 +1194,7 @@ def _write_tree_feature_heatmap_svg(
 def _tree_table_canvas(
     tree: Any, *, table_width: int, header_height: int, sidebar_width: int = 0,
     minimum_height: int = 0,
-) -> tuple[Any, Any, Any, int]:
+) -> tuple[Any, Any, Any, int, Any]:
     """Use separate, aligned tree and table axes with dimensions in pixels.
 
     Branch lengths must not control the space available to text or legends.
@@ -1224,7 +1219,7 @@ def _tree_table_canvas(
         bounds=(248, 248 + table_width, 12, header_height - 8),
         padding=0, xmin=0, xmax=table_width, ymin=0, ymax=1, show=False,
     )
-    return canvas, axes, headers, width
+    return canvas, axes, headers, width, tree_axes
 
 
 def _draw_toytree_heatmap(
@@ -1253,7 +1248,7 @@ def _draw_toytree_heatmap(
     annotation_width = sum(track_widths)
     species_label_width = _text_column_width_px(tip_labels, min_width=120, padding=28)
     header_height = max(64, 16 + 6 * max(len(_track_label(track)) for track in tracks))
-    canvas, axes, headers, _width = _tree_table_canvas(
+    canvas, axes, headers, _width, _tree_axes = _tree_table_canvas(
         tree, table_width=annotation_width + species_label_width + 40,
         header_height=header_height,
     )
@@ -1393,20 +1388,22 @@ def _draw_toytree_feature_heatmap(
     heatmap_end_x = feature_xs[-1] + feature_step / 2.0
     species_x = heatmap_end_x + 12
     feature_label_depth_px = _feature_label_depth_px(feature_labels)
-    species_width = _text_column_width_px(tip_labels, min_width=120, padding=60)
-    canvas, axes, headers, width = _tree_table_canvas(
+    text = importlib.import_module("toyplot.text")
+    left, right, _, _ = text.extents(
+        tip_labels, angle=0,
+        style={"font-family": "Helvetica", "font-size": "9px", "text-anchor": "start"},
+    )
+    species_width = max(80, math.ceil(float(max(right - left))) + 16)
+    canvas, axes, headers, width, tree_axes = _tree_table_canvas(
         tree, table_width=int(species_x) + species_width,
-        header_height=max(64, feature_label_depth_px + 16), sidebar_width=285,
-        minimum_height=680 if value_col == "residue" else 540,
+        header_height=max(64, feature_label_depth_px + 16), sidebar_width=270,
+        minimum_height=530 if value_col == "residue" else 380,
     )
 
     from phenoradar.residue_colors import residue_color
 
     value_lookup: dict[tuple[str, str], object] = {}
     residue_details: dict[tuple[str, str], str] = {}
-    trait_lookup: dict[str, object] = {}
-    prob_lookup: dict[str, object] = {}
-    status_lookup: dict[str, object] = {}
     for row in annotation.iter_rows(named=True):
         species = str(row["species"])
         key = (species, str(row["feature"]))
@@ -1418,15 +1415,6 @@ def _draw_toytree_feature_heatmap(
                 f"selection={row.get('representative_selection')}; "
                 f"status={row.get('residue_status')}"
             )
-        trait_lookup.setdefault(species, row.get("true_label"))
-        prob_lookup.setdefault(species, row.get("prob"))
-        status_lookup.setdefault(species, row.get("decision_status"))
-    confusion_groups = [
-        "abstained"
-        if status_lookup.get(species) == "abstained"
-        else _oof_confusion_group(trait_lookup.get(species), prob_lookup.get(species))
-        for species in tip_labels
-    ]
     residues = value_col == "residue"
     finite_values = [] if residues else _finite_values(annotation, value_col)
     vmin, vmax = (0.0, 1.0) if residues else _heatmap_domain(value_col, finite_values)
@@ -1457,6 +1445,7 @@ def _draw_toytree_feature_heatmap(
                      style={"font-size": "9px", "text-anchor": "start"})
     boundaries = _draw_context_boundaries(
         axes, tip_labels, context_rows, tracks, end_x=species_x + species_width - 12,
+        tree_axes=tree_axes,
     )
     for x, feature, feature_label, feature_title in zip(
         feature_xs,
@@ -1502,18 +1491,9 @@ def _draw_toytree_feature_heatmap(
     axes.text(
         [species_x] * len(tip_labels),
         list(range(len(tip_labels))),
-        [
-            f"{species} (abstained)" if group == "abstained" else species
-            for species, group in zip(tip_labels, confusion_groups, strict=True)
-        ],
-        color=[
-            CONFUSION_GROUP_COLORS.get(group, "#999999") if group is not None else _TEXT_COLOR
-            for group in confusion_groups
-        ],
-        title=[
-            (f"{species} OOF confusion group={group}" if group is not None else species)
-            for species, group in zip(tip_labels, confusion_groups, strict=True)
-        ],
+        tip_labels,
+        color=_TEXT_COLOR,
+        title=tip_labels,
         style={"font-size": "9px", "text-anchor": "start"},
     )
     if residues:
@@ -1527,8 +1507,7 @@ def _draw_toytree_feature_heatmap(
             y_offset=170,
         )
     _draw_context_legend(canvas=canvas, width=width)
-    _draw_confusion_group_legend(canvas=canvas, width=width, y_offset=310 if residues else 170)
-    _draw_boundary_legend(canvas, width, boundaries, y=610 if residues else 470)
+    _draw_boundary_legend(canvas, width, boundaries, y=465 if residues else 310)
     _save_toytree_svg(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
 
 
@@ -1629,7 +1608,7 @@ _BOUNDARY_STYLES = {
 
 def _draw_context_boundaries(
     axes: Any, species: list[str], rows: dict[str, dict[str, Any]], tracks: list[str],
-    *, end_x: float,
+    *, end_x: float, tree_axes: Any | None = None,
 ) -> list[str]:
     used: set[str] = set()
     for i in range(1, len(species)):
@@ -1640,6 +1619,8 @@ def _draw_context_boundaries(
         if changed:
             track = "fold_id" if "fold_id" in changed else changed[0]
             axes.plot([0, end_x], [i - .5, i - .5], style=_BOUNDARY_STYLES[track])
+            if tree_axes is not None:
+                tree_axes.hlines([i - .5], style=_BOUNDARY_STYLES[track])
             used.add(track)
     return [track for track in tracks if track in used]
 
@@ -1722,44 +1703,6 @@ def _draw_residue_legend(*, canvas: Any, width: int, y_offset: int = 0) -> None:
                          style={"stroke": "#999999", "stroke-width": ".5px"})
         legend.text(.12, y, f"{letters}: {label}", color=_TEXT_COLOR,
                     style={"font-size": "9px", "text-anchor": "start"})
-
-def _draw_confusion_group_legend(*, canvas: Any, width: int, y_offset: int = 0) -> None:
-    legend_axes = canvas.cartesian(
-        bounds=(width - 270, width - 35, 150 + y_offset, 266 + y_offset),
-        show=False,
-        xmin=0,
-        xmax=1,
-        ymin=0,
-        ymax=1,
-    )
-    legend_axes.show = False
-    legend_axes.text(
-        0.02,
-        0.92,
-        "Classification outcome",
-        color=_TEXT_COLOR,
-        style={"font-size": "9px", "font-weight": "bold", "text-anchor": "start"},
-    )
-    y_positions = [0.70, 0.51, 0.32, 0.13]
-    for group, y in zip(CONFUSION_GROUP_ORDER, y_positions, strict=True):
-        color = CONFUSION_GROUP_COLORS[group]
-        legend_axes.rectangle(
-            [0.03],
-            [0.09],
-            [y - 0.055],
-            [y + 0.055],
-            color=[color],
-            title=[f"{group}: {CONFUSION_GROUP_LABELS[group]}"],
-            style={"stroke": "none"},
-        )
-        legend_axes.text(
-            0.13,
-            y,
-            f"{group}: {CONFUSION_GROUP_LABELS[group]}",
-            color=color,
-            style={"font-size": "9px", "text-anchor": "start"},
-        )
-
 
 def _oof_confusion_group(true_label: object, probability: object) -> str | None:
     try:
