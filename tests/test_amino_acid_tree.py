@@ -69,15 +69,15 @@ def test_annotation_resolves_aa_site_and_combined_keys_without_losing_ids() -> N
     names = ['OG1', json.dumps(['OG1', 8, 'V']), json.dumps(['OG1', 8]),
              json.dumps(['expression', 'OG1'])]
     labels = _feature_axis_labels(names, annotations)
-    assert labels == ['Test kinase (OG1)', 'Test kinase (OG1:8 V)',
-                      'Test kinase (OG1:8)', 'Test kinase (OG1 (expression))']
+    assert labels == ['Test kinase (OG1)', 'Test kinase (OG1):8V',
+                      'Test kinase (OG1):8', 'Test kinase (OG1) (expression)']
     importance = pl.DataFrame({'feature': [names[1]], 'importance_mean': [1.]})
     coefficients = pl.DataFrame({
         'feature': [names[1]], 'coef_mean': [1.], 'method': ['coef_signed']})
     subset = _feature_label_annotations_subset(annotations, feature_importance=importance,
                                               coefficients=coefficients, top_features=1)
     assert subset is not None and subset.equals(annotations)
-    assert _feature_axis_labels([names[1]], None) == ['OG1:8 V']
+    assert _feature_axis_labels([names[1]], None) == ['OG1:8V']
 
 
 def test_residue_tree_svg_table_palette_and_accepted_population(tmp_path: Path) -> None:

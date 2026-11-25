@@ -237,7 +237,7 @@ def _feature_label_row_height_px(labels: list[str]) -> int:
 
 
 def _feature_label_axis_title(_labels: list[str]) -> str:
-    return ("Feature" if any(re.search(r":\d+ [A-Z]$", label) for label in _labels)
+    return ("Feature" if any(re.search(r":\d+[A-Z]$", label) for label in _labels)
             else "Orthogroup")
 
 
@@ -292,9 +292,13 @@ def _feature_axis_labels(
     labels: list[str] = []
     for feature in features:
         og, display = _feature_address(feature)
+        suffix = display[len(og):]
+        if suffix.startswith(":"):
+            suffix = suffix.replace(" ", "")
+        display = og + suffix
         annotation = annotation_lookup.get(feature, annotation_lookup.get(og))
         labels.append(display if annotation is None else textwrap.fill(
-            f"{' '.join(annotation.split())} ({display})", width=48))
+            f"{' '.join(annotation.split())} ({og}){suffix}", width=48))
     return labels
 
 
