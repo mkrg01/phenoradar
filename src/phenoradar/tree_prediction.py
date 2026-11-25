@@ -80,9 +80,11 @@ def _tree_population_figures(func: Callable[..., list[str]]) -> Callable[..., li
             else [(population_suffix, kwargs)]
         )
         for suffix, inputs in populations:
-            if suffix and inputs["annotation"]["species"].n_unique() < 2:
+            minimum = 1 if "value_col" in inputs else 2
+            if suffix and inputs["annotation"]["species"].n_unique() < minimum:
                 write_population_message_svg(
-                    inputs["out_path"], "Fewer than two accepted species; tree unavailable."
+                    inputs["out_path"], "No accepted species; heatmap unavailable."
+                    if minimum == 1 else "Fewer than two accepted species; tree unavailable."
                 )
             else:
                 warnings.extend(func(**inputs))
@@ -153,6 +155,44 @@ def _run_tree_svg_jobs(
     return [warnings_by_index.get(index, []) for index in range(len(jobs))]
 
 
+def write_expression_tree_heatmaps(
+    *, run_dir: Path, stage: str, tree_path: Path | None, predictions: pl.DataFrame,
+    feature_importance: pl.DataFrame, coefficients: pl.DataFrame, tpm_path: Path,
+    species_col: str, feature_col: str, value_col: str,
+    top_feature_expression: pl.DataFrame | None = None,
+    feature_limit: int = DEFAULT_TOP_FEATURES,
+    orthogroup_annotations: pl.DataFrame | None = None,
+    preserve_missing: bool = False, zero_as_missing: bool = False,
+    parallel_workers: int = 1, timing_recorder: TimingRecorder | None = None,
+    workers: FigureWorkers | None = None,
+) -> list[str]:
+    """Display only this prediction stage's species using training-selected features."""
+    if tree_path is None or predictions.is_empty() or feature_importance.is_empty():
+        return []
+    annotation = build_tree_feature_heatmap_annotation(
+        metadata=predictions.select("species", "true_label", "group_id"),
+        group_col="group_id", oof_predictions=predictions,
+        tpm_path=tpm_path, species_col=species_col, feature_col=feature_col, value_col=value_col,
+        feature_importance=feature_importance, coefficients=coefficients,
+        top_feature_expression=top_feature_expression, feature_limit=feature_limit,
+        orthogroup_annotations=orthogroup_annotations, require_groups=False,
+        preserve_missing=preserve_missing, zero_as_missing=zero_as_missing,
+    )
+    if annotation.is_empty():
+        return []
+    annotation.write_csv(_stage_tables_dir(run_dir, stage) / "tree_feature_heatmap_annotation.tsv",
+                         separator="\t")
+    jobs = [(f"{stage}_tree_feature_heatmap_{suffix}", _write_tree_feature_heatmap_svg, {
+        "tree_path": tree_path, "annotation": annotation, "value_col": column,
+        "out_path": _stage_figures_dir(run_dir, stage) / f"tree_feature_heatmap_{suffix}.svg",
+        "title": "", "cmap_name": cmap, "annotate_features": True,
+    }) for suffix, column, cmap in [("log2_tpm", "log2_tpm_plus1", "viridis"),
+                                    ("zscore", "z_score_log2_tpm", "coolwarm")]]
+    results = _run_tree_svg_jobs(jobs, parallel_workers=parallel_workers,
+                                timing_recorder=timing_recorder, workers=workers)
+    return [warning for result in results for warning in result]
+
+
 def write_run_tree_prediction_artifacts(
     *,
     run_dir: Path,
@@ -178,10 +218,13 @@ def write_run_tree_prediction_artifacts(
     workers: FigureWorkers | None = None,
     preserve_missing: bool = False,
     zero_as_missing: bool = False,
+    final_feature_importance: pl.DataFrame | None = None,
+    final_coefficients: pl.DataFrame | None = None,
+    pred_inference: pl.DataFrame | None = None,
 ) -> list[str]:
     """Write run-level tree annotation TSVs and optional Toytree SVG figures."""
     if tree_path is None:
-        remove_retired_cv_tree_figures(run_dir)
+        remove_retired_prediction_trees(run_dir)
         return []
     _require_tree(tree_path)
     metadata = _load_metadata(
@@ -292,7 +335,6 @@ def write_run_tree_prediction_artifacts(
         )
 
     if pred_external_test is not None and pred_external_test.height > 0:
-        external_test_figures_dir = _stage_figures_dir(run_dir, "external_test")
         external_test_tables_dir = _stage_tables_dir(run_dir, "external_test")
         external_annotation = build_external_tree_prediction_annotation(
             metadata=metadata,
@@ -305,44 +347,55 @@ def write_run_tree_prediction_artifacts(
             float_precision=8,
             null_value="NA",
         )
-        external_inputs = {
-            "tree_path": tree_path,
-            "annotation": external_annotation,
-            "out_path": external_test_figures_dir / "tree_prediction_external.svg",
-            "title": "External Test Tree Prediction",
-            "tracks": ["true_label", "prob", "pred_label", "uncertainty_std", "group_id"],
-        }
-        for suffix, inputs in _tree_population_inputs(external_inputs):
-            add_svg_job(
-                f"tree_prediction_external{suffix}",
-                _write_tree_prediction_svg,
-                {**inputs, "population_suffix": suffix},
-            )
+    target_warnings = []
+    if (include_feature_heatmaps and final_feature_importance is not None
+            and final_coefficients is not None):
+        from phenoradar.cv_display import with_prediction_context
+
+        for stage, predictions in [("external_test", pred_external_test),
+                                   ("inference", pred_inference)]:
+            if predictions is not None:
+                context = with_prediction_context(
+                    predictions, metadata_path=metadata_path, species_col=species_col,
+                    trait_col=trait_col, group_col=group_col,
+                )
+                target_warnings.extend(write_expression_tree_heatmaps(
+                    run_dir=run_dir, stage=stage, tree_path=tree_path, predictions=context,
+                    tpm_path=tpm_path, species_col=species_col, feature_col=feature_col,
+                    value_col=value_col, feature_importance=final_feature_importance,
+                    coefficients=final_coefficients, feature_limit=feature_limit,
+                    orthogroup_annotations=orthogroup_annotations,
+                    preserve_missing=preserve_missing,
+                    zero_as_missing=zero_as_missing, parallel_workers=parallel_workers,
+                    timing_recorder=timing_recorder, workers=workers,
+                ))
     svg_warnings = _run_tree_svg_jobs(
         svg_jobs,
         parallel_workers=parallel_workers,
         timing_recorder=timing_recorder,
         workers=workers,
     )
-    remove_retired_cv_tree_figures(run_dir)
+    remove_retired_prediction_trees(run_dir)
     warnings: list[str] = []
     for step_type, index in ordered_steps:
         if step_type == "warning":
             warnings.extend(warning_steps[index])
         else:
             warnings.extend(svg_warnings[index])
-    return warnings
+    return warnings + target_warnings
 
 
-def remove_retired_cv_tree_figures(run_dir: Path) -> None:
+def remove_retired_prediction_trees(run_dir: Path) -> None:
     """Retire redundant generated trees, including earlier selective variants."""
-    directory = run_dir / "cv/figures"
-    for stem in ["tree_group", "tree_prediction_cv"]:
-        for extension in ["svg", "pdf"]:
-            for path in [directory / f"{stem}.{extension}",
-                         directory / f"{stem}_accepted_only.{extension}",
-                         directory / "accepted_only" / f"{stem}.{extension}"]:
-                path.unlink(missing_ok=True)
+    for stage in ["cv", "external_test", "inference", "predict"]:
+        directory = run_dir / stage / "figures"
+        for stem in ["tree_group", "tree_prediction_cv", "tree_prediction_external",
+                     "tree_prediction_inference", "tree_prediction_predict"]:
+            for extension in ["svg", "pdf"]:
+                for path in [directory / f"{stem}.{extension}",
+                             directory / f"{stem}_accepted_only.{extension}",
+                             directory / "accepted_only" / f"{stem}.{extension}"]:
+                    path.unlink(missing_ok=True)
 
 
 def write_predict_tree_prediction_artifacts(
@@ -354,9 +407,17 @@ def write_predict_tree_prediction_artifacts(
     trait_col: str,
     group_col: str,
     pred_predict: pl.DataFrame,
+    tpm_path: Path | None = None,
+    feature_importance: pl.DataFrame | None = None,
+    coefficients: pl.DataFrame | None = None,
+    feature_col: str = "orthogroup", value_col: str = "tpm",
+    feature_limit: int = DEFAULT_TOP_FEATURES,
+    orthogroup_annotations: pl.DataFrame | None = None,
+    preserve_missing: bool = False, zero_as_missing: bool = False,
 ) -> list[str]:
     """Write predict-level tree annotation TSV and optional Toytree SVG figure."""
     if tree_path is None:
+        remove_retired_prediction_trees(run_dir)
         return []
     _require_tree(tree_path)
     if metadata_path is None:
@@ -383,19 +444,16 @@ def write_predict_tree_prediction_artifacts(
         float_precision=8,
         null_value="NA",
     )
-    inference_figures_dir = _stage_figures_dir(run_dir, "inference")
-    return _write_tree_prediction_svg(
-        tree_path=tree_path,
-        annotation=annotation,
-        out_path=inference_figures_dir / "tree_prediction_predict.svg",
-        title="Prediction Tree",
-        tracks=[
-            "true_label",
-            "prob",
-            "pred_label_fixed_threshold",
-            "uncertainty_std",
-            "group_id",
-        ],
+    remove_retired_prediction_trees(run_dir)
+    if tpm_path is None or feature_importance is None or coefficients is None:
+        return []
+    return write_expression_tree_heatmaps(
+        run_dir=run_dir, stage="inference", tree_path=tree_path, predictions=annotation,
+        tpm_path=tpm_path, species_col=species_col, feature_col=feature_col, value_col=value_col,
+        feature_importance=feature_importance, coefficients=coefficients,
+        feature_limit=feature_limit,
+        orthogroup_annotations=orthogroup_annotations, preserve_missing=preserve_missing,
+        zero_as_missing=zero_as_missing,
     )
 
 
@@ -435,6 +493,7 @@ def build_tree_feature_heatmap_annotation(
     top_feature_expression: pl.DataFrame | None = None,
     preserve_missing: bool = False,
     zero_as_missing: bool = False,
+    require_groups: bool = True,
 ) -> pl.DataFrame:
     """Build long-form feature heatmap values for grouped species and top features."""
     _require_columns(metadata, {"species", "true_label", group_col}, "metadata TSV")
@@ -445,7 +504,6 @@ def build_tree_feature_heatmap_annotation(
     species_meta = (
         _metadata_group_lookup(metadata, group_col=group_col)
         .join(metadata.select(["species", "true_label"]), on="species", how="left")
-        .filter(pl.col("group_id").is_not_null() & (pl.col("group_id") != ""))
         .select(
             [
                 "species",
@@ -456,6 +514,12 @@ def build_tree_feature_heatmap_annotation(
         .unique("species")
         .sort(["group_id", "species"])
     )
+    if require_groups:
+        species_meta = species_meta.filter(
+            pl.col("group_id").is_not_null() & (pl.col("group_id") != ""))
+    if oof_predictions is not None:
+        species_meta = species_meta.join(oof_predictions.select("species").unique(),
+                                         on="species", how="semi")
     if species_meta.height == 0:
         return _empty_feature_heatmap_annotation()
     if oof_predictions is None:
@@ -1164,9 +1228,9 @@ def _write_tree_feature_heatmap_svg(
         warnings.append(
             f"{out_path.name}: skipped {missing_count} species absent from the tree."
         )
-    if len(requested_species) < 2:
+    if len(requested_species) < 1:
         warnings.append(
-            f"Skipped {out_path.name}: fewer than two annotated species are in the tree."
+            f"Skipped {out_path.name}: no annotated species are in the tree."
         )
         return warnings
 
@@ -1205,13 +1269,15 @@ def _tree_table_canvas(
     height = max(minimum_height, 280 if sidebar_width else 0,
                  header_height + 18 * tree.ntips + 24)
     canvas = toyplot.Canvas(width=width, height=height, style={"background-color": "white"})
-    tree_axes = canvas.cartesian(bounds=(12, 236, header_height, height - 16), padding=0)
-    tree.draw(axes=tree_axes, layout="r", tip_labels=False, node_sizes=0, scale_bar=False)
+    bottom = min(height - 16, header_height + 18 * tree.ntips)
+    tree_axes = canvas.cartesian(bounds=(12, 236, header_height, bottom), padding=0)
+    if tree.ntips > 1:
+        tree.draw(axes=tree_axes, layout="r", tip_labels=False, node_sizes=0, scale_bar=False)
     tree_axes.show = False
     tree_axes.y.domain.min = -0.5
     tree_axes.y.domain.max = tree.ntips - 0.5
     axes = canvas.cartesian(
-        bounds=(248, 248 + table_width, header_height, height - 16),
+        bounds=(248, 248 + table_width, header_height, bottom),
         padding=0, xmin=0, xmax=table_width, ymin=-0.5, ymax=tree.ntips - 0.5,
         show=False,
     )
@@ -1761,9 +1827,10 @@ def _heatmap_domain(value_col: str, values: list[float]) -> tuple[float, float]:
     if not values:
         return 0.0, 1.0
     if value_col == "z_score_log2_tpm":
-        max_abs = max(abs(value) for value in values)
+        max_abs = max(abs(value) for value in values) or 1.0
         return -max_abs, max_abs
-    return min(values), max(values)
+    low, high = min(values), max(values)
+    return (low, high) if low < high else (0.0, max(1.0, high))
 
 
 def _finite_values(annotation: pl.DataFrame, column: str) -> list[float]:

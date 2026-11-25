@@ -650,9 +650,12 @@ def test_write_run_tree_prediction_artifacts_parallel_workers_write_outputs(
         ),
         parallel_workers=2,
         timing_recorder=timing,
+        final_feature_importance=_feature_importance(),
+        final_coefficients=_coefficients(),
     )
 
-    assert {"tree_prediction_external", "tree_prediction_external_accepted_only"} <= set(
+    assert {"external_test_tree_feature_heatmap_log2_tpm",
+            "external_test_tree_feature_heatmap_zscore"} <= set(
         timing.to_frame()["stage"]
     )
     cv_tables_dir = tmp_path / "run" / "cv" / "tables"
@@ -666,9 +669,10 @@ def test_write_run_tree_prediction_artifacts_parallel_workers_write_outputs(
         assert (cv_figures_dir / "tree_feature_heatmap_zscore.svg").exists()
         assert (cv_figures_dir / "tree_feature_heatmap_log2_tpm.svg").exists()
         external = tmp_path / "run" / "external_test" / "figures"
-        full_tree = ET.parse(external / "tree_prediction_external.svg").getroot()
+        assert not (external / "tree_prediction_external.svg").exists()
+        full_tree = ET.parse(external / "tree_feature_heatmap_log2_tpm.svg").getroot()
         accepted_tree = ET.parse(
-            external / "accepted_only" / "tree_prediction_external.svg"
+            external / "accepted_only" / "tree_feature_heatmap_log2_tpm.svg"
         ).getroot()
         assert "sp3" in set(full_tree.itertext())
         assert "sp3" not in set(accepted_tree.itertext())

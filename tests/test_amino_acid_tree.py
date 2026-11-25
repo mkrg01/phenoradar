@@ -199,6 +199,38 @@ def test_sequence_modes_write_group_and_cv_prediction_trees(
     assert external_table.exists() == full
     if full:
         assert pl.read_csv(external_table, separator='\t')['species'].to_list() == ['external']
+        for stage, species in [('external_test', 'external'), ('inference', 'unknown')]:
+            table = pl.read_csv(out / stage / 'tables' /
+                                'tree_feature_heatmap_amino_acid_annotation.tsv', separator='\t')
+            assert set(table['species']) == {species}
+            assert 'fold_id' not in table.columns
+            assert (out / stage / 'figures/tree_feature_heatmap_amino_acid.svg').exists()
+            assert (out / stage / 'figures/accepted_only/' /
+                    'tree_feature_heatmap_amino_acid.svg').exists()
+            assert not (out / stage / 'figures/tree_prediction_external.svg').exists()
+            if stage == 'inference':
+                assert table['true_label'].null_count() == table.height
+                assert not (out / stage / 'figures/amino_acid_frequency_by_confusion.svg').exists()
+            else:
+                assert (out / stage / 'figures/amino_acid_frequency_by_confusion.svg').exists()
+            if mode == 'combined':
+                expression_table = pl.read_csv(out / stage / 'tables' /
+                                               'tree_feature_heatmap_annotation.tsv',
+                                               separator='\t')
+                assert set(expression_table['species']) == {species}
+                assert (out / stage / 'figures/tree_feature_heatmap_log2_tpm.svg').exists()
+        from phenoradar.amino_acid_run import predict_amino_acid
+
+        targets = tmp_path / 'targets-only.tsv'
+        targets.write_text('species\nunknown\n')
+        predicted = predict_amino_acid(out / 'model_bundle', tmp_path / 'predicted',
+                                       metadata_path=targets)
+        table = pl.read_csv(predicted / 'predict/tables/'
+                            'tree_feature_heatmap_amino_acid_annotation.tsv', separator='\t')
+        assert set(table['species']) == {'unknown'}
+        assert table['true_label'].null_count() == table.height and 'fold_id' not in table.columns
+        assert (predicted / 'predict/figures/tree_feature_heatmap_amino_acid.svg').exists()
+        assert not (predicted / 'predict/figures/amino_acid_frequency_by_confusion.svg').exists()
 
 
 @pytest.mark.parametrize('mode', ['amino_acid', 'combined'])

@@ -1049,6 +1049,14 @@ def run_amino_acid(
                                 on="species",
                             )
                             prediction.write_csv(dest / f"pred_{stage}.tsv", separator="\t")
+                            from phenoradar.amino_acid_stage_figures import (
+                                write_prediction_interpretation,
+                            )
+
+                            warnings.extend(write_prediction_interpretation(
+                                run_dir, stage, config, targets, final, prediction,
+                                expression=expression,
+                            ))
                             _write(
                                 dest / "selected_site_sequence_map.tsv",
                                 _coordinate_rows(targets, final, target["species"].to_list()),
@@ -1219,6 +1227,7 @@ def predict_amino_acid(
     tpm_path: Path | None = None,
     summary_group_col: str | None = None,
     warning_messages: list[str] | None = None,
+    tree_path: Path | None = None,
 ) -> Path:
     from phenoradar.config import load_and_resolve_config
 
@@ -1233,6 +1242,8 @@ def predict_amino_acid(
         if sha256_file(bundle / name) != manifest["files"][name]:
             raise AlignmentError(f"Bundle checksum mismatch: {name}")
     config = load_and_resolve_config([bundle / "resolved_config.yml"])
+    if tree_path is not None:
+        config.data.tree_path = str(tree_path)
     combined = manifest.get("feature_mode") == "combined"
     if combined != (config.data.feature_mode == "combined"):
         raise AlignmentError("Bundle feature mode does not match its frozen configuration")
@@ -1301,6 +1312,15 @@ def predict_amino_acid(
         predictions = predict_members(config, store, targets, members, tables=tables,
                                       expression=expression)
         predictions.write_csv(tables / "pred_predict.tsv", separator="\t")
+        from phenoradar.amino_acid_stage_figures import write_prediction_interpretation
+        from phenoradar.figures import write_predict_figures
+
+        interpretation_warnings = write_prediction_interpretation(
+            destination, "predict", config, store, members, predictions,
+            expression=expression, metadata_path=metadata_path,
+        )
+        write_predict_figures(run_dir=destination, pred_predict=predictions,
+                              require_uncertainty=len(members) > 1, stage="predict")
         from phenoradar.group_summary_outputs import write_group_summary_artifacts
 
         summary_config = config.model_copy(deep=True)
@@ -1313,6 +1333,6 @@ def predict_amino_acid(
             source_table_name="pred_predict.tsv", config=summary_config,
         )
         if warning_messages is not None:
-            warning_messages.extend(summary_warnings)
+            warning_messages.extend(summary_warnings + interpretation_warnings)
         _write(tables / "selected_site_sequence_map.tsv", _coordinate_rows(store, members, targets))
     return destination

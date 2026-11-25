@@ -51,6 +51,7 @@ def build_group_trait_composition(
     store: AlignmentStore, sites: pl.DataFrame, predictions: pl.DataFrame,
     *, aggregation: str, annotations: pl.DataFrame | None = None,
     tree_path: Path | None = None,
+    oof: bool = True,
 ) -> pl.DataFrame:
     """Aggregate raw observations in species batches; missing species get no weight.
 
@@ -60,7 +61,7 @@ def build_group_trait_composition(
     if sites.is_empty() or predictions.is_empty():
         return pl.DataFrame()
     if predictions["species"].n_unique() != predictions.height:
-        raise ValueError("Residue composition requires one OOF row per species")
+        raise ValueError("Residue composition requires one prediction row per species")
     if "group_id" not in predictions.columns or predictions["group_id"].null_count():
         raise ValueError("Residue composition requires a split group for every species")
     if aggregation not in {"aa_frequency", "tpm_weighted_frequency", "best_covered"}:
@@ -74,7 +75,8 @@ def build_group_trait_composition(
             if subset.is_empty():
                 continue
             rows.append({"group_id": group, "trait": trait, "n_species": subset.height,
-                         "mean_oof_probability": subset["prob"].mean()})
+                         "mean_oof_probability" if oof else "mean_probability":
+                         subset["prob"].mean()})
             row_species.append(subset["species"].sort().to_list())
     if not rows:
         return pl.DataFrame()
@@ -120,8 +122,10 @@ def _site_label(site: dict[str, Any]) -> str:
 
 
 def _composition_figure(table: pl.DataFrame) -> Figure:
+    probability_col = ("mean_oof_probability" if "mean_oof_probability" in table.columns
+                       else "mean_probability")
     sites = table.unique("feature_rank", maintain_order=True).sort("feature_rank")
-    context = table.select("group_id", "trait", "n_species", "mean_oof_probability").unique(
+    context = table.select("group_id", "trait", "n_species", probability_col).unique(
         maintain_order=True)
     labels = [_site_label(site) for site in sites.iter_rows(named=True)]
     # Measure full labels before reserving the header; long names are never truncated.
@@ -159,7 +163,8 @@ def _composition_figure(table: pl.DataFrame) -> Figure:
     ax.tick_params(axis="x", top=True, bottom=False, labeltop=True, labelbottom=False,
                    length=0, pad=7)
     trait_x, n_x, prob_x = meta_width - 1.20, meta_width - .81, meta_width - .30
-    for title, x in [("Group", .03), ("Trait", trait_x), ("n", n_x), ("Mean OOF p", prob_x)]:
+    prob_label = "Mean OOF p" if probability_col == "mean_oof_probability" else "Mean p"
+    for title, x in [("Group", .03), ("Trait", trait_x), ("n", n_x), (prob_label, prob_x)]:
         meta.text(x, -.3, title, ha="left" if title == "Group" else "center", va="bottom",
                   fontsize=8)
     group_ids = context["group_id"].to_list()
@@ -179,7 +184,7 @@ def _composition_figure(table: pl.DataFrame) -> Figure:
         meta.text(trait_x, r + .445, str(row["trait"]), ha="center", va="center", fontsize=8,
                   color=_cell_text_color(color))
         meta.text(n_x, r + .445, str(row["n_species"]), ha="center", va="center", fontsize=8)
-        p = row["mean_oof_probability"]
+        p = row[probability_col]
         color = to_hex(_PROBABILITY_CMAP(p))
         meta.add_patch(Rectangle((prob_x - .20, r + .14), .40, .61, color=color, linewidth=0))
         meta.text(prob_x, r + .445, f"{p:.2f}", ha="center", va="center", fontsize=7,
@@ -227,15 +232,16 @@ def write_group_trait_composition(
     run_dir: Path, store: AlignmentStore, sites: pl.DataFrame, predictions: pl.DataFrame,
     *, aggregation: str, annotations: pl.DataFrame | None = None,
     tree_path: Path | None = None,
+    stage: str = "cv",
 ) -> list[str]:
     """Write only the composition summary, including existing accepted-only populations."""
     for suffix, population in prediction_figure_populations({"oof": predictions}):
         table = build_group_trait_composition(
             store, sites, population["oof"], aggregation=aggregation,
-            annotations=annotations, tree_path=tree_path,
+            annotations=annotations, tree_path=tree_path, oof=stage == "cv",
         )
-        figure_path = population_figure_path(run_dir / "cv/figures" / f"{_STEM}.svg", suffix)
-        table_path = population_figure_path(run_dir / "cv/tables" / f"{_STEM}.tsv", suffix)
+        figure_path = population_figure_path(run_dir / stage / "figures" / f"{_STEM}.svg", suffix)
+        table_path = population_figure_path(run_dir / stage / "tables" / f"{_STEM}.tsv", suffix)
         if table.is_empty():
             table_path.unlink(missing_ok=True)
             write_population_message_svg(figure_path, "No observed groups or positive-PSS sites.")

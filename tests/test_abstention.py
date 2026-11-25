@@ -313,7 +313,7 @@ def test_cli_run_and_predict_preserve_abstention_and_missing_evidence(
         "cv/figures/accepted_only/roc_curve_cv.svg",
         "external_test/figures/accepted_only/external_confusion_matrix.svg",
         "external_test/figures/accepted_only/cv_external_metric_comparison.svg",
-        "external_test/figures/accepted_only/tree_prediction_external.svg",
+        "external_test/figures/accepted_only/tree_feature_heatmap_log2_tpm.svg",
         "inference/figures/accepted_only/inference_probability_distribution.svg",
     ):
         assert (run_dir / relative).exists(), relative

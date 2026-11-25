@@ -1873,6 +1873,12 @@ def _run_single(
                         thresholds=cv_artifacts.thresholds,
                         feature_importance=cv_artifacts.feature_importance,
                         coefficients=cv_artifacts.coefficients,
+                        final_feature_importance=(final_refit_artifacts.feature_importance
+                                                  if final_refit_artifacts is not None else None),
+                        final_coefficients=(final_refit_artifacts.coefficients
+                                            if final_refit_artifacts is not None else None),
+                        pred_inference=(final_refit_artifacts.pred_inference
+                                        if final_refit_artifacts is not None else None),
                         pred_external_test=(
                             None
                             if final_refit_artifacts is None
@@ -2507,6 +2513,8 @@ def predict(
                 summary_group_col=(sequence_inputs.summary.group_col
                                    if "summary" in sequence_inputs.model_fields_set else None),
                 warning_messages=sequence_warnings,
+                tree_path=(Path(sequence_inputs.data.tree_path)
+                           if sequence_inputs.data.tree_path else None),
                 tpm_path=(Path(sequence_inputs.data.tpm_path)
                           if combined and sequence_inputs.data.tpm_path else None),
             )
@@ -2645,8 +2653,16 @@ def predict(
             raise typer.BadParameter(str(exc)) from exc
         predict_warnings.extend(evidence_warnings)
     contrast_group_col = resolved.data.contrast_group_col
-    if tree_path is not None and contrast_group_col is not None:
+    if tree_path is not None:
         try:
+            from phenoradar.bundle import bundle_preprocess_entries
+            from phenoradar.interpret import ModelFeatureEntry, build_interpretation_tables
+
+            interpretation = build_interpretation_tables([
+                ModelFeatureEntry(entry.feature_names, model, "final_refit")
+                for entry, model in zip(bundle_preprocess_entries(bundle), bundle.models,
+                                        strict=True)
+            ])
             tree_warnings = write_predict_tree_prediction_artifacts(
                 run_dir=run_dir,
                 tree_path=Path(tree_path),
@@ -2657,16 +2673,20 @@ def predict(
                 ),
                 species_col=resolved.data.species_col,
                 trait_col=resolved.data.trait_col,
-                group_col=contrast_group_col,
+                group_col=contrast_group_col or "group_id",
                 pred_predict=pred_predict,
+                tpm_path=Path(resolved.data.tpm_path),
+                feature_col=resolved.data.feature_col, value_col=resolved.data.value_col,
+                feature_importance=interpretation.feature_importance,
+                coefficients=interpretation.coefficients,
+                feature_limit=resolved.figures.top_features,
+                orthogroup_annotations=bundle.orthogroup_annotations,
+                preserve_missing=bundle.missing_expression_method == "neutral",
+                zero_as_missing=bundle.zero_as_missing,
             )
         except TreePredictionError as exc:
             raise typer.BadParameter(str(exc)) from exc
         predict_warnings.extend(tree_warnings)
-    elif tree_path is not None:
-        predict_warnings.append(
-            "Skipped tree prediction artifacts because data.contrast_group_col is null."
-        )
     timing_recorder.record_since(figures_started, scope="predict", stage="figure_generation")
     _log("Collect provenance metadata.")
     try:

@@ -181,8 +181,9 @@ def write_frequency_by_confusion(
     oof: pl.DataFrame,
     limit: int,
     annotations: pl.DataFrame | None = None,
+    *, stage: str = "cv",
 ) -> None:
-    source = run_dir / "cv/tables/top_amino_acid_frequencies.tsv"
+    source = run_dir / stage / "tables/top_amino_acid_frequencies.tsv"
     if not source.exists():
         return
     data = pl.read_csv(source, separator="\t")
@@ -192,10 +193,11 @@ def write_frequency_by_confusion(
             values=data.rename({"frequency": "value"}),
             predictions=oof,
             features=names,
-            out_path=run_dir / "cv/figures/amino_acid_frequency_by_confusion.svg",
+            out_path=run_dir / stage / "figures/amino_acid_frequency_by_confusion.svg",
             value_label="Residue frequency",
             value_limits=(-0.05, 1.05),
             orthogroup_annotations=annotations,
+            context="OOF" if stage == "cv" else "Final-model predictions",
         )
 
 

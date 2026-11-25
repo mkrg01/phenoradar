@@ -20,6 +20,30 @@ def with_cv_groups(
                                                          validate="m:1")
 
 
+def with_prediction_context(
+    predictions: pl.DataFrame, *, metadata_path: Path | None, species_col: str,
+    group_col: str, trait_col: str,
+) -> pl.DataFrame:
+    """Attach optional observed metadata; prediction targets have no CV-fold identity."""
+    result = predictions.drop("fold_id", strict=False)
+    metadata = (canonical_metadata(pl.read_csv(metadata_path, separator="\t", infer_schema=False))
+                if metadata_path is not None and metadata_path.is_file() else None)
+    columns = {"group_id": (group_col, pl.String), "true_label": (trait_col, pl.Int8)}
+    for name, (source, dtype) in columns.items():
+        if name in result.columns:
+            result = result.with_columns(pl.col(name).cast(dtype, strict=False))
+            continue
+        if metadata is not None and source in metadata.columns:
+            values = metadata.select(
+                pl.col(species_col).cast(pl.String).str.strip_chars().alias("species"),
+                pl.col(source).cast(dtype, strict=False).alias(name),
+            ).unique()
+            result = result.join(values, on="species", how="left", validate="m:1")
+        else:
+            result = result.with_columns(pl.lit(None, dtype=dtype).alias(name))
+    return result
+
+
 def fold_group_labels(frame: pl.DataFrame) -> dict[str, str] | None:
     """Return fold-to-group labels only for a complete one-to-one correspondence."""
     if not {"group_id", "fold_id"}.issubset(frame.columns):

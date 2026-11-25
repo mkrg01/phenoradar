@@ -480,6 +480,21 @@ losses and species counts are retained in `training_loss_by_sample_set.tsv`.
 
 ## Tree residue heatmap and annotation labels
 
+External-test and inference outputs include `tree_feature_heatmap_amino_acid.svg`
+and the matching annotation TSV, restricted to that stage's predicted species.
+Sites follow mean PSS across the final fitted models; target traits and expression
+never select the displayed sites. Known traits, probabilities and available metadata
+groups are shown together; unknown traits remain missing and no CV fold is assigned.
+Single-species heatmaps are supported. Accepted-only variants use the same sites.
+Combined models also show `tree_feature_heatmap_log2_tpm.svg` and
+`tree_feature_heatmap_zscore.svg` for final-model expression features.
+With observed labels, external tests also receive the residue-frequency confusion
+plot and, when groups are supplied, the group-by-trait composition summary.
+Unknown-trait inference does not produce confusion-based evaluation plots.
+Standalone AA/combined prediction writes the same displays under `predict/`.
+The redundant `tree_prediction_external.svg` and `tree_prediction_predict.svg`
+are retired across modes; regenerating figures removes their older variants.
+
 `cv/figures/amino_acid_group_trait_composition.svg` summarizes the same PSS-ranked
 sites by split group and observed trait. Each cell shows the mean residue frequencies,
 giving equal weight to species with an observed site. TPM weights apply only within

@@ -287,10 +287,7 @@ def write_amino_acid_figures(
             config,
             expression,
             oof,
-            external,
             expression_importance,
-            final_importance,
-            final_coefficients,
             annotations,
         )
     for stage, predictions, source in [
@@ -371,10 +368,7 @@ def _write_combined_expression_figures(
     config: AppConfig,
     expression: ExpressionInput,
     oof: pl.DataFrame,
-    external: pl.DataFrame | None,
     importance: pl.DataFrame,
-    final_importance: pl.DataFrame | None,
-    final_coefficients: pl.DataFrame | None,
     annotations: pl.DataFrame | None,
 ) -> None:
     """Adapt the existing raw-expression cache to the shared distribution writer."""
@@ -387,16 +381,6 @@ def _write_combined_expression_figures(
         .collect(engine="streaming")
     )
     pools = [("cv", oof, importance, cv_coefficients, "label")]
-    if external is not None and final_importance is not None and final_coefficients is not None:
-        expression_keys = [
-            name for name in final_importance["feature"] if json.loads(name)[0] == "expression"
-        ]
-        final_top = (
-            final_importance.filter(pl.col("feature").is_in(expression_keys))
-            .sort(["importance_mean", "feature"], descending=[True, False])
-            .head(config.figures.top_features)
-        )
-        pools.append(("external_test", external, final_top, final_coefficients, "true_label"))
     for stage, predictions, top, coefficients, label in pools:
         if top.is_empty() or predictions.is_empty():
             continue

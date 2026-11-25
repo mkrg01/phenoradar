@@ -233,6 +233,7 @@ def write_frequency_table(
     members: list[AAMember],
     importance: pl.DataFrame,
     limit: int,
+    *, prediction_species: list[str] | None = None,
 ) -> None:
     """Save OOF residue frequencies used by the confusion-group plot."""
     features = (
@@ -240,7 +241,8 @@ def write_frequency_table(
         .head(limit)["feature"]
         .to_list()
     )
-    species = sorted(manifest.filter(pl.col("pool") == "validation")["species"].unique().to_list())
+    species = (sorted(prediction_species) if prediction_species is not None else sorted(
+        manifest.filter(pl.col("pool") == "validation")["species"].unique().to_list()))
     index = {sample: i for i, sample in enumerate(species)}
     totals = np.zeros((len(species), len(features)))
     counts = np.zeros_like(totals)
@@ -251,9 +253,9 @@ def write_frequency_table(
             continue
         seen.add(id(member.transform))
         fold = member.scope.removeprefix("outer_fold_")
-        targets = manifest.filter((pl.col("pool") == "validation") & (pl.col("fold_id") == fold))[
-            "species"
-        ].to_list()
+        targets = (species if prediction_species is not None else
+                   manifest.filter((pl.col("pool") == "validation") &
+                                   (pl.col("fold_id") == fold))["species"].to_list())
         requested = {(og, position) for og, position, _ in parsed}
         display = replace(
             member.transform,

@@ -5560,9 +5560,11 @@ def write_predict_figures(
     run_dir: Path,
     pred_predict: pl.DataFrame,
     require_uncertainty: bool = False,
+    stage: str = "inference",
 ) -> None:
     """Write predict-level SVG figures under <run_dir>/inference/figures."""
-    inference_dir = _stage_figure_dirs(run_dir)["inference"]
+    inference_dir = run_dir / stage / "figures"
+    inference_dir.mkdir(parents=True, exist_ok=True)
     _predict_probability_distribution(
         pred_predict,
         inference_dir / "predict_probability_distribution.svg",

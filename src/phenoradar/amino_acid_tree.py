@@ -90,20 +90,21 @@ def build_residue_annotation(
 def write_residue_tree(
     run_dir: Path, tree_path: Path | None, store: AlignmentStore, sites: pl.DataFrame,
     predictions: pl.DataFrame, *, aggregation: str, annotations: pl.DataFrame | None = None,
+    stage: str = "cv",
 ) -> list[str]:
     if tree_path is None:
         return []
-    if sites.is_empty():
+    if sites.is_empty() or predictions.is_empty():
         return ["Skipped tree_feature_heatmap_amino_acid.svg: no positive-PSS sites."]
     table = build_residue_annotation(
         store, sites, predictions, aggregation=aggregation, annotations=annotations,
     )
-    table_path = run_dir / "cv/tables/tree_feature_heatmap_amino_acid_annotation.tsv"
+    table_path = run_dir / stage / "tables/tree_feature_heatmap_amino_acid_annotation.tsv"
     table_path.parent.mkdir(parents=True, exist_ok=True)
     table.sort("feature_rank", "species").write_csv(table_path, separator="\t")
     return _write_tree_feature_heatmap_svg(
         tree_path=tree_path, annotation=table, value_col="residue", cmap_name="",
-        out_path=run_dir / "cv/figures/tree_feature_heatmap_amino_acid.svg",
-        title="Representative residues (sites ranked by mean outer-fold PSS)",
+        out_path=run_dir / stage / "figures/tree_feature_heatmap_amino_acid.svg",
+        title="",
         annotate_features=True,
     )
