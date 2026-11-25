@@ -32,6 +32,41 @@ def model(beta: np.ndarray) -> GlmnetLogisticRegression:
     return fitted
 
 
+@pytest.mark.parametrize("compact", [False, True])
+def test_pss_controls_coverage_selection_and_coordinates(tmp_path: Path, compact: bool) -> None:
+    from phenoradar.amino_acid_run import _coordinate_rows, predict_members
+
+    path = alignment(tmp_path / "aa", [
+        ("train0_g", "AAA"), ("train1_g", "VVV"),
+        ("first_g", "A--"), ("second_g", "-A-"), ("third_g", "--A"),
+        ("complete_g", "AAA"),
+    ])
+    species = ["first", "second", "third", "complete"]
+    with AlignmentStore(path, ["train0", "train1", *species]) as store:
+        transform = fit_amino_acid(
+            store, ["train0", "train1"], settings(), y=np.array([0, 1]),
+            groups=np.array(["g0", "g1"]),
+        )
+        member = AAMember(transform, model(np.array([1., 2., 1., -1., 2., 2.])),
+                          "outer_fold_1", 0, Candidate(0, {}))
+        config = AppConfig()
+        config.abstention.enabled = True
+        config.abstention.threshold = .4
+        predictions = predict_members(config, store, species, [member])
+        # Site PSS values are 3, 2, 4; the last site has equal nonzero coefficients.
+        np.testing.assert_allclose(predictions["information_coverage"], [3/9, 2/9, 4/9, 1])
+        assert predictions["decision_status"].to_list() == [
+            "abstained", "abstained", "accepted", "accepted",
+        ]
+        coordinates = list(_coordinate_rows(store, [member], species))
+        assert {row["alignment_pos_1based"] for row in coordinates} == {1, 2, 3}
+        with AAReportWriter(tmp_path / "tables", compact=compact) as writer:
+            writer.add([member])
+            writer.write_site_stability()
+        stability = pl.read_csv(tmp_path / "tables/amino_acid_site_stability.tsv", separator="\t")
+        assert stability["n_selected_folds"].to_list() == [1, 1, 1]
+
+
 @pytest.mark.parametrize("combined", [False, True])
 @pytest.mark.parametrize("zero", [False, True])
 @pytest.mark.parametrize("isolated", [False, True])

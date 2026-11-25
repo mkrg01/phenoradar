@@ -20,7 +20,7 @@ phenoradar annotate-sites \
 ```
 
 Both commands accept repeated `--orthogroup OG` to process a subset. `--scope final`
-uses sites with R > 1e-12 in the final ensemble; `--scope cv` uses the outer-CV
+uses sites with PSS > 1e-12 in the final ensemble; `--scope cv` uses the outer-CV
 union. Scope is explicit and defaults to final, including for cv-only runs.
 All requested sites are retained in the correspondence tables.
 
@@ -130,7 +130,7 @@ rotation matrices are shared across views. Target chains are emphasized and othe
 protein chains are muted context. PNG panels are ray traced at 1000 x 1000 pixels;
 page text, legends and complete mapping tables are PDF text.
 
-Separate pages show selected sites, mean PSS, mean R, and CV selection frequency;
+Separate pages show selected sites, mean PSS, and CV selection frequency;
 each quantitative scale is fixed across six views and labeled per structure/OG.
 AlphaFold adds a pLDDT page. Reference residue/position and MSA column appear in
 site labels. The paginated audit lists every requested site, including gaps,

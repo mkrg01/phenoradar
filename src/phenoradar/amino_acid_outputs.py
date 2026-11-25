@@ -120,7 +120,7 @@ def write_site_effects(
     alphabet = np.array(list(ALPHABET))
     keys = ["scope", "sample_set_id", "candidate_index", "orthogroup",
             "alignment_pos_1based", "residue", "coefficient", "reference_residue",
-            "effect_vs_reference", "site_effect_range", "mean_abs_site_contribution"]
+            "effect_vs_reference", "mean_abs_site_contribution"]
     for block, beta, offset in coefficient_blocks(
         member.transform.sites, member.model.coef_, member.expression_width,
     ):
@@ -130,9 +130,6 @@ def write_site_effects(
         if not len(rows):
             continue
         reference = np.argmax(block["mean"], axis=1)
-        effect = (np.max(np.where(known, beta, -np.inf), axis=1)
-                  - np.min(np.where(known, beta, np.inf), axis=1))
-        effect[known.sum(axis=1) < 2] = 0
         contribution = np.zeros(len(beta))
         columns = np.r_[0, np.cumsum(active.sum(axis=1))]
         # Keep each nonzero site's original dot-product order exactly.
@@ -149,7 +146,6 @@ def write_site_effects(
             pl.Series("coefficient", beta[rows, states]),
             pl.Series("reference_residue", alphabet[reference[rows]]),
             pl.Series("effect_vs_reference", beta[rows, states] - beta[rows, reference[rows]]),
-            pl.Series("site_effect_range", effect[rows]),
             pl.Series("mean_abs_site_contribution", contribution[rows]),
         ).select(keys)
         if compact:

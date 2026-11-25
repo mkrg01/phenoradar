@@ -525,8 +525,8 @@ def _site_coefficients(member: AAMember) -> list[np.ndarray]:
     return coefficients
 
 
-def _effect_range(known: np.ndarray, beta: np.ndarray) -> float:
-    return float(np.ptp(beta[known])) if np.count_nonzero(known) > 1 else 0.0
+def _site_pss(known: np.ndarray, beta: np.ndarray) -> float:
+    return float(np.abs(beta[known]).sum())
 
 
 def predict_members(
@@ -575,7 +575,7 @@ def predict_members(
             betas = _site_coefficients(member)
             weights = np.array(
                 [
-                    _effect_range(site.known, beta)
+                    _site_pss(site.known, beta)
                     for site, beta in zip(member.transform.sites, betas, strict=True)
                 ]
             )
@@ -731,7 +731,7 @@ def _coordinate_rows(
                 for site, beta in zip(
                     other.transform.sites, _site_coefficients(other), strict=True
                 ):
-                    if _effect_range(site.known, beta) > 1e-12:
+                    if _site_pss(site.known, beta) > 1e-12:
                         selected.add((site.orthogroup, site.column))
         for site in member.transform.sites:
             if (site.orthogroup, site.column) in selected:

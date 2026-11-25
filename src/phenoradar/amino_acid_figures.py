@@ -42,14 +42,12 @@ def _read(directory: Path, name: str) -> pl.DataFrame | None:
     if not path.exists():
         return None
     return pl.read_csv(path, separator="\t", infer_schema_length=10000,
-                       schema_overrides={"fold_id": pl.String, "pss": pl.Float64,
-                                         "effect_range": pl.Float64})
+                       schema_overrides={"fold_id": pl.String, "pss": pl.Float64})
 
 
 def _scan(directory: Path, name: str) -> pl.LazyFrame:
     return pl.scan_csv(directory / f"{name}.tsv", separator="\t", infer_schema_length=10000,
-                       schema_overrides={"fold_id": pl.String, "pss": pl.Float64,
-                                         "effect_range": pl.Float64})
+                       schema_overrides={"fold_id": pl.String, "pss": pl.Float64})
 
 
 def _selection(directory: Path, name: str) -> pl.DataFrame | None:
@@ -117,6 +115,12 @@ def write_amino_acid_figures(
     expression: ExpressionInput | None = None,
 ) -> list[str]:
     """Reuse common plots, without loading millions of zero coefficients into RAM."""
+    for path in run_dir.glob("*/figures/**/amino_acid_site_effect_range_top.svg"):
+        path.unlink()
+    for suffix in ("summary", "by_fold"):
+        (run_dir / "cv/tables" / f"amino_acid_site_effect_range_top_{suffix}.tsv").unlink(
+            missing_ok=True,
+        )
     cv = run_dir / "cv/tables"
     model = run_dir / "model/tables"
     limit = config.figures.top_features
@@ -220,18 +224,13 @@ def write_amino_acid_figures(
             sparsity = sparsity.filter(pl.col("n_models") == 1)
     counts = _selection(cv, "model_selection_selected")
     assert counts is not None
-    top_sites = {}
-    site_folds = {}
-    for metric in ["pss", "effect_range"]:
-        site_source = (
-            report.sites.scan() if report is not None else _scan(
-                cv, "amino_acid_site_scores" if (cv / "amino_acid_site_scores.tsv").exists()
-                else f"amino_acid_site_{metric}",
-            )
+    site_source = (
+        report.sites.scan() if report is not None else _scan(
+            cv, "amino_acid_site_scores" if (cv / "amino_acid_site_scores.tsv").exists()
+            else "amino_acid_site_pss",
         )
-        top_sites[metric], site_folds[metric] = site_score_summary(
-            site_source, counts, metric, limit,
-        )
+    )
+    top_sites, site_folds = site_score_summary(site_source, counts, "pss", limit)
     from phenoradar.orthogroup_annotation import load_orthogroup_annotations
 
     annotation_features = set(requested)
@@ -244,8 +243,7 @@ def write_amino_acid_figures(
         if annotation_frame is not None:
             annotation_features.update(annotation_frame["feature"])
     ogs = {figures._feature_address(f)[0] for f in annotation_features}
-    for top in top_sites.values():
-        ogs.update(top["orthogroup"])
+    ogs.update(top_sites["orthogroup"])
     annotations = load_orthogroup_annotations(
         Path(config.data.orthogroup_annotation_path)
         if config.data.orthogroup_annotation_path
@@ -305,10 +303,9 @@ def write_amino_acid_figures(
                     config=config,
                 )
             )
-    for metric, top in top_sites.items():
-        write_site_scores(run_dir, top, site_folds[metric], metric, annotations,
-                          unit_label="Group" if fold_group_labels(oof) else "Fold")
-    write_site_stability(run_dir, top_sites["pss"], annotations,
+    write_site_scores(run_dir, top_sites, site_folds, "pss", annotations,
+                      unit_label="Group" if fold_group_labels(oof) else "Fold")
+    write_site_stability(run_dir, top_sites, annotations,
                          unit_label="Group" if fold_group_labels(oof) else "Fold")
     warnings.extend(
         write_run_tree_prediction_artifacts(
@@ -343,14 +340,14 @@ def write_amino_acid_figures(
                 run_dir,
                 Path(config.data.tree_path) if config.data.tree_path else None,
                 store,
-                top_sites["pss"],
+                top_sites,
                 oof,
                 aggregation=config.preprocess.amino_acid.aggregation,
                 annotations=annotations,
             )
         )
         warnings.extend(write_group_trait_composition(
-            run_dir, store, top_sites["pss"], oof,
+            run_dir, store, top_sites, oof,
             aggregation=config.preprocess.amino_acid.aggregation,
             annotations=annotations,
             tree_path=Path(config.data.tree_path) if config.data.tree_path else None,

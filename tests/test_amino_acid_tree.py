@@ -122,11 +122,11 @@ def test_aa_run_generates_annotated_figures_and_tree(tmp_path: Path) -> None:
     out = run_amino_acid(load_and_resolve_config([path]), tmp_path / 'run')
     for figure in ['tree_feature_heatmap_amino_acid', 'feature_importance_top',
                    'coefficients_signed_top', 'amino_acid_site_pss_top',
-                   'amino_acid_site_effect_range_top',
                    'amino_acid_frequency_by_confusion']:
         text = (out / 'cv/figures' / f'{figure}.svg').read_text()
         assert 'Test kinase' in text, figure
     assert not (out / 'cv/figures/amino_acid_frequency_heatmap.svg').exists()
+    assert not (out / 'cv/figures/amino_acid_site_effect_range_top.svg').exists()
     table = pl.read_csv(out / 'cv/tables/tree_feature_heatmap_amino_acid_annotation.tsv',
                         separator='\t')
     assert table['species'].n_unique() == 8

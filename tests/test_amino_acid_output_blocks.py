@@ -56,7 +56,6 @@ def test_columnar_effects_and_units_match_all_states_and_append_contexts(
                                 "effect_vs_reference": float(
                                     coefficients[state] - coefficients[reference]
                                 ),
-                                "site_effect_range": float(np.ptp(coefficients[site.known])),
                                 "mean_abs_site_contribution": contribution})
             offset += count
         _write(tmp_path / "old/amino_acid_site_effects.tsv", effects)

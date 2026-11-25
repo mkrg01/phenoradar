@@ -160,16 +160,12 @@ class AAReportWriter:
                     self._features(names, beta[active], aa_total, "amino_acid",
                                    model_index, fold, member.sample_set_id, axes=axes)
                 n_known = known.sum(axis=1)
-                effect = (np.max(np.where(known, beta, -np.inf), axis=1)
-                          - np.min(np.where(known, beta, np.inf), axis=1))
-                effect[n_known < 2] = 0
                 self.sites.add(pl.DataFrame({
                     "orthogroup": block["orthogroup"],
                     "alignment_pos_1based": block["column"] + 1,
                     "n_known_residue_states": n_known.astype(np.int64),
                     "n_nonzero_coefficients": np.count_nonzero(beta * known, axis=1),
                     "pss": np.sum(np.abs(beta) * known, axis=1),
-                    "effect_range": effect,
                     "eligible": active.any(axis=1),
                 }).with_columns(
                     pl.lit(model_index).alias("_model"), pl.lit(member.scope).alias("scope"),
@@ -269,26 +265,25 @@ class AAReportWriter:
             write_site_scores(raw, self.destination)
             return
         context = ["scope", "sample_set_id", "candidate_index"]
-        for metric in ["pss", "effect_range"]:
-            with (self.destination / f"amino_acid_site_{metric}.tsv").open("wb") as output:
-                for index, (scope, sample, candidate) in enumerate(sorted(self.contexts)):
-                    frame = raw.filter(
-                        (pl.col("scope") == scope) & (pl.col("sample_set_id") == sample)
-                        & (pl.col("candidate_index") == candidate)
-                    ).with_columns(pl.col(metric).sum().over("_model").alias("_total"))
-                    frame = frame.with_columns(
-                        pl.when(pl.col("_total") > 0).then(pl.col(metric) / pl.col("_total"))
-                        .otherwise(0.0).alias("normalized_score"),
-                        pl.when(pl.col(metric) > 0)
-                        .then(pl.col(metric).rank(method="min", descending=True).over(context))
-                        .otherwise(None).alias("rank"),
-                    ).select(*context, "orthogroup", "alignment_pos_1based",
-                             "n_known_residue_states", "n_nonzero_coefficients",
-                             metric, "normalized_score", "rank")
-                    frame.sort([metric, "orthogroup", "alignment_pos_1based"],
-                               descending=[True, False, False]).sink_csv(
-                        output, separator="\t", engine="streaming", include_header=index == 0,
-                    )
+        with (self.destination / "amino_acid_site_pss.tsv").open("wb") as output:
+            for index, (scope, sample, candidate) in enumerate(sorted(self.contexts)):
+                frame = raw.filter(
+                    (pl.col("scope") == scope) & (pl.col("sample_set_id") == sample)
+                    & (pl.col("candidate_index") == candidate)
+                ).with_columns(pl.col("pss").sum().over("_model").alias("_total"))
+                frame = frame.with_columns(
+                    pl.when(pl.col("_total") > 0).then(pl.col("pss") / pl.col("_total"))
+                    .otherwise(0.0).alias("normalized_score"),
+                    pl.when(pl.col("pss") > 0)
+                    .then(pl.col("pss").rank(method="min", descending=True).over(context))
+                    .otherwise(None).alias("rank"),
+                ).select(*context, "orthogroup", "alignment_pos_1based",
+                         "n_known_residue_states", "n_nonzero_coefficients",
+                         "pss", "normalized_score", "rank")
+                frame.sort(["pss", "orthogroup", "alignment_pos_1based"],
+                           descending=[True, False, False]).sink_csv(
+                    output, separator="\t", engine="streaming", include_header=index == 0,
+                )
 
     def write_site_stability(self) -> None:
         raw = self.sites.scan()
@@ -297,7 +292,7 @@ class AAReportWriter:
                            (["orthogroup"], "og")]:
             frame = raw.group_by(keys).agg(
                 pl.col("scope").filter(pl.col("eligible")).n_unique().alias("n_eligible_folds"),
-                pl.col("scope").filter(pl.col("effect_range") > 1e-12)
+                pl.col("scope").filter(pl.col("pss") > 1e-12)
                 .n_unique().alias("n_selected_folds"),
             )
             frame = frame.filter(pl.col("n_eligible_folds") > 0)

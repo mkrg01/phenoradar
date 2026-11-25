@@ -77,7 +77,7 @@ def test_process_outer_folds_match_serial_and_render_common_figures(
         "cv": ["prediction_cv", "model_selection_trials", "model_selection_selected",
                "loss_by_split_cv", "training_loss_by_sample_set",
                "feature_importance", "coefficients", "coefficients_by_fold", "amino_acid_site_pss",
-               "amino_acid_site_effect_range", "amino_acid_site_stability",
+               "amino_acid_site_stability",
                "selected_site_sequence_map", "amino_acid_site_effects"],
         "external_test": ["pred_external_test"], "inference": ["pred_inference"],
     }.items():
@@ -89,7 +89,7 @@ def test_process_outer_folds_match_serial_and_render_common_figures(
     for name in ["roc_curve_cv", "pr_curve_cv",
                  "feature_importance_top", "coefficients_signed_top",
                  "feature_importance_by_fold_heatmap", "model_selection",
-                 "amino_acid_site_pss_top", "amino_acid_site_effect_range_top",
+                 "amino_acid_site_pss_top",
                  "amino_acid_frequency_by_confusion", "amino_acid_site_filter_funnel"]:
         assert (second / "cv/figures" / f"{name}.svg").exists(), name
     for root in [first, second]:

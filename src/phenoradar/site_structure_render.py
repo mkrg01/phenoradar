@@ -92,7 +92,7 @@ for site in selected:
         site['reference_pos_1based'], site['alignment_pos_1based'])
     cmd.label(sel + ' and name CA', repr(label))
 
-pages = ['selected', 'pss', 'effect_range', 'selection_frequency']
+pages = ['selected', 'pss', 'selection_frequency']
 if scene['source'] == 'alphafold':
     pages.append('confidence')
 scales = {}
@@ -219,7 +219,6 @@ def _write_pdf(record: dict[str, Any], folder: Path) -> None:
     labels = dict(
         selected="Selected sites",
         pss="PSS (mean across models)",
-        effect_range="R (mean coefficient range)",
         selection_frequency="CV selection frequency",
         confidence="AlphaFold local confidence (pLDDT)",
     )
@@ -290,7 +289,7 @@ def _write_pdf(record: dict[str, Any], folder: Path) -> None:
     for start in range(0, len(record["sites"]), 23):
         header("Site correspondence and missing-coordinate audit")
         rows: list[list[Any]] = [
-            ["MSA", "Reference", "Structure", "PSS", "R", "CV freq.", "pLDDT", "Status"]
+            ["MSA", "Reference", "Structure", "PSS", "CV freq.", "pLDDT", "Status"]
         ]
         for site in record["sites"][start : start + 23]:
 
@@ -319,13 +318,12 @@ def _write_pdf(record: dict[str, Any], folder: Path) -> None:
                     ref,
                     residue,
                     number(site.get("pss")),
-                    number(site.get("effect_range")),
                     number(site.get("selection_frequency")),
                     number(site.get("plddt")),
                     status,
                 ]
             )
-        table = Table(rows, colWidths=[43, 58, 65, 46, 46, 48, 44, width - 406])
+        table = Table(rows, colWidths=[43, 58, 65, 46, 48, 44, width - 360])
         table.setStyle(
             TableStyle(
                 [

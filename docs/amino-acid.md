@@ -188,12 +188,13 @@ interactions. Combined mode currently rejects phylogenetic imputation.
 ## Information coverage
 
 When abstention is enabled, sequence coverage weights site observation fractions
-by each site's fitted coefficient range and normalizes within each model.
+by each site's PSS (sum of absolute fitted residue coefficients) and normalizes
+within each model.
 Frequency-mode observation combines callable-gene fraction and known residue
 mass. Weighted mode uses callable OG-TPM fraction times known residue mass,
 not a fraction of all transcriptome TPM. Intercept-only members contribute zero.
 
-Combined models use absolute-coefficient expression coverage and site-range AA
+Combined models use absolute-coefficient expression coverage and PSS-weighted AA
 coverage. Per-model joint coverage is the minimum over modalities with selected
 coefficients; unused modalities impose no requirement. An intercept-only model
 has zero coverage. Missing prediction evidence is neutralized and assessed
@@ -224,8 +225,8 @@ candidate selection, coefficients, predictions, and the model bundle are unchang
   reference-residue effects. Site QC covers these sites. Unselected-site means and
   detailed QC are intentionally omitted. `amino_acid_site_qc_summary.tsv` retains
   all-site counts and QC means/minima/maxima for each training context.
-- `amino_acid_site_scores.tsv` combines PSS and effect range, with their original
-  normalization and ranks. Rows with both scores zero are implicit. OG QC and
+- `amino_acid_site_scores.tsv` stores PSS, its per-model normalization and ranks.
+  Rows with zero PSS are implicit. OG QC and
   global site/filter summaries remain available.
 
 For Python analysis, `phenoradar.amino_acid_compact_reports.read_model_coefficients`
@@ -244,20 +245,19 @@ tables use the normal stage directories. Sequence-specific tables include:
 | `amino_acid_og_qc.tsv`, `amino_acid_site_qc.tsv` | Train-only coverage, variation, and scoring diagnostics |
 | `feature_schema.tsv`, `representative_sequences.tsv` | State columns and gene choices |
 | `representative_scoring_sites.tsv` | Pre-ranking columns frozen for gene selection |
-| `amino_acid_site_effects.tsv` | Effects versus training major residue, ranges, and local contribution summaries |
+| `amino_acid_site_effects.tsv` | Effects versus training major residue and local contribution summaries |
 | `amino_acid_site_pss.tsv` | Per-model/site sum of absolute residue coefficients |
-| `amino_acid_site_effect_range.tsv` | Per-model/site max–min coefficient among training-observed residues, including zero coefficients |
 | `amino_acid_site_stability.tsv`, `amino_acid_og_stability.tsv` | Selected-fold fractions, including fractions conditional on eligibility |
 | `amino_acid_local_contributions.tsv` | Leading per-model site effects, observation fractions, and gene counts |
 | `selected_site_sequence_map.tsv` | Original residues, sequence checksums, and coordinates; weighted mode adds gene TPM and callable-site weight fractions |
 
-PSS and effect-range scores are written in `cv/tables/`, `model/tables/` for
+PSS scores are written in `cv/tables/`, `model/tables/` for
 refits, and `predict/tables/` for bundle predictions. Keys include model scope,
 sampled set, candidate, OG, and original alignment position. Scores are computed
 per model, normalized by that model's total, and ranked with shared ranks for
 ties. Zero scores have blank rank; all-zero models have zero normalized scores.
 These describe coefficients, not predictive performance. Site selection,
-stability, and coverage use effect range.
+stability, and coverage use PSS. Selection and stability require PSS > `1e-12`.
 
 Coordinates are one-based: alignment positions refer to the original MSA;
 sequence positions count non-gap characters, including `X` and `*`. Gap coordinates
@@ -373,7 +373,7 @@ tables retain them. Centering expands only model columns to float64.
 Selected models refit along matching stronger lambdas on their own training
 data, retaining the selected lambda and modality penalty factors.
 CV interpretation is spooled to temporary Parquet parts as each model finishes.
-Full feature eligibility, coefficients, PSS, effect ranges, and stability tables
+Full feature eligibility, coefficients, PSS, and stability tables
 are retained; completed folds do not accumulate Python feature dictionaries or
 full fitted transforms in RAM. Fold means and feature eligibility are aggregated
 one fold at a time; shared feature statistics are computed once for coefficient
@@ -423,9 +423,9 @@ No sites, candidates or CV folds are removed to reduce resource use.
 
 AA runs also write the shared evaluation, model-selection, coefficient,
 importance and stability SVGs under each stage's `figures/` directory.
-`amino_acid_site_pss_top.svg` and `amino_acid_site_effect_range_top.svg` show
+`amino_acid_site_pss_top.svg` shows
 per-fold scores (blue points) and their mean (black diamonds). Scores describe
-training coefficients: PSS sums absolute residue coefficients; R is their range.
+training coefficients: PSS sums absolute residue coefficients.
 Models are averaged within folds, then folds receive equal weight; absent sites
 count as zero. Bounded `*_top_summary.tsv` and `*_top_by_fold.tsv` tables save the
 displayed values. `amino_acid_site_stability_top.svg` shows the eligible and
@@ -539,7 +539,7 @@ Species absent from the tree are omitted with a warning; accepted-only variants
 follow the existing abstention figure policy.
 
 When `data.orthogroup_annotation_path` is supplied, AA/combined importance,
-coefficient, frequency and PSS/R figures include the annotation name
+coefficient, frequency and PSS figures include the annotation name
 alongside the OG/site/residue ID. Tree headers may shorten the annotation text; OG IDs and input-MSA site numbers
 are always kept in full. SVG tooltips and the annotation TSV retain the complete name. Missing annotations retain IDs.
 

@@ -108,7 +108,7 @@ def write_site_scores(
     ax.set_xlim(left=0)
     ax.grid(axis="x", linewidth=0.5)
     ax.set_axisbelow(True)
-    ax.set_xlabel("Site PSS" if metric == "pss" else "Site effect range (R)")
+    ax.set_xlabel("Site PSS")
     ax.set_ylabel("Orthogroup / MSA position")
     figures._legend_above(
         ax,

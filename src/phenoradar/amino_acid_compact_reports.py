@@ -70,20 +70,18 @@ def write_dictionary(writer: AAReportWriter, raw: pl.LazyFrame) -> None:
 
 def write_site_scores(raw: pl.LazyFrame, destination: Path) -> None:
     context = ["scope", "sample_set_id", "candidate_index"]
-    frame = raw
-    for metric in ["pss", "effect_range"]:
-        total = pl.col(metric).sum().over("_model")
-        frame = frame.with_columns(
-            pl.when(total > 0).then(pl.col(metric) / total).otherwise(0.0)
-            .alias(f"normalized_{metric}"),
-            pl.when(pl.col(metric) > 0)
-            .then(pl.col(metric).rank(method="min", descending=True).over(context))
-            .otherwise(None).alias(f"{metric}_rank"),
-        )
-    frame.filter((pl.col("pss") != 0) | (pl.col("effect_range") != 0)).select(
+    total = pl.col("pss").sum().over("_model")
+    frame = raw.with_columns(
+        pl.when(total > 0).then(pl.col("pss") / total).otherwise(0.0)
+        .alias("normalized_pss"),
+        pl.when(pl.col("pss") > 0)
+        .then(pl.col("pss").rank(method="min", descending=True).over(context))
+        .otherwise(None).alias("pss_rank"),
+    )
+    frame.filter(pl.col("pss") != 0).select(
         pl.col("_model").alias("model_id"), *context, "orthogroup", "alignment_pos_1based",
-        "n_known_residue_states", "n_nonzero_coefficients", "pss", "effect_range",
-        "normalized_pss", "normalized_effect_range", "pss_rank", "effect_range_rank",
+        "n_known_residue_states", "n_nonzero_coefficients", "pss",
+        "normalized_pss", "pss_rank",
     ).sink_csv(destination / "amino_acid_site_scores.tsv", separator="\t", engine="streaming")
 
 

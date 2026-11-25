@@ -54,23 +54,21 @@ def test_site_score_exports_preserve_model_scores_ranks_and_zero_states(tmp_path
         model.coef_ = beta
         members.append(AAMember(transform, model, f"outer_fold_{index + 1}", 0, Candidate(0, {})))
     write_site_scores(tmp_path, members)
-    for metric, expected, ranks in [
-        ("pss", [4, 3, 0, 3], [1, 2, None, 2]),
-        ("effect_range", [2, 3, 0, 1], [2, 1, None, 3]),
-    ]:
-        table = pl.read_csv(tmp_path / f"amino_acid_site_{metric}.tsv", separator="\t")
-        assert table.height == 12
-        first = table.filter(pl.col("scope") == "outer_fold_1").sort("alignment_pos_1based")
-        assert first[metric].to_list() == expected
-        assert first["rank"].to_list() == ranks
-        assert first["n_known_residue_states"].to_list() == [4, 2, 2, 2]
-        np.testing.assert_allclose(first["normalized_score"], np.array(expected) / sum(expected))
-        # Opposite-signed models must not cancel before absolute values/ranges.
-        second = table.filter(pl.col("scope") == "outer_fold_2").sort("alignment_pos_1based")
-        assert first.drop("scope").equals(second.drop("scope"))
-        zero = table.filter(pl.col("scope") == "outer_fold_3")
-        assert zero["normalized_score"].to_list() == [0, 0, 0, 0]
-        assert zero["rank"].null_count() == 4
+    expected = [4, 3, 0, 3]
+    table = pl.read_csv(tmp_path / "amino_acid_site_pss.tsv", separator="\t")
+    assert table.height == 12
+    first = table.filter(pl.col("scope") == "outer_fold_1").sort("alignment_pos_1based")
+    assert first["pss"].to_list() == expected
+    assert first["rank"].to_list() == [1, 2, None, 2]
+    assert first["n_known_residue_states"].to_list() == [4, 2, 2, 2]
+    np.testing.assert_allclose(first["normalized_score"], np.array(expected) / sum(expected))
+    # Opposite-signed models must not cancel before absolute values.
+    second = table.filter(pl.col("scope") == "outer_fold_2").sort("alignment_pos_1based")
+    assert first.drop("scope").equals(second.drop("scope"))
+    zero = table.filter(pl.col("scope") == "outer_fold_3")
+    assert zero["normalized_score"].to_list() == [0, 0, 0, 0]
+    assert zero["rank"].null_count() == 4
+    assert not (tmp_path / "amino_acid_site_effect_range.tsv").exists()
 
 
 def test_default_coverage_uses_ceiling_and_allows_singleton_residues(tmp_path: Path) -> None:
@@ -426,18 +424,19 @@ def test_nested_cv_refit_bundle_and_coordinates(
     after = pl.read_csv(predicted / "predict/tables/pred_predict.tsv", separator="\t")
     before = pl.read_csv(destination / "inference/tables/pred_inference.tsv", separator="\t")
     np.testing.assert_array_equal(after["prob"].to_numpy(), before["prob"].to_numpy())
-    for metric in ["pss", "effect_range"]:
-        name = ("amino_acid_site_scores.tsv" if output_mode == "compact" else
-                f"amino_acid_site_{metric}.tsv")
-        for stage in ["cv", "model"]:
-            scores = pl.read_csv(destination / stage / "tables" / name, separator="\t")
-            assert set(scores["alignment_pos_1based"]) == {3, 4}
-            assert scores[metric].is_finite().all()
-            assert (scores[metric] >= 0).all()
-        fitted_scores = pl.read_csv(destination / "model/tables" / name, separator="\t")
-        predicted_scores = pl.read_csv(predicted / "predict/tables" / name, separator="\t")
-        # Model interpretation must not depend on the requested prediction species.
-        assert fitted_scores.equals(predicted_scores)
+    name = ("amino_acid_site_scores.tsv" if output_mode == "compact" else
+            "amino_acid_site_pss.tsv")
+    for stage in ["cv", "model"]:
+        scores = pl.read_csv(destination / stage / "tables" / name, separator="\t")
+        assert set(scores["alignment_pos_1based"]) == {3, 4}
+        assert scores["pss"].is_finite().all()
+        assert (scores["pss"] >= 0).all()
+        assert not any("effect_range" in column for column in scores.columns)
+        assert not (destination / stage / "tables/amino_acid_site_effect_range.tsv").exists()
+    fitted_scores = pl.read_csv(destination / "model/tables" / name, separator="\t")
+    predicted_scores = pl.read_csv(predicted / "predict/tables" / name, separator="\t")
+    # Model interpretation must not depend on the requested prediction species.
+    assert fitted_scores.equals(predicted_scores)
     state_path = destination / "model_bundle/model_state.joblib"
     state_path.write_bytes(state_path.read_bytes() + b"tampered")
     with pytest.raises(AlignmentError, match="checksum"):

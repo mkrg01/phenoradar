@@ -22,6 +22,7 @@ from phenoradar.site_reference import (
     project_references,
     reference_order,
     score_reference,
+    selected_sites,
 )
 from phenoradar.site_reference_resources import (
     ResourceCache,
@@ -149,10 +150,9 @@ def fixture_run(root: Path) -> tuple[Path, Path]:
         orthogroup=["OG1"] * 2,
         alignment_pos_1based=[3, 18],
     )
-    for name, metric in [("effect_range", [2.0, 1.0]), ("pss", [2.0, 1.0])]:
-        pl.DataFrame({**base, name: metric}).write_csv(
-            run / "model/tables" / f"amino_acid_site_{name}.tsv", separator="\t"
-        )
+    pl.DataFrame({**base, "pss": [2.0, 1.0]}).write_csv(
+        run / "model/tables/amino_acid_site_pss.tsv", separator="\t"
+    )
     pl.DataFrame(
         dict(orthogroup=["OG1"] * 2, alignment_pos_1based=[3, 18], selection_frequency=[1.0, 0.5])
     ).write_csv(run / "cv/tables/amino_acid_site_stability.tsv", separator="\t")
@@ -183,6 +183,45 @@ def fixture_run(root: Path) -> tuple[Path, Path]:
         ),
     )
     return run, catalog
+
+
+@pytest.mark.parametrize("compact", [False, True])
+@pytest.mark.parametrize("scope", ["final", "cv"])
+def test_selected_sites_uses_pss_and_includes_zero_models(
+    tmp_path: Path, compact: bool, scope: str,
+) -> None:
+    tables = tmp_path / ("model/tables" if scope == "final" else "cv/tables")
+    tables.mkdir(parents=True)
+    rows = [
+        {"model_id": i, "scope": "final_refit" if scope == "final" else f"outer_fold_{i+1}",
+         "sample_set_id": 0, "candidate_index": i, "orthogroup": "OG1",
+         "alignment_pos_1based": position, "pss": value}
+        for i, values in enumerate([(4., 0.), (2., 3.), (0., 0.)])
+        for position, value in enumerate(values, 1)
+    ]
+    frame = pl.DataFrame(rows)
+    if compact:
+        frame = frame.filter(pl.col("pss") > 0)
+        pl.DataFrame({"model_id": [0, 1, 2]}).write_parquet(tables / "report_models.parquet")
+    name = "amino_acid_site_scores.tsv" if compact else "amino_acid_site_pss.tsv"
+    frame.write_csv(tables / name, separator="\t")
+    actual = selected_sites(tmp_path, scope)
+    assert actual["alignment_pos_1based"].to_list() == [1, 2]
+    assert actual["pss"].to_list() == [2., 1.]
+    assert "effect_range" not in actual.columns
+    assert actual["selection_frequency"].null_count() == 2
+    # A final intercept-only model may coexist with selected CV sites.
+    stability = tmp_path / "cv/tables/amino_acid_site_stability.tsv"
+    stability.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"orthogroup": ["OG1"], "alignment_pos_1based": [1],
+                  "selection_frequency": [1.]}).write_csv(stability, separator="\t")
+    empty = frame.filter(pl.lit(False)) if compact else frame.with_columns(pl.lit(0.).alias("pss"))
+    empty.write_csv(tables / name, separator="\t")
+    assert selected_sites(tmp_path, scope).is_empty()
+    if compact:
+        (tables / "report_models.parquet").unlink()
+        with pytest.raises(SiteAnnotationError, match="requires model counts"):
+            selected_sites(tmp_path, scope)
 
 
 def test_species_balance_and_copy_count_independence(tmp_path: Path) -> None:
@@ -448,7 +487,8 @@ def test_real_pymol_six_views_and_pdf(tmp_path: Path, source: str) -> None:
         np.testing.assert_allclose(rotation @ rotation.T, np.eye(3), atol=1e-5)
         translations.append(view[9:])
     assert all(t == translations[0] for t in translations)
-    assert len(list(folder.glob("*.png"))) == (30 if source == "alphafold" else 24)
+    assert len(list(folder.glob("*.png"))) == (24 if source == "alphafold" else 18)
+    assert "effect_range" not in render["pages"]
     assert ("confidence" in render["pages"]) == (source == "alphafold")
     assert (folder / "sites.pse").stat().st_size > 100
     assert (folder / "sites.pdf").read_bytes().startswith(b"%PDF")

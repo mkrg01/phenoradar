@@ -114,18 +114,17 @@ def test_compact_values_membership_and_global_summaries_match_full(
     keys = ['scope', 'sample_set_id', 'candidate_index', 'orthogroup', 'alignment_pos_1based']
     score_schema = {**dict.fromkeys(keys[1:3] + [keys[-1], 'n_known_residue_states',
                                                 'n_nonzero_coefficients'], pl.Int64),
-                    **dict.fromkeys(['pss', 'effect_range', 'normalized_pss',
-                                     'normalized_effect_range', 'pss_rank', 'effect_range_rank',
+                    **dict.fromkeys(['pss', 'normalized_pss', 'pss_rank',
                                      'normalized_score', 'rank'], pl.Float64)}
     scores = pl.read_csv(compact / 'amino_acid_site_scores.tsv', separator='\t',
                          schema_overrides=score_schema)
-    for metric in ['pss', 'effect_range']:
-        expected_scores = pl.read_csv(full / f'amino_acid_site_{metric}.tsv', separator='\t',
-                                      schema_overrides=score_schema)
-        expected_scores = expected_scores.join(scores.select(keys), on=keys, how='semi')
-        actual_scores = scores.rename({f'normalized_{metric}': 'normalized_score',
-                                       f'{metric}_rank': 'rank'}).select(expected_scores.columns)
-        assert_frame_equal(actual_scores.sort(keys), expected_scores.sort(keys), check_exact=True)
+    assert not any('effect_range' in column for column in scores.columns)
+    expected_scores = pl.read_csv(full / 'amino_acid_site_pss.tsv', separator='\t',
+                                  schema_overrides=score_schema)
+    expected_scores = expected_scores.join(scores.select(keys), on=keys, how='semi')
+    actual_scores = scores.rename({'normalized_pss': 'normalized_score',
+                                   'pss_rank': 'rank'}).select(expected_scores.columns)
+    assert_frame_equal(actual_scores.sort(keys), expected_scores.sort(keys), check_exact=True)
     if not combined:
         assert sum(p.stat().st_size for p in compact.iterdir()) < \
             sum(p.stat().st_size for p in full.iterdir()) * .15
@@ -291,4 +290,12 @@ def test_intercept_only_cv_can_replot_empty_compact_site_scores(
         assert pl.read_csv(directory / 'amino_acid_site_scores.tsv', separator='\t').is_empty()
         assert pl.read_csv(directory / 'amino_acid_site_qc_summary.tsv',
                            separator='\t')['n_retained_sites'].sum() > 0
+    retired = [run / 'cv/figures/amino_acid_site_effect_range_top.svg',
+               run / 'cv/figures/accepted_only/amino_acid_site_effect_range_top.svg',
+               run / 'cv/tables/amino_acid_site_effect_range_top_summary.tsv',
+               run / 'cv/tables/amino_acid_site_effect_range_top_by_fold.tsv']
+    for path in retired:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('obsolete')
     write_amino_acid_figures(run, config)
+    assert not any(path.exists() for path in retired)

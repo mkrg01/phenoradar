@@ -53,33 +53,39 @@ def _write_table(path: Path, rows: list[dict[str, Any]]) -> None:
         path.write_text("status\n")
 
 
+def _site_pss_path(tables: Path) -> Path:
+    for name in ("amino_acid_site_scores.tsv", "amino_acid_site_pss.tsv"):
+        path = tables / name
+        if path.is_file():
+            return path
+    raise SiteAnnotationError(f"Site PSS is not available: {tables}")
+
+
 def selected_sites(run: Path, scope: str) -> pl.DataFrame:
-    """Bounded aggregation of nonzero site effects; preserve all selected positions."""
+    """Aggregate PSS over all models, including models with no selected sites."""
     if scope not in {"final", "cv"}:
         raise SiteAnnotationError("Scope must be final or cv.")
     tables = run / ("model/tables" if scope == "final" else "cv/tables")
-    effects = tables / "amino_acid_site_effect_range.tsv"
-    if not effects.is_file():
-        raise SiteAnnotationError(f"Site effects are not available for {scope}: {effects}")
+    scores = _site_pss_path(tables)
     context = ["scope", "sample_set_id", "candidate_index"]
-    scan = pl.scan_csv(effects, separator="\t", infer_schema_length=10000)
-    count = scan.select(context).unique().select(pl.len()).collect().item()
+    scan = pl.scan_csv(scores, separator="\t", infer_schema_length=10000,
+                       schema_overrides={"pss": pl.Float64, "orthogroup": pl.String,
+                                         "alignment_pos_1based": pl.Int64})
+    models = tables / "report_models.parquet"
+    if models.is_file():
+        count = pl.scan_parquet(models).select(pl.len()).collect().item()
+    elif scores.name == "amino_acid_site_pss.tsv":
+        count = scan.select(context).unique().select(pl.len()).collect().item()
+    else:
+        raise SiteAnnotationError(f"Compact site PSS requires model counts: {models}")
     if not count:
-        raise SiteAnnotationError("Site effect table has no models.")
+        raise SiteAnnotationError("Site PSS table has no models.")
     frame = (
-        scan.filter(pl.col("effect_range") > 1e-12)
-        .group_by("orthogroup", "alignment_pos_1based")
-        .agg((pl.col("effect_range").sum() / count).alias("effect_range"))
-        .collect(engine="streaming")
-    )
-    pss = (
-        pl.scan_csv(tables / "amino_acid_site_pss.tsv", separator="\t")
-        .filter(pl.col("pss") > 0)
+        scan.filter(pl.col("pss") > 1e-12)
         .group_by("orthogroup", "alignment_pos_1based")
         .agg((pl.col("pss").sum() / count).alias("pss"))
         .collect(engine="streaming")
     )
-    frame = frame.join(pss, on=["orthogroup", "alignment_pos_1based"], how="left")
     stability = run / "cv/tables/amino_acid_site_stability.tsv"
     if stability.is_file():
         freq = (
@@ -363,11 +369,13 @@ def annotate_sites(
             "resolved_config.yml",
             "split/tables/split_manifest.tsv",
             "model/tables/alignment_inputs.tsv",
-            ("model" if scope == "final" else "cv") + "/tables/amino_acid_site_effect_range.tsv",
-            ("model" if scope == "final" else "cv") + "/tables/amino_acid_site_pss.tsv",
             "cv/tables/amino_acid_site_stability.tsv",
         ]
     ]
+    score_path = _site_pss_path(run / ("model/tables" if scope == "final" else "cv/tables"))
+    artifact_paths.append(score_path)
+    if score_path.name == "amino_acid_site_scores.tsv":
+        artifact_paths.append(score_path.parent / "report_models.parquet")
     from phenoradar.provenance import phenoradar_build_snapshot
 
     manifest: dict[str, Any] = dict(

@@ -187,7 +187,6 @@ def test_combined_full_run_and_frozen_predictions(
         np.testing.assert_array_equal(aa["coefficient"], aa["coefficient_original_unit"])
         if output_mode == "full":
             assert (tables / "amino_acid_site_pss.tsv").is_file()
-            assert (tables / "amino_acid_site_effect_range.tsv").is_file()
         else:
             assert (tables / "amino_acid_site_scores.tsv").is_file()
             assert set(pl.read_parquet(tables / "feature_dictionary.parquet")["modality"]) == {
@@ -196,6 +195,7 @@ def test_combined_full_run_and_frozen_predictions(
             for modality in ["expression", "amino_acid"]:
                 assert (tables / f"{modality}_feature_importance.tsv").is_file()
     oof = pl.read_csv(destination / "cv/tables/prediction_cv.tsv", separator="\t")
+    assert not list(destination.rglob("*effect_range*"))
     assert oof.height == 8 and oof["species"].n_unique() == 8
     for stage, sample in [("external_test", "external"), ("inference", "unknown")]:
         subset = tmp_path / f"{sample}.tsv"
