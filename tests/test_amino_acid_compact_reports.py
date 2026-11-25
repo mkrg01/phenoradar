@@ -62,6 +62,11 @@ def test_compact_values_membership_and_global_summaries_match_full(
             tops.append(writer.finalize(combined=combined, top_features=3))
     assert_frame_equal(*tops, check_exact=True)
     compact, full = tmp_path / "compact", tmp_path / "full"
+    for directory in [compact, full]:
+        sparsity = pl.read_csv(directory / "model_sparsity.tsv", separator="\t")
+        assert sparsity["n_nonzero_features"].to_list() == ([0] * 4 if zero else [2] * 4)
+        assert sparsity.filter(pl.col("fold_id") == 1).height == 2
+        assert sparsity["scope"].unique().to_list() == ["outer_fold"]
     values = read_model_coefficients(compact)
     actual = {(r['model_id'], r['feature']): r['coefficient'] for r in values.to_dicts()}
     expected = {(i, feature): float(value) for i, member in enumerate(members)

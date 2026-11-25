@@ -201,17 +201,23 @@ def write_amino_acid_figures(
         oof, metadata_path=Path(config.data.metadata_path), species_col=config.data.species_col,
         group_col=config.split.group_col,
     )
-    coefficient_source = (
-        _scan(cv, "coefficients_by_fold")
-        if means is None
-        else means.rename({"coefficient": "coef_mean"})
-    )
-    sparsity = (
-        coefficient_source.group_by("fold_id")
-        .agg((pl.col("coef_mean").abs() > 1e-12).sum().alias("n_nonzero_features"))
-        .with_columns(pl.lit("outer_fold").alias("scope"))
-        .collect(engine="streaming")
-    )
+    sparsity = _read(cv, "model_sparsity")
+    sparsity_warnings = []
+    if sparsity is None:
+        # Older runs retain fold means, which recover model counts only for singleton folds.
+        sparsity = (
+            _scan(cv, "coefficients_by_fold").group_by("fold_id")
+            .agg((pl.col("coef_mean").abs() > 1e-12).sum().alias("n_nonzero_features"),
+                 pl.col("n_models").first())
+            .with_columns(pl.lit("outer_fold").alias("scope"))
+            .collect(engine="streaming")
+        )
+        if sparsity.filter(pl.col("n_models") > 1).height:
+            sparsity_warnings.append(
+                "Non-zero feature counts: omitted folds without saved per-model counts; "
+                "fold-mean coefficients cannot recover individual model sparsity."
+            )
+            sparsity = sparsity.filter(pl.col("n_models") == 1)
     counts = _selection(cv, "model_selection_selected")
     assert counts is not None
     top_sites = {}
@@ -274,6 +280,7 @@ def write_amino_acid_figures(
         top_features=limit,
         orthogroup_annotations=annotations,
     )
+    warnings.extend(sparsity_warnings)
     if expression is not None and expression_importance is not None:
         _write_combined_expression_figures(
             run_dir,

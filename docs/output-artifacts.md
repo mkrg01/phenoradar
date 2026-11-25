@@ -247,6 +247,12 @@ prose is omitted from the figure canvas.
 | Filtering and sparsity | `feature_filter_funnel.svg`, `non_zero_feature_count_by_fold.svg` |
 | Candidate selection | `model_selection.svg` for `best`, or `model_selection_one_se_curve.svg` for `one_se` |
 
+`non_zero_feature_count_by_fold.svg` uses bars when every group/fold has one model,
+with the y-axis label `Number of non-zero features` and no repeated `n=1` labels.
+With multiple models, it retains individual points, boxplots and model counts.
+AA/combined runs save counts per fitted model in `cv/tables/model_sparsity.tsv`,
+before any averaging of coefficients across models.
+
 Selection curves show inner-CV means and SEs; only one-SE curves show the
 one-SE eligibility threshold. Candidate details remain in tables. Final-refit
 figures under `model/figures/` use the `final_refit_` prefix and summarize final

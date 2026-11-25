@@ -4279,11 +4279,16 @@ def _non_zero_feature_count_by_fold(
     fig, ax = plt.subplots(figsize=_figure_size_inches(width_px, 340), dpi=_FIG_DPI)
     fig.patch.set_facecolor("white")
 
-    for fold_idx, center in enumerate(fold_centers):
-        if fold_idx % 2 == 0:
-            ax.axvspan(center - 0.48, center + 0.48, color="#f7f7f7", zorder=0)
-    for boundary in np.arange(1.5, len(fold_ids), 1.0):
-        ax.axvline(boundary, color="#d9d9d9", linewidth=0.5, zorder=1)
+    single_model = all(values.size == 1 for values in values_by_fold)
+    if single_model:
+        ax.bar(fold_centers, [values[0] for values in values_by_fold], width=0.65,
+               color=_COLOR_BLUE, linewidth=0, zorder=3)
+    else:
+        for fold_idx, center in enumerate(fold_centers):
+            if fold_idx % 2 == 0:
+                ax.axvspan(center - 0.48, center + 0.48, color="#f7f7f7", zorder=0)
+        for boundary in np.arange(1.5, len(fold_ids), 1.0):
+            ax.axvline(boundary, color="#d9d9d9", linewidth=0.5, zorder=1)
 
     box_values: list[list[float]] = []
     box_positions: list[float] = []
@@ -4317,7 +4322,7 @@ def _non_zero_feature_count_by_fold(
             patch.set_linewidth(0.8)
 
     for center, values in zip(fold_centers, values_by_fold, strict=True):
-        if values.size == 0:
+        if single_model or values.size == 0:
             continue
         offsets = _deterministic_offsets(values.size, 0.15)
         ax.scatter(
@@ -4332,7 +4337,7 @@ def _non_zero_feature_count_by_fold(
         )
 
     for center, values in zip(fold_centers, values_by_fold, strict=True):
-        if values.size == 0:
+        if single_model or values.size == 0:
             continue
         ax.text(
             center,
@@ -4351,7 +4356,8 @@ def _non_zero_feature_count_by_fold(
     ax.set_xticks(fold_centers)
     ax.set_xticklabels(_fold_labels(fold_ids, fold_groups), fontsize=_TICK_FONTSIZE)
     ax.set_xlabel("Group" if fold_groups else "CV fold", fontsize=_LABEL_FONTSIZE)
-    ax.set_ylabel("Number of non-zero features per model", fontsize=_LABEL_FONTSIZE)
+    ax.set_ylabel("Number of non-zero features" + ("" if single_model else " per model"),
+                  fontsize=_LABEL_FONTSIZE)
     ax.yaxis.set_major_locator(MaxNLocator(integer=True))
     ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)

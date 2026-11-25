@@ -129,7 +129,7 @@ class AAReportWriter:
             n = member.expression_width
             aa_total = float(np.abs(member.model.coef_[n:]).sum())
             expression_total = float(np.abs(member.model.coef_[:n]).sum())
-            if self.compact and features:
+            if features:
                 self.model_details.append({
                     "model_id": model_index, "fold_id": fold, "scope": member.scope,
                     "sample_set_id": member.sample_set_id,
@@ -137,6 +137,8 @@ class AAReportWriter:
                     "intercept": float(member.model.intercept_),
                     "n_amino_acid_features": len(member.model.coef_) - n,
                     "n_expression_features": n,
+                    "n_nonzero_features": int(np.count_nonzero(
+                        np.abs(member.model.coef_) > DEFAULT_NONZERO_TOLERANCE)),
                     "amino_acid_l1": aa_total, "expression_l1": expression_total,
                     "amino_acid_importance_zeroed": bool(np.isclose(aa_total, 0)),
                     "expression_importance_zeroed": bool(np.isclose(expression_total, 0)),
@@ -319,6 +321,11 @@ class AAReportWriter:
     def finalize(self, *, combined: bool, top_features: int) -> pl.DataFrame:
         raw = self.features.scan()
         self.top_features = top_features
+        pl.DataFrame(self.model_details).select(
+            pl.when(pl.col("scope").str.starts_with("outer_fold_"))
+            .then(pl.lit("outer_fold")).otherwise(pl.col("scope")).alias("scope"),
+            "fold_id", "model_id", "sample_set_id", "candidate_index", "n_nonzero_features",
+        ).write_csv(self.destination / "model_sparsity.tsv", separator="\t")
         if self.compact:
             from phenoradar.amino_acid_compact_reports import write_dictionary
 

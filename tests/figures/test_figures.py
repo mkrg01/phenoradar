@@ -1528,6 +1528,45 @@ def test_non_zero_feature_count_by_fold_writes_svg(tmp_path: Path) -> None:
     assert "CV fold" in svg_text
 
 
+@pytest.mark.parametrize("zero", [False, True])
+def test_single_model_nonzero_counts_use_bars_without_redundant_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, zero: bool,
+) -> None:
+    data = pl.DataFrame({
+        "scope": ["outer_fold"] * 3 + ["final_refit"],
+        "fold_id": ["10", "2", "1", "NA"],
+        "n_nonzero_features": [0 if zero else 30, 0 if zero else 20, 0 if zero else 10, 999],
+    })
+    path = tmp_path / "non_zero_feature_count_by_fold.svg"
+    figures = []
+    save = figures_mod._save_svg_figure
+
+    def capture(fig, out_path):
+        figures.append(fig)
+        save(fig, out_path)
+
+    monkeypatch.setattr(figures_mod, "_save_svg_figure", capture)
+    figures_mod._non_zero_feature_count_by_fold(data, path,
+                                               fold_groups={"1": "A", "2": "B", "10": "C"})
+    ax = figures[0].axes[0]
+    assert [bar.get_height() for bar in ax.containers[0]] == ([0, 0, 0] if zero else [10, 20, 30])
+    assert ax.get_ylim()[0] == 0
+    assert [label.get_text() for label in ax.get_xticklabels()] == ["A", "B", "C"]
+    text = _svg_text_values(path)
+    assert "Number of non-zero features" in text and "Group" in text
+    assert "Number of non-zero features per model" not in text
+    assert not any(label.startswith("n=") for label in text)
+
+
+def test_mixed_model_counts_keep_model_distribution_labels(tmp_path: Path) -> None:
+    data = _minimal_model_sparsity().head(3)
+    path = tmp_path / "non_zero_feature_count_by_fold.svg"
+    figures_mod._non_zero_feature_count_by_fold(data, path)
+    text = _svg_text_values(path)
+    assert "Number of non-zero features per model" in text
+    assert {"n=1", "n=2"}.issubset(text)
+
+
 def test_feature_importance_top_rejects_invalid_schema(tmp_path: Path) -> None:
     with pytest.raises(FigureError, match="feature_importance.tsv schema is invalid"):
         figures_mod._feature_importance_top(
