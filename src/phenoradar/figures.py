@@ -14,7 +14,7 @@ from inspect import signature
 from multiprocessing import get_context
 from pathlib import Path
 from time import perf_counter
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import matplotlib
 import numpy as np
@@ -363,10 +363,14 @@ def _publication_layout(fig: Figure) -> None:
     canvas.draw()
 
 
-def _legend_above(ax: Any, *, handles: list[Any] | None = None, ncol: int = 3) -> None:
+def _legend_above(
+    ax: Any, *, handles: list[Any] | None = None, ncol: int = 3,
+    align: Literal["left", "right"] = "left",
+) -> None:
     """Give legends a separate row, so they cannot obscure data."""
     ax.legend(
-        handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.02),
+        handles=handles, loc=f"lower {align}",
+        bbox_to_anchor=(1.0 if align == "right" else 0.0, 1.02),
         ncol=ncol, frameon=False, borderaxespad=0.0,
         columnspacing=1.2, handlelength=1.6,
     )
@@ -4184,7 +4188,7 @@ def _feature_filter_funnel(
             label="min-max",
         ),
     ]
-    _legend_above(ax, handles=legend_handles)
+    _legend_above(ax, handles=legend_handles, align="right")
     fig.subplots_adjust(left=0.08, right=0.99, top=0.96, bottom=0.16)
     _save_svg_figure(fig, out_path)
 
