@@ -10,6 +10,7 @@ from collections.abc import Callable, Generator, Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
@@ -37,7 +38,7 @@ from phenoradar.amino_acid_outputs import (
     write_site_effects,
     write_site_scores,
 )
-from phenoradar.amino_acid_prediction import prediction_members
+from phenoradar.amino_acid_prediction import DeferredAAValidation, prediction_members
 from phenoradar.amino_acid_reporting import AAReportWriter
 from phenoradar.amino_acid_resources import record_sparse_usage
 from phenoradar.amino_acid_sparse import (
@@ -156,13 +157,21 @@ def _prepare_inner_fold(
     train, valid, fold = split
     train_species = [species[i] for i in train]
     valid_species = [species[i] for i in valid]
-    fitted, matrices, _ = fit_sparse_encoded(
-        store, train_species, config.preprocess.amino_acid,
-        [train_species, valid_species], y=y[train], groups=groups[train],
+    packed = config.runtime.amino_acid_matrix == "packed"
+    deferred = (packed and expression is None and config.data.feature_mode == "amino_acid"
+                and config.model_selection.search_strategy == "grid")
+    fit = partial(
+        fit_sparse_encoded, store, train_species, config.preprocess.amino_acid,
+        y=y[train], groups=groups[train],
         contrast_groups=pairs[train], audit=False, n_jobs=_runtime_n_jobs(config),
-        packed=config.runtime.amino_acid_matrix == "packed",
+        packed=packed,
     )
-    x_train, x_valid = matrices
+    if deferred:
+        fitted, (x_train,), shift = fit([train_species])
+        x_valid = DeferredAAValidation(fitted, store, valid_species, shift,
+                                       lambda: fit([valid_species])[1][0])
+    else:
+        fitted, (x_train, x_valid), _ = fit([train_species, valid_species])
     n_expression = None
     if expression is not None:
         expr, xe, _, _ = fit_expression(config, expression, train_species, y[train],

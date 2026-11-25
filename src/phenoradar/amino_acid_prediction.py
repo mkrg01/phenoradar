@@ -3,24 +3,79 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable, Sequence
 from copy import copy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
+from scipy import sparse
+from scipy.special import expit
 
-from phenoradar.amino_acid import AASiteTable
+from phenoradar.amino_acid import AASite, AASiteTable, AATransform, AlignmentStore
+from phenoradar.amino_acid_packed import PackedAAMatrix
 
 if TYPE_CHECKING:
     from phenoradar.amino_acid_run import AAMember
+    from phenoradar.glmnet import _CompactGlmnetModel
 
 
-def site_offsets(member: AAMember) -> np.ndarray:
-    sites = member.transform.sites
+def _site_offsets(sites: Sequence[AASite]) -> np.ndarray:
     counts = (sites.active.sum(axis=1) if isinstance(sites, AASiteTable)
               else np.fromiter((np.count_nonzero(site.active) for site in sites),
                                dtype=np.int64, count=len(sites)))
     return np.cumsum(np.concatenate(([0], counts)))
+
+
+def site_offsets(member: AAMember) -> np.ndarray:
+    return _site_offsets(member.transform.sites)
+
+
+@dataclass
+class DeferredAAValidation:
+    """Decode supported validation columns in the fitted, shifted basis."""
+
+    transform: AATransform
+    store: AlignmentStore
+    species: list[str]
+    shift: np.ndarray
+    full_matrix: Callable[[], PackedAAMatrix]
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return len(self.species), len(self.shift)
+
+    def _columns(self, columns: np.ndarray) -> sparse.csc_matrix:
+        if not len(columns):
+            return sparse.csc_matrix((len(self.species), 0))
+        offsets = _site_offsets(self.transform.sites)
+        positions = np.searchsorted(offsets, columns, side="right") - 1
+        indices, starts = np.unique(positions, return_index=True)
+        sites = []
+        for i, start, stop in zip(indices, starts, np.r_[starts[1:], len(columns)], strict=True):
+            site = self.transform.sites[int(i)]
+            residues = np.flatnonzero(site.active)[columns[start:stop] - offsets[i]]
+            active = np.zeros(20, dtype=bool)
+            active[residues] = True
+            sites.append(replace(site, active=active))
+        # Keep every known training residue for centering, including states
+        # whose coefficients are zero, and keep the original representative mask.
+        projected = replace(self.transform, sites=sites, qc=[])
+        return sparse.csc_matrix(projected.matrix(self.store, self.species) + self.shift[columns])
+
+    def predict(self, models: Sequence[_CompactGlmnetModel]) -> list[np.ndarray]:
+        supports = [model.coefficient_indices_ for model in models]
+        columns = np.unique(np.concatenate(supports))
+        # Bound the dense decoding workspace for unusually dense paths.
+        if len(columns) * len(self.species) > 1_000_000:
+            full = self.full_matrix()
+            return [model.predict_proba(full)[:, 1] for model in models]
+        selected = self._columns(columns)
+        return [
+            expit(np.asarray(selected[:, np.searchsorted(columns, support)]
+                             @ model.coefficient_values_ + model.intercept_))
+            for model, support in zip(models, supports, strict=True)
+        ]
 
 
 def prediction_members(

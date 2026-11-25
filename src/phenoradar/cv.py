@@ -38,6 +38,7 @@ from sklearn.svm import LinearSVC
 from sklearn.utils.validation import has_fit_parameter
 
 from phenoradar.abstention import annotate_abstention
+from phenoradar.amino_acid_prediction import DeferredAAValidation
 from phenoradar.config import AppConfig, PredictConfig
 from phenoradar.expression_input_cache import (
     ExpressionCacheError,
@@ -213,7 +214,7 @@ class InnerCvPreprocessedFold:
 
     inner_fold_id: str
     x_train: np.ndarray | sparse.csc_matrix
-    x_valid: np.ndarray | sparse.csc_matrix
+    x_valid: np.ndarray | sparse.csc_matrix | DeferredAAValidation
     y_train: np.ndarray
     y_valid: np.ndarray
     sample_weight: np.ndarray | None
@@ -3913,6 +3914,8 @@ def _score_candidate_inner_cv(
         params_json = json.dumps(candidate.params, ensure_ascii=True, sort_keys=True)
 
         for fold in preprocessed_folds:
+            if isinstance(fold.x_valid, DeferredAAValidation):
+                raise CVError("Deferred AA validation requires a glmnet path")
             seed = _deterministic_int_seed(
                 f"{config.runtime.seed}|{seed_scope(config, training_scope_id)}|"
                 f"source_{source_sample_set_id}|candidate_{candidate.candidate_index}|"
@@ -4256,7 +4259,8 @@ def _score_glmnet_paths(
             raise CVError(f"Inner fold {fold.inner_fold_id}: {exc}") from exc
         results = []
         probabilities = (predict_glmnet_path(models, fold.x_valid)
-                         if fold.x_valid.shape[1] >= 100_000 else
+                         if isinstance(fold.x_valid, DeferredAAValidation)
+                         or fold.x_valid.shape[1] >= 100_000 else
                          [_predict_positive_probability(m, fold.x_valid) for m in models])
         for candidate, model, prob in zip(path, models, probabilities, strict=True):
             score = _selection_metric_from_probability(config, fold.y_valid, prob)

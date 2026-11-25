@@ -452,7 +452,14 @@ def predict_glmnet_path(
     """Validate once and skip exact-zero columns when scoring a wide fitted path."""
     if not models:
         return []
+    from phenoradar.amino_acid_prediction import DeferredAAValidation
+
     p = models[0].n_features_in_
+    if isinstance(x, DeferredAAValidation):
+        compact = [model for model in models if isinstance(model, _CompactGlmnetModel)]
+        if len(compact) != len(models) or any(m.n_features_in_ != x.shape[1] for m in models):
+            raise ValueError("Deferred AA validation requires a matching compact glmnet path")
+        return x.predict(compact)
     if isinstance(x, PackedAAMatrix):
         return [model.predict_proba(x)[:, 1] for model in models]
     if p < 100_000:
