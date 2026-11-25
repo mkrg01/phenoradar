@@ -89,7 +89,7 @@ model_selection:
   inner_cv_strategy: stratified_group_kfold  # choices: logo, group_kfold, stratified_group_kfold, null
   inner_cv_n_splits: 5  # type: integer or null
   selection_metric: log_loss  # choices: mcc, balanced_accuracy, log_loss
-  selection_rule: best  # choices: best, one_se
+  selection_rule: best  # choices: best, one_se; one_se prefers simpler models within best-score SE
 
 abstention:
   enabled: true  # choices: true, false

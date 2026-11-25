@@ -3498,8 +3498,10 @@ model_selection:
     assert result.selected_candidates[0].candidate.candidate_index == 0
 
 
+@pytest.mark.parametrize("selection_rule", ["best", "one_se"])
+@pytest.mark.parametrize("metric", ["log_loss", "mcc"])
 def test_prepare_source_selection_one_se_prefers_simpler_candidate_within_best_se(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection_rule: str, metric: str,
 ) -> None:
     metadata, tpm = _write_fixture(tmp_path)
     x_train_raw, y_train, groups_train = _selection_source_arrays()
@@ -3509,12 +3511,12 @@ def test_prepare_source_selection_one_se_prefers_simpler_candidate_within_best_s
                 tmp_path,
                 metadata,
                 tpm,
-                extra="""
+                extra=f"""
 model_selection:
   selected_candidate_count: 1
   inner_cv_strategy: logo
-  selection_metric: log_loss
-  selection_rule: one_se
+  selection_metric: {metric}
+  selection_rule: {selection_rule}
 """.strip(),
             )
         ]
@@ -3535,15 +3537,18 @@ model_selection:
             raise AssertionError("candidate must be a Candidate instance")
         fold_values_by_candidate = {
             0: [0.40, 0.40],
-            1: [0.23, 0.23],
+            # Eligible with sample SE (0.05), but not population SE (0.0354).
+            1: [0.245, 0.245],
             2: [0.15, 0.25],
         }
         fold_values = fold_values_by_candidate[candidate.candidate_index]
+        if metric == "mcc":
+            fold_values = [1.0 - value for value in fold_values]
         rows = [
             {
                 "candidate_index": candidate.candidate_index,
                 "inner_fold_id": str(inner_fold_id),
-                "metric_name": "log_loss",
+                "metric_name": metric,
                 "metric_value": value,
                 "params_json": "{}",
             }
@@ -3572,9 +3577,13 @@ model_selection:
     )
 
     selected = result.selected_candidates[0]
-    assert selected.candidate.candidate_index == 1
-    assert selected.score == pytest.approx(0.23)
-    assert selected.selection_rule == "one_se"
+    expected_score = 0.245 if selection_rule == "one_se" else 0.20
+    if metric == "mcc":
+        expected_score = 1.0 - expected_score
+    assert selected.candidate.candidate_index == (1 if selection_rule == "one_se" else 2)
+    assert selected.score == pytest.approx(expected_score)
+    assert selected.score_std_error == pytest.approx(0.0 if selection_rule == "one_se" else 0.05)
+    assert selected.selection_rule == selection_rule
 
 
 def test_score_candidate_inner_cv_uses_estimator_n_jobs_for_native_thread_limit(

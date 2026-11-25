@@ -49,8 +49,9 @@ def test_grid_queue_bounds_both_pools_and_falls_back_when_memory_is_small(monkey
 
 
 @pytest.mark.parametrize("policy", ["per_sample_set", "reuse_first_sample_set"])
+@pytest.mark.parametrize("selection_rule", ["best", "one_se"])
 def test_queued_sample_ensembles_match_serial_all_public_tables(
-    tmp_path: Path, monkeypatch, policy,
+    tmp_path: Path, monkeypatch, policy, selection_rule,
 ):
     from phenoradar import amino_acid_queue
 
@@ -62,6 +63,7 @@ def test_queued_sample_ensembles_match_serial_all_public_tables(
     config.sampling.sampled_set_count = 2
     config.model_selection.selected_candidate_count = 2
     config.model_selection.candidate_source_policy = policy
+    config.model_selection.selection_rule = selection_rule
     config.preprocess.amino_acid.ranked_site_filter.method = "none"
     config.figures.top_features = 3
     serial = run_amino_acid(config, tmp_path / "serial")

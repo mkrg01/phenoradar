@@ -742,12 +742,13 @@ def test_default_weighted_aggregation_requires_tpm_only_when_active(mode: str) -
     assert config.preprocess.amino_acid.aggregation == "tpm_weighted_frequency"
 
 
-@pytest.mark.parametrize("strategy", ["random", "tpe"])
+@pytest.mark.parametrize("strategy", ["grid", "random", "tpe"])
 def test_shared_search_strategies(tmp_path: Path, strategy: str) -> None:
     config_path = fixture_config(tmp_path, "aa_frequency", full=False)
     payload = yaml.safe_load(config_path.read_text())
     payload["model_selection"].update(
-        search_strategy=strategy, trial_count=2, selection_rule="one_se"
+        search_strategy=strategy, trial_count=None if strategy == "grid" else 2,
+        selection_rule="one_se",
     )
     config_path.write_text(yaml.safe_dump(payload))
     run_amino_acid(load_and_resolve_config([config_path]), tmp_path / "run")

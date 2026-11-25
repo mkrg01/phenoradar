@@ -3528,9 +3528,9 @@ def _summarize_model_selection_trials_for_figure(
     scored = scored.with_columns(
         pl.col("metric_value").cast(pl.Float64, strict=False).alias("_metric_value_raw")
     ).with_columns(
-        pl.when(pl.col("_metric_value_raw").is_nan())
-        .then(None)
-        .otherwise(pl.col("_metric_value_raw"))
+        pl.when(pl.col("_metric_value_raw").is_finite())
+        .then(pl.col("_metric_value_raw"))
+        .otherwise(None)
         .alias("_metric_value_valid")
     )
     summary = scored.group_by(
@@ -3540,11 +3540,11 @@ def _summarize_model_selection_trials_for_figure(
             pl.len().alias("n_inner_folds"),
             pl.col("_metric_value_valid").count().alias("n_valid_inner_folds"),
             pl.col("_metric_value_valid").mean().alias("metric_value_mean"),
-            pl.col("_metric_value_valid").std(ddof=0).alias("metric_value_std"),
+            pl.col("_metric_value_valid").std(ddof=1).alias("metric_value_std"),
         ]
     )
     return summary.with_columns(
-        pl.when(pl.col("n_valid_inner_folds") > 0)
+        pl.when(pl.col("n_valid_inner_folds") > 1)
         .then(pl.col("metric_value_std") / pl.col("n_valid_inner_folds").cast(pl.Float64).sqrt())
         .otherwise(pl.lit(None, dtype=pl.Float64))
         .alias("metric_value_se")
@@ -3606,7 +3606,7 @@ def _model_selection_summary_with_se(
     if "metric_value_se" not in summary.columns:
         if "n_valid_inner_folds" in summary.columns:
             summary = summary.with_columns(
-                pl.when(pl.col("n_valid_inner_folds").cast(pl.Float64, strict=False) > 0)
+                pl.when(pl.col("n_valid_inner_folds").cast(pl.Float64, strict=False) > 1)
                 .then(
                     pl.col("metric_value_std").cast(pl.Float64, strict=False)
                     / pl.col("n_valid_inner_folds").cast(pl.Float64, strict=False).sqrt()

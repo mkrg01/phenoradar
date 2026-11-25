@@ -270,7 +270,9 @@ def test_combined_cli_run_tpe_and_no_selection(tmp_path: Path, monkeypatch) -> N
     path = combined_config(tmp_path)
     raw = yaml.safe_load(path.read_text())
     raw["runtime"]["execution_stage"] = "cv_only"
-    raw["model_selection"].update({"search_strategy": "tpe", "trial_count": 2})
+    raw["model_selection"].update({
+        "search_strategy": "tpe", "trial_count": 2, "selection_rule": "one_se",
+    })
     raw["model_selection"]["search_space"]["amino_acid_penalty_ratio"] = {
         "type": "continuous_range", "start": 0.2, "end": 2,
     }
@@ -279,6 +281,9 @@ def test_combined_cli_run_tpe_and_no_selection(tmp_path: Path, monkeypatch) -> N
     result = CliRunner().invoke(app, ["run", "-c", str(path), "--quiet"])
     assert result.exit_code == 0, result.output
     assert len(list((tmp_path / "runs").glob("*/cv/tables/prediction_cv.tsv"))) == 1
+    selected_path = next((tmp_path / "runs").glob("*/cv/tables/model_selection_selected.tsv"))
+    selected = pl.read_csv(selected_path, separator="\t")
+    assert set(selected["selection_rule"]) == {"one_se"}
     raw["model_selection"] = {
         "selected_candidate_count": None,
         "search_space": {"lambda": [0.01], "amino_acid_penalty_ratio": [2]},

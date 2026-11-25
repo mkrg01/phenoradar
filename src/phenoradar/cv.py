@@ -3965,13 +3965,14 @@ def _score_candidate_inner_cv(
 
 
 def _score_std_error_from_trial_rows(trial_rows: list[dict[str, Any]]) -> float | None:
+    """Estimate SE across finite inner-fold scores using the sample variance."""
     values = [
         score for row in trial_rows if (score := _finite_score(row.get("metric_value"))) is not None
     ]
-    if not values:
+    if len(values) < 2:
         return None
     value_array = np.asarray(values, dtype=float)
-    return float(np.std(value_array, ddof=0) / np.sqrt(value_array.size))
+    return float(np.std(value_array, ddof=1) / np.sqrt(value_array.size))
 
 
 def _candidate_score_std_errors_from_trial_rows(
@@ -4550,9 +4551,9 @@ def _binary_log_loss(y_true: np.ndarray, prob: np.ndarray) -> float:
 
 def _summarize_model_selection_trials(model_selection_trials: pl.DataFrame) -> pl.DataFrame:
     scored = model_selection_trials.with_columns(
-        pl.when(pl.col("metric_value").is_nan())
-        .then(None)
-        .otherwise(pl.col("metric_value"))
+        pl.when(pl.col("metric_value").is_finite())
+        .then(pl.col("metric_value"))
+        .otherwise(None)
         .alias("_metric_value_valid")
     )
     summary = scored.group_by(
@@ -4562,11 +4563,11 @@ def _summarize_model_selection_trials(model_selection_trials: pl.DataFrame) -> p
             pl.len().alias("n_inner_folds"),
             pl.col("_metric_value_valid").count().alias("n_valid_inner_folds"),
             pl.col("_metric_value_valid").mean().alias("metric_value_mean"),
-            pl.col("_metric_value_valid").std(ddof=0).alias("metric_value_std"),
+            pl.col("_metric_value_valid").std(ddof=1).alias("metric_value_std"),
         ]
     )
     return summary.with_columns(
-        pl.when(pl.col("n_valid_inner_folds") > 0)
+        pl.when(pl.col("n_valid_inner_folds") > 1)
         .then(pl.col("metric_value_std") / pl.col("n_valid_inner_folds").cast(pl.Float64).sqrt())
         .otherwise(pl.lit(None, dtype=pl.Float64))
         .alias("metric_value_se")

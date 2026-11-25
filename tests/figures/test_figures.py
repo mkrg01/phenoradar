@@ -1005,6 +1005,53 @@ def test_write_run_figures_hides_fixed_params_in_model_selection_labels(
     assert warnings == []
 
 
+@pytest.mark.parametrize("values,n_valid,expected_se", [
+    ([0.15, 0.25], 2, 0.05),
+    ([0.15, None, float("nan"), float("inf"), float("-inf"), 0.25], 2, 0.05),
+    ([0.20], 1, None),
+    ([None, float("nan"), float("inf")], 0, None),
+])
+def test_model_selection_summaries_share_sample_se(
+    values: list[float | None], n_valid: int, expected_se: float | None,
+) -> None:
+    from phenoradar import cv
+
+    trials = pl.DataFrame({
+        "fold_id": ["1"] * len(values),
+        "sample_set_id": [0] * len(values),
+        "candidate_index": [0] * len(values),
+        "metric_name": ["log_loss"] * len(values),
+        "params_json": ['{"lambda":0.01}'] * len(values),
+        "metric_value": values,
+    })
+    selection_se = cv._score_std_error_from_trial_rows(trials.to_dicts())
+    summaries = [
+        cv._summarize_model_selection_trials(trials),
+        figures_mod._summarize_model_selection_trials_for_figure(trials),
+    ]
+    for summary in summaries:
+        row = summary.row(0, named=True)
+        assert row["n_inner_folds"] == len(values)
+        assert row["n_valid_inner_folds"] == n_valid
+        if expected_se is None:
+            assert selection_se is None
+            assert row["metric_value_se"] is None
+            assert row["metric_value_std"] is None
+        else:
+            assert selection_se == pytest.approx(expected_se)
+            assert row["metric_value_mean"] == pytest.approx(0.20)
+            assert row["metric_value_std"] == pytest.approx(0.07071067811865475)
+            assert row["metric_value_se"] == pytest.approx(expected_se)
+        # Summary-only figure generation uses the same finite-fold count and SE.
+        fallback = figures_mod._model_selection_summary_with_se(
+            summary.drop("metric_value_se")
+        )["metric_value_se"].item()
+        if expected_se is None:
+            assert fallback is None
+        else:
+            assert fallback == pytest.approx(expected_se)
+
+
 @pytest.mark.parametrize("selection_rule", ["best", "one_se"])
 @pytest.mark.parametrize("final_rule", ["best", "one_se"])
 def test_write_run_figures_writes_model_selection_figure_for_recorded_rule(

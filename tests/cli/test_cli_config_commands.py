@@ -1219,8 +1219,9 @@ def test_run_requires_config_option() -> None:
     assert "-c" in output
 
 
+@pytest.mark.parametrize("selection_rule", ["best", "one_se"])
 def test_run_emits_model_selection_artifacts_when_selection_active(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection_rule: str,
 ) -> None:
     runner = CliRunner()
     monkeypatch.chdir(tmp_path)
@@ -1288,6 +1289,7 @@ model_selection:
     lambda: [0.5, 1.0]
   selected_candidate_count: 1
   inner_cv_strategy: logo
+  selection_rule: {selection_rule}
 """.strip()
         + "\n",
     )
@@ -1324,17 +1326,21 @@ model_selection:
     assert trials_summary_path.exists()
     assert final_trials_path.exists()
     assert final_trials_summary_path.exists()
+    selection_stem = (
+        "model_selection_one_se_curve" if selection_rule == "one_se" else "model_selection"
+    )
     assert not (run_dirs[0] / "cv" / "figures" / "model_selection_trials.svg").exists()
-    assert (run_dirs[0] / "cv" / "figures" / "model_selection.svg").exists()
+    assert (run_dirs[0] / "cv" / "figures" / f"{selection_stem}.svg").exists()
     assert not (
         run_dirs[0] / "model" / "figures" / "final_refit_model_selection_trials.svg"
     ).exists()
     assert (
-        run_dirs[0] / "model" / "figures" / "final_refit_model_selection.svg"
+        run_dirs[0] / "model" / "figures" / f"final_refit_{selection_stem}.svg"
     ).exists()
     assert not (run_dirs[0] / "cv" / "figures" / "selected_hyperparameter_stability.svg").exists()
 
     selected_df = pl.read_csv(selected_path, separator="\t")
+    assert set(selected_df["selection_rule"]) == {selection_rule}
     scopes = set(selected_df.select("selection_scope").to_series().to_list())
     assert {"outer_fold", "final_refit"}.issubset(scopes)
 

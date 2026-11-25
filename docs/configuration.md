@@ -330,16 +330,27 @@ simpler models: larger `lambda`, then larger `alpha` for logistic regression;
 smaller `C` for SVM; shallower trees, larger split/leaf minima, then fewer trees
 for random forest.
 
+The rule applies to outer-CV model selection and final refitting in expression,
+amino-acid, and combined modes. The standard error is
+the sample standard deviation of finite fold scores (`ddof=1`) divided by the
+square root of their count. With fewer than two finite scores, no SE is available
+and `one_se` permits no tolerance beyond the best score.
+
 A complete selection example:
 
 ```yaml
 model_selection:
   selected_candidate_count: 1
   inner_cv_strategy: logo
+  selection_rule: best
   search_space:
     lambda: [0.0001, 0.001, 0.01, 0.1]
     alpha: [1]
 ```
+
+To prefer a simpler model within one SE, change `selection_rule` to `one_se`.
+Omitting the setting keeps `best`. Retain one candidate to select a single model;
+larger counts retain multiple candidates in the rule's ranking order.
 
 ### Search-space formats
 
@@ -370,6 +381,10 @@ model_selection:
       inclusive_end: true
     alpha: [1]
 ```
+
+For a finer grid with a lower minimum lambda, use `start_exp: -6` and
+`step_exp: 0.25` (21 candidates through `0.1`). Check whether selected values
+reach either endpoint when deciding whether to expand the range.
 
 ## Output and runtime settings
 
