@@ -84,13 +84,11 @@ def write_prediction_interpretation(
                               prediction_species=context["species"].to_list())
         if context["label"].is_not_null().any():
             write_frequency_by_confusion(run_dir, context, limit, annotations, stage=stage)
-    grouped = context.filter(pl.col("group_id").is_not_null() & (pl.col("group_id") != "") &
-                             pl.col("label").is_in([0, 1]))
-    if grouped.height:
-        warnings.extend(write_group_trait_composition(
-            run_dir, store, sites, grouped, stage=stage, tree_path=tree_path,
-            aggregation=config.preprocess.amino_acid.aggregation, annotations=annotations,
-        ))
+    warnings.extend(write_group_trait_composition(
+        run_dir, store, sites, context, stage=stage, tree_path=tree_path,
+        aggregation=config.preprocess.amino_acid.aggregation, annotations=annotations,
+        prediction_labels=stage in {"inference", "predict"},
+    ))
     if expression is not None:
         from phenoradar import figures
         from phenoradar.cv import _build_top_feature_expression_from_matrix

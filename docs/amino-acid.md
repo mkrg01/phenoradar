@@ -489,7 +489,14 @@ Single-species heatmaps are supported. Accepted-only variants use the same sites
 Combined models also show `tree_feature_heatmap_log2_tpm.svg` and
 `tree_feature_heatmap_zscore.svg` for final-model expression features.
 With observed labels, external tests also receive the residue-frequency confusion
-plot and, when groups are supplied, the group-by-trait composition summary.
+plot and the group-by-trait composition summary. Without metadata groups, the
+composition summary uses the whole stage population (`All`), split by observed trait.
+Inference and standalone prediction instead write
+`amino_acid_group_prediction_composition.svg`, explicitly stratified by predicted
+class at p >= 0.5. This is a descriptive summary of the model's predictions, not an
+independent comparison of observed traits. Available metadata groups are retained;
+otherwise it summarizes all predicted species. TSV columns distinguish observed
+`trait` from `predicted_class` and record the prediction threshold.
 Unknown-trait inference does not produce confusion-based evaluation plots.
 Standalone AA/combined prediction writes the same displays under `predict/`.
 The redundant `tree_prediction_external.svg` and `tree_prediction_predict.svg`

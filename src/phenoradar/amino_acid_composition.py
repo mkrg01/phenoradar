@@ -23,6 +23,7 @@ from phenoradar.figure_population import (
     write_population_message_svg,
 )
 from phenoradar.figures import _orthogroup_annotation_lookup
+from phenoradar.metrics import FIXED_PROBABILITY_THRESHOLD_VALUE
 from phenoradar.residue_colors import ZAPPO_GROUPS, residue_color
 from phenoradar.tree_prediction import _PROBABILITY_CMAP, _cell_text_color
 
@@ -55,8 +56,8 @@ def build_group_trait_composition(
 ) -> pl.DataFrame:
     """Aggregate raw observations in species batches; missing species get no weight.
 
-    Expression weights apply only within each species. No centering, imputation,
-    coefficients or predicted labels enter the residue proportions.
+    Expression weights apply only within each species. Residue values are never
+    centered or imputed; the supplied labels define the strata being summarized.
     """
     if sites.is_empty() or predictions.is_empty():
         return pl.DataFrame()
@@ -122,10 +123,13 @@ def _site_label(site: dict[str, Any]) -> str:
 
 
 def _composition_figure(table: pl.DataFrame) -> Figure:
+    label_col = "predicted_class" if "predicted_class" in table.columns else "trait"
+    population_only = "grouping" in table.columns and table["grouping"][0] == "all_species"
+    group_heading = "Population" if population_only else "Group"
     probability_col = ("mean_oof_probability" if "mean_oof_probability" in table.columns
                        else "mean_probability")
     sites = table.unique("feature_rank", maintain_order=True).sort("feature_rank")
-    context = table.select("group_id", "trait", "n_species", probability_col).unique(
+    context = table.select("group_id", label_col, "n_species", probability_col).unique(
         maintain_order=True)
     labels = [_site_label(site) for site in sites.iter_rows(named=True)]
     # Measure full labels before reserving the header; long names are never truncated.
@@ -138,7 +142,10 @@ def _composition_figure(table: pl.DataFrame) -> Figure:
                  / fig.dpi + .12)
     for probe in probes:
         probe.remove()
-    probes = [fig.text(0, 0, group, fontsize=8) for group in context["group_id"].unique()]
+    group_labels = context["group_id"].unique().to_list()
+    if population_only:
+        group_labels.append(group_heading)
+    probes = [fig.text(0, 0, group, fontsize=8) for group in group_labels]
     group_width = max(probe.get_window_extent(renderer).width for probe in probes) / fig.dpi
     for probe in probes:
         probe.remove()
@@ -164,8 +171,10 @@ def _composition_figure(table: pl.DataFrame) -> Figure:
                    length=0, pad=7)
     trait_x, n_x, prob_x = meta_width - 1.20, meta_width - .81, meta_width - .30
     prob_label = "Mean OOF p" if probability_col == "mean_oof_probability" else "Mean p"
-    for title, x in [("Group", .03), ("Trait", trait_x), ("n", n_x), (prob_label, prob_x)]:
-        meta.text(x, -.3, title, ha="left" if title == "Group" else "center", va="bottom",
+    label_heading = "Predicted\nclass" if label_col == "predicted_class" else "Trait"
+    for title, x in [(group_heading, .03), (label_heading, trait_x),
+                     ("n", n_x), (prob_label, prob_x)]:
+        meta.text(x, -.3, title, ha="left" if title == group_heading else "center", va="bottom",
                   fontsize=8)
     group_ids = context["group_id"].to_list()
     for g, group in enumerate(dict.fromkeys(group_ids)):
@@ -179,9 +188,9 @@ def _composition_figure(table: pl.DataFrame) -> Figure:
             for pane in [meta, ax]:
                 pane.axhline(start, color="#909090", linewidth=.65)
     for r, row in enumerate(context.iter_rows(named=True)):
-        color = BINARY_TRAIT_COLORS[row["trait"]]
+        color = BINARY_TRAIT_COLORS[row[label_col]]
         meta.add_patch(Rectangle((trait_x - .15, r + .14), .30, .61, color=color, linewidth=0))
-        meta.text(trait_x, r + .445, str(row["trait"]), ha="center", va="center", fontsize=8,
+        meta.text(trait_x, r + .445, str(row[label_col]), ha="center", va="center", fontsize=8,
                   color=_cell_text_color(color))
         meta.text(n_x, r + .445, str(row["n_species"]), ha="center", va="center", fontsize=8)
         p = row[probability_col]
@@ -190,7 +199,7 @@ def _composition_figure(table: pl.DataFrame) -> Figure:
         meta.text(prob_x, r + .445, f"{p:.2f}", ha="center", va="center", fontsize=7,
                   color=_cell_text_color(color))
         cells = table.filter((pl.col("group_id") == row["group_id"]) &
-                             (pl.col("trait") == row["trait"])).sort("feature_rank")
+                             (pl.col(label_col) == row[label_col])).sort("feature_rank")
         for j, cell in enumerate(cells.iter_rows(named=True)):
             x = j + .065
             if not cell["n_observed_species"]:
@@ -233,20 +242,41 @@ def write_group_trait_composition(
     *, aggregation: str, annotations: pl.DataFrame | None = None,
     tree_path: Path | None = None,
     stage: str = "cv",
+    prediction_labels: bool = False,
 ) -> list[str]:
     """Write only the composition summary, including existing accepted-only populations."""
+    stem = _STEM.replace("group_trait", "group_prediction") if prediction_labels else _STEM
+    if prediction_labels:
+        predictions = predictions.with_columns(
+            (pl.col("prob") >= FIXED_PROBABILITY_THRESHOLD_VALUE).cast(pl.Int8).alias("label"))
+    population_only = False
+    if stage != "cv":
+        if "group_id" not in predictions.columns:
+            predictions = predictions.with_columns(pl.lit(None, dtype=pl.String).alias("group_id"))
+        predictions = predictions.with_columns(pl.col("group_id").cast(pl.String).str.strip_chars())
+        has_group = pl.col("group_id").is_not_null() & (pl.col("group_id") != "")
+        population_only = not predictions.select(has_group.any()).item()
+        predictions = predictions.with_columns(
+            pl.when(has_group).then(pl.col("group_id"))
+            .otherwise(pl.lit("All" if population_only else "Unassigned")).alias("group_id"))
     for suffix, population in prediction_figure_populations({"oof": predictions}):
         table = build_group_trait_composition(
             store, sites, population["oof"], aggregation=aggregation,
             annotations=annotations, tree_path=tree_path, oof=stage == "cv",
         )
-        figure_path = population_figure_path(run_dir / stage / "figures" / f"{_STEM}.svg", suffix)
-        table_path = population_figure_path(run_dir / stage / "tables" / f"{_STEM}.tsv", suffix)
+        figure_path = population_figure_path(run_dir / stage / "figures" / f"{stem}.svg", suffix)
+        table_path = population_figure_path(run_dir / stage / "tables" / f"{stem}.tsv", suffix)
         if table.is_empty():
             table_path.unlink(missing_ok=True)
             write_population_message_svg(figure_path, "No observed groups or positive-PSS sites.")
             continue
         table_path.parent.mkdir(parents=True, exist_ok=True)
+        if stage != "cv":
+            table = table.with_columns(
+                pl.lit("all_species" if population_only else "metadata_group").alias("grouping"))
+        if prediction_labels:
+            table = table.rename({"trait": "predicted_class"}).with_columns(
+                pl.lit(FIXED_PROBABILITY_THRESHOLD_VALUE).alias("classification_threshold"))
         table.write_csv(table_path, separator="\t")
         fig = _composition_figure(table)
         figure_path.parent.mkdir(parents=True, exist_ok=True)

@@ -211,8 +211,12 @@ def test_sequence_modes_write_group_and_cv_prediction_trees(
             if stage == 'inference':
                 assert table['true_label'].null_count() == table.height
                 assert not (out / stage / 'figures/amino_acid_frequency_by_confusion.svg').exists()
+                composition_stem = 'amino_acid_group_prediction_composition'
+                assert (out / stage / 'figures' / f'{composition_stem}.svg').exists()
             else:
                 assert (out / stage / 'figures/amino_acid_frequency_by_confusion.svg').exists()
+                composition_stem = 'amino_acid_group_trait_composition'
+                assert (out / stage / 'figures' / f'{composition_stem}.svg').exists()
             if mode == 'combined':
                 expression_table = pl.read_csv(out / stage / 'tables' /
                                                'tree_feature_heatmap_annotation.tsv',
@@ -231,6 +235,7 @@ def test_sequence_modes_write_group_and_cv_prediction_trees(
         assert table['true_label'].null_count() == table.height and 'fold_id' not in table.columns
         assert (predicted / 'predict/figures/tree_feature_heatmap_amino_acid.svg').exists()
         assert not (predicted / 'predict/figures/amino_acid_frequency_by_confusion.svg').exists()
+        assert (predicted / 'predict/figures/amino_acid_group_prediction_composition.svg').exists()
 
 
 @pytest.mark.parametrize('mode', ['amino_acid', 'combined'])
