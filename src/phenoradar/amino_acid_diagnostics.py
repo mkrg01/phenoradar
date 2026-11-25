@@ -161,7 +161,7 @@ def write_site_stability(
     ys = np.arange(table.height)
     eligible = (table["n_eligible_folds"] / table["n_outer_folds"]).to_numpy()
     selected = table["selection_frequency"].to_numpy()
-    ax.barh(ys, eligible, height=0.65, color="#dceaf3", label="Eligible")
+    ax.barh(ys, eligible, height=0.65, color="#dceaf3", label="Model input")
     ax.barh(ys, selected, height=0.35, color=figures._COLOR_BLUE, label="Selected")
     ax.set_yticks(ys, labels)
     ax.invert_yaxis()

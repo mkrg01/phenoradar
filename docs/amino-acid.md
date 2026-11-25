@@ -428,8 +428,8 @@ per-fold scores (blue points) and their mean (black diamonds). Scores describe
 training coefficients: PSS sums absolute residue coefficients.
 Models are averaged within folds, then folds receive equal weight; absent sites
 count as zero. Bounded `*_top_summary.tsv` and `*_top_by_fold.tsv` tables save the
-displayed values. `amino_acid_site_stability_top.svg` shows the eligible and
-selected fractions of all outer folds for the same top-PSS sites.
+displayed values. `amino_acid_site_stability_top.svg` shows the fractions of all
+outer folds where each top-PSS site was a model input or selected.
 
 The site-filter funnel counts sites, including the final sites with active encoded
 residue features after ranking, when site QC is available. It excludes final-refit
