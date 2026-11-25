@@ -125,6 +125,32 @@ def _run_inputs(run: Path) -> tuple[dict[str, Any], list[str], list[str]]:
     return config, species, training
 
 
+def _run_orthodb_release(config: dict[str, Any], explicit_release: str | None) -> str:
+    match = re.search(
+        r"odb(\d+)v(\d+)_OGs", str(config["data"].get("orthogroup_annotation_path", ""))
+    )
+    inferred = f"v{match[1]}.{match[2]}" if match else None
+    release = explicit_release or inferred
+    if release is None:
+        raise SiteAnnotationError(
+            "Set report.structure.orthodb_release or supply --orthodb-release "
+            "when the run does not identify its release."
+        )
+    release = "v" + release.removeprefix("v")
+    if inferred is not None and inferred != release:
+        raise SiteAnnotationError("Reference catalog and run OrthoDB releases differ.")
+    return release
+
+
+def _checked_alignment(og: AlignmentOG, expected: dict[str, Any] | None) -> None:
+    if (
+        expected is None
+        or og.sha256 != expected["sha256"]
+        or og.width != int(expected["alignment_length"])
+    ):
+        raise SiteAnnotationError(f"Input alignment changed since model fitting: {og.orthogroup}")
+
+
 def core_columns(og: AlignmentOG, training: list[str], policy: ReferencePolicy) -> np.ndarray:
     matrix = og.matrix()
     canonical = np.frombuffer(ALPHABET.encode(), dtype=np.uint8)
@@ -380,6 +406,18 @@ def _alphafold_for_sites(
     return min(ranked, key=lambda item: item[:4])[-1]
 
 
+def _check_annotation_tools(mafft: str, pymol: str, render: bool) -> None:
+    for module in ["Bio", "reportlab"] if render else ["Bio"]:
+        if importlib.util.find_spec(module) is None:
+            raise SiteAnnotationError("Install phenoradar[structure] for structure annotations.")
+    if shutil.which(mafft) is None:
+        raise SiteAnnotationError(f"MAFFT executable not found: {mafft}")
+    if render and shutil.which(pymol) is None:
+        raise SiteAnnotationError(
+            f"PyMOL executable not found: {pymol}; install PyMOL or disable rendering."
+        )
+
+
 def annotate_sites(
     *,
     run: Path,
@@ -409,15 +447,7 @@ def annotate_sites(
     if out.exists():
         raise SiteAnnotationError(f"Output already exists: {out}")
     config, species, training = _run_inputs(run)
-    for module in ["Bio", "reportlab"] if render else ["Bio"]:
-        if importlib.util.find_spec(module) is None:
-            raise SiteAnnotationError("Install phenoradar[structure] for structure annotations.")
-    if shutil.which(mafft) is None:
-        raise SiteAnnotationError(f"MAFFT executable not found: {mafft}")
-    if render and shutil.which(pymol) is None:
-        raise SiteAnnotationError(
-            f"PyMOL executable not found: {pymol}; install PyMOL or use --no-render."
-        )
+    _check_annotation_tools(mafft, pymol, render)
     sites = selected_sites(run, scope)
     if orthogroups:
         unknown = set(orthogroups) - set(sites["orthogroup"])
@@ -448,17 +478,7 @@ def annotate_sites(
     release = data.get("orthodb_release", "")
     if not release:
         raise SiteAnnotationError("Reference catalog has no frozen OrthoDB release.")
-    match = re.search(
-        r"odb(\d+)v(\d+)_OGs", str(config["data"].get("orthogroup_annotation_path", ""))
-    )
-    inferred = f"v{match[1]}.{match[2]}" if match else None
-    expected_release = orthodb_release or inferred
-    if expected_release is None:
-        raise SiteAnnotationError(
-            "Supply --orthodb-release when the run does not identify its release."
-        )
-    expected_release = "v" + expected_release.removeprefix("v")
-    if release != expected_release or (inferred is not None and inferred != expected_release):
+    if release != _run_orthodb_release(config, orthodb_release):
         raise SiteAnnotationError("Reference catalog and run OrthoDB releases differ.")
     automatic = {}
     if overrides:
@@ -576,14 +596,7 @@ def annotate_sites(
                 only_orthogroups={name},
             ) as store:
                 og = store.ogs[name]
-                if (
-                    name not in expected
-                    or og.sha256 != expected[name]["sha256"]
-                    or (og.width != int(expected[name]["alignment_length"]))
-                ):
-                    raise SiteAnnotationError(
-                        f"Input alignment changed since model fitting: {name}"
-                    )
+                _checked_alignment(og, expected.get(name))
                 manifest["input_hashes"][name] = og.sha256
                 core = core_columns(og, training, policy)
                 projected, positions, mafft_version = project_references(

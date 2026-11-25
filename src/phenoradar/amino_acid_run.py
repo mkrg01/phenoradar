@@ -11,7 +11,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import joblib
 import numpy as np
@@ -1134,6 +1134,13 @@ def run_amino_acid(
             "study_context": study_context,
         }
         (run_dir / "run_metadata.json").write_text(json.dumps(metadata_out, indent=2) + "\n")
+    if config.report.structure.enabled:
+        from phenoradar.site_annotation_run import run_site_annotation_report
+
+        scope: Literal["final", "cv"] = (
+            "final" if config.runtime.execution_stage == "full_run" else "cv"
+        )
+        run_site_annotation_report(run_dir, config.report.structure, scope, progress=progress)
     return run_dir
 
 

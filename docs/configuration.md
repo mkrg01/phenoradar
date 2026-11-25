@@ -424,6 +424,10 @@ shared feature membership, selected-site details, and global summaries. Use `ful
 for all AA audit rows and the legacy dense TSV tables. This changes reporting only;
 classification uses a fixed probability threshold of 0.5 throughout.
 
+Set `report.structure.enabled: true` to map sites after amino-acid or combined
+runs. See [structure annotation](site-structure-annotation.md) for options and
+PyMOL outputs.
+
 ## Prediction settings
 
 Expression `predict` requires a bundle and an explicit TPM path through

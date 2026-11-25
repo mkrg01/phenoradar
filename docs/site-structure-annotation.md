@@ -1,10 +1,41 @@
 # External reference numbering and protein structures
 
-`prepare-site-references` and `annotate-sites` are optional postprocessing commands
-for completed amino-acid/combined runs. They never refit a model or change its
-predictions, feature selection, input alignment, or original output tables.
+Structure annotation is optional postprocessing for completed amino-acid and
+combined runs. It uses the fitted model's site scores and input alignment.
 
-## Install and run
+## Run automatically from YAML
+
+Install `phenoradar[structure]` and the MAFFT executable. To also save annotated
+PyMOL sessions and PDFs, install PyMOL and set `render: true`.
+
+```yaml
+report:
+  structure:
+    enabled: true
+    top_orthogroups: 20
+    orthodb_release: v12.2  # optional if inferred from the OG annotation filename
+    render: true
+```
+
+Run `phenoradar run -c config.yml` as usual. PhenoRadar uses final-model sites for
+`full_run` and outer-CV sites for `cv_only`. It ranks OGs by their maximum mean
+site PSS, with ties broken by OG ID, and maps their selected sites. For each OG,
+it searches RCSB PDB with the training MSA row closest to the median ungapped
+length, breaking ties by sequence ID. Gaps are removed before search. For a query
+shorter than 25 residues, it skips the PDB search and still looks for a verified
+reference and AlphaFold model. The search sequence is sent to RCSB for eligible
+queries and is separate from the full-length coordinate reference.
+
+Results are written to `RUN/site_annotations/`. `RUN/site_annotation_inputs/`
+contains the generated query FASTA, candidate catalog and `status.json`, which
+records duration and success or failure independently of model fitting. Use
+`mafft_exe`, `pymol_exe` or `cache_dir` under `report.structure` to override the
+executable paths or resource cache. With `render: false` (the default), the
+coordinates, mapping tables and PyMOL scripts are still saved. Open `sites.pse`
+directly in PyMOL when `render: true`, or run `pymol sites.pml` from the structure
+directory to rebuild the session with the saved coordinates.
+
+## Run separately on completed results
 
 Install `phenoradar[structure]` plus the MAFFT and PyMOL executables separately.
 PyMOL can run in a different environment; pass its executable explicitly.
@@ -26,7 +57,7 @@ All requested sites are retained in the correspondence tables.
 
 ## Prioritize experimental structures at selected sites
 
-Supply a FASTA with one full-length, unaligned protein sequence per OG. Use the
+Supply a FASTA with one ungapped protein sequence per OG. Use the
 OG ID as the first token of the header and include the source sequence ID in the
 description. The query sequence is sent to the RCSB PDB sequence-search service.
 An optional sites TSV has the columns `orthogroup`, `alignment_pos_1based`, and

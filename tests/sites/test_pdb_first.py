@@ -9,9 +9,16 @@ import polars as pl
 import pytest
 from test_site_reference import MAFFT, REFERENCE, THREE, fixture_run, reference
 
+from phenoradar import site_annotation_run
+from phenoradar.config.schema import StructureReportConfig
 from phenoradar.site_pdb_search import prepare_pdb_catalog
 from phenoradar.site_reference import annotate_sites
-from phenoradar.site_reference_resources import ResourceCache, SiteAnnotationError, write_json
+from phenoradar.site_reference_resources import (
+    ResourceCache,
+    SiteAnnotationError,
+    sha256,
+    write_json,
+)
 
 
 class SearchCache(ResourceCache):
@@ -80,6 +87,73 @@ def test_pdb_catalog_requires_same_og_cross_reference_even_for_identical_protein
     assert data["exclusions"] == [dict(
         accession="P00002", orthogroup="OG1", reason="no_exact_linked_orthodb_member",
     )]
+
+
+def test_short_alignment_query_can_still_use_orthodb_member_sequence(tmp_path: Path) -> None:
+    queries = tmp_path / "queries.fa"
+    queries.write_text(f">OG1 g1\n{REFERENCE[:15]}\n")
+    catalog = tmp_path / "catalog.json"
+    prepare_pdb_catalog(
+        orthogroups=["OG1"], release="v12.2", queries=queries, out=catalog,
+        cache=SearchCache(tmp_path / "cache"), alignment_sequence_ids={"OG1": "g1"},
+    )
+    data = json.loads(catalog.read_text())
+    assert [r["sequence"] for r in data["references"]] == [REFERENCE]
+    assert data["pdb_search"]["queries"]["OG1"]["pdb_search_skipped"] == (
+        "query_shorter_than_25_residues"
+    )
+    assert data["pdb_search"]["candidates"] == {"OG1": []}
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_automatic_report_uses_top_og_and_training_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fails: bool,
+) -> None:
+    run, _ = fixture_run(tmp_path)
+    aln = tmp_path / "align/OG1.fa"
+    aln.write_text(
+        ">s2_gene\nCD..\n>s0_gene\nA-CC\n>s1_gene\nC.A-\n>s3_heldout\nFF-F\n"
+    )
+    inventory = pl.DataFrame(
+        {"orthogroup": ["OG1"], "sha256": [sha256(aln)], "alignment_length": [4]},
+    )
+    inventory.write_csv(run / "model/tables/alignment_inputs.tsv", separator="\t")
+    score_path = run / "model/tables/amino_acid_site_pss.tsv"
+    scores = pl.read_csv(score_path, separator="\t")
+    lower_scores = scores.with_columns(pl.lit("OG2").alias("orthogroup"), pl.lit(0.3).alias("pss"))
+    pl.concat([scores, lower_scores]).write_csv(score_path, separator="\t")
+    split_path = run / "split/tables/split_manifest.tsv"
+    pl.read_csv(split_path, separator="\t").with_columns(
+        pl.when(pl.col("species") == "s3").then(pl.lit("external_test"))
+        .otherwise(pl.col("pool")).alias("pool")
+    ).write_csv(split_path, separator="\t")
+    monkeypatch.setattr(site_annotation_run, "_check_annotation_tools", lambda *args: None)
+    calls = []
+
+    def prepare(**kwargs: Any) -> None:
+        assert kwargs["orthogroups"] == ["OG1"]
+        assert kwargs["queries"].read_text() == ">OG1 s1_gene\nCA\n"
+        assert kwargs["alignment_sequence_ids"] == {"OG1": "s1_gene"}
+        assert kwargs["release"] == "v12.2"
+        if fails:
+            raise SiteAnnotationError("External resource unavailable")
+        calls.append("prepared")
+
+    def annotate(**kwargs: Any) -> None:
+        assert kwargs["orthogroups"] == ["OG1"]
+        assert kwargs["scope"] == "final"
+        assert kwargs["render"] is True
+        calls.append("annotated")
+
+    monkeypatch.setattr(site_annotation_run, "prepare_pdb_catalog", prepare)
+    monkeypatch.setattr(site_annotation_run, "annotate_sites", annotate)
+    options = StructureReportConfig(top_orthogroups=1, render=True, cache_dir=str(tmp_path))
+    site_annotation_run.run_site_annotation_report(run, options, "final")
+    status = json.loads((run / "site_annotation_inputs/status.json").read_text())
+    assert status["status"] == ("failed" if fails else "completed")
+    assert status["orthogroups"] == ["OG1"]
+    assert json.loads((run / "run_metadata.json").read_text())["status"] == "full_run_completed"
+    assert calls == ([] if fails else ["prepared", "annotated"])
 
 
 def write_cif(path: Path, accession: str, observed: set[int]) -> None:

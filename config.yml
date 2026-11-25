@@ -118,6 +118,11 @@ summary:
 
 report:
   amino_acid_tables: compact  # choices: compact, full
+  structure:
+    enabled: false  # amino_acid and combined runs only
+    top_orthogroups: 20
+    orthodb_release: null  # e.g. v12.2 when the annotation filename does not identify it
+    render: false  # true writes the PDF and PyMOL session
 
 runtime:
   seed: 42

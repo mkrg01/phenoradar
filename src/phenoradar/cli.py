@@ -2905,7 +2905,7 @@ def prepare_site_references_command(
     pdb_query_fasta: Annotated[
         Path | None,
         typer.Option("--pdb-query-fasta", exists=True, dir_okay=False,
-                     help="Search RCSB with one full-length protein FASTA record per OG."),
+                     help="Search RCSB with one ungapped protein FASTA record per OG."),
     ] = None,
     offline: Annotated[bool, typer.Option("--offline")] = False,
 ) -> None:

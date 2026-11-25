@@ -1,4 +1,4 @@
-"""Discover experimental PDB chains using one full-length search query per OG."""
+"""Discover experimental PDB chains using one protein search query per OG."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ _RCSB_GRAPHQL = "https://data.rcsb.org/graphql"
 _UNIPROT = "https://rest.uniprot.org/uniprotkb/"
 _ENTITY_BATCH = 40
 _SEARCH_HITS = 100
+_RCSB_MINIMUM_QUERY_LENGTH = 25
 
 
 def _pdb_hits(sequence: str, cache: ResourceCache) -> tuple[dict[str, float], int]:
@@ -156,21 +157,31 @@ def _closest_member_sequences(query: str, members: dict[str, list[str]]) -> list
 
 def _prepare_og(
     og: str, query: str, base: str, cache: ResourceCache,
+    *, alignment_sequence_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     exclusions: list[dict[str, Any]] = []
-    hits, total_hits = _pdb_hits(query, cache)
+    search_pdb = alignment_sequence_id is None or len(query) >= _RCSB_MINIMUM_QUERY_LENGTH
+    hits, total_hits = _pdb_hits(query, cache) if search_pdb else ({}, 0)
     chains = _pdb_chains(hits, cache)
-    query_info = dict(
+    query_info: dict[str, Any] = dict(
         sha256=hashlib.sha256(query.encode()).hexdigest(),
         pdb_total_hits=total_hits, pdb_screened_entities=len(hits),
     )
+    if alignment_sequence_id is not None:
+        query_info.update(alignment_sequence_id=alignment_sequence_id, length=len(query))
+        if not search_pdb:
+            query_info["pdb_search_skipped"] = "query_shorter_than_25_residues"
     members = cache.fetch(base + "/fasta?" + urlencode({"id": og}))
     assert members is not None
+    sequences_by_gene = read_fasta(members.read_text())
     member_sequences: dict[str, list[str]] = defaultdict(list)
-    for gene, sequence in read_fasta(members.read_text()).items():
+    for gene, sequence in sequences_by_gene.items():
         member_sequences[sequence].append(gene)
     gene_links: dict[str, set[str]] = {}
-    for gene in member_sequences.get(query, []):
+    query_genes = set(member_sequences.get(query, []))
+    if alignment_sequence_id is not None and alignment_sequence_id in sequences_by_gene:
+        query_genes.add(alignment_sequence_id)
+    for gene in sorted(query_genes):
         gene_links[gene] = _orthodb_gene_links(gene, base, cache)
     # Query-linked references also give AlphaFold a fallback when PDB has no useful hit.
     accessions = {chain["accession"] for chain in chains}
@@ -233,6 +244,7 @@ def prepare_pdb_catalog(
     queries: Path,
     out: Path,
     cache: ResourceCache,
+    alignment_sequence_ids: dict[str, str] | None = None,
 ) -> Path:
     """Freeze site-mapping candidates without querying every OrthoDB gene."""
     if out.exists():
@@ -245,14 +257,17 @@ def prepare_pdb_catalog(
         raise SiteAnnotationError("Supply one search FASTA record per requested OG, with OG IDs.")
     for og, sequence in sequences.items():
         if not re.fullmatch(r"[A-Z]+", sequence):
-            raise SiteAnnotationError(f"Expected an ungapped, full-length protein query for {og}.")
+            raise SiteAnnotationError(f"Expected an ungapped protein query for {og}.")
     release, base = orthodb_api(release, cache)
     references: list[dict[str, Any]] = []
     pdb_candidates: dict[str, list[dict[str, Any]]] = {}
     queries_info: dict[str, dict[str, Any]] = {}
     exclusions = []
     for og, query in sorted(sequences.items()):
-        refs, chains, rejected, query_info = _prepare_og(og, query, base, cache)
+        refs, chains, rejected, query_info = _prepare_og(
+            og, query, base, cache,
+            alignment_sequence_id=(alignment_sequence_ids or {}).get(og),
+        )
         references.extend(refs)
         pdb_candidates[og] = chains
         exclusions.extend(rejected)

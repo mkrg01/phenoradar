@@ -504,10 +504,23 @@ class ModelSelectionConfig(StrictModel):
         return self
 
 
+class StructureReportConfig(StrictModel):
+    """Optional structure annotation of selected amino-acid orthogroups."""
+
+    enabled: bool = False
+    top_orthogroups: PositiveInt = DEFAULT_TOP_FEATURES
+    orthodb_release: str | None = None
+    cache_dir: str = "runs/.phenoradar_cache/site_resources"
+    mafft_exe: str = "mafft"
+    pymol_exe: str = "pymol"
+    render: bool = False
+
+
 class ReportConfig(StrictModel):
     """Interpretation table retention; independent of fitting and prediction."""
 
     amino_acid_tables: Literal["compact", "full"] = "compact"
+    structure: StructureReportConfig = Field(default_factory=StructureReportConfig)
 
 
 class GroupBootstrapConfig(StrictModel):
@@ -631,6 +644,8 @@ class AppConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_contrast_pair_dependencies(self) -> AppConfig:
+        if self.report.structure.enabled and self.data.feature_mode == "expression":
+            raise ValueError("report.structure requires amino_acid or combined mode")
         if self.runtime.amino_acid_matrix == "packed" and (
             self.data.feature_mode != "amino_acid"
             or self.preprocess.amino_acid.ranked_site_filter.method != "none"
