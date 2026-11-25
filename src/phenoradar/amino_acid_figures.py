@@ -307,6 +307,18 @@ def write_amino_acid_figures(
                       unit_label="Group" if fold_group_labels(oof) else "Fold")
     write_site_stability(run_dir, top_sites, annotations,
                          unit_label="Group" if fold_group_labels(oof) else "Fold")
+    from phenoradar.og_expression_figures import (
+        expression_orthogroups,
+        write_group_trait_expression,
+    )
+
+    expression_ogs = (expression_orthogroups(expression_importance, limit)
+                      if expression_importance is not None else [])
+    warnings.extend(write_group_trait_expression(
+        run_dir, config, oof,
+        list(dict.fromkeys([*top_sites["orthogroup"].to_list(), *expression_ogs])),
+        annotations=annotations,
+    ))
     warnings.extend(
         write_run_tree_prediction_artifacts(
             run_dir=run_dir,

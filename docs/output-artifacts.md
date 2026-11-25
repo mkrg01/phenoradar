@@ -344,6 +344,21 @@ equal-species residue compositions at the same PSS-ranked sites, by split group 
 observed trait, with species counts, mean OOF probability and observed-site fractions.
 This summary is available without a tree. Full annotation names are retained and
 the legend groups residues sharing a Zappo color.
+
+All feature modes also write CV OG-expression diagnostics when `data.tpm_path`
+contains the selected species/OGs: `og_expression_by_group_trait_01.svg` (four OGs
+per page, then `_02.svg`, etc.) and `og_expression_group_trait_heatmap.svg`, with
+PDF versions under `cv/figures/`. AA selects unique OGs among the PSS-ranked sites;
+expression selects the top-importance OGs; combined uses their union. Distributions
+show one point per species, sorted within group and observed trait, with boxes for
+n ≥ 3. The heatmap shows median `log2(TPM + 1)` on a shared scale. Raw observed TPM
+is used: duplicate coordinates are summed, explicit zeros retained, absent entries
+excluded, and no imputation applied. OG TPM is distinct from sequence-level TPM;
+AA runs without OG TPM omit these diagnostics. The matching tables are
+`og_expression_species.tsv` and `og_expression_group_trait_summary.tsv`, including
+total, observed, missing and zero counts. Accepted-only outputs use the existing
+`accepted_only/` directories. Names wrap in full; no tree is required.
+
 Feature heatmaps include colored trait and probability columns, split-group IDs,
 and dashed boundaries between adjacent groups. Fold IDs and distinct fold boundaries
 are also shown when groups and folds do not correspond one-to-one. Group labels

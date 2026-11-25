@@ -1,5 +1,6 @@
 """Group and fold identities shared by prediction figures."""
 
+import importlib
 from pathlib import Path
 
 import polars as pl
@@ -68,3 +69,22 @@ def tree_context_tracks(frame: pl.DataFrame) -> list[str]:
     if "group_id" in tracks and "fold_id" in tracks and fold_group_labels(frame) is not None:
         tracks.remove("fold_id")
     return tracks
+
+
+def ordered_prediction_groups(predictions: pl.DataFrame, tree_path: Path | None) -> list[str]:
+    """Follow the shared tree order, retaining groups whose species lack tree tips."""
+    groups = sorted(predictions["group_id"].unique().to_list())
+    if tree_path is None:
+        return groups
+    toytree = importlib.import_module("toytree")
+
+    tree = toytree.tree(str(tree_path))
+    lookup = dict(predictions.select("species", "group_id").iter_rows())
+    present = [name for name in tree.get_tip_labels() if name in lookup]
+    if len(present) < 2:
+        return groups
+    if len(present) < tree.ntips:
+        tree = tree.mod.prune(*present)
+    ordered = list(dict.fromkeys(lookup[name] for name in reversed(
+        tree.ladderize().get_tip_labels())))
+    return ordered + [group for group in groups if group not in ordered]

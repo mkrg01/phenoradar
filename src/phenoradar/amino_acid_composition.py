@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import textwrap
 from pathlib import Path
 from typing import Any, cast
@@ -17,6 +16,7 @@ from matplotlib.patches import Patch, Rectangle
 
 from phenoradar.amino_acid import ALPHABET, PREDICTION_BATCH_SIZE, AlignmentStore
 from phenoradar.colors import BINARY_TRAIT_COLORS
+from phenoradar.cv_display import ordered_prediction_groups as _group_order
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
@@ -28,24 +28,6 @@ from phenoradar.residue_colors import ZAPPO_GROUPS, residue_color
 from phenoradar.tree_prediction import _PROBABILITY_CMAP, _cell_text_color
 
 _STEM = "amino_acid_group_trait_composition"
-
-
-def _group_order(predictions: pl.DataFrame, tree_path: Path | None) -> list[str]:
-    groups = sorted(predictions["group_id"].unique().to_list())
-    if tree_path is None:
-        return groups
-    toytree = importlib.import_module("toytree")
-
-    tree = toytree.tree(str(tree_path))
-    lookup = dict(predictions.select("species", "group_id").iter_rows())
-    present = [name for name in tree.get_tip_labels() if name in lookup]
-    if len(present) < 2:
-        return groups
-    if len(present) < tree.ntips:
-        tree = tree.mod.prune(*present)
-    ordered = list(dict.fromkeys(lookup[name] for name in reversed(
-        tree.ladderize().get_tip_labels())))
-    return ordered + [group for group in groups if group not in ordered]
 
 
 def build_group_trait_composition(

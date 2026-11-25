@@ -1801,6 +1801,18 @@ def _run_single(
                 )
             except FigureError as exc:
                 raise typer.BadParameter(str(exc)) from exc
+        with timing_recorder.measure(scope="figures", stage="og_expression"):
+            from phenoradar.og_expression_figures import (
+                expression_orthogroups,
+                write_group_trait_expression,
+            )
+
+            figure_warnings.extend(write_group_trait_expression(
+                run_dir, resolved, cv_artifacts.oof_predictions,
+                expression_orthogroups(
+                    cv_artifacts.feature_importance, resolved.figures.top_features),
+                annotations=orthogroup_annotations,
+            ))
         with timing_recorder.measure(scope="figures", stage="cv_species_evidence"):
             if (
                 isinstance(cv_species_evidence, pl.DataFrame)
