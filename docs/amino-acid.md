@@ -471,6 +471,19 @@ blocks, including zero coefficients and all eligible sites.
 
 ## Tree residue heatmap and annotation labels
 
+`cv/figures/amino_acid_group_trait_composition.svg` summarizes the same PSS-ranked
+sites by split group and observed trait. Each cell shows the mean residue frequencies,
+giving equal weight to species with an observed site. TPM weights apply only within
+species. Missing sites are excluded from the mean; the stripe below each cell shows
+the observed fraction of species. Rows include the species count and mean OOF
+probability. Groups follow the tree order when available; species absent from the
+tree remain included. Full annotation names wrap without truncation, and the Zappo
+legend combines residues sharing a color. The matching TSV retains all 20 residue
+means, total/observed counts, group, trait, PSS and site identifiers. Accepted-only
+figures and tables are written in their respective `accepted_only/` directories.
+For `best_covered`, this descriptive summary uses the input-MSA coverage representative,
+as in the residue tree; it does not replace training-frozen model representatives.
+
 The feature heatmap includes colored trait and probability columns and group IDs
 from `split.group_col`. Fold IDs are also shown when group and fold membership
 do not correspond one-to-one. Dashed lines separate adjacent groups and folds.

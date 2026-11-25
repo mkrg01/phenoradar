@@ -168,6 +168,11 @@ def test_sequence_modes_write_group_and_cv_prediction_trees(
         assert not (out / 'cv/figures/accepted_only' / f'{name}.svg').exists()
     assert (out / 'cv/figures/tree_feature_heatmap_amino_acid.svg').exists()
     assert (out / 'cv/figures/accepted_only/tree_feature_heatmap_amino_acid.svg').exists()
+    composition_name = 'amino_acid_group_trait_composition'
+    assert (out / 'cv/figures' / f'{composition_name}.svg').exists()
+    composition = pl.read_csv(out / 'cv/tables' / f'{composition_name}.tsv', separator='\t')
+    populations = composition.select('group_id', 'trait', 'n_species').unique()
+    assert populations['n_species'].sum() == 8
     assert not (out / 'cv/tables/tree_feature_heatmap_annotation.tsv').exists()
     for name in ['tree_feature_heatmap_log2_tpm', 'tree_feature_heatmap_zscore']:
         assert not (out / 'cv/figures' / f'{name}.svg').exists()

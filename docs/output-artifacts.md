@@ -332,6 +332,11 @@ species absent from the tree stay in annotation tables.
 Toytree figures include `tree_feature_heatmap_log2_tpm.svg`,
 `tree_feature_heatmap_zscore.svg`, and stage-specific external/predict trees.
 AA/combined runs instead write `tree_feature_heatmap_amino_acid.svg`.
+They also write `amino_acid_group_trait_composition.svg` and its matching TSV:
+equal-species residue compositions at the same PSS-ranked sites, by split group and
+observed trait, with species counts, mean OOF probability and observed-site fractions.
+This summary is available without a tree. Full annotation names are retained and
+the legend groups residues sharing a Zappo color.
 Feature heatmaps include colored trait and probability columns, split-group IDs,
 and dashed boundaries between adjacent groups. Fold IDs and distinct fold boundaries
 are also shown when groups and folds do not correspond one-to-one. Group labels

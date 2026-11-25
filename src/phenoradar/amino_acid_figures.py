@@ -331,6 +331,7 @@ def write_amino_acid_figures(
         )
     )
     if store is not None:
+        from phenoradar.amino_acid_composition import write_group_trait_composition
         from phenoradar.amino_acid_tree import write_residue_tree
 
         warnings.extend(
@@ -344,6 +345,12 @@ def write_amino_acid_figures(
                 annotations=annotations,
             )
         )
+        warnings.extend(write_group_trait_composition(
+            run_dir, store, top_sites["pss"], oof,
+            aggregation=config.preprocess.amino_acid.aggregation,
+            annotations=annotations,
+            tree_path=Path(config.data.tree_path) if config.data.tree_path else None,
+        ))
     _frequency_by_confusion(run_dir, oof, limit, annotations)
     _site_filter_funnel(
         run_dir,
