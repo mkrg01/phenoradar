@@ -177,6 +177,18 @@ fragments. Only the first deposited model is displayed for experimental ensemble
 Alternate-location CA coordinates use deposited order. pLDDT remains a distinct
 local-confidence measure, not PhenoRadar importance or alignment confidence.
 
+New reference catalogs retain exact UniProtKB `Active site` and `Binding site`
+features from the verified reference, including ligand IDs and evidence. The
+`functional_site_map.tsv` records both mapped and unresolved feature positions.
+Prepare the reference catalog again to add UniProt features to older catalogs.
+For experimental structures, `pdb_ligands.tsv` lists deposited non-water,
+non-polymer components in the displayed model, including ions and additives.
+
+When these coordinates are available, the PDF has a functional-context page and
+PyMOL has a `functional_context` scene. Toggle `UniProt_active_sites` (blue),
+`UniProt_binding_sites` (green), and `PDB_ligands` (orange) independently. The
+original score pages and front scene keep their score colors.
+
 ## Outputs and PDF display
 
 The new output directory contains `manifest.json` and a portable
@@ -190,7 +202,10 @@ QC failures, chosen species genes, commands and tool versions are retained.
 
 Each OG has `reference_candidates.tsv`, `reference_species_matches.tsv`,
 `selected_reference.json`, `reference.fa`, `site_reference_map.tsv`, and structure
-screening/selection tables. Each structure folder contains the copied coordinates,
+screening/selection tables. When `data.orthogroup_annotation_path` has a name for
+the OG, the mapping tables, PDF header and PyMOL group include that name alongside
+the OG ID. The portable catalog retains the names for offline replay.
+Each structure folder contains the copied coordinates,
 `site_structure_map.tsv`, `scene.json`, `render.py`, `sites.pml`, `sites.pse`,
 `rendering.json`, and `sites.pdf`. Run `pymol -cq render.py` **in that folder**
 to regenerate its saved scenes. `--no-render` writes mapping and scene scripts

@@ -21,6 +21,7 @@ import polars as pl
 import yaml
 
 from phenoradar.amino_acid import ALPHABET, AlignmentOG, AlignmentStore
+from phenoradar.orthogroup_annotation import load_orthogroup_annotations
 from phenoradar.site_reference_resources import (
     ResourceCache,
     SiteAnnotationError,
@@ -502,6 +503,26 @@ def annotate_sites(
         ]
     if data.get("frozen_annotation_binding") not in (None, binding):
         raise SiteAnnotationError("Portable catalog is bound to different run inputs or policy.")
+    names = sorted(set(sites["orthogroup"]))
+    annotations = data.get("orthogroup_annotations")
+    annotation_source = data.get("orthogroup_annotation_source")
+    if annotations is None:
+        annotations = {}
+        raw_path = config["data"].get("orthogroup_annotation_path")
+        if raw_path:
+            annotation_path = Path(raw_path)
+            if not annotation_path.is_absolute() and not annotation_path.is_file():
+                annotation_path = run.parent.parent / annotation_path
+            if annotation_path.is_file():
+                table = load_orthogroup_annotations(annotation_path, feature_names=names)
+                assert table is not None
+                annotations = {
+                    og: label for og, label in table.select("feature", "orthogroup_annotation")
+                    .iter_rows() if label
+                }
+                annotation_source = dict(path=str(annotation_path.resolve()),
+                                         sha256=sha256(annotation_path))
+    annotations = {og: annotations[og] for og in names if og in annotations}
     out.mkdir(parents=True)
     artifact_paths = [
         run / p
@@ -528,6 +549,8 @@ def annotate_sites(
         catalog=str(catalog),
         catalog_sha256=sha256(catalog),
         orthodb_release=release,
+        orthogroup_annotations=annotations,
+        orthogroup_annotation_source=annotation_source,
         policy=asdict(policy),
         scope=scope,
         training_species=training,
@@ -552,9 +575,11 @@ def annotate_sites(
     )
     portable = {**data, "structures": [], "structures_complete_for": []}
     portable["references"] = [
-        r for r in data["references"] if r["orthogroup"] in set(sites["orthogroup"])
+        r for r in data["references"] if r["orthogroup"] in names
     ]
-    portable["orthogroups"] = sorted(set(sites["orthogroup"]))
+    portable["orthogroups"] = names
+    portable["orthogroup_annotations"] = annotations
+    portable["orthogroup_annotation_source"] = annotation_source
     portable["frozen_annotation_binding"] = binding
     if pdb_search is not None:
         portable["pdb_search"] = {**pdb_search, "decisions": {}}
@@ -563,7 +588,7 @@ def annotate_sites(
     try:
         inputs = pl.read_csv(run / "model/tables/alignment_inputs.tsv", separator="\t")
         expected = {str(r["orthogroup"]): r for r in inputs.iter_rows(named=True)}
-        for name in sites["orthogroup"].unique().sort().to_list():
+        for name in names:
             print(f"Annotating {name}", flush=True)
             target = out / name
             target.mkdir()
@@ -682,6 +707,7 @@ def annotate_sites(
             reference = references[accession]
             reference["selection_mode"] = mode
             reference["reference_qualified"] = bool(preselected) or choice["qualified"]
+            reference["orthogroup_annotation"] = annotations.get(name)
             write_json(
                 target / "selected_reference.json",
                 dict(
@@ -693,6 +719,8 @@ def annotate_sites(
             _write_table(target / "reference_species_matches.tsv", choice["species_matches"])
             rows = _reference_site_rows(selected, reference, positions[accession],
                                         len(projected[accession]), scope)
+            for row in rows:
+                row["orthogroup_annotation"] = annotations.get(name)
             _write_table(target / "site_reference_map.tsv", rows)
             (target / "reference.fa").write_text(f">{accession}\n{reference['sequence']}\n")
             core_positions = _core_positions(positions[accession], core)
@@ -718,7 +746,7 @@ def annotate_sites(
                 frozen["path"] = str(Path(frozen["path"]).relative_to(out))
                 if frozen["source"] == "pdb" and frozen.get("sifts_format") != "mmcif":
                     frozen["sifts_path"] = str(file.parent.relative_to(out) / "sifts.xml.gz")
-                for key in ["folder", "sites", "structure_key"]:
+                for key in ["folder", "sites", "structure_key", "functional_sites", "pdb_ligands"]:
                     frozen.pop(key, None)
                 if pdb_search is not None:
                     frozen["orthogroup"] = name

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,9 @@ scene = json.loads((root / 'scene.json').read_text())
 cmd.reinitialize()
 cmd.set('max_threads', 1)
 cmd.load(str(root / scene['file']), 'structure')
+if scene.get('orthogroup_group'):
+    cmd.group(scene['orthogroup_group'], 'structure')
+    cmd.set_title('structure', 1, scene['orthogroup_label'])
 cmd.frame(1)
 # Keep the first deposited alternate location for each protein atom.
 seen, duplicates = set(), []
@@ -92,13 +96,63 @@ for site in selected:
         site['reference_pos_1based'], site['alignment_pos_1based'])
     cmd.label(sel + ' and name CA', repr(label))
 
+context_layers = []
+def context_layer(name, expression, color, representation):
+    if not expression or not cmd.count_atoms(expression, state=1):
+        return
+    cmd.create(name, expression, source_state=1, target_state=1)
+    cmd.hide('everything', name)
+    cmd.show(representation, name)
+    cmd.color(color, name)
+    cmd.disable(name)
+    context_layers.append(name)
+
+for kind, name, color in [('Active site', 'UniProt_active_sites', '0x2274c7'),
+                          ('Binding site', 'UniProt_binding_sites', '0x17844b')]:
+    expressions = sorted({
+        '(' + selection(site) + ' and polymer.protein and name CA)'
+        for site in scene.get('functional_sites', [])
+        if site['feature_type'] == kind and site['structure_status'] == 'mapped'
+    })
+    context_layer(name, ' or '.join(expressions), color, 'spheres')
+    if name in context_layers:
+        cmd.set('sphere_scale', .45, name)
+
+ligands = {
+    (row['chain'], row['label_asym_id'], str(row['auth_seq_id']) + row['insertion_code'],
+     row['component_id']) for row in scene.get('pdb_ligands', [])
+}
+if ligands:
+    indices, matched = [], set()
+    for atom in cmd.get_model('structure', state=1).atom:
+        exact = (atom.chain, atom.segi, atom.resi, atom.resn)
+        unsegmented = (atom.chain, '', atom.resi, atom.resn)
+        matches = ligands.intersection((exact, unsegmented))
+        if matches:
+            matched.update(matches)
+            indices.append(str(atom.index))
+    if matched != ligands:
+        print('Recorded PDB ligand instances unavailable in PyMOL:', sorted(ligands - matched))
+    if indices:
+        context_layer('PDB_ligands', 'structure and index ' + '+'.join(indices), '0xf28e2b',
+                      'sticks')
+        cmd.show('spheres', 'PDB_ligands')
+        cmd.set('sphere_scale', .19, 'PDB_ligands')
+
 pages = ['selected', 'pss', 'selection_frequency']
 if scene['source'] == 'alphafold':
     pages.append('confidence')
+if context_layers:
+    pages.append('functional_context')
 scales = {}
 for page in pages:
     cmd.color('gray80', target)
-    if page == 'confidence':
+    if page == 'functional_context':
+        for layer in context_layers:
+            cmd.enable(layer)
+        for site in selected:
+            cmd.color('0xd62728', selection(site))
+    elif page == 'confidence':
         atoms = cmd.get_model(target, state=1).atom
         for lo, hi, color in [(0, 50, '0xff7d45'), (50, 70, '0xffdb13'),
                               (70, 90, '0x65cbf3'), (90, 101, '0x0053d6')]:
@@ -127,11 +181,14 @@ for page in pages:
             cmd.scene(name, 'store')
         cmd.png(str(root / (page + '_' + name + '.png')), width=1000, height=1000,
                 dpi=300, ray=1, quiet=1)
-    if page == 'selected':
-        cmd.scene('front', 'recall')
-        cmd.save(str(root / 'sites.pse'))
+    if page == 'functional_context':
+        cmd.set_view(views['front'])
+        cmd.scene('functional_context', 'store')
+cmd.scene('front', 'recall')
+cmd.save(str(root / 'sites.pse'))
 (root / 'rendering.json').write_text(json.dumps(dict(
     pymol_version=cmd.get_version()[0], views=views, scales=scales,
+    functional_layers=context_layers,
     projection='orthographic', pixel_size=[1000, 1000], pages=pages,
     orientation='CA principal axes, saved initial camera; proper rotations only',
     first_model=scene['first_model']), indent=2) + '\n')
@@ -147,6 +204,13 @@ def render_structure(
     render: bool,
 ) -> None:
     folder = Path(record["folder"])
+    orthogroup = record["sites"][0]["orthogroup"]
+    annotation = record.get("orthogroup_annotation")
+    group = None
+    if annotation:
+        name_part = re.sub(r"[^A-Za-z0-9]+", "_", annotation).strip("_")[:55]
+        id_part = re.sub(r"[^A-Za-z0-9_]+", "_", orthogroup)
+        group = f"OG_{name_part}_{id_part}" if name_part else f"OG_{id_part}"
     write_json(
         folder / "scene.json",
         dict(
@@ -155,6 +219,10 @@ def render_structure(
             chain=record["chain"],
             first_model=record["first_model"],
             sites=record["sites"],
+            functional_sites=record.get("functional_sites", []),
+            pdb_ligands=record.get("pdb_ligands", []),
+            orthogroup_label=f"{annotation} ({orthogroup})" if annotation else orthogroup,
+            orthogroup_group=group,
         ),
     )
     (folder / "render.py").write_text(_PYMOL_SCRIPT)
@@ -197,6 +265,7 @@ def _write_pdf(record: dict[str, Any], folder: Path) -> None:
     styles["BodyText"].leading = 9
     page_number = 0
     title = record["sites"][0]["orthogroup"] + " | " + record["accession"]
+    annotation = record.get("orthogroup_annotation")
     subtitle = "{} | chain {} | {} | model {}".format(
         record["structure_id"], record["chain"], record["method"], record["first_model"]
     )
@@ -205,13 +274,21 @@ def _write_pdf(record: dict[str, Any], folder: Path) -> None:
         nonlocal page_number
         page_number += 1
         canvas.setFillColor(colors.HexColor("#17324d"))
-        canvas.setFont("Helvetica-Bold", 13)
-        canvas.drawString(28, height - 30, title)
+        if annotation:
+            label_width = canvas.stringWidth(annotation, "Helvetica-Bold", 13)
+            font_size = min(13, 13 * (width - 56) / max(label_width, 1))
+            canvas.setFont("Helvetica-Bold", font_size)
+            canvas.drawString(28, height - 27, annotation)
+            canvas.setFont("Helvetica", 9)
+            canvas.drawString(28, height - 41, title)
+        else:
+            canvas.setFont("Helvetica-Bold", 13)
+            canvas.drawString(28, height - 30, title)
         canvas.setFont("Helvetica", 9)
-        canvas.drawString(28, height - 46, subtitle)
+        canvas.drawString(28, height - (54 if annotation else 46), subtitle)
         canvas.setFillColor(colors.black)
         canvas.setFont("Helvetica-Bold", 10)
-        canvas.drawString(28, height - 64, label)
+        canvas.drawString(28, height - (68 if annotation else 64), label)
         canvas.setFont("Helvetica", 7)
         canvas.drawRightString(width - 28, 18, f"PhenoRadar | {page_number}")
 
@@ -221,6 +298,7 @@ def _write_pdf(record: dict[str, Any], folder: Path) -> None:
         pss="PSS (mean across models)",
         selection_frequency="CV selection frequency",
         confidence="AlphaFold local confidence (pLDDT)",
+        functional_context="Functional sites and deposited ligands",
     )
     for page in rendering["pages"]:
         header(record.get("site_scope", "final") + " | " + labels[page])
@@ -242,7 +320,7 @@ def _write_pdf(record: dict[str, Any], folder: Path) -> None:
                 preserveAspectRatio=True,
                 mask="auto",
             )
-        if page not in {"selected", "confidence"}:
+        if page in {"pss", "selection_frequency"}:
             for index in range(100):
                 fraction = index / 99
                 canvas.setFillColor(
@@ -255,6 +333,14 @@ def _write_pdf(record: dict[str, Any], folder: Path) -> None:
             note = "Red: selected sites. Labels: reference residue/position / MSA column."
         elif page == "confidence":
             note = "pLDDT: orange <50; yellow 50-70; cyan 70-90; blue >=90. Not mapping confidence."
+        elif page == "functional_context":
+            entries = {
+                "UniProt_active_sites": "blue: UniProt active sites",
+                "UniProt_binding_sites": "green: UniProt binding sites",
+                "PDB_ligands": "orange: PDB ligands",
+            }
+            parts = ["Red: selected sites", *(entries[n] for n in rendering["functional_layers"])]
+            note = ". ".join(parts) + "."
         else:
             upper = rendering["scales"][page]
             note = (

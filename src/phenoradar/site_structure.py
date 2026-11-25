@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
+from phenoradar.amino_acid import ALPHABET
+from phenoradar.site_functional_context import deposited_ligands
 from phenoradar.site_reference_resources import ResourceCache, SiteAnnotationError, sha256
 
 
@@ -515,6 +517,7 @@ def structure_annotations(
         path = folder / ("structure." + suffix)
         shutil.copyfile(source_path, path)
         pdb_mapping = None
+        cif_data = None
         if record["source"] == "pdb" and record.get("sifts_format") == "mmcif":
             cif_data, atoms, first_model = pdbe_cif_sites(path)
             pdb_mapping = pdbe_sifts_mapping(
@@ -528,13 +531,29 @@ def structure_annotations(
                 raise SiteAnnotationError("SIFTS checksum differs from its catalog.")
             pdb_mapping = sifts_mapping(sifts_path, reference["accession"], record["chain"])
             shutil.copyfile(sifts_path, folder / "sifts.xml.gz")
-        rows, coordinate_map = map_structure_sites(reference, sites, record, atoms, pdb_mapping)
+        functional = []
+        for feature in reference.get("uniprot_site_features", []):
+            for position in range(feature["feature_start"], feature["feature_end"] + 1):
+                letter = reference["sequence"][position - 1]
+                functional.append(dict(
+                    **feature, accession=reference["accession"], reference_pos_1based=position,
+                    reference_residue=letter,
+                    reference_status="mapped" if letter in ALPHABET else "reference_unknown",
+                ))
+        mapped, coordinate_map = map_structure_sites(
+            reference, sites + functional, record, atoms, pdb_mapping,
+        )
+        ligands = (deposited_ligands(path, record["structure_id"], first_model, cif_data)
+                   if record["source"] == "pdb" else [])
         record.update(
             folder=str(folder),
             path=str(path),
             structure_key=folder.name,
             first_model=first_model,
-            sites=rows,
+            sites=mapped[:len(sites)],
+            functional_sites=mapped[len(sites):],
+            pdb_ligands=ligands,
+            orthogroup_annotation=reference.get("orthogroup_annotation"),
             site_scope=sites[0].get("analysis_scope", "final"),
             reference_selection=reference.get("selection_mode", "automatic"),
             reference_qualified=reference.get("reference_qualified", True),
@@ -591,9 +610,14 @@ def structure_annotations(
         ],
     )
     for record in candidates:
+        folder = Path(record["folder"])
         record["selected"] = record["folder"] in selected_paths
-        write_json(Path(record["folder"]) / "structure.json", record)
-        _write_table(Path(record["folder"]) / "site_structure_map.tsv", record["sites"])
+        write_json(folder / "structure.json", record)
+        _write_table(folder / "site_structure_map.tsv", record["sites"])
+        if record["functional_sites"]:
+            _write_table(folder / "functional_site_map.tsv", record["functional_sites"])
+        if record["pdb_ligands"]:
+            _write_table(folder / "pdb_ligands.tsv", record["pdb_ligands"])
     write_json(
         out / "structure_selection.json",
         dict(

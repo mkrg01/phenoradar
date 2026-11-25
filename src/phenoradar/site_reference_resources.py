@@ -165,6 +165,8 @@ def orthodb_api(release: str, cache: ResourceCache) -> tuple[str, str]:
 def uniprot_reference(
     og: str, requested: str, entry: dict[str, Any], genes: list[str], sequence: str,
 ) -> dict[str, Any]:
+    from phenoradar.site_functional_context import uniprot_site_features
+
     return dict(
         orthogroup=og,
         accession=entry["primaryAccession"],
@@ -179,6 +181,7 @@ def uniprot_reference(
         organism=entry["organism"]["scientificName"],
         orthodb_gene_ids=genes,
         membership_verified=True,
+        uniprot_site_features=uniprot_site_features(entry, len(sequence)),
     )
 
 

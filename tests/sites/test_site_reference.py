@@ -123,6 +123,8 @@ def fixture_run(root: Path) -> tuple[Path, Path]:
     align = root / "align"
     align.mkdir()
     (align / "OG1.fa").write_text("".join(f">s{i}_gene\n{SEQUENCE}\n" for i in range(4)))
+    annotations = root / "odb12v2_OGs.tab"
+    annotations.write_text("OG1\t3193\tExample aminotransferase\n")
     for stage in ["model", "cv", "split"]:
         (run / stage / "tables").mkdir(parents=True)
     write_json(run / "run_metadata.json", dict(status="full_run_completed"))
@@ -132,7 +134,7 @@ def fixture_run(root: Path) -> tuple[Path, Path]:
                 data=dict(
                     feature_mode="amino_acid",
                     alignment_dir=str(align),
-                    orthogroup_annotation_path="odb12v2_OGs.tab.gz",
+                    orthogroup_annotation_path=str(annotations),
                 )
             )
         )
@@ -301,6 +303,10 @@ def test_offline_postprocessing_preserves_models_and_records_missing_sites(tmp_p
     assert mapped["auth_seq_id"].to_list() == [105, 120]
     assert mapped["insertion_code"][0] == "A"
     assert mapped["structure_residue"].to_list() == ["D", "V"]
+    assert rows["orthogroup_annotation"].to_list() == ["Example aminotransferase"] * 2
+    assert mapped["orthogroup_annotation"].to_list() == ["Example aminotransferase"] * 2
+    scene = json.loads((out / "OG1/structure_0000/scene.json").read_text())
+    assert scene["orthogroup_label"] == "Example aminotransferase (OG1)"
     assert (out / "OG1/structure_0000/sites.pml").is_file()
     assert (
         json.loads((out / "manifest.json").read_text())["status"] == "completed_without_rendering"
@@ -379,6 +385,7 @@ def test_portable_replay_and_policy_binding(tmp_path: Path) -> None:
         cache=ResourceCache(tmp_path / "empty", offline=True),
     )
     portable = first / "reference_catalog.json"
+    (tmp_path / "odb12v2_OGs.tab").unlink()
     second = tmp_path / "second"
     annotate_sites(
         run=run,
@@ -457,9 +464,13 @@ def test_structure_ranking_and_first_deposited_alternate_location(tmp_path: Path
 @pytest.mark.parametrize("source", ["pdb", "alphafold"])
 def test_real_pymol_six_views_and_pdf(tmp_path: Path, source: str) -> None:
     run, catalog = fixture_run(tmp_path)
+    data = json.loads(catalog.read_text())
+    data["references"][0]["uniprot_site_features"] = [
+        dict(feature_type="Active site", feature_start=3, feature_end=3, evidence="[]"),
+        dict(feature_type="Binding site", feature_start=20, feature_end=20, evidence="[]"),
+    ]
     if source == "alphafold":
         make_pdb(tmp_path / "model.pdb", REFERENCE)
-        data = json.loads(catalog.read_text())
         data["structures"][0].update(
             source=source,
             method="AlphaFold",
@@ -467,7 +478,12 @@ def test_real_pymol_six_views_and_pdf(tmp_path: Path, source: str) -> None:
             reference_start=1,
             reference_end=len(REFERENCE),
         )
-        write_json(catalog, data)
+    else:
+        path = tmp_path / "model.pdb"
+        ligand = "HETATM  999  C1  LIG A 501       6.000   1.000  10.000  1.00 20.00           C\n"
+        path.write_text(path.read_text().replace("END\n", ligand + "END\n"))
+        data["structures"][0]["sha256"] = sha256(path)
+    write_json(catalog, data)
     out = tmp_path / "rendered"
     annotate_sites(
         run=run,
@@ -487,9 +503,18 @@ def test_real_pymol_six_views_and_pdf(tmp_path: Path, source: str) -> None:
         np.testing.assert_allclose(rotation @ rotation.T, np.eye(3), atol=1e-5)
         translations.append(view[9:])
     assert all(t == translations[0] for t in translations)
-    assert len(list(folder.glob("*.png"))) == (24 if source == "alphafold" else 18)
+    assert len(list(folder.glob("*.png"))) == (30 if source == "alphafold" else 24)
     assert "effect_range" not in render["pages"]
+    assert "functional_context" in render["pages"]
+    assert render["functional_layers"] == [
+        "UniProt_active_sites", "UniProt_binding_sites" if source == "alphafold" else "PDB_ligands",
+    ]
     assert ("confidence" in render["pages"]) == (source == "alphafold")
+    functional = pl.read_csv(folder / "functional_site_map.tsv", separator="\t")
+    assert functional["reference_pos_1based"].to_list() == [3, 20]
+    assert functional["structure_status"].to_list() == [
+        "mapped", "mapped" if source == "alphafold" else "unobserved",
+    ]
     assert (folder / "sites.pse").stat().st_size > 100
     assert (folder / "sites.pdf").read_bytes().startswith(b"%PDF")
 
