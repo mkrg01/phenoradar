@@ -1601,7 +1601,7 @@ def _draw_context_legend(*, canvas: Any, width: int) -> None:
 
 
 _BOUNDARY_STYLES = {
-    "group_id": {"stroke": "#b0b0b0", "stroke-width": "0.6px", "stroke-dasharray": "2,2"},
+    "group_id": {"stroke": "#909090", "stroke-width": "0.8px", "stroke-dasharray": "2,2"},
     "fold_id": {"stroke": "#555555", "stroke-width": "0.8px", "stroke-dasharray": "5,3"},
 }
 
