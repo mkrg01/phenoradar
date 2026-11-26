@@ -171,10 +171,11 @@ def _distribution_page(summary: pl.DataFrame, points: pl.DataFrame, ranks: list[
         _wrap_title(title, name_font, (plot_width - (legend_width if i == 0 else 0)) * 72)
         for i, title in enumerate(titles)
     ]
-    title_heights = [.09 + .16*len(title.splitlines()) for title in titles]
+    # Reserve two count rows between each title and its plot.
+    header_heights = [.39 + .16*len(title.splitlines()) for title in titles]
     plot_height = 1.75 if len(ranks) == 1 else 1.35
-    footer = .57
-    height = .13 + sum(title_heights) + (plot_height + footer)*len(ranks) + .22
+    footer = .30
+    height = .13 + sum(header_heights) + (plot_height + footer)*len(ranks) + .22
     fig = plt.figure(figsize=(width, height), facecolor="white")
     handles = [
         Line2D([], [], marker="o", ms=4, lw=0, color=BINARY_TRAIT_COLORS[trait],
@@ -185,10 +186,10 @@ def _distribution_page(summary: pl.DataFrame, points: pl.DataFrame, ranks: list[
     fig.legend(handles=handles, ncol=2, frameon=False, loc="upper right",
                bbox_to_anchor=(1 - right/width, cursor/height), borderaxespad=0,
                fontsize=7, handlelength=.8, handletextpad=.4, columnspacing=.9)
-    for og, title, title_height in zip(ogs, titles, title_heights, strict=True):
+    for og, title, header_height in zip(ogs, titles, header_heights, strict=True):
         fig.text(left/width, cursor/height, title, fontproperties=name_font, va="top",
                  color="#222222")
-        bottom = cursor - title_height - plot_height
+        bottom = cursor - header_height - plot_height
         ax = fig.add_axes((left/width, bottom/height, plot_width/width, plot_height/height))
         cursor = bottom - footer
         values = points.filter(pl.col("orthogroup") == og["orthogroup"])
@@ -215,16 +216,16 @@ def _distribution_page(summary: pl.DataFrame, points: pl.DataFrame, ranks: list[
         for trait, offset in [(0, -.19), (1, .19)]:
             color = BINARY_TRAIT_COLORS[trait]
             count_color = ("#8F3C00", "#005582")[trait]
-            count_y = -17 - trait * 8
+            count_y = 13 - trait * 8
             count_transform = offset_copy(ax.get_xaxis_transform(), fig=fig,
                                           y=count_y, units="points")
             count_key = offset_copy(ax.transAxes, fig=fig, x=-5, y=count_y, units="points")
-            ax.text(0, 0, rf"$n_{trait}$", transform=count_key,
-                    ha="right", va="top", fontsize=6.5, color=count_color)
+            ax.text(0, 1, rf"$n_{trait}$", transform=count_key,
+                    ha="right", va="bottom", fontsize=6.5, color=count_color)
             for i in range(len(groups)):
                 part = strata.get((i, trait))
                 n = part.height if part is not None else 0
-                ax.text(i, 0, str(n), transform=count_transform, ha="center", va="top",
+                ax.text(i, 1, str(n), transform=count_transform, ha="center", va="bottom",
                         fontsize=6.5, color=count_color if n else "#777777")
                 if part is None:
                     continue
