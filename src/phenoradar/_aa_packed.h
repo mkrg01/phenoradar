@@ -210,6 +210,21 @@ static int valid_mapping(int32_t index, Py_ssize_t packed, Py_ssize_t fallback) 
     return index >= 0 ? index < packed : -1 - index < fallback;
 }
 
+static int validate_scan_indices(Py_ssize_t height, Py_ssize_t width, Py_ssize_t packed,
+                                Py_ssize_t nnz, Py_ssize_t fallback, const int32_t *mapping,
+                                const uint64_t *planes, const int32_t *rows) {
+    for (Py_ssize_t i = 0; i < width; ++i)
+        if (!valid_mapping(mapping[i], packed, fallback)) return 0;
+    for (Py_ssize_t i = 0; i < nnz; ++i)
+        if (rows[i] < 0 || rows[i] >= height) return 0;
+    if (height % 64) {
+        Py_ssize_t words = (height + 63) / 64;
+        for (Py_ssize_t i = 0; i < 2 * packed; ++i)
+            if ((planes[(i + 1) * words - 1] >> (height % 64)) != 0) return 0;
+    }
+    return 1;
+}
+
 static PyObject *scan_packed_columns(PyObject *self, PyObject *args) {
     PyObject *o[8]; Py_buffer b[8] = {{0}};
     int fused;
@@ -224,14 +239,9 @@ static PyObject *scan_packed_columns(PyObject *self, PyObject *args) {
     REQUIRE(shape(&b[4], nnz, 1, 4) && csc_offsets(b[5].buf, fallback, nnz));
     const int32_t *mapping = b[0].buf, *rows = b[4].buf;
     const uint64_t *planes = b[2].buf;
-    int valid = 1;
+    int valid;
     Py_BEGIN_ALLOW_THREADS
-    for (Py_ssize_t i = 0; i < width && valid; ++i) valid = valid_mapping(mapping[i], packed, fallback);
-    for (Py_ssize_t i = 0; i < nnz && valid; ++i) valid = rows[i] >= 0 && rows[i] < height;
-    if (height % 64) {
-        for (Py_ssize_t i = 0; i < 2 * packed && valid; ++i)
-            valid = (planes[(i + 1) * words - 1] >> (height % 64)) == 0;
-    }
+    valid = validate_scan_indices(height, width, packed, nnz, fallback, mapping, planes, rows);
     if (valid) scan_impl(fused, (int32_t)width, (int32_t)words, mapping, b[1].buf, planes,
                          b[3].buf, rows, b[5].buf, b[6].buf, b[7].buf);
     Py_END_ALLOW_THREADS
@@ -239,6 +249,81 @@ static PyObject *scan_packed_columns(PyObject *self, PyObject *args) {
     release(b, 8); Py_RETURN_NONE;
 fail:
     release(b, 8); return NULL;
+}
+
+typedef struct {
+    PyObject *owners[4];  /* Immutable bytes, also used by the NumPy index views. */
+    Py_ssize_t height, width, packed, nnz;
+} PackedScanPlan;
+
+static const char packed_scan_name[] = "phenoradar.packed_scan_plan";
+
+static void free_packed_scan(PyObject *capsule) {
+    PackedScanPlan *plan = PyCapsule_GetPointer(capsule, packed_scan_name);
+    for (int i = 0; i < 4; ++i) Py_DECREF(plan->owners[i]);
+    PyMem_Free(plan);
+}
+
+static PyObject *prepare_packed_scan(PyObject *self, PyObject *args) {
+    PyObject *o[4];
+    Py_ssize_t height, packed;
+    if (!PyArg_ParseTuple(args, "nnOOOO", &height, &packed, &o[0], &o[1], &o[2], &o[3]))
+        return NULL;
+    REQUIRE(height >= 0 && height <= INT32_MAX && packed >= 0 && packed <= INT32_MAX);
+    for (int i = 0; i < 4; ++i) REQUIRE(PyBytes_CheckExact(o[i]));
+    Py_ssize_t width = PyBytes_GET_SIZE(o[0]) / 4, words = (height + 63) / 64;
+    Py_ssize_t nnz = PyBytes_GET_SIZE(o[2]) / 4, fallback = PyBytes_GET_SIZE(o[3]) / 4 - 1;
+    REQUIRE(width <= INT32_MAX && nnz <= INT32_MAX && fallback >= 0 && fallback <= INT32_MAX);
+    REQUIRE(PyBytes_GET_SIZE(o[0]) == width * 4 && PyBytes_GET_SIZE(o[2]) == nnz * 4);
+    REQUIRE(PyBytes_GET_SIZE(o[3]) == (fallback + 1) * 4);
+    Py_buffer planes = {.len = PyBytes_GET_SIZE(o[1])};
+    REQUIRE(shape(&planes, packed, 2 * words, 8));
+    for (int i = 0; i < 4; ++i) REQUIRE((uintptr_t)PyBytes_AS_STRING(o[i]) % 8 == 0);
+    int valid;
+    Py_BEGIN_ALLOW_THREADS
+    valid = csc_offsets((const int32_t *)PyBytes_AS_STRING(o[3]), fallback, nnz) &&
+            validate_scan_indices(height, width, packed, nnz, fallback,
+                                  (const int32_t *)PyBytes_AS_STRING(o[0]),
+                                  (const uint64_t *)PyBytes_AS_STRING(o[1]),
+                                  (const int32_t *)PyBytes_AS_STRING(o[2]));
+    Py_END_ALLOW_THREADS
+    REQUIRE(valid);
+    PackedScanPlan *plan = PyMem_Malloc(sizeof(*plan));
+    if (!plan) return PyErr_NoMemory();
+    PyObject *capsule = PyCapsule_New(plan, packed_scan_name, free_packed_scan);
+    if (!capsule) { PyMem_Free(plan); return NULL; }
+    plan->height = height; plan->width = width; plan->packed = packed; plan->nnz = nnz;
+    for (int i = 0; i < 4; ++i) {
+        Py_INCREF(o[i]);
+        plan->owners[i] = o[i];
+    }
+    return capsule;
+fail:
+    return NULL;
+}
+
+static PyObject *scan_validated_packed_columns(PyObject *self, PyObject *args) {
+    PyObject *capsule, *o[4]; Py_buffer b[4] = {{0}};
+    int fused;
+    if (!PyArg_ParseTuple(args, "OpOOOO", &capsule, &fused, &o[0], &o[1], &o[2], &o[3]))
+        return NULL;
+    PackedScanPlan *plan = PyCapsule_GetPointer(capsule, packed_scan_name);
+    if (!plan) return NULL;
+    GET(0, 8, 0); GET(1, 8, 0); GET(2, 8, 0); GET(3, 8, 1);
+    REQUIRE(shape(&b[0], plan->packed, 3, 8) && shape(&b[1], plan->nnz, 1, 8));
+    REQUIRE(shape(&b[2], plan->height, 1, 8) && shape(&b[3], plan->width, 1, 8));
+    const int32_t *mapping = (const int32_t *)PyBytes_AS_STRING(plan->owners[0]);
+    const uint64_t *planes = (const uint64_t *)PyBytes_AS_STRING(plan->owners[1]);
+    const int32_t *rows = (const int32_t *)PyBytes_AS_STRING(plan->owners[2]);
+    const int32_t *ptr = (const int32_t *)PyBytes_AS_STRING(plan->owners[3]);
+    int32_t words = (int32_t)((plan->height + 63) / 64);
+    Py_BEGIN_ALLOW_THREADS
+    scan_impl(fused, (int32_t)plan->width, words, mapping, b[0].buf, planes,
+              b[1].buf, rows, ptr, b[2].buf, b[3].buf);
+    Py_END_ALLOW_THREADS
+    release(b, 4); Py_RETURN_NONE;
+fail:
+    release(b, 4); return NULL;
 }
 
 static PyObject *gather_packed_columns(PyObject *self, PyObject *args) {

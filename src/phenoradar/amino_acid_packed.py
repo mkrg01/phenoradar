@@ -1,8 +1,10 @@
 """Exact column blocks for amino-acid matrices that exceed glmnet's CSC limit."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import copy
+from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import Any
 
 import numpy as np
 from scipy import sparse
@@ -25,6 +27,9 @@ class PackedColumns:
     values: np.ndarray
     planes: np.ndarray
     fallback: sparse.csc_matrix
+    _scan_plan: tuple[Any, tuple[np.ndarray, ...]] | None = field(
+        default=None, init=False, repr=False, compare=False,
+    )
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -97,8 +102,38 @@ class PackedColumns:
         return (self.mapping, self.values, self.planes, self.fallback.data,
                 self.fallback.indices, self.fallback.indptr)
 
+    def _prepare_scan(self) -> None:
+        structural = (self.mapping, self.planes, self.fallback.indices, self.fallback.indptr)
+        owners = tuple(array.tobytes() for array in structural)
+        plan = native.prepare_packed_scan(self.shape[0], len(self.values), *owners)
+        mapping, planes, rows, offsets = (
+            np.frombuffer(owner, dtype=array.dtype).reshape(array.shape)
+            for array, owner in zip(structural, owners, strict=True)
+        )
+        # Replace only this block's views. The original CSC matrix may have a caller.
+        fallback = copy(self.fallback)
+        fallback.indices, fallback.indptr = rows, offsets
+        self.mapping, self.planes, self.fallback = mapping, planes, fallback
+        self._scan_plan = (plan, (mapping, planes, rows, offsets))
+
     def gradient(self, residual: np.ndarray, out: np.ndarray, *, fused: bool) -> None:
+        scan = getattr(native, "scan_validated_packed_columns", None)
+        if scan is not None and len(residual) == self.shape[0]:
+            if self._scan_plan is None:
+                self._prepare_scan()
+            assert self._scan_plan is not None
+            plan, arrays = self._scan_plan
+            mapping, planes, rows, offsets = arrays
+            if (self.mapping is mapping and self.planes is planes
+                    and self.fallback.indices is rows and self.fallback.indptr is offsets):
+                scan(plan, fused, self.values, self.fallback.data, residual, out)
+                return
         native.scan_packed_columns(fused, *self._buffers(), residual, out)
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = self.__dict__.copy()
+        state.pop("_scan_plan", None)
+        return state
 
     def gather(
         self, columns: np.ndarray, indptr: np.ndarray, data: np.ndarray, indices: np.ndarray,

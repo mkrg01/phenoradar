@@ -1,16 +1,51 @@
+import pickle
 from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy import sparse
 from test_amino_acid import alignment, fixture_config, settings, tpm_table
 
 from phenoradar import glmnet
 from phenoradar.amino_acid import AlignmentStore
-from phenoradar.amino_acid_packed import packed_arithmetic
+from phenoradar.amino_acid_packed import PackedColumns, native, packed_arithmetic
 from phenoradar.amino_acid_prediction import DeferredAAValidation
 from phenoradar.amino_acid_run import run_amino_acid
 from phenoradar.amino_acid_sparse import fit_sparse_encoded
 from phenoradar.config import load_and_resolve_config
+
+
+def test_packed_scan_reuses_validated_immutable_indices():
+    if not hasattr(native, "prepare_packed_scan"):
+        pytest.skip("Validated scan kernel is unavailable")
+    matrix = sparse.csc_matrix(np.column_stack([np.ones(65), np.arange(65.0)]))
+    block = PackedColumns.from_csc(matrix)
+    assert len(block.values) == 1 and block.fallback.nnz
+    residual = np.linspace(-0.3, 0.7, 65)
+    out = np.empty(2)
+    checked = np.empty_like(out)
+    for fused in (False, True):
+        native.scan_packed_columns(fused, *block._buffers(), residual, checked)
+        block.gradient(residual, out, fused=fused)
+        assert out.tobytes() == checked.tobytes()
+    state = block._scan_plan
+    for array in state[1]:
+        with pytest.raises(ValueError):
+            array.setflags(write=True)
+
+    restored = pickle.loads(pickle.dumps(block))
+    assert restored._scan_plan is None
+    restored.gradient(residual, out, fused=True)
+    assert out.tobytes() == checked.tobytes()
+
+    block.fallback.indices = block.fallback.indices.copy()
+    block.fallback.indices[0] = len(residual)
+    with pytest.raises(ValueError, match="shape/index"):
+        block.gradient(residual, out, fused=True)
+    with pytest.raises(ValueError, match="shape/index"):
+        native.scan_validated_packed_columns(
+            state[0], True, block.values, block.fallback.data, residual[:-1], out,
+        )
 
 
 @pytest.mark.parametrize("aggregation", ["aa_frequency", "tpm_weighted_frequency", "best_covered"])
