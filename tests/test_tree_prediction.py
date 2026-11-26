@@ -13,6 +13,7 @@ from phenoradar.tree_prediction import (
     _ensure_svg_white_background,
     _load_expression_for_heatmap,
     _oof_confusion_group,
+    _write_tree_feature_heatmap_svg,
     build_contrast_pair_tree_annotation,
     build_cv_tree_prediction_annotation,
     build_external_tree_prediction_annotation,
@@ -51,6 +52,33 @@ def _metadata() -> pl.DataFrame:
             "contrast_pair_id": ["g1", "g1", None],
         }
     )
+
+
+def test_tree_heatmap_keeps_tip_order_when_pruning_contracts_an_edge(tmp_path: Path) -> None:
+    tree = tmp_path / "ordered.nwk"
+    tree.write_text("(((A:1,excluded:1):1,B:2):1,(C:1,D:1):2);\n")
+    annotation = pl.DataFrame({
+        "species": ["B", "A", "C", "D"],
+        "group_id": ["2", "2", "1", "1"],
+        "decision_status": ["accepted", "accepted", "abstained", "accepted"],
+        "prob": [.2, .3, .4, .6],
+        "true_label": [0, 0, 1, 1],
+        "feature": ["OG1"] * 4,
+        "feature_rank": [1] * 4,
+        "orthogroup_annotation": [None] * 4,
+        "log2_tpm_plus_1": [1., 2., 3., 4.],
+    })
+    out = tmp_path / "heatmap.svg"
+    _write_tree_feature_heatmap_svg(
+        tree_path=tree, annotation=annotation, value_col="log2_tpm_plus_1",
+        out_path=out, title="", cmap_name="viridis",
+    )
+    for path, tips in [(out, ["D", "C", "B", "A"]),
+                       (out.parent / "accepted_only" / out.name, ["D", "B", "A"])]:
+        svg = path.read_text()
+        y_positions = [_svg_text_absolute_y(svg, tip) for tip in tips]
+        assert y_positions == sorted(y_positions)
+        assert len(set(y_positions)) == len(tips)
 
 
 def _thresholds() -> pl.DataFrame:

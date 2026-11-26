@@ -337,6 +337,9 @@ species absent from the tree stay in annotation tables.
 
 Toytree figures include `tree_feature_heatmap_log2_tpm.svg` and
 `tree_feature_heatmap_zscore.svg` for CV, external-test and inference species.
+Tree heatmaps keep the relative tip order of the input Newick across populations
+(the last Newick tip appears at the top). Use matching species-tree and
+phylogenetic block metadata to display tree-ordered group IDs.
 External/inference features are selected by the final trained models.
 AA/combined runs instead write `tree_feature_heatmap_amino_acid.svg`.
 They also write `amino_acid_group_trait_composition.svg` and its matching TSV:

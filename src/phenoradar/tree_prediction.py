@@ -6,7 +6,7 @@ import importlib
 import math
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from contextlib import nullcontext, suppress
+from contextlib import nullcontext
 from functools import wraps
 from multiprocessing import get_context
 from pathlib import Path
@@ -1173,10 +1173,10 @@ def _write_tree_prediction_svg(
             tree = tree.mod.prune(*requested_species)
         except Exception as exc:
             raise TreePredictionError(f"Failed to prune tree for {out_path.name}") from exc
-    with suppress(Exception):
-        tree = tree.ladderize()
+    requested_set = set(requested_species)
     _draw_toytree_heatmap(
         tree=tree,
+        tip_labels=[tip for tip in tip_labels if tip in requested_set],
         annotation=annotation,
         out_path=out_path,
         title=title,
@@ -1239,10 +1239,10 @@ def _write_tree_feature_heatmap_svg(
             tree = tree.mod.prune(*requested_species)
         except Exception as exc:
             raise TreePredictionError(f"Failed to prune tree for {out_path.name}") from exc
-    with suppress(Exception):
-        tree = tree.ladderize()
+    requested_set = set(requested_species)
     _draw_toytree_feature_heatmap(
         tree=tree,
+        tip_labels=[tip for tip in tip_labels if tip in requested_set],
         annotation=annotation,
         value_col=value_col,
         out_path=out_path,
@@ -1256,8 +1256,8 @@ def _write_tree_feature_heatmap_svg(
 
 
 def _tree_table_canvas(
-    tree: Any, *, table_width: int, header_height: int, sidebar_width: int = 0,
-    minimum_height: int = 0,
+    tree: Any, tip_labels: list[str], *, table_width: int, header_height: int,
+    sidebar_width: int = 0, minimum_height: int = 0,
 ) -> tuple[Any, Any, Any, int, Any]:
     """Use separate, aligned tree and table axes with dimensions in pixels.
 
@@ -1272,7 +1272,10 @@ def _tree_table_canvas(
     bottom = min(height - 16, header_height + 18 * tree.ntips)
     tree_axes = canvas.cartesian(bounds=(12, 236, header_height, bottom), padding=0)
     if tree.ntips > 1:
-        tree.draw(axes=tree_axes, layout="r", tip_labels=False, node_sizes=0, scale_bar=False)
+        # Pruning can move a surviving child when its parent edge is contracted.
+        fixed_order = tip_labels if tip_labels != tree.get_tip_labels() else None
+        tree.draw(axes=tree_axes, layout="r", tip_labels=False, node_sizes=0, scale_bar=False,
+                  fixed_order=fixed_order)
     tree_axes.show = False
     tree_axes.y.domain.min = -0.5
     tree_axes.y.domain.max = tree.ntips - 0.5
@@ -1291,13 +1294,13 @@ def _tree_table_canvas(
 def _draw_toytree_heatmap(
     *,
     tree: Any,
+    tip_labels: list[str],
     annotation: pl.DataFrame,
     out_path: Path,
     title: str,
     tracks: list[str],
     toytree_module: Any,
 ) -> None:
-    tip_labels = [str(v) for v in tree.get_tip_labels()]
     by_species = {str(row["species"]): row for row in annotation.iter_rows(named=True)}
     cell_text_by_track: dict[str, list[str]] = {}
     for track in tracks:
@@ -1315,7 +1318,7 @@ def _draw_toytree_heatmap(
     species_label_width = _text_column_width_px(tip_labels, min_width=120, padding=28)
     header_height = max(64, 16 + 6 * max(len(_track_label(track)) for track in tracks))
     canvas, axes, headers, _width, _tree_axes = _tree_table_canvas(
-        tree, table_width=annotation_width + species_label_width + 40,
+        tree, tip_labels, table_width=annotation_width + species_label_width + 40,
         header_height=header_height,
     )
 
@@ -1395,6 +1398,7 @@ def _feature_label_depth_px(labels: list[str]) -> int:
 def _draw_toytree_feature_heatmap(
     *,
     tree: Any,
+    tip_labels: list[str],
     annotation: pl.DataFrame,
     value_col: str,
     out_path: Path,
@@ -1404,7 +1408,6 @@ def _draw_toytree_feature_heatmap(
     toytree_module: Any,
     tracks: list[str],
 ) -> None:
-    tip_labels = [str(v) for v in tree.get_tip_labels()]
     feature_rows = (
         annotation.select(["feature_rank", "feature", "orthogroup_annotation"])
         .unique("feature")
@@ -1461,7 +1464,7 @@ def _draw_toytree_feature_heatmap(
     )
     species_width = max(80, math.ceil(float(max(right - left))) + 16)
     canvas, axes, headers, width, tree_axes = _tree_table_canvas(
-        tree, table_width=int(species_x) + species_width,
+        tree, tip_labels, table_width=int(species_x) + species_width,
         header_height=max(64, feature_label_depth_px + 16), sidebar_width=270,
         minimum_height=530 if value_col == "residue" else 380,
     )
