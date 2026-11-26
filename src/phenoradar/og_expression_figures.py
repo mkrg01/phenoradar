@@ -6,6 +6,7 @@ import math
 import textwrap
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote
 
 import numpy as np
 import polars as pl
@@ -20,7 +21,7 @@ from matplotlib.ticker import MaxNLocator
 from phenoradar.colors import BINARY_TRAIT_COLORS
 from phenoradar.config import AppConfig
 from phenoradar.cv import CVError, ExpressionMatrixBuilder
-from phenoradar.cv_display import ordered_prediction_groups, with_cv_groups
+from phenoradar.cv_display import with_cv_groups
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
@@ -67,7 +68,7 @@ def read_og_expression(
 
 def expression_tables(
     values: pl.DataFrame, predictions: pl.DataFrame, orthogroups: list[str],
-    *, annotations: pl.DataFrame | None = None, tree_path: Path | None = None,
+    *, annotations: pl.DataFrame | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Summarize species equally; heatmap medians are on the displayed log scale."""
     if predictions["species"].n_unique() != predictions.height:
@@ -77,7 +78,8 @@ def expression_tables(
     ).height:
         raise ValueError("OG expression requires groups and observed binary labels")
     predictions = predictions.with_columns(pl.col("group_id").cast(pl.String))
-    groups = ordered_prediction_groups(predictions, tree_path)
+    groups = sorted(predictions["group_id"].unique().to_list(),
+                    key=lambda value: (0, int(value), value) if value.isdigit() else (1, 0, value))
     lookup = _orthogroup_annotation_lookup(annotations)
     observed = values.join(predictions.select("species", "group_id", "label"), on="species",
                            how="inner", validate="m:1").with_columns(
@@ -283,37 +285,42 @@ def write_group_trait_expression(
     if values.is_empty():
         return ["OG expression figures skipped: "
                 "no selected species/OG coordinates in data.tpm_path."]
-    tree_path = Path(config.data.tree_path) if config.data.tree_path else None
     for suffix, population in prediction_figure_populations({"cv": predictions}):
         figure_dir = population_figure_path(run_dir / "cv/figures" / "placeholder", suffix).parent
         table_dir = population_figure_path(run_dir / "cv/tables" / "placeholder", suffix).parent
         figure_dir.mkdir(parents=True, exist_ok=True)
         table_dir.mkdir(parents=True, exist_ok=True)
-        # Rerendering fewer OGs must not leave obsolete pages or an obsolete PDF.
+        og_dir = figure_dir / _DISTRIBUTION
+        og_dir.mkdir(parents=True, exist_ok=True)
+        # Remove retired page SVGs and individual OGs no longer selected.
         for path in [*figure_dir.glob(f"{_DISTRIBUTION}_*.svg"),
+                     *og_dir.glob("*.svg"),
                      figure_dir / f"{_DISTRIBUTION}.pdf", figure_dir / f"{_HEATMAP}.pdf"]:
             path.unlink(missing_ok=True)
         if population["cv"].is_empty():
-            for stem in [_DISTRIBUTION+"_01", _HEATMAP]:
-                write_population_message_svg(figure_dir / f"{stem}.svg", "No accepted species.")
+            for path in [og_dir / "no_accepted_species.svg", figure_dir / f"{_HEATMAP}.svg"]:
+                write_population_message_svg(path, "No accepted species.")
             for name in ["og_expression_group_trait_summary", "og_expression_species"]:
                 (table_dir / f"{name}.tsv").unlink(missing_ok=True)
             continue
         summary, points = expression_tables(values, population["cv"], orthogroups,
-                                            annotations=annotations, tree_path=tree_path)
+                                            annotations=annotations)
         summary.write_csv(table_dir / "og_expression_group_trait_summary.tsv", separator="\t")
         points.write_csv(table_dir / "og_expression_species.tsv", separator="\t")
         with plt.rc_context({"font.family": "DejaVu Sans", "font.size": 8, "svg.fonttype": "none",
                              "pdf.fonttype": 42, "axes.spines.top": False,
                              "axes.spines.right": False, "axes.linewidth": .65}):
             ranks = summary["og_rank"].unique(maintain_order=True).to_list()
+            for og in summary.unique("og_rank", maintain_order=True).iter_rows(named=True):
+                fig = _distribution_page(summary, points, [og["og_rank"]])
+                fig.savefig(og_dir / f"{quote(og['orthogroup'], safe='')}.svg",
+                            metadata={"Date": None})
+                plt.close(fig)
             with PdfPages(figure_dir / f"{_DISTRIBUTION}.pdf", metadata={"CreationDate": None,
                                                                  "ModDate": None}) as pdf:
-                for page, start in enumerate(range(0, len(ranks), 4), 1):
+                for start in range(0, len(ranks), 4):
                     fig = _distribution_page(summary, points, ranks[start:start+4])
                     pdf.savefig(fig)
-                    fig.savefig(figure_dir / f"{_DISTRIBUTION}_{page:02d}.svg",
-                                metadata={"Date": None})
                     plt.close(fig)
             fig = _heatmap_figure(summary)
             fig.savefig(figure_dir / f"{_HEATMAP}.svg", metadata={"Date": None})

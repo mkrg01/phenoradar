@@ -346,9 +346,12 @@ This summary is available without a tree. Full annotation names are retained and
 the legend groups residues sharing a Zappo color.
 
 All feature modes also write CV OG-expression diagnostics when `data.tpm_path`
-contains the selected species/OGs: `og_expression_by_group_trait_01.svg` (four OGs
-per page, then `_02.svg`, etc.) and `og_expression_group_trait_heatmap.svg`, with
-PDF versions under `cv/figures/`. AA selects unique OGs among the PSS-ranked sites;
+contains the selected species/OGs: one SVG per OG in
+`cv/figures/og_expression_by_group_trait/<OG>.svg`, plus the four-OG-per-page summary
+`og_expression_by_group_trait.pdf` and `og_expression_group_trait_heatmap.svg`/`.pdf`.
+Groups follow ascending ID order (numeric for numeric IDs) in all of these displays,
+regardless of tree order. Regeneration removes the retired numbered page SVGs.
+AA selects unique OGs among the PSS-ranked sites;
 expression selects the top-importance OGs; combined uses their union. Distributions
 show one point per species, sorted within group and observed trait, with boxes for
 n ≥ 3. The heatmap shows median `log2(TPM + 1)` on a shared scale. Raw observed TPM
