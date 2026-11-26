@@ -13,10 +13,14 @@ import polars as pl
 from matplotlib import pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.colors import to_rgba
 from matplotlib.figure import Figure
+from matplotlib.font_manager import FontProperties
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
+from matplotlib.textpath import TextToPath
 from matplotlib.ticker import MaxNLocator
+from matplotlib.transforms import offset_copy
 
 from phenoradar.colors import BINARY_TRAIT_COLORS
 from phenoradar.config import AppConfig
@@ -126,70 +130,117 @@ def expression_tables(
     return summary, point_table
 
 
+def _wrap_title(title: str, font: FontProperties, width: float) -> str:
+    """Wrap to a measured width in points, retaining the full annotation."""
+    measure = TextToPath().get_text_width_height_descent
+    lines: list[str] = []
+    line = ""
+    for word in title.split():
+        candidate = f"{line} {word}" if line else word
+        if line and measure(candidate, font, ismath=False)[0] > width:
+            lines.append(line)
+            line = word
+        else:
+            line = candidate
+    return "\n".join([*lines, line])
+
+
 def _distribution_page(summary: pl.DataFrame, points: pl.DataFrame, ranks: list[int]) -> Figure:
     groups = summary.select("group_index", "group_id").unique().sort("group_index")["group_id"]
-    width = max(7, len(groups) * .44 + .85)
-    titles = []
-    for rank in ranks:
-        og = summary.filter(pl.col("og_rank") == rank).row(0, named=True)
-        annotation = " ".join((og["orthogroup_annotation"] or "").split())
-        title = f"{rank}.  {annotation} ({og['orthogroup']})" if annotation else og["orthogroup"]
-        titles.append(textwrap.fill(title, width=int(width*12), break_long_words=False))
-    title_heights = [.20 + .16*len(title.splitlines()) for title in titles]
-    plot_height = 1.35
-    height = .4 + sum(title_heights) + plot_height*len(ranks) + .35*(len(ranks)-1) + .92
-    fig = plt.figure(figsize=(width, height))
-    axes = []
-    cursor = height-.4
-    for title_height in title_heights:
-        bottom = cursor-title_height-plot_height
-        axes.append(fig.add_axes((.09, bottom/height, .895, plot_height/height)))
-        cursor = bottom-.35
-    fig.supylabel("log2(TPM + 1)", x=.012, fontsize=8.5)
-    handles = [Line2D([], [], color=BINARY_TRAIT_COLORS[t], marker="o", markersize=4,
-                      lw=0, label=f"Trait {t}") for t in [0, 1]]
+    ogs = [summary.filter(pl.col("og_rank") == rank).row(0, named=True) for rank in ranks]
+    name_font = FontProperties(size=9, weight="bold")
+    tick_font = FontProperties(size=7)
+    measure = TextToPath().get_text_width_height_descent
+    group_width = max(.31, (max(measure(g, tick_font, ismath=False)[0] for g in groups) + 6) / 72)
+    left, right = .62, .14
+    legend_width = 1.5
+    names = [
+        " ".join((og["orthogroup_annotation"] or "").split()) for og in ogs
+    ]
+    titles = [
+        f"{name} ({og['orthogroup']})" if name else og["orthogroup"]
+        for name, og in zip(names, ogs, strict=True)
+    ]
+    # A long word or ID still has a place on the same page as the legend.
+    longest_word = max(measure(word, name_font, ismath=False)[0]
+                       for title in titles for word in title.split())
+    width = max(5.0, len(groups) * group_width + left + right,
+                longest_word / 72 + left + right + legend_width)
+    plot_width = width - left - right
+    titles = [
+        _wrap_title(title, name_font, (plot_width - (legend_width if i == 0 else 0)) * 72)
+        for i, title in enumerate(titles)
+    ]
+    title_heights = [.09 + .16*len(title.splitlines()) for title in titles]
+    plot_height = 1.75 if len(ranks) == 1 else 1.35
+    footer = .57
+    height = .13 + sum(title_heights) + (plot_height + footer)*len(ranks) + .22
+    fig = plt.figure(figsize=(width, height), facecolor="white")
+    handles = [
+        Line2D([], [], marker="o", ms=4, lw=0, color=BINARY_TRAIT_COLORS[trait],
+               markeredgecolor="none", label=f"Trait {trait}")
+        for trait in [0, 1]
+    ]
+    cursor = height - .13
     fig.legend(handles=handles, ncol=2, frameon=False, loc="upper right",
-               bbox_to_anchor=(.985, .995), fontsize=8, handletextpad=.4, columnspacing=1)
-    for row_index, (ax, rank) in enumerate(zip(axes, ranks, strict=True)):
-        og = summary.filter(pl.col("og_rank") == rank).row(0, named=True)
-        values = (points.filter(pl.col("orthogroup") == og["orthogroup"])
-                  if points.height else points)
-        maximum = float(values["log2_tpm_plus1"].to_numpy().max()) if values.height else 0
-        limit = max(3, math.ceil(maximum)) + .45
-        for group_index, group in enumerate(groups):
-            if group_index % 2 == 0:
-                ax.axvspan(group_index-.5, group_index+.5, color="#f5f5f5", zorder=0)
-            for trait, offset in [(0, -.19), (1, .19)]:
-                part = values.filter((pl.col("group_id") == group) & (pl.col("label") == trait)
-                                     ) if values.height else values
-                y = part["log2_tpm_plus1"].to_numpy() if part.height else np.array([])
-                color = BINARY_TRAIT_COLORS[trait]
-                if len(y) >= 3:
-                    ax.boxplot([y], positions=[group_index+offset], widths=.28,
-                        patch_artist=True, showfliers=False,
-                        boxprops={"facecolor": color, "alpha": .16,
-                                  "edgecolor": color, "linewidth": .6},
-                        medianprops={"color": "#222222", "linewidth": .85},
-                        whiskerprops={"color": color, "linewidth": .6},
-                        capprops={"color": color, "linewidth": .6})
-                if len(y):
-                    ax.scatter(part["plot_x"], y, s=5, color=color, alpha=.58,
-                               edgecolors="none", linewidths=0, zorder=3)
-                ax.text(group_index+offset, -.105, str(len(y)), transform=ax.get_xaxis_transform(),
-                        ha="center", va="top", fontsize=6.8, color=color)
-        ax.text(-.045, -.105, "n", transform=ax.transAxes, ha="right", va="top", fontsize=6.8)
-        ax.set(xlim=(-.5, len(groups)-.5), ylim=(-.35, limit), xticks=[])
-        ax.yaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
-        ax.tick_params(axis="y", labelsize=7)
-        ax.set_yticks([v for v in ax.get_yticks() if 0 <= v <= limit])
-        ax.grid(axis="y", color="#d7d7d7", lw=.45, zorder=0)
+               bbox_to_anchor=(1 - right/width, cursor/height), borderaxespad=0,
+               fontsize=7, handlelength=.8, handletextpad=.4, columnspacing=.9)
+    for og, title, title_height in zip(ogs, titles, title_heights, strict=True):
+        fig.text(left/width, cursor/height, title, fontproperties=name_font, va="top",
+                 color="#222222")
+        bottom = cursor - title_height - plot_height
+        ax = fig.add_axes((left/width, bottom/height, plot_width/width, plot_height/height))
+        cursor = bottom - footer
+        values = points.filter(pl.col("orthogroup") == og["orthogroup"])
+        maximum = values["log2_tpm_plus1"].to_numpy().max() if values.height else 0
+        upper = max(3., float(maximum) * 1.05)
+        ax.set(xlim=(-.5, len(groups)-.5), ylim=(-.34, upper))
+        ax.set_xticks(range(len(groups)), groups, fontproperties=tick_font)
+        ax.tick_params(axis="x", length=0, pad=3, colors="#303030")
+        ax.tick_params(axis="y", labelsize=7, length=2.5, width=.55, colors="#303030")
+        ax.set_ylabel(r"$\log_2(\mathrm{TPM}+1)$", fontsize=8, labelpad=5)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        for spine in ("bottom", "left"):
+            ax.spines[spine].set_color("#666666")
+            ax.spines[spine].set_linewidth(.55)
+        ticks = MaxNLocator(nbins=4, integer=True).tick_values(0, upper)
+        ax.set_yticks([tick for tick in ticks if 0 <= tick <= upper])
+        ax.grid(axis="y", color="#e5e5e5", lw=.45)
         ax.set_axisbelow(True)
-        ax.set_title(titles[row_index], loc="left", fontsize=8.5, pad=9)
-        if row_index == len(ranks)-1:
-            for position, group in enumerate(groups):
-                ax.text(position, -.29, group, transform=ax.get_xaxis_transform(),
-                        ha="center", va="top", fontsize=7.5)
-            ax.text(.5, -.53, "Group", transform=ax.transAxes, ha="center", va="top", fontsize=8.5)
+        for boundary in np.arange(.5, len(groups)-.5):
+            ax.axvline(boundary, color="#e5e5e5", lw=.45, zorder=0)
+
+        strata = values.partition_by(["group_index", "label"], as_dict=True)
+        for trait, offset in [(0, -.19), (1, .19)]:
+            color = BINARY_TRAIT_COLORS[trait]
+            count_color = ("#8F3C00", "#005582")[trait]
+            count_y = -17 - trait * 8
+            count_transform = offset_copy(ax.get_xaxis_transform(), fig=fig,
+                                          y=count_y, units="points")
+            count_key = offset_copy(ax.transAxes, fig=fig, x=-5, y=count_y, units="points")
+            ax.text(0, 0, rf"$n_{trait}$", transform=count_key,
+                    ha="right", va="top", fontsize=6.5, color=count_color)
+            for i in range(len(groups)):
+                part = strata.get((i, trait))
+                n = part.height if part is not None else 0
+                ax.text(i, 0, str(n), transform=count_transform, ha="center", va="top",
+                        fontsize=6.5, color=count_color if n else "#777777")
+                if part is None:
+                    continue
+                y = part["log2_tpm_plus1"].to_numpy()
+                if n >= 3:
+                    line = {"color": color, "linewidth": .65}
+                    ax.boxplot([y], positions=[i+offset], widths=.29, manage_ticks=False,
+                               patch_artist=True, showfliers=False, zorder=2,
+                               boxprops={"facecolor": to_rgba(color, .13), "edgecolor": color,
+                                         "linewidth": .65},
+                               medianprops={"color": "#222222", "linewidth": .8, "zorder": 4},
+                               whiskerprops=line, capprops=line)
+                ax.scatter(part["plot_x"], y, s=6 if n < 45 else 4, color=color,
+                           alpha=.69 if n < 45 else .48, edgecolors="none", zorder=3)
+    fig.text((left + plot_width/2)/width, .14/height, "Group", ha="center",
+             va="bottom", fontsize=8)
     return fig
 
 
@@ -310,9 +361,12 @@ def write_group_trait_expression(
                              "pdf.fonttype": 42, "axes.spines.top": False,
                              "axes.spines.right": False, "axes.linewidth": .65}):
             ranks = summary["og_rank"].unique(maintain_order=True).to_list()
+            rank_width = max(2, len(str(max(ranks))))
             for og in summary.unique("og_rank", maintain_order=True).iter_rows(named=True):
-                fig = _distribution_page(summary, points, [og["og_rank"]])
-                fig.savefig(og_dir / f"{quote(og['orthogroup'], safe='')}.svg",
+                rank = og["og_rank"]
+                fig = _distribution_page(summary, points, [rank])
+                og_id = quote(og["orthogroup"], safe="")
+                fig.savefig(og_dir / f"{rank:0{rank_width}d}_{og_id}.svg",
                             metadata={"Date": None})
                 plt.close(fig)
             with PdfPages(figure_dir / f"{_DISTRIBUTION}.pdf", metadata={"CreationDate": None,

@@ -38,6 +38,6 @@ def test_cli_writes_raw_og_expression_for_cv_species_in_every_mode(
     assert summary["n_zero"].sum() == 4
     assert points["tpm"].max() == 100
     assert set(points["group_id"]) == {"g0", "g1", "g2", "g3"}
-    assert (run / "cv/figures/og_expression_by_group_trait/OG1.svg").exists()
+    assert (run / "cv/figures/og_expression_by_group_trait/01_OG1.svg").exists()
     assert not list((run / "cv/figures").glob("og_expression_by_group_trait_*.svg"))
     assert (run / "cv/figures/og_expression_group_trait_heatmap.svg").exists()

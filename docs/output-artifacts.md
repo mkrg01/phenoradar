@@ -350,7 +350,8 @@ the legend groups residues sharing a Zappo color.
 
 All feature modes also write CV OG-expression diagnostics when `data.tpm_path`
 contains the selected species/OGs: one SVG per OG in
-`cv/figures/og_expression_by_group_trait/<OG>.svg`, plus the four-OG-per-page summary
+`cv/figures/og_expression_by_group_trait/<rank>_<OG>.svg` (for example,
+`01_17392at3193.svg`), plus the four-OG-per-page summary
 `og_expression_by_group_trait.pdf` and `og_expression_group_trait_heatmap.svg`/`.pdf`.
 Groups follow ascending ID order (numeric for numeric IDs) in all of these displays,
 regardless of tree order. Regeneration removes the retired numbered page SVGs.

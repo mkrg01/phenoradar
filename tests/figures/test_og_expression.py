@@ -101,14 +101,18 @@ def test_per_og_figures_full_names_populations_and_stale_outputs(tmp_path: Path)
         figures = tmp_path / "cv/figures" / folder
         tables = tmp_path / "cv/tables" / folder
         assert not list(figures.glob("og_expression_by_group_trait_*.svg"))
-        assert {p.stem for p in (figures / "og_expression_by_group_trait").glob("*.svg")
-                } == set(ogs)
+        og_dir = figures / "og_expression_by_group_trait"
+        assert sorted(p.name for p in og_dir.glob("*.svg")) == [
+            f"{rank:02d}_{og}.svg" for rank, og in enumerate(ogs, 1)
+        ]
         assert (figures / "og_expression_by_group_trait.pdf").exists()
         assert (figures / "og_expression_group_trait_heatmap.pdf").exists()
         summary = pl.read_csv(tables / "og_expression_group_trait_summary.tsv", separator="\t")
         points = pl.read_csv(tables / "og_expression_species.tsv", separator="\t")
         assert summary["n_observed"].sum() == points.height == 5*n
         for fig in [_distribution_page(summary, points, [5]), _heatmap_figure(summary)]:
+            if len(fig.axes) == 1:
+                assert " ".join(fig.texts[0].get_text().split()) == f"{annotation} (OG5)"
             canvas = FigureCanvasAgg(fig)
             canvas.draw()
             artists = [*fig.texts]
@@ -125,7 +129,7 @@ def test_per_og_figures_full_names_populations_and_stale_outputs(tmp_path: Path)
     write_group_trait_expression(tmp_path, config, predictions, ["OG1"])
     for folder in ["", "accepted_only"]:
         og_dir = tmp_path / "cv/figures" / folder / "og_expression_by_group_trait"
-        assert [p.name for p in og_dir.glob("*.svg")] == ["OG1.svg"]
+        assert [p.name for p in og_dir.glob("*.svg")] == ["01_OG1.svg"]
     empty = predictions.with_columns(pl.lit("abstained").alias("decision_status"))
     write_group_trait_expression(tmp_path, config, empty, ["OG1"])
     assert "No accepted species" in (tmp_path / "cv/figures/accepted_only/"
@@ -144,7 +148,7 @@ def test_population_with_only_missing_expression(tmp_path: Path) -> None:
     summary = pl.read_csv(tmp_path / "cv/tables/accepted_only/"
                           "og_expression_group_trait_summary.tsv", separator="\t")
     assert summary["n_observed"].sum() == 0
-    assert (tmp_path / "cv/figures/accepted_only/og_expression_by_group_trait/OG1.svg").exists()
+    assert (tmp_path / "cv/figures/accepted_only/og_expression_by_group_trait/01_OG1.svg").exists()
 
 
 def test_optional_missing_or_invalid_input_does_not_block_training(tmp_path: Path) -> None:
@@ -167,9 +171,7 @@ def test_numeric_group_order_shared_by_points_distributions_and_heatmap(tmp_path
         group_labels = [t for t in fig.axes[0].texts if t.get_text() in {"1", "2", "10"}]
         # Distribution x positions and heatmap y positions follow the same group sequence.
         if len(fig.axes) == 1:
-            labels = [t for t in group_labels if t.get_position()[1] == -.29]
-            assert [t.get_text() for t in sorted(labels, key=lambda t: t.get_position()[0])
-                    ] == ["1", "2", "10"]
+            assert [t.get_text() for t in fig.axes[0].get_xticklabels()] == ["1", "2", "10"]
         else:
             assert [t.get_text() for t in group_labels if t.get_position()[0] == .02] == [
                 "1", "2", "10"]
@@ -183,4 +185,4 @@ def test_og_ids_are_encoded_as_single_filenames(tmp_path: Path) -> None:
     config = source(tmp_path, "s0\tOG/sub\t1\ns0\t../OG\t2\n")
     write_group_trait_expression(tmp_path, config, context(), ["OG/sub", "../OG"])
     og_dir = tmp_path / "cv/figures/og_expression_by_group_trait"
-    assert {p.name for p in og_dir.iterdir()} == {"OG%2Fsub.svg", "..%2FOG.svg"}
+    assert {p.name for p in og_dir.iterdir()} == {"01_OG%2Fsub.svg", "02_..%2FOG.svg"}
