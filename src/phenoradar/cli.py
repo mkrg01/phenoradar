@@ -2905,8 +2905,9 @@ def prepare_site_references_command(
     run_dir: Annotated[Path, typer.Option("--run-dir", exists=True, file_okay=False)],
     out: Annotated[Path, typer.Option("--out", help="New frozen candidate JSON catalog.")],
     orthodb_release: Annotated[
-        str, typer.Option("--orthodb-release", help="Exact release, e.g. v12.2.")
-    ],
+        str | None,
+        typer.Option("--orthodb-release", help="Exact release for OrthoDB references, e.g. v12.2."),
+    ] = None,
     scope: Annotated[str, typer.Option("--scope", help="final or cv.")] = "final",
     orthogroup: Annotated[list[str] | None, typer.Option("--orthogroup")] = None,
     cache_dir: Annotated[Path, typer.Option("--cache-dir")] = Path(
@@ -2921,8 +2922,8 @@ def prepare_site_references_command(
     ] = None,
     offline: Annotated[bool, typer.Option("--offline")] = False,
 ) -> None:
-    """Freeze same-release OrthoDB/UniProt candidates for selected AA sites."""
-    from phenoradar.site_reference import _run_inputs, selected_sites
+    """Freeze reference candidates from PDB sequence search or OrthoDB."""
+    from phenoradar.site_reference import _run_inputs, _run_orthodb_release, selected_sites
     from phenoradar.site_reference_resources import (
         ResourceCache,
         SiteAnnotationError,
@@ -2930,7 +2931,7 @@ def prepare_site_references_command(
     )
 
     try:
-        _run_inputs(run_dir)
+        config, _, _ = _run_inputs(run_dir)
         sites = selected_sites(run_dir, scope)
         names = sorted(set(sites["orthogroup"]))
         if pdb_query_fasta is not None and orthogroup is None:
@@ -2943,6 +2944,8 @@ def prepare_site_references_command(
             names = sorted(set(orthogroup))
         cache = ResourceCache(cache_dir, offline=offline)
         if pdb_query_fasta is None:
+            if orthodb_release is None:
+                raise SiteAnnotationError("Set --orthodb-release for an OrthoDB catalog.")
             prepare_reference_catalog(
                 orthogroups=names, release=orthodb_release, out=out, cache=cache,
                 members=og2genes, xrefs=gene_xrefs,
@@ -2951,9 +2954,10 @@ def prepare_site_references_command(
             from phenoradar.site_pdb_search import prepare_pdb_catalog
 
             if og2genes is not None or gene_xrefs is not None:
-                raise SiteAnnotationError("PDB queries use targeted OrthoDB requests.")
+                raise SiteAnnotationError("Membership and cross-reference dumps require OrthoDB.")
+            release = _run_orthodb_release(config, orthodb_release, required=False)
             prepare_pdb_catalog(
-                orthogroups=names, release=orthodb_release, queries=pdb_query_fasta,
+                orthogroups=names, release=release, queries=pdb_query_fasta,
                 out=out, cache=cache,
             )
     except (ValueError, OSError, pl.exceptions.PolarsError) as exc:

@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import polars as pl
 import pytest
+import yaml
 from test_site_reference import MAFFT, REFERENCE, THREE, fixture_run, reference
 
 from phenoradar import site_annotation_run
@@ -30,8 +31,14 @@ class SearchCache(ResourceCache):
             search = json.loads(parse_qs(urlsplit(url).query)["json"][0])
             assert search["request_options"]["results_content_type"] == ["experimental"]
             assert search["query"]["parameters"]["value"] == REFERENCE
+            assert search["request_options"]["results_verbosity"] == "verbose"
+            match = dict(sequence_identity=0.9, evalue=0.01, bitscore=42, subject_beg=1,
+                         subject_end=len(REFERENCE), subject_length=len(REFERENCE),
+                         query_beg=1, query_end=len(REFERENCE))
+            services = [dict(service_type="sequence", nodes=[dict(match_context=[match])])]
             write_json(path, dict(total_count=2, result_set=[
-                dict(identifier="1ABC_1", score=0.75), dict(identifier="2ABC_1", score=1.0),
+                dict(identifier="1ABC_1", score=0.75, services=services),
+                dict(identifier="2ABC_1", score=1.0, services=services),
             ]))
         else:
             assert "/fasta?id=OG1" in url
@@ -71,129 +78,54 @@ class SearchCache(ResourceCache):
         )
 
 
-def test_pdb_catalog_requires_same_og_cross_reference_even_for_identical_proteins(
-    tmp_path: Path,
-) -> None:
+class PdbOnlyCache(SearchCache):
+    def fetch(self, url: str, *, missing_ok: bool = False) -> Path | None:
+        assert "orthodb" not in url
+        return super().fetch(url, missing_ok=missing_ok)
+
+    def json(self, url: str, *, missing_ok: bool = False) -> Any:
+        assert "orthodb" not in url
+        result = super().json(url, missing_ok=missing_ok)
+        if url.endswith("/P00002.json"):
+            result["sequence"]["value"] = "W" + REFERENCE[1:]
+        return result
+
+
+def test_pdb_catalog_admits_homologs_without_orthodb(tmp_path: Path) -> None:
     queries = tmp_path / "queries.fa"
     queries.write_text(f">OG1 full_length_gene\n{REFERENCE}*\n")
     catalog = tmp_path / "catalog.json"
     prepare_pdb_catalog(
-        orthogroups=["OG1"], release="v12.2", queries=queries,
-        out=catalog, cache=SearchCache(tmp_path / "cache"),
+        orthogroups=["OG1"], queries=queries, out=catalog,
+        cache=PdbOnlyCache(tmp_path / "cache"),
     )
     data = json.loads(catalog.read_text())
-    assert [ref["accession"] for ref in data["references"]] == ["P00001"]
-    assert data["references"][0]["orthodb_gene_ids"] == ["g1"]
-    assert data["pdb_search"]["candidates"]["OG1"][0]["chain"] == "A"
+    assert data["orthodb_release"] is None
+    assert [r["accession"] for r in data["references"]] == ["P00001", "P00002"]
+    assert data["references"][1]["sequence"] != REFERENCE
+    assert all(r["orthodb_gene_ids"] == [] and not r["membership_verified"]
+               for r in data["references"])
+    candidates = data["pdb_search"]["candidates"]["OG1"]
+    assert {(r["accession"], r["chain"]) for r in candidates} == {("P00001", "A"), ("P00002", "B")}
+    assert candidates[0]["search_subject_end"] == len(REFERENCE)
     assert data["pdb_search"]["queries"]["OG1"]["header"] == "OG1 full_length_gene"
-    assert data["exclusions"] == [dict(
-        accession="P00002", orthogroup="OG1", reason="no_exact_linked_orthodb_member",
-    )]
+    assert data["exclusions"] == []
 
 
-def test_short_alignment_query_can_still_use_orthodb_member_sequence(tmp_path: Path) -> None:
+def test_short_alignment_query_prepares_without_orthodb(tmp_path: Path) -> None:
     queries = tmp_path / "queries.fa"
     queries.write_text(f">OG1 g1\n{REFERENCE[:15]}\n")
     catalog = tmp_path / "catalog.json"
     prepare_pdb_catalog(
-        orthogroups=["OG1"], release="v12.2", queries=queries, out=catalog,
-        cache=SearchCache(tmp_path / "cache"), alignment_sequence_ids={"OG1": "g1"},
+        orthogroups=["OG1"], release="v12.2", queries=queries,
+        out=catalog, cache=PdbOnlyCache(tmp_path / "cache"), alignment_sequence_ids={"OG1": "g1"},
     )
     data = json.loads(catalog.read_text())
-    assert [r["sequence"] for r in data["references"]] == [REFERENCE]
+    assert not data["references"]
     assert data["pdb_search"]["queries"]["OG1"]["pdb_search_skipped"] == (
         "query_shorter_than_25_residues"
     )
     assert data["pdb_search"]["candidates"] == {"OG1": []}
-
-
-@pytest.mark.parametrize(
-    "case,accepted",
-    [
-        ("mature", True),
-        ("variant", True),
-        ("stable_gene_id", True),
-        ("wrong_taxon", False),
-        ("wrong_gene", False),
-        ("unannotated_chain", False),
-        ("internal_substring", False),
-        ("ambiguous", False),
-        ("diverged", False),
-    ],
-)
-def test_pdb_same_gene_matches_are_conservative(
-    tmp_path: Path, case: str, accepted: bool,
-) -> None:
-    sequence = REFERENCE * 4
-    if case in {"variant", "stable_gene_id"}:
-        member = "W" + sequence[1:]
-    elif case == "diverged":
-        member = "W" * 10 + sequence[10:]
-    elif case == "internal_substring":
-        member = "MM" + sequence + "VV"
-    else:
-        member = "MM" + sequence
-    genes = ["4577_0:gene1"]
-    if case == "ambiguous":
-        genes.append("4577_0:gene2")
-
-    class SameGeneCache(SearchCache):
-        def fetch(self, url: str, *, missing_ok: bool = False) -> Path | None:
-            path = super().fetch(url, missing_ok=missing_ok)
-            assert path is not None
-            if "/fasta?" in url:
-                with path.open("a") as handle:
-                    for gene in genes:
-                        handle.write(f">{gene}\n{member}\n")
-            return path
-
-        def json(self, url: str, *, missing_ok: bool = False) -> Any:
-            if "/ogdetails" in url:
-                gene = parse_qs(urlsplit(url).query)["id"][0]
-                if gene in genes:
-                    return dict(status="ok", data=dict(
-                        gene_id=dict(id=gene),
-                        entrezgene=[dict(id="123", synonyms="GeneModel|abc1")],
-                    ))
-            result = super().json(url, missing_ok=missing_ok)
-            if not url.endswith("/P00002.json"):
-                return result
-            result["sequence"]["value"] = sequence
-            result["organism"]["taxonId"] = 3702 if case == "wrong_taxon" else 4577
-            result["genes"] = [dict(
-                geneName=dict(value="ABC2" if case in {"wrong_gene", "stable_gene_id"} else "ABC1"),
-            )]
-            if case == "stable_gene_id":
-                result["uniProtKBCrossReferences"] = [dict(database="GeneID", id="123")]
-            if case != "unannotated_chain":
-                result["features"] = [dict(type="Chain", location=dict(
-                    start=dict(value=1, modifier="EXACT"),
-                    end=dict(value=len(sequence), modifier="EXACT"),
-                ))]
-            return result
-
-    queries = tmp_path / "queries.fa"
-    queries.write_text(f">OG1\n{REFERENCE}\n")
-    catalog = tmp_path / "catalog.json"
-    prepare_pdb_catalog(orthogroups=["OG1"], release="v12.2", queries=queries,
-                        out=catalog, cache=SameGeneCache(tmp_path / "cache"))
-    data = json.loads(catalog.read_text())
-    assert {c["accession"] for c in data["pdb_search"]["candidates"]["OG1"]} == (
-        {"P00001", "P00002"} if accepted else {"P00001"}
-    )
-    if accepted:
-        record = next(r for r in data["references"] if r["accession"] == "P00002")
-        assert record["sequence"] == sequence
-        match = record["pdb_orthodb_match"]
-        assert match["orthodb_gene_id"] == genes[0]
-        assert match["orthodb_start_1based"] == (3 if case == "mature" else 1)
-        assert match["orthodb_end_1based"] == len(member)
-        assert match["differences_at_uniprot_positions_1based"] == (
-            [] if case == "mature" else [1]
-        )
-        assert match["gene_evidence"][0]["matched_by"] == (
-            "id" if case == "stable_gene_id" else "primary_gene_symbol"
-        )
 
 
 @pytest.mark.parametrize("fails", [False, True])
@@ -367,3 +299,75 @@ def test_pdb_first_uses_actual_coordinates_and_replays_offline(
             run=run, catalog=out / "reference_catalog.json", out=tmp_path / "other",
             cache=replay_cache, mafft=str(MAFFT), render=False,
         )
+
+
+@pytest.mark.skipif(MAFFT is None, reason="optional MAFFT executable unavailable")
+@pytest.mark.parametrize("scenario", ["eligible", "partial", "fallback", "no_hits"])
+def test_homolog_pdb_annotation_and_lazy_fallback(tmp_path: Path, scenario: str) -> None:
+    run, _ = fixture_run(tmp_path)
+    requires_fallback = scenario in {"fallback", "no_hits"}
+    if not requires_fallback:
+        config_path = run / "resolved_config.yml"
+        config = yaml.safe_load(config_path.read_text())
+        config["data"].pop("orthogroup_annotation_path", None)
+        config_path.write_text(yaml.safe_dump(config))
+    queries = tmp_path / "query.fa"
+    queries.write_text(f">OG1\n{REFERENCE[:12] if scenario == 'no_hits' else REFERENCE}\n")
+    catalog = tmp_path / "pdb_catalog.json"
+    prepare_pdb_catalog(
+        orthogroups=["OG1"], queries=queries, out=catalog,
+        cache=PdbOnlyCache(tmp_path / "preparation"),
+        alignment_sequence_ids={"OG1": "g1"} if scenario == "no_hits" else None,
+    )
+    data = json.loads(catalog.read_text())
+    if scenario != "no_hits":
+        only_chain = next(r for r in data["pdb_search"]["candidates"]["OG1"]
+                          if r["structure_id"] == "1abc")
+        if scenario != "eligible":
+            only_chain["search_subject_start"] = 6
+        data["pdb_search"]["candidates"]["OG1"] = [only_chain]
+    write_json(catalog, data)
+    sites = tmp_path / "sites.tsv"
+    required = "false" if scenario == "partial" else "true"
+    sites.write_text(f"orthogroup\talignment_pos_1based\trequired\n"
+                     f"OG1\t3\t{required}\nOG1\t18\tfalse\n")
+
+    class MappingCache(StructureCache):
+        def fetch(self, url: str, *, missing_ok: bool = False) -> Path | None:
+            if "orthodb" in url:
+                assert requires_fallback
+                return lookup.fetch(url, missing_ok=missing_ok)
+            return super().fetch(url, missing_ok=missing_ok)
+
+        def json(self, url: str, *, missing_ok: bool = False) -> Any:
+            if "orthodb" in url or "uniprot" in url:
+                assert requires_fallback
+                if "/ogdetails" in url:
+                    return dict(status="ok", data=dict(
+                        gene_id=dict(id="g1"), uniprot=[dict(id="P00002")],
+                    ))
+                return lookup.json(url, missing_ok=missing_ok)
+            return super().json(url, missing_ok=missing_ok)
+
+    lookup = SearchCache(tmp_path / "fallback_lookup")
+    out = tmp_path / "annotated"
+    annotate_sites(
+        run=run, catalog=catalog, out=out, cache=MappingCache(tmp_path),
+        mafft=str(MAFFT), render=False, sites_path=sites,
+    )
+    path = "OG1/structure_0000/site_structure_map.tsv"
+    mapped = pl.read_csv(out / path, separator="\t")
+    assert mapped["structure_id"].unique().to_list() == [
+        "AF-P00002-F1" if requires_fallback else "1abc",
+    ]
+    assert mapped["orthodb_membership_verified"].unique().to_list() == [requires_fallback]
+    assert mapped["structure_status"].to_list() == [
+        "outside_search_alignment" if scenario == "partial" else "mapped", "mapped",
+    ]
+    replay = tmp_path / "replay"
+    annotate_sites(
+        run=run, catalog=out / "reference_catalog.json", out=replay,
+        cache=ResourceCache(tmp_path / "offline", offline=True), mafft=str(MAFFT),
+        render=False, sites_path=sites,
+    )
+    assert (replay / path).read_bytes() == (out / path).read_bytes()

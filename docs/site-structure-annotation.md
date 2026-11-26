@@ -13,7 +13,7 @@ report:
   structure:
     enabled: true
     top_orthogroups: 20
-    orthodb_release: v12.2  # optional if inferred from the OG annotation filename
+    orthodb_release: v12.2  # for the AlphaFold fallback, if not inferred
     render: true
 ```
 
@@ -66,7 +66,7 @@ used by the run. With no sites TSV, selection uses all sites in the requested sc
 
 ```bash
 phenoradar prepare-site-references \
-  --run-dir RUN --orthodb-release v12.2 --pdb-query-fasta queries.fa \
+  --run-dir RUN --pdb-query-fasta queries.fa \
   --cache-dir site_resource_cache --out pdb_candidates.json
 
 phenoradar annotate-sites \
@@ -75,41 +75,32 @@ phenoradar annotate-sites \
 ```
 
 The search screens up to 100 experimentally determined PDB polymer entities per
-query (E-value cutoff 1, sequence identity cutoff 0.25). It first checks for an
-exact full-length match to a UniProt-linked OG member in the run's OrthoDB
-release. A reviewed experimental reference can also match one member of the
-same NCBI taxon using an accession link, a shared NCBI Gene ID, or its primary
-gene symbol in the member's NCBI Gene aliases. This route requires one of the
-following sequence matches:
+query (E-value cutoff 1, sequence identity cutoff 0.25). Search identity, E-value
+and the query and polymer alignment intervals are recorded. Candidates with UniProtKB
+accessions are projected onto the fixed MSA and mapped through SIFTS-enriched
+PDBe mmCIF files. These PDB structures represent sequence matches, with their
+source species recorded and OG membership marked as unverified.
 
-- A position-by-position comparison of equal-length proteins with at least 98%
-  identity.
-- An exact C-terminal match to a longer OrthoDB protein, with a reviewed
-  UniProtKB `Chain` feature spanning the entire shorter sequence.
+An eligible chain contains a deposited Cα in the search interval at every
+required site and at least one requested site. The number of mapped sites wins,
+followed by RCSB search score and PDB, chain and UniProt identifier order.
+Screening can stop when the highest-ranked chain with complete site coverage is
+found. The `pdb_site_candidates.tsv` table records observed columns, search
+intervals and reasons for excluding or skipping candidates. Check the local
+projection for sites interpreted individually.
 
-The catalog records the gene evidence, matched OrthoDB interval and sequence
-differences. Site projection uses the actual UniProt sequence. Candidate chains
-with verified accessions are fetched as SIFTS-enriched PDBe mmCIF files.
-
-An eligible chain contains a deposited Cα coordinate at every required site and
-at least one requested site. Among eligible chains, the largest number of
-observed requested sites wins, followed by RCSB sequence-search score and PDB,
-chain and UniProt identifier order. The `pdb_site_candidates.tsv` table records
-observed columns and reasons for exclusion, including SIFTS inconsistencies
-specific to individual chains. Check the local projection for sites interpreted
-individually.
-
-When eligible experimental coordinates are unavailable, AlphaFold models of
-exact full-length linked references are ranked by observed site coverage and
-mean pLDDT over mapped sites. The catalog includes an exact query-linked UniProt
-reference where available. If no exact linked reference is verified,
-preparation tries closest same-OG members by full-length protein alignment.
-A portable catalog freezes the selected structure and the site list. To replay,
-use the same sites TSV and `--offline`.
+If the PDB search yields no eligible chain, the AlphaFold fallback uses
+UniProtKB sequences that exactly match linked OG members in the run's OrthoDB
+release. Its models are ranked by observed site coverage and mean mapped-site
+pLDDT. The release is inferred from the OG annotation filename or set with
+`--orthodb-release` (YAML `report.structure.orthodb_release`). Specify it to enable
+this fallback when the filename carries no release. A portable catalog freezes
+the selected structure and site list. To replay, use the same sites TSV and
+`--offline`.
 
 ## OrthoDB snapshot and complete candidate collection
 
-An exact OrthoDB release is required. Annotation checks it against the run's
+OrthoDB reference catalogs require an exact release. Annotation checks it against the run's
 `odb12v2_OGs`-style annotation filename; when that information is absent, supply
 `--orthodb-release` explicitly. OG identifiers are not portable across releases.
 

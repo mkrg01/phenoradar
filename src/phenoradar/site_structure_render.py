@@ -31,7 +31,10 @@ cmd.set('max_threads', 1)
 cmd.load(str(root / scene['file']), 'structure')
 if scene.get('orthogroup_group'):
     cmd.group(scene['orthogroup_group'], 'structure')
-    cmd.set_title('structure', 1, scene['orthogroup_label'])
+title = scene['orthogroup_label']
+if scene.get('pdb_search_organism'):
+    title += ' | PDB sequence match | ' + scene['pdb_search_organism']
+cmd.set_title('structure', 1, title)
 cmd.frame(1)
 # Keep the first deposited alternate location for each protein atom.
 seen, duplicates = set(), []
@@ -242,6 +245,10 @@ def render_structure(
             functional_sites=record.get("functional_sites", []),
             pdb_ligands=record.get("pdb_ligands", []),
             orthogroup_label=f"{annotation} ({orthogroup})" if annotation else orthogroup,
+            pdb_search_organism=(
+                record["reference_organism"] if record.get("search_subject_start") is not None
+                else None
+            ),
             orthogroup_group=group,
         ),
     )
@@ -289,6 +296,7 @@ def _write_pdf(record: dict[str, Any], folder: Path, site_colors: dict[int, str]
     subtitle = "{} | chain {} | {} | model {}".format(
         record["structure_id"], record["chain"], record["method"], record["first_model"]
     )
+    search_provenance = record.get("search_subject_start") is not None
 
     def header(label: str) -> None:
         nonlocal page_number
@@ -399,8 +407,9 @@ def _write_pdf(record: dict[str, Any], folder: Path, site_colors: dict[int, str]
         canvas.drawString(
             28,
             48,
-            "Reference: "
-            + record.get("reference_selection", "automatic")
+            f"PDB sequence match | {record['reference_organism']} | OG membership unverified"
+            if search_provenance else
+            "Reference: " + record.get("reference_selection", "automatic")
             + ("; QC passed" if record.get("reference_qualified", True) else "; QC FAILED"),
         )
         canvas.showPage()

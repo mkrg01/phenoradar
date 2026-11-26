@@ -22,6 +22,7 @@ import yaml
 
 from phenoradar.amino_acid import ALPHABET, AlignmentOG, AlignmentStore
 from phenoradar.orthogroup_annotation import load_orthogroup_annotations
+from phenoradar.site_pdb_search import PDB_SEARCH_POLICY, orthodb_fallback_references
 from phenoradar.site_reference_resources import (
     ResourceCache,
     SiteAnnotationError,
@@ -126,13 +127,17 @@ def _run_inputs(run: Path) -> tuple[dict[str, Any], list[str], list[str]]:
     return config, species, training
 
 
-def _run_orthodb_release(config: dict[str, Any], explicit_release: str | None) -> str:
+def _run_orthodb_release(
+    config: dict[str, Any], explicit_release: str | None, *, required: bool = True,
+) -> str | None:
     match = re.search(
         r"odb(\d+)v(\d+)_OGs", str(config["data"].get("orthogroup_annotation_path", ""))
     )
     inferred = f"v{match[1]}.{match[2]}" if match else None
     release = explicit_release or inferred
     if release is None:
+        if not required:
+            return None
         raise SiteAnnotationError(
             "Set report.structure.orthodb_release or supply --orthodb-release "
             "when the run does not identify its release."
@@ -367,6 +372,20 @@ def _reference_site_rows(
     return rows
 
 
+def _validate_references(records: list[dict[str, Any]], og: str) -> None:
+    accessions = {r["accession"] for r in records}
+    if len(accessions) != len(records):
+        raise SiteAnnotationError(f"Duplicate catalog accessions for {og}")
+    for record in records:
+        if not re_full_accession(record["accession"]):
+            raise SiteAnnotationError("Unsafe or empty reference accession.")
+        seq = record["sequence"]
+        if not seq or not seq.isascii() or not seq.isalpha() or seq != seq.upper():
+            raise SiteAnnotationError("Reference must be an ungapped uppercase AA sequence.")
+        if hashlib.sha256(seq.encode()).hexdigest() != record["sequence_sha256"]:
+            raise SiteAnnotationError("Reference catalog sequence checksum mismatch.")
+
+
 def _core_positions(positions: dict[int, int], core: np.ndarray) -> set[int]:
     return {positions.get(int(i) + 1, -int(i) - 1) for i in np.flatnonzero(core)}
 
@@ -385,7 +404,7 @@ def _alphafold_for_sites(
     ranked = []
     for rank, accession in enumerate(accessions):
         reference = references[accession]
-        if "pdb_orthodb_match" in reference:
+        if not reference.get("membership_verified") or "pdb_orthodb_match" in reference:
             continue
         sites = sites_by_accession[accession]
         target = {r["alignment_pos_1based"]: r["reference_pos_1based"]
@@ -461,6 +480,9 @@ def annotate_sites(
     if data.get("schema_version") != "site-reference-catalog-1":
         raise SiteAnnotationError("Unsupported reference catalog schema.")
     pdb_search = data.get("pdb_search")
+    homolog_search = (
+        pdb_search is not None and pdb_search.get("reference_policy") == PDB_SEARCH_POLICY
+    )
     if pdb_search is not None:
         catalog_ogs = set(data["orthogroups"])
         if orthogroups and (unprepared := set(orthogroups) - catalog_ogs):
@@ -478,11 +500,13 @@ def annotate_sites(
     for name in sites["orthogroup"].unique():
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
             raise SiteAnnotationError("Unsafe orthogroup identifier.")
-    release = data.get("orthodb_release", "")
-    if not release:
+    release = data.get("orthodb_release")
+    if not release and not homolog_search:
         raise SiteAnnotationError("Reference catalog has no frozen OrthoDB release.")
-    if release != _run_orthodb_release(config, orthodb_release):
+    run_release = _run_orthodb_release(config, orthodb_release, required=not homolog_search)
+    if release and run_release and release != run_release:
         raise SiteAnnotationError("Reference catalog and run OrthoDB releases differ.")
+    release = release or run_release
     automatic = {}
     if overrides:
         for row in pl.read_csv(overrides, separator="\t").iter_rows(named=True):
@@ -544,7 +568,8 @@ def annotate_sites(
 
     manifest: dict[str, Any] = dict(
         schema_version="site-annotation-1",
-        reference_policy=("pdb-site-coverage-1" if pdb_search is not None
+        reference_policy=(PDB_SEARCH_POLICY if homolog_search
+                          else "pdb-site-coverage-1" if pdb_search is not None
                           else "species-balanced-reference-1"),
         status="running",
         run=str(run),
@@ -576,6 +601,7 @@ def annotate_sites(
         orthogroups=[],
     )
     portable = {**data, "structures": [], "structures_complete_for": []}
+    portable["orthodb_release"] = release
     portable["references"] = [
         r for r in data["references"] if r["orthogroup"] in names
     ]
@@ -595,27 +621,20 @@ def annotate_sites(
             target = out / name
             target.mkdir()
             records = [r for r in data["references"] if r["orthogroup"] == name]
-            accessions = [r["accession"] for r in records]
-            references = {r["accession"]: r for r in records}
-            if len(set(accessions)) != len(accessions):
-                raise SiteAnnotationError(f"Duplicate catalog accessions for {name}")
-            for record in records:
-                if not re_full_accession(record["accession"]):
-                    raise SiteAnnotationError("Unsafe or empty reference accession.")
-                seq = record["sequence"]
-                if not seq or not seq.isascii() or not seq.isalpha() or seq != seq.upper():
-                    raise SiteAnnotationError(
-                        "Reference must be an ungapped uppercase AA sequence."
-                    )
-                if hashlib.sha256(seq.encode()).hexdigest() != record["sequence_sha256"]:
-                    raise SiteAnnotationError("Reference catalog sequence checksum mismatch.")
-            if not records:
+            forced = automatic.get(name)
+            frozen = None if pdb_search is None else pdb_search.get("decisions", {}).get(name)
+            if not records and not (homolog_search and frozen is None):
                 if pdb_search is not None and name in automatic:
                     raise SiteAnnotationError(f"No verified reference for override in {name}.")
                 manifest["orthogroups"].append(
                     dict(orthogroup=name, status="reference_unavailable")
                 )
                 continue
+            _validate_references(records, name)
+            selected = sites.filter(pl.col("orthogroup") == name).to_dicts()
+            required = required_sites.get(name, set())
+            best_pdb = None
+            audit: list[dict[str, Any]] = []
             with AlignmentStore(
                 Path(config["data"]["alignment_dir"]),
                 species,
@@ -626,10 +645,40 @@ def annotate_sites(
                 _checked_alignment(og, expected.get(name))
                 manifest["input_hashes"][name] = og.sha256
                 core = core_columns(og, training, policy)
-                projected, positions, mafft_version = project_references(
-                    og, records, target / "alignment", mafft
-                )
-                manifest["mafft_version"] = mafft_version
+                projected: dict[str, str] = {}
+                positions: dict[str, dict[int, int]] = {}
+                if records:
+                    projected, positions, manifest["mafft_version"] = project_references(
+                        og, records, target / "alignment", mafft,
+                    )
+                references = {r["accession"]: r for r in records}
+                if pdb_search is not None and frozen is None:
+                    search_candidates = pdb_search["candidates"][name]
+                    best_pdb, audit = rank_pdb_site_candidates(
+                        [r for r in search_candidates if not forced or r["accession"] == forced],
+                        references,
+                        {a: _reference_site_rows(selected, r, positions[a], og.width, scope)
+                         for a, r in references.items()},
+                        required,
+                        cache,
+                    )
+                    if homolog_search and best_pdb is None and release:
+                        fallback = orthodb_fallback_references(
+                            name, release, pdb_search["queries"][name], records, cache,
+                        )
+                        _validate_references(fallback, name)
+                        if fallback:
+                            if records:
+                                (target / "alignment").rename(target / "pdb_alignment")
+                            records = fallback
+                            references = {r["accession"]: r for r in records}
+                            projected, positions, manifest["mafft_version"] = project_references(
+                                og, records, target / "alignment", mafft,
+                            )
+                            # Replay the exact set of sequences used in the selected projection.
+                            portable["references"] = [
+                                r for r in portable["references"] if r["orthogroup"] != name
+                            ] + records
                 ranked = sorted(
                     [
                         score_reference(r, projected[r["accession"]], og, training, core, policy)
@@ -644,7 +693,6 @@ def annotate_sites(
                     for i, row in enumerate(ranked, 1)
                 ],
             )
-            forced = automatic.get(name)
             eligible = [
                 r for r in ranked
                 if r["qualified"] and "pdb_orthodb_match" not in references[r["accession"]]
@@ -658,17 +706,10 @@ def annotate_sites(
                 raise SiteAnnotationError(
                     f"Override accession is not in the frozen catalog: {forced}"
                 )
-            selected = sites.filter(pl.col("orthogroup") == name).to_dicts()
             preselected: list[dict[str, Any]] | None = None
             mode = "manual_override" if forced else "automatic"
             if pdb_search is not None:
                 by_accession = {r["accession"]: r for r in ranked}
-                site_maps = {
-                    a: _reference_site_rows(selected, references[a], positions[a],
-                                            len(projected[a]), scope)
-                    for a in accessions
-                }
-                frozen = pdb_search.get("decisions", {}).get(name)
                 if frozen is not None:
                     winner = frozen["accession"]
                     if forced and forced != winner:
@@ -678,14 +719,13 @@ def annotate_sites(
                     preselected = [r for r in data["structures"]
                                    if r.get("orthogroup") == name and r["accession"] == winner]
                 else:
-                    required = required_sites.get(name, set())
-                    search_candidates = pdb_search["candidates"][name]
-                    best_pdb, audit = rank_pdb_site_candidates(
-                        [r for r in search_candidates if not forced or r["accession"] == forced],
-                        references, site_maps, required, cache,
-                    )
                     model = best_pdb
                     if model is None:
+                        site_maps = {
+                            a: _reference_site_rows(selected, r, positions[a],
+                                                    len(projected[a]), scope)
+                            for a, r in references.items()
+                        }
                         order = [forced] if forced else [r["accession"] for r in ranked]
                         model = _alphafold_for_sites(
                             order, references, site_maps, required, core, positions, cache,
@@ -726,6 +766,9 @@ def annotate_sites(
                                         len(projected[accession]), scope)
             for row in rows:
                 row["orthogroup_annotation"] = annotations.get(name)
+                if homolog_search:
+                    row["reference_organism"] = reference["organism"]
+                    row["orthodb_membership_verified"] = reference["membership_verified"]
             _write_table(target / "site_reference_map.tsv", rows)
             (target / "reference.fa").write_text(f">{accession}\n{reference['sequence']}\n")
             core_positions = _core_positions(positions[accession], core)
@@ -771,6 +814,12 @@ def annotate_sites(
             )
             write_json(out / "manifest.json", manifest)
         manifest["resource_receipts"] = list(cache.receipts.values())
+        portable["resource_receipts"] = list({
+            r["url"]: r for r in [
+                *data.get("resource_receipts", []), *manifest["resource_receipts"],
+            ]
+        }.values())
+        write_json(out / "reference_catalog.json", portable)
         manifest["status"] = "completed" if render else "completed_without_rendering"
         write_json(out / "manifest.json", manifest)
     except Exception as exc:

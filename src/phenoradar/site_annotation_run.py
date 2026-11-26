@@ -65,7 +65,7 @@ def run_site_annotation_report(
             progress(f"Annotate protein structures for {len(names):,} selected orthogroups.")
         _check_annotation_tools(options.mafft_exe, options.pymol_exe, options.render)
         config, species, training = _run_inputs(run)
-        release = _run_orthodb_release(config, options.orthodb_release)
+        release = _run_orthodb_release(config, options.orthodb_release, required=False)
         inventory = pl.read_csv(run / "model/tables/alignment_inputs.tsv", separator="\t")
         expected = {str(row["orthogroup"]): row for row in inventory.iter_rows(named=True)}
         with AlignmentStore(

@@ -377,6 +377,8 @@ def map_structure_sites(
         raise SiteAnnotationError("Structure source must be pdb or alphafold.")
     coordinate_map = {}
     for residue in mapping:
+        if not 1 <= residue["reference_pos_1based"] <= len(reference["sequence"]):
+            raise _InconsistentPdbMapping("Structure maps outside the full reference sequence.")
         key = residue["chain"], residue["auth_seq_id"], residue["insertion_code"]
         atom_at_residue = atoms.get(key)
         observed = residue["observed"] and atom_at_residue is not None
@@ -394,9 +396,17 @@ def map_structure_sites(
             else None,
         }
     rows = []
+    search_start = record.get("search_subject_start")
+    search_end = record.get("search_subject_end")
     for site in sites:
         site_residue = coordinate_map.get(site["reference_pos_1based"])
         observed = site_residue is not None and site_residue["observed"]
+        inside_search = True
+        if observed and site_residue is not None and "alignment_pos_1based" in site and (
+            search_start is not None
+        ):
+            key = chain, site_residue["auth_seq_id"], site_residue["insertion_code"]
+            inside_search = search_start <= atoms[key]["label_seq_id"] <= search_end
         status = (
             site["reference_status"]
             if site["reference_status"] != "mapped"
@@ -404,6 +414,8 @@ def map_structure_sites(
             if site_residue is None
             else "unobserved"
             if not observed
+            else "outside_search_alignment"
+            if not inside_search
             else "sifts_reference_differs"
             if site_residue.get("uniprot_residue") not in {None, site["reference_residue"]}
             else "structure_residue_differs"
@@ -451,12 +463,18 @@ def rank_pdb_site_candidates(
 
     audit = []
     eligible = []
-    for candidate in sorted(candidates, key=lambda r: (r["structure_id"], r["chain"])):
+    full_coverage = False
+    for candidate in sorted(candidates, key=lambda r: (
+        -r["search_score"], r["structure_id"], r["chain"], r["accession"],
+    )):
         accession = candidate["accession"]
         pdb = candidate["structure_id"]
-        path = coordinates(pdb)
+        screened = not full_coverage
+        path = None if full_coverage else coordinates(pdb)
         observed: set[int] = set()
-        reason = "coordinates_unavailable"
+        reason = (
+            "lower_rank_after_full_site_coverage" if full_coverage else "coordinates_unavailable"
+        )
         detail = ""
         if path is not None:
             cif_data, atoms, _ = read_structure(path)
@@ -473,15 +491,19 @@ def rank_pdb_site_candidates(
                     if r["structure_status"] in {"mapped", "structure_residue_differs"}
                 }
                 reason = "no_observed_sites" if not observed else "required_site_unobserved"
+                if not observed and any(r["structure_status"] == "outside_search_alignment"
+                                        for r in rows):
+                    reason = "no_observed_sites_in_search_alignment"
                 if observed and required_sites <= observed:
                     reason = ""
+                    full_coverage = len(observed) == len(sites_by_accession[accession])
                     eligible.append((len(observed), {
                         **candidate, "path": str(path), "sha256": sha256(path),
                         "format": "cif", "sifts_format": "mmcif",
                     }))
         audit.append({
             **candidate,
-            "n_observed_sites": len(observed),
+            "n_observed_sites": len(observed) if screened else None,
             "observed_columns": ",".join(map(str, sorted(observed))),
             "exclusion_reason": reason,
             "exclusion_detail": detail,
@@ -567,6 +589,8 @@ def structure_annotations(
             site_scope=sites[0].get("analysis_scope", "final"),
             reference_selection=reference.get("selection_mode", "automatic"),
             reference_qualified=reference.get("reference_qualified", True),
+            reference_organism=reference.get("organism"),
+            orthodb_membership_verified=reference.get("membership_verified", False),
             core_coverage=_coverage(list(coordinate_map.values()), core),
             sequence_identity=_identity(list(coordinate_map.values()), reference["sequence"]),
         )
