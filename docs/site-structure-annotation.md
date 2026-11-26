@@ -188,10 +188,11 @@ Prepare the reference catalog again to add UniProt features to older catalogs.
 For experimental structures, `pdb_ligands.tsv` lists deposited non-water,
 non-polymer components in the displayed model, including ions and additives.
 
-When these coordinates are available, the PDF has a functional-context page and
-PyMOL has a `functional_context` scene. Toggle `UniProt_active_sites` (blue),
-`UniProt_binding_sites` (green), and `PDB_ligands` (orange) independently. The
-original score pages and front scene keep their score colors.
+The structure figure combines mapped sites with the available functional context.
+When a selected site is also a UniProt functional site, a colored ring surrounds
+its selected-site marker in the structure and the PDF legend.
+PyMOL opens the same view and supports toggling `UniProt_active_sites` (blue),
+`UniProt_binding_sites` (green), and `PDB_ligands` (orange) independently.
 
 ## Outputs and PDF display
 
@@ -215,23 +216,18 @@ Each structure folder contains the copied coordinates,
 to regenerate its saved scenes. `--no-render` writes mapping and scene scripts
 without requiring PyMOL; the manifest explicitly records that rendering was skipped.
 
-PDF pages show front/back/right/left/top/bottom in a 2-column, 3-row layout.
-The saved initial CA orientation, orthographic projection, camera scale and proper
-rotation matrices are shared across views. Target chains are emphasized and other
-protein chains are muted context. PNG panels are ray traced at 1000 x 1000 pixels;
-page text, legends and complete mapping tables are PDF text.
+The 180 mm wide PDF shows six orthographic views at the same scale in a
+three-column layout, with the OG name and ID alongside the structure identifier.
+Target chains are emphasized and other protein chains
+are muted. The legend identifies the available functional layers and uses
+distinct colors for up to eight mapped sites, with their MSA columns,
+structure residues, and mean PSS. Larger sets use red site markers.
+AlphaFold models also have a pLDDT figure. The `site_structure_map.tsv` table
+contains all requested sites, their PSS and CV selection frequencies, and
+their mapping status.
 
-Separate pages show selected sites, mean PSS, and CV selection frequency;
-each quantitative scale is fixed across six views and labeled per structure/OG.
-AlphaFold adds a pLDDT page. The Selected sites page uses colored markers and a
-key below the views when up to eight sites have coordinates. The key lists the
-MSA column, UniProt residue and structure residue. Larger sets use red markers
-and the paginated audit table. PyMOL hides residue labels by default. Use
-`show labels, selected_sites` to reveal them or an `MSA_<column>` selection to
-locate an individual site. The paginated audit lists every requested site,
-including gaps, unobserved coordinates, substitutions in the structure and
-unavailable confidence.
-PDFs show the reference's automatic/manual status and QC outcome.
+PyMOL hides residue labels by default. Use `show labels, selected_sites` to
+reveal them or select `MSA_<column>` to locate an individual site.
 
 SIFTS: https://www.ebi.ac.uk/pdbe/docs/sifts/methodology.html
 MAFFT: https://mafft.cbrc.jp/alignment/software/addsequences.html

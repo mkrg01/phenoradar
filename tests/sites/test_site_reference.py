@@ -461,14 +461,18 @@ def test_structure_ranking_and_first_deposited_alternate_location(tmp_path: Path
     MAFFT is None or not os.environ.get("PHENORADAR_TEST_PYMOL"),
     reason="optional MAFFT/PyMOL rendering environment unavailable",
 )
-@pytest.mark.parametrize("source", ["pdb", "alphafold"])
-def test_real_pymol_six_views_and_pdf(tmp_path: Path, source: str) -> None:
+@pytest.mark.parametrize(
+    "source,has_context", [("pdb", True), ("pdb", False), ("alphafold", True)],
+)
+def test_real_pymol_six_views_and_pdf(tmp_path: Path, source: str, has_context: bool) -> None:
     run, catalog = fixture_run(tmp_path)
     data = json.loads(catalog.read_text())
-    data["references"][0]["uniprot_site_features"] = [
-        dict(feature_type="Active site", feature_start=3, feature_end=3, evidence="[]"),
-        dict(feature_type="Binding site", feature_start=20, feature_end=20, evidence="[]"),
-    ]
+    if has_context:
+        data["references"][0]["uniprot_site_features"] = [
+            dict(feature_type="Active site", feature_start=3, feature_end=3, evidence="[]"),
+            dict(feature_type="Binding site", feature_start=5, feature_end=5, evidence="[]"),
+            dict(feature_type="Binding site", feature_start=20, feature_end=20, evidence="[]"),
+        ]
     if source == "alphafold":
         make_pdb(tmp_path / "model.pdb", REFERENCE)
         data["structures"][0].update(
@@ -478,7 +482,7 @@ def test_real_pymol_six_views_and_pdf(tmp_path: Path, source: str) -> None:
             reference_start=1,
             reference_end=len(REFERENCE),
         )
-    else:
+    elif has_context:
         path = tmp_path / "model.pdb"
         ligand = "HETATM  999  C1  LIG A 501       6.000   1.000  10.000  1.00 20.00           C\n"
         path.write_text(path.read_text().replace("END\n", ligand + "END\n"))
@@ -506,20 +510,35 @@ def test_real_pymol_six_views_and_pdf(tmp_path: Path, source: str) -> None:
         np.testing.assert_allclose(rotation @ rotation.T, np.eye(3), atol=1e-5)
         translations.append(view[9:])
     assert all(t == translations[0] for t in translations)
-    assert len(list(folder.glob("*.png"))) == (30 if source == "alphafold" else 24)
-    assert "effect_range" not in render["pages"]
-    assert "functional_context" in render["pages"]
-    assert render["functional_layers"] == [
-        "UniProt_active_sites", "UniProt_binding_sites" if source == "alphafold" else "PDB_ligands",
-    ]
-    assert ("confidence" in render["pages"]) == (source == "alphafold")
-    functional = pl.read_csv(folder / "functional_site_map.tsv", separator="\t")
-    assert functional["reference_pos_1based"].to_list() == [3, 20]
-    assert functional["structure_status"].to_list() == [
-        "mapped", "mapped" if source == "alphafold" else "unobserved",
-    ]
+    expected_pages = ["functional_context" if has_context else "selected"]
+    if source == "alphafold":
+        expected_pages.append("confidence")
+    assert render["pages"] == expected_pages
+    assert len(list(folder.glob("*.png"))) == 6 * len(expected_pages)
+    if has_context:
+        layers = ["UniProt_active_sites", "UniProt_binding_sites"]
+        overlaps = {"3": ["UniProt_binding_sites"]}
+        if source == "pdb":
+            layers.append("PDB_ligands")
+        else:
+            overlaps["18"] = ["UniProt_binding_sites"]
+        assert render["functional_layers"] == layers
+        assert render["site_context_overlaps"] == overlaps
+        functional = pl.read_csv(folder / "functional_site_map.tsv", separator="\t")
+        assert functional["reference_pos_1based"].to_list() == [3, 5, 20]
+        assert functional["structure_status"].to_list() == [
+            "mapped", "mapped", "mapped" if source == "alphafold" else "unobserved",
+        ]
+    else:
+        assert not render["functional_layers"]
+        assert not render["site_context_overlaps"]
+    assert render["ligand_ids"] == (["LIG"] if source == "pdb" and has_context else [])
+    mapped_sites = pl.read_csv(folder / "site_structure_map.tsv", separator="\t")
+    assert mapped_sites["pss"].to_list() == [2.0, 1.0]
     assert (folder / "sites.pse").stat().st_size > 100
-    assert (folder / "sites.pdf").read_bytes().startswith(b"%PDF")
+    pdf = (folder / "sites.pdf").read_bytes()
+    assert pdf.startswith(b"%PDF")
+    assert pdf.count(b"/Type /Page\n") == len(expected_pages)
 
 
 @pytest.mark.skipif(MAFFT is None, reason="optional MAFFT executable unavailable")

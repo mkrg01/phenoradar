@@ -14,14 +14,26 @@ _SITE_COLORS = (
     "#d62728", "#6941a5", "#007f72", "#9d6500",
     "#1964ad", "#b02a78", "#617b19", "#49545c",
 )
+_CONTEXT_COLORS = {
+    "UniProt_active_sites": "#2274c7",
+    "UniProt_binding_sites": "#17844b",
+    "PDB_ligands": "#f28e2b",
+}
+_CONFIDENCE_LEVELS = (
+    (0, 50, "#ff7d45", "<50"),
+    (50, 70, "#ffdb13", "50 to <70"),
+    (70, 90, "#65cbf3", "70 to <90"),
+    (90, 101, "#0053d6", "90 to 100"),
+)
 _POSITION_STATUSES = {"mapped", "structure_residue_differs"}
+_LegendKey = list[tuple[str, str, tuple[str, ...]]]
 
 # Standalone script: PyMOL may run in a different environment from PhenoRadar.
 _PYMOL_SCRIPT = r"""from pathlib import Path
 import json
 import math
 import numpy as np
-from pymol import cmd
+from pymol import cgo, cmd
 
 # PyMOL does not bind __file__ to the executed script. CLI sets this working directory.
 root = Path.cwd()
@@ -51,7 +63,9 @@ def quote(value):
 target = 'model structure and chain ' + quote(scene['chain'])
 cmd.show('cartoon', 'structure and polymer.protein')
 cmd.color('gray80', 'structure')
-cmd.set('cartoon_transparency', .65, 'structure and not (' + target + ')')
+other_chains = 'structure and not (' + target + ')'
+cmd.color('gray90', other_chains)
+cmd.set('cartoon_transparency', .65, other_chains)
 cmd.bg_color('white')
 cmd.set('orthoscopic', 1)
 cmd.set('ray_shadows', 0)
@@ -60,15 +74,17 @@ cmd.set('label_color', 'black')
 cmd.set('label_size', 26)
 cmd.set('label_outline_color', 'white')
 cmd.set('label_shadow_mode', 0)
-coords = cmd.get_coords(target + ' and name CA', state=1)
-if coords is None or len(coords) == 0:
+target_ca = target + ' and polymer.protein and name CA'
+proteins = 'structure and polymer.protein'
+if not cmd.count_atoms(target_ca, state=1):
     raise RuntimeError('Selected chain has no CA atoms.')
-cmd.orient(target + ' and name CA', state=1)
-cmd.zoom(target, buffer=5, state=1, complete=1)
+cmd.orient(target_ca, state=1)
+cmd.zoom(proteins, buffer=5, state=1, complete=1)
 base = list(cmd.get_view())
-# Fixed camera scale for all rotations, with room for the full target chain.
-base[11] *= 1.3
-radius = max(float(np.linalg.norm(x - np.mean(coords, axis=0))) for x in coords) + 5
+# Frame the displayed protein chains at the same scale in every rotation.
+base[11] *= 1.15
+coords = cmd.get_coords(proteins, state=1)
+radius = float(np.linalg.norm(coords - base[12:15], axis=1).max()) + 5
 base[15], base[16] = -base[11] - 1.5 * radius, -base[11] + 1.5 * radius
 cmd.set_view(base)
 def rx(degrees):
@@ -93,6 +109,7 @@ def selection(site):
                                       (site['insertion_code'] or ''))
 selected = [s for s in scene['sites'] if s['structure_status'] in
             ('mapped', 'structure_residue_differs')]
+selected_columns = {selection(site): site['alignment_pos_1based'] for site in selected}
 site_selections = []
 for site in selected:
     sel = selection(site)
@@ -100,7 +117,9 @@ for site in selected:
         raise RuntimeError('Mapped residue does not uniquely identify a CA atom: ' + sel)
     cmd.show('sticks', sel)
     cmd.show('spheres', sel + ' and name CA')
-    cmd.set('sphere_scale', .5, sel)
+    cmd.set('sphere_scale', .6, sel)
+    color = scene['site_colors'].get(str(site['alignment_pos_1based']), '#d62728')
+    cmd.color('0x' + color[1:], sel)
     label = '{}{} / MSA {}'.format(site['reference_residue'],
         site['reference_pos_1based'], site['alignment_pos_1based'])
     cmd.label(sel + ' and name CA', repr(label))
@@ -112,33 +131,42 @@ if site_selections:
     cmd.hide('labels', 'selected_sites')
 
 context_layers = []
-def context_layer(name, expression, color, representation):
-    if not expression or not cmd.count_atoms(expression, state=1):
-        return
-    cmd.create(name, expression, source_state=1, target_state=1)
-    cmd.hide('everything', name)
-    cmd.show(representation, name)
-    cmd.color(color, name)
-    cmd.disable(name)
-    context_layers.append(name)
-
-for kind, name, color in [('Active site', 'UniProt_active_sites', '0x2274c7'),
-                          ('Binding site', 'UniProt_binding_sites', '0x17844b')]:
-    expressions = sorted({
-        '(' + selection(site) + ' and polymer.protein and name CA)'
+site_context_overlaps = {}
+for kind, name, ring_radius in [('Active site', 'UniProt_active_sites', 1.45),
+                                ('Binding site', 'UniProt_binding_sites', 1.85)]:
+    residues = sorted({
+        selection(site)
         for site in scene.get('functional_sites', [])
         if site['feature_type'] == kind and site['structure_status'] == 'mapped'
     })
-    context_layer(name, ' or '.join(expressions), color, 'spheres')
-    if name in context_layers:
-        cmd.set('sphere_scale', .45, name)
+    hex_color = scene['context_colors'][name]
+    color = [int(hex_color[i:i+2], 16) / 255 for i in (1, 3, 5)]
+    markers = []
+    for residue in residues:
+        coordinates = cmd.get_coords(residue + ' and polymer.protein and name CA', state=1)
+        if coordinates is None or len(coordinates) != 1:
+            print('Functional residue lacks a unique CA atom:', residue)
+            continue
+        center = coordinates[0].tolist()
+        if residue in selected_columns:
+            # Orthogonal hoops keep the annotation visible as the scene rotates.
+            for normal in [(1., 0., 0.), (0., 1., 0.), (0., 0., 1.)]:
+                markers.extend(cgo.torus(center, normal, ring_radius, color,
+                                         cradius=.14, samples=20, csamples=6))
+            site_context_overlaps.setdefault(selected_columns[residue], []).append(name)
+        else:
+            markers.extend([cgo.COLOR, *color, cgo.SPHERE, *center, .75])
+    if markers:
+        cmd.load_cgo(markers, name, state=1)
+        context_layers.append(name)
 
 ligands = {
     (row['chain'], row['label_asym_id'], str(row['auth_seq_id']) + row['insertion_code'],
      row['component_id']) for row in scene.get('pdb_ligands', [])
 }
+matched = set()
 if ligands:
-    indices, matched = [], set()
+    indices = []
     for atom in cmd.get_model('structure', state=1).atom:
         exact = (atom.chain, atom.segi, atom.resi, atom.resn)
         unsegmented = (atom.chain, '', atom.resi, atom.resn)
@@ -149,51 +177,32 @@ if ligands:
     if matched != ligands:
         print('Recorded PDB ligand instances unavailable in PyMOL:', sorted(ligands - matched))
     if indices:
-        context_layer('PDB_ligands', 'structure and index ' + '+'.join(indices), '0xf28e2b',
-                      'sticks')
+        cmd.create('PDB_ligands', 'structure and index ' + '+'.join(indices),
+                   source_state=1, target_state=1)
+        cmd.hide('everything', 'PDB_ligands')
+        cmd.show('sticks', 'PDB_ligands')
         cmd.show('spheres', 'PDB_ligands')
+        cmd.color('0x' + scene['context_colors']['PDB_ligands'][1:], 'PDB_ligands')
         cmd.set('sphere_scale', .19, 'PDB_ligands')
+        context_layers.append('PDB_ligands')
 
-pages = ['selected', 'pss', 'selection_frequency']
+overview = 'functional_context' if context_layers else 'selected'
+pages = [overview]
 if scene['source'] == 'alphafold':
     pages.append('confidence')
-if context_layers:
-    pages.append('functional_context')
-scales = {}
 for page in pages:
-    cmd.color('gray80', target)
-    if page == 'functional_context':
+    if page == 'confidence':
         for layer in context_layers:
-            cmd.enable(layer)
-        for site in selected:
-            cmd.color('0xd62728', selection(site))
-    elif page == 'confidence':
+            cmd.disable(layer)
+        cmd.color('gray80', target)
         atoms = cmd.get_model(target, state=1).atom
-        for lo, hi, color in [(0, 50, '0xff7d45'), (50, 70, '0xffdb13'),
-                              (70, 90, '0x65cbf3'), (90, 101, '0x0053d6')]:
+        for lo, hi, color, _ in scene['confidence_levels']:
             indices = [str(atom.index) for atom in atoms if lo <= atom.b < hi]
             if indices:
-                cmd.color(color, target + ' and index ' + '+'.join(indices))
-    else:
-        values = [float(s[page]) for s in scene['sites'] if page != 'selected' and
-                  s.get(page) is not None and math.isfinite(float(s[page]))]
-        upper = 1.0 if page == 'selection_frequency' else max(values, default=0)
-        scales[page] = upper
-        for site in selected:
-            if page == 'selected':
-                color = '0x' + scene['site_colors'].get(
-                    str(site['alignment_pos_1based']), '#d62728')[1:]
-            elif site.get(page) is None:
-                color = 'gray70'
-            else:
-                fraction = max(0, min(1, float(site[page]) / upper)) if upper > 0 else 0
-                rgb = [1 - .25 * fraction, .9 * (1 - fraction), .9 * (1 - fraction)]
-                color = 'metric_{}'.format(site['alignment_pos_1based'])
-                cmd.set_color(color, rgb)
-            cmd.color(color, selection(site))
+                cmd.color('0x' + color[1:], target + ' and index ' + '+'.join(indices))
     for name, view in views.items():
         cmd.set_view(view)
-        if page == 'selected':
+        if page == overview:
             cmd.scene(name, 'store')
         cmd.png(str(root / (page + '_' + name + '.png')), width=1000, height=1000,
                 dpi=300, ray=1, quiet=1)
@@ -203,8 +212,9 @@ for page in pages:
 cmd.scene('front', 'recall')
 cmd.save(str(root / 'sites.pse'))
 (root / 'rendering.json').write_text(json.dumps(dict(
-    pymol_version=cmd.get_version()[0], views=views, scales=scales,
-    functional_layers=context_layers,
+    pymol_version=cmd.get_version()[0], views=views, functional_layers=context_layers,
+    site_context_overlaps=site_context_overlaps,
+    ligand_ids=sorted({row[3] for row in matched}),
     projection='orthographic', pixel_size=[1000, 1000], pages=pages,
     orientation='CA principal axes, saved initial camera; proper rotations only',
     first_model=scene['first_model']), indent=2) + '\n')
@@ -242,6 +252,8 @@ def render_structure(
             first_model=record["first_model"],
             sites=record["sites"],
             site_colors=site_colors,
+            context_colors=_CONTEXT_COLORS,
+            confidence_levels=_CONFIDENCE_LEVELS,
             functional_sites=record.get("functional_sites", []),
             pdb_ligands=record.get("pdb_ligands", []),
             orthogroup_label=f"{annotation} ({orthogroup})" if annotation else orthogroup,
@@ -273,199 +285,117 @@ def render_structure(
 
 
 def _write_pdf(record: dict[str, Any], folder: Path, site_colors: dict[int, str]) -> None:
-    from html import escape
-
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.colors import HexColor, black
+    from reportlab.lib.units import mm
     from reportlab.lib.utils import ImageReader
     from reportlab.pdfgen.canvas import Canvas
-    from reportlab.platypus import Paragraph, Table, TableStyle
 
     rendering = json.loads((folder / "rendering.json").read_text())
-    width, height = A4
-    canvas = Canvas(str(folder / "sites.pdf"), pagesize=A4)
-    canvas.setTitle("PhenoRadar site mapping: " + record["structure_id"])
-    canvas.setAuthor("PhenoRadar")
-    styles = getSampleStyleSheet()
-    styles["BodyText"].fontSize = 7
-    styles["BodyText"].leading = 9
-    page_number = 0
-    title = record["sites"][0]["orthogroup"] + " | " + record["accession"]
+    width = 180 * mm
+    margin = 12
+    gutter = 8
+    panel_size = (width - 2 * margin - 2 * gutter) / 3
+    panel_height = panel_size + 14
+    key_width = (width - 2 * margin) / 2
+    canvas = Canvas(str(folder / "sites.pdf"))
+    structure_id = record["structure_id"]
+    if record["source"] == "pdb":
+        structure_id = structure_id.upper()
+    orthogroup = record["sites"][0]["orthogroup"]
     annotation = record.get("orthogroup_annotation")
-    subtitle = "{} | chain {} | {} | model {}".format(
-        record["structure_id"], record["chain"], record["method"], record["first_model"]
-    )
-    search_provenance = record.get("search_subject_start") is not None
+    title = f"OrthoDB {orthogroup} | {structure_id} | Chain {record['chain']}"
+    canvas.setTitle(f"{annotation} | {title}" if annotation else title)
+    canvas.setAuthor("PhenoRadar")
 
-    def header(label: str) -> None:
-        nonlocal page_number
-        page_number += 1
-        canvas.setFillColor(colors.HexColor("#17324d"))
-        if annotation:
-            label_width = canvas.stringWidth(annotation, "Helvetica-Bold", 13)
-            font_size = min(13, 13 * (width - 56) / max(label_width, 1))
-            canvas.setFont("Helvetica-Bold", font_size)
-            canvas.drawString(28, height - 27, annotation)
-            canvas.setFont("Helvetica", 9)
-            canvas.drawString(28, height - 41, title)
-        else:
-            canvas.setFont("Helvetica-Bold", 13)
-            canvas.drawString(28, height - 30, title)
-        canvas.setFont("Helvetica", 9)
-        canvas.drawString(28, height - (54 if annotation else 46), subtitle)
-        canvas.setFillColor(colors.black)
-        canvas.setFont("Helvetica-Bold", 10)
-        canvas.drawString(28, height - (68 if annotation else 64), label)
-        canvas.setFont("Helvetica", 7)
-        canvas.drawRightString(width - 28, 18, f"PhenoRadar | {page_number}")
-
-    names = ["front", "back", "right", "left", "top", "bottom"]
-    labels = dict(
-        selected="Selected sites",
-        pss="PSS (mean across models)",
-        selection_frequency="CV selection frequency",
-        confidence="AlphaFold local confidence (pLDDT)",
-        functional_context="Functional sites and deposited ligands",
-    )
+    overlaps = rendering["site_context_overlaps"]
     mapped = [site for site in record["sites"] if site["structure_status"] in _POSITION_STATUSES]
+    site_key: _LegendKey = []
+    for site in mapped:
+        column = site["alignment_pos_1based"]
+        if column not in site_colors:
+            continue
+        pdb_residue = (
+            f"{site['structure_residue']}{site['auth_seq_id']}{site['insertion_code'] or ''}"
+        )
+        label = f"MSA {column}  |  {site['chain']}:{pdb_residue}"
+        reference = f"{site['reference_residue']}{site['reference_pos_1based']}"
+        if reference != pdb_residue:
+            label += f"  |  UniProt {reference}"
+        if site.get("pss") is not None:
+            label += f"  |  PSS {float(site['pss']):.3g}"
+        rings = tuple(_CONTEXT_COLORS[layer] for layer in overlaps.get(str(column), []))
+        site_key.append((site_colors[column], label, rings))
+    if mapped and not site_key:
+        site_key.append((_SITE_COLORS[0], "Selected sites", ()))
+
+    context_labels = {
+        "UniProt_active_sites": "UniProt active sites",
+        "UniProt_binding_sites": "UniProt binding sites",
+        "PDB_ligands": "Deposited ligands",
+    }
+    if rendering["ligand_ids"]:
+        with_ids = "Deposited ligands (" + ", ".join(rendering["ligand_ids"]) + ")"
+        if canvas.stringWidth(with_ids, "Helvetica", 8) <= key_width - 14:
+            context_labels["PDB_ligands"] = with_ids
+    for layer in {layer for layers in overlaps.values() for layer in layers}:
+        context_labels[layer] += " (rings at selected sites)"
+    context_key: _LegendKey = [
+        (_CONTEXT_COLORS[layer], context_labels[layer], ())
+        for layer in rendering["functional_layers"]
+    ]
+    confidence_key: _LegendKey = [
+        (color, f"pLDDT {label}", ()) for _, _, color, label in _CONFIDENCE_LEVELS
+    ]
+    directions = ["front", "right", "top", "back", "left", "bottom"]
+    header_height = 29 if annotation else 16
     for page in rendering["pages"]:
-        header(record.get("site_scope", "final") + " | " + labels[page])
-        for i, direction in enumerate(names):
+        keys = [confidence_key] if page == "confidence" else [site_key, context_key]
+        legend_items = sum((len(key) + 1) // 2 for key in keys)
+        legend_height = 13 * legend_items
+        height = 2 * panel_height + 2 * margin + header_height + legend_height
+        canvas.setPageSize((width, height))
+        canvas.setFillColor(black)
+        title_y = height - margin - 7
+        if annotation:
+            name_width = canvas.stringWidth(annotation, "Helvetica-Bold", 10)
+            canvas.setFont("Helvetica-Bold", min(10, 10 * (width - 2 * margin) / name_width))
+            canvas.drawString(margin, title_y, annotation)
+            canvas.setFont("Helvetica", 8)
+            title_y -= 13
+        else:
+            canvas.setFont("Helvetica-Bold", 10)
+        header = title + (" | Local confidence" if page == "confidence" else "")
+        canvas.drawString(margin, title_y, header)
+
+        for i, direction in enumerate(directions):
             image = folder / f"{page}_{direction}.png"
             if not image.is_file():
                 raise SiteAnnotationError(f"Missing six-view panel: {image}")
-            column, row = i % 2, i // 2
-            x = 28 + column * (width - 56) / 2
-            y = height - 267 - row * 203
+            row, column = divmod(i, 3)
+            x = margin + column * (panel_size + gutter)
+            y = height - margin - header_height - panel_height * (row + 1)
             canvas.setFont("Helvetica", 8)
-            canvas.drawString(x + 10, y + 190, direction.capitalize())
-            canvas.drawImage(
-                ImageReader(str(image)),
-                x + 32,
-                y,
-                width=184,
-                height=184,
-                preserveAspectRatio=True,
-                mask="auto",
-            )
-        if page in {"pss", "selection_frequency"}:
-            for index in range(100):
-                fraction = index / 99
-                canvas.setFillColor(
-                    colors.Color(1 - 0.25 * fraction, 0.9 * (1 - fraction), 0.9 * (1 - fraction))
-                )
-                canvas.rect(width - 160 + index * 1.25, 102, 1.3, 7, stroke=0, fill=1)
-            canvas.setFillColor(colors.black)
-        canvas.setFont("Helvetica", 8)
-        if page == "selected":
-            if site_colors:
-                for index, site in enumerate(mapped):
-                    x = 33 + (index % 2) * (width - 56) / 2
-                    y = 157 - (index // 2) * 15
-                    column = site["alignment_pos_1based"]
-                    canvas.setFillColor(colors.HexColor(site_colors[column]))
-                    canvas.circle(x, y + 2.5, 3, stroke=0, fill=1)
-                    canvas.setFillColor(colors.black)
-                    reference = f"{site['reference_residue']}{site['reference_pos_1based']}"
-                    structure = (
-                        f"{site['chain']}:{site['structure_residue']}{site['auth_seq_id']}"
-                        f"{site['insertion_code'] or ''}"
-                    )
-                    canvas.drawString(x + 9, y, f"MSA {column}   |   {reference}   |   {structure}")
-                note = "Site key shows the MSA column, UniProt residue and structure residue."
-            else:
-                note = "Red marks mapped sites. See the site correspondence table for residue IDs."
-        elif page == "confidence":
-            note = "pLDDT: orange <50; yellow 50-70; cyan 70-90; blue >=90. Not mapping confidence."
-        elif page == "functional_context":
-            entries = {
-                "UniProt_active_sites": "blue: UniProt active sites",
-                "UniProt_binding_sites": "green: UniProt binding sites",
-                "PDB_ligands": "orange: PDB ligands",
-            }
-            parts = ["Red: selected sites", *(entries[n] for n in rendering["functional_layers"])]
-            note = ". ".join(parts) + "."
-        else:
-            upper = rendering["scales"][page]
-            note = (
-                f"Pale to dark red: 0 to {upper:.4g}; gray: unavailable. Shared scale across views."
-            )
-        canvas.drawString(28, 90, note)
-        canvas.drawString(
-            28,
-            76,
-            f"{len(mapped)}/{len(record['sites'])} selected sites have coordinates; "
-            f"core coverage {record['core_coverage']:.1%}.",
-        )
-        canvas.drawString(
-            28,
-            62,
-            "Six views share one camera scale. Full mapping, omissions and "
-            "residue differences follow.",
-        )
-        canvas.drawString(
-            28,
-            48,
-            f"PDB sequence match | {record['reference_organism']} | OG membership unverified"
-            if search_provenance else
-            "Reference: " + record.get("reference_selection", "automatic")
-            + ("; QC passed" if record.get("reference_qualified", True) else "; QC FAILED"),
-        )
-        canvas.showPage()
-    # Complete, paginated site listing; no top-N truncation of failed mappings.
-    for start in range(0, len(record["sites"]), 23):
-        header("Site correspondence and missing-coordinate audit")
-        rows: list[list[Any]] = [
-            ["MSA", "Reference", "Structure", "PSS", "CV freq.", "pLDDT", "Status"]
-        ]
-        for site in record["sites"][start : start + 23]:
+            canvas.drawCentredString(x + panel_size / 2, y + panel_size + 3, direction.title())
+            canvas.drawImage(ImageReader(str(image)), x, y, width=panel_size, height=panel_size)
 
-            def number(value: Any) -> str:
-                return "-" if value is None else f"{float(value):.3g}"
-
-            ref = (
-                "-"
-                if site["reference_pos_1based"] is None
-                else str(site["reference_residue"]) + str(site["reference_pos_1based"])
-            )
-            residue = (
-                "-"
-                if site["auth_seq_id"] is None
-                else str(site["chain"])
-                + ":"
-                + str(site["auth_seq_id"])
-                + (site["insertion_code"] or "")
-            )
-            status = Paragraph(
-                escape(site["structure_status"]).replace("_", " "), styles["BodyText"]
-            )
-            rows.append(
-                [
-                    str(site["alignment_pos_1based"]),
-                    ref,
-                    residue,
-                    number(site.get("pss")),
-                    number(site.get("selection_frequency")),
-                    number(site.get("plddt")),
-                    status,
-                ]
-            )
-        table = Table(rows, colWidths=[43, 58, 65, 46, 48, 44, width - 360])
-        table.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e9eff5")),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 8),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("TOPPADDING", (0, 0), (-1, -1), 6),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-                    ("LINEBELOW", (0, 0), (-1, 0), 0.5, colors.HexColor("#9bafc2")),
-                ]
-            )
-        )
-        _, table_height = table.wrap(width - 56, height - 120)
-        table.drawOn(canvas, 28, height - 86 - table_height)
+        y = margin + legend_height - 8
+        for key in keys:
+            for i, (color, label, rings) in enumerate(key):
+                row, column = divmod(i, 2)
+                x = margin + 6 + column * key_width
+                baseline = y - 13 * row
+                canvas.setFillColor(HexColor(color))
+                if key is site_key:
+                    canvas.circle(x, baseline + 2.5, 3, stroke=0, fill=1)
+                    for index, ring in enumerate(rings):
+                        canvas.setStrokeColor(HexColor(ring))
+                        canvas.setLineWidth(.7)
+                        canvas.circle(x, baseline + 2.5, 4 + 1.3 * index, stroke=1, fill=0)
+                else:
+                    canvas.rect(x - 3, baseline - .5, 6, 6, stroke=0, fill=1)
+                canvas.setFillColor(black)
+                canvas.setFont("Helvetica", 8)
+                canvas.drawString(x + 9, baseline, label)
+            y -= 13 * ((len(key) + 1) // 2)
         canvas.showPage()
     canvas.save()
