@@ -67,3 +67,64 @@ fail:
     PyMem_Free(positive);
     release(b, 9); return NULL;
 }
+
+/* Count minor support directly from the stored residue columns. */
+static PyObject *compact_minor_support(PyObject *self, PyObject *args) {
+    PyObject *o[7]; Py_buffer b[7] = {{0}};
+    uint64_t *seen = NULL;
+    if (!PyArg_UnpackTuple(args, "compact_minor_support", 7, 7,
+                          &o[0], &o[1], &o[2], &o[3], &o[4], &o[5], &o[6])) return NULL;
+    GET(0, 4, 0); GET(1, 8, 0); GET(2, 8, 0); GET(3, 8, 0);
+    GET(4, 8, 1); GET(5, 8, 1); GET(6, 1, 1);
+    Py_ssize_t nr = b[3].len / 8, ns = b[2].len / 8;
+    REQUIRE(nr > 0 && ns > 0 && b[0].len % (4 * nr) == 0);
+    Py_ssize_t width = b[0].len / 4 / nr;
+    REQUIRE(b[1].len / 8 == ns + 1 && b[4].len / 8 == ns && b[5].len / 8 == ns && b[6].len == ns);
+    const float *raw = b[0].buf;
+    const int64_t *offsets = b[1].buf, *major = b[2].buf, *groups = b[3].buf;
+    int64_t *sample_counts = b[4].buf, *group_counts = b[5].buf;
+    uint8_t *fallback = b[6].buf;
+    REQUIRE(offsets[0] == 0 && offsets[ns] == width);
+    for (Py_ssize_t s = 0; s < ns; ++s) {
+        REQUIRE(offsets[s + 1] >= offsets[s] && offsets[s + 1] - offsets[s] <= 20);
+        REQUIRE(major[s] == -1 || (major[s] >= offsets[s] && major[s] < offsets[s + 1]));
+    }
+    for (Py_ssize_t i = 0; i < nr; ++i) { REQUIRE(groups[i] >= -1 && groups[i] < 64); }
+    seen = PyMem_Calloc((size_t)ns, sizeof(uint64_t));
+    if (!seen) { PyErr_NoMemory(); goto fail; }
+    int valid = 1;
+    const double threshold = (double)1e-7f;
+    Py_BEGIN_ALLOW_THREADS
+    for (Py_ssize_t i = 0; i < nr && valid; ++i) {
+        const float *row = raw + i * width;
+        uint64_t group = groups[i] < 0 ? 0 : UINT64_C(1) << groups[i];
+        for (Py_ssize_t s = 0; s < ns; ++s) {
+            if (fallback[s]) continue;
+            double total = 0, minor = 0;
+            for (int64_t j = offsets[s]; j < offsets[s + 1]; ++j) {
+                float q = row[j];
+                if (isnan(q)) continue;
+                if (q < 0 || q > 1) { valid = 0; break; }
+                total += q;
+                if (j != major[s]) minor += q;
+            }
+            if (minor == 0) continue;
+            /* Bound any float32 reduction of 20 nonnegative values and its
+               subtraction. Close calls use the original NumPy expression. */
+            if (fabs(minor - threshold) <= 32 * FLT_EPSILON * total) {
+                fallback[s] = 1;
+            } else if (minor > threshold) {
+                sample_counts[s]++;
+                group_counts[s] += (group & ~seen[s]) != 0;
+                seen[s] |= group;
+            }
+        }
+    }
+    Py_END_ALLOW_THREADS
+    PyMem_Free(seen);
+    release(b, 7);
+    return PyBool_FromLong(valid);
+fail:
+    release(b, 7);
+    return NULL;
+}

@@ -199,12 +199,54 @@ def fit_encoded(
         encoding.close()
 
 
+def _compact_quality_counts(
+    raw: np.ndarray, observed: np.ndarray, sites: np.ndarray, residues: np.ndarray,
+    groups: np.ndarray, quality: AminoAcidSiteFilter,
+) -> tuple[np.ndarray, np.ndarray]:
+    from phenoradar.amino_acid import _quality_summary
+    from phenoradar.amino_acid_kernels import native
+
+    n = observed.shape[1]
+    minor_samples = np.zeros(n, dtype=np.int64)
+    minor_groups = np.zeros(n, dtype=np.int64)
+    fallback = np.ones(n, dtype=bool)
+    kernel = getattr(native, "compact_minor_support", None)
+    steps = np.diff(sites)
+    if (kernel is not None and raw.dtype == np.float32 and raw.shape[1] > 1 and n
+            and np.all((steps > 0) | ((steps == 0) & (np.diff(residues) > 0)))):
+        unique, group_ids = np.unique(groups, return_inverse=True)
+        if len(unique) <= 64:
+            group_ids[groups != groups] = -1
+            values = np.ascontiguousarray(raw)
+            # Reduce over rows in both layouts. Implicit states have frequency
+            # zero at observed sites and are missing elsewhere.
+            means = np.zeros((n, 20), dtype=np.float32)
+            means[~observed.any(axis=0)] = np.nan
+            means[sites, residues] = np.nanmean(values, axis=0)
+            columns = np.full((n, 20), -1, dtype=np.int64)
+            columns[sites, residues] = np.arange(len(sites))
+            major_columns = columns[np.arange(n), means.argmax(axis=1)]
+            offsets = np.r_[0, np.bincount(sites, minlength=n).cumsum()].astype(np.int64)
+            fallback.fill(False)
+            if not kernel(values, offsets, major_columns, group_ids.astype(np.int64, copy=False),
+                          minor_samples, minor_groups, fallback):
+                fallback.fill(True)
+    if fallback.any():
+        local = np.cumsum(fallback) - 1
+        keep = fallback[sites]
+        dense = np.full((len(raw), int(fallback.sum()), 20), np.nan, dtype=np.float32)
+        dense[observed[:, fallback]] = 0
+        dense[:, local[sites[keep]], residues[keep]] = raw[:, keep]
+        _, samples, group_counts = _quality_summary(dense, groups, quality)
+        minor_samples[fallback] = samples
+        minor_groups[fallback] = group_counts
+    return minor_samples, minor_groups
+
+
 def compact_statistics(
     raw: np.ndarray, observed: np.ndarray, sites: np.ndarray, residues: np.ndarray,
     groups: np.ndarray, quality: AminoAcidSiteFilter, *, audit: bool,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    from phenoradar.amino_acid import _quality_summary
-
     if not audit:
         from phenoradar.amino_acid_kernels import compact_statistics_native
 
@@ -216,13 +258,13 @@ def compact_statistics(
     known = np.zeros((n, 20), dtype=bool)
     known[sites, residues] = np.any(raw > 0, axis=0)
     eligible = known.sum(axis=1) >= quality.min_residue_states
-    minor_samples = np.zeros(n, dtype=int)
-    minor_groups = np.zeros(n, dtype=int)
     if audit:
-        dense = np.full((len(raw), n, 20), np.nan, dtype=np.float32)
-        dense[observed] = 0
-        dense[:, sites, residues] = raw
-        _, minor_samples, minor_groups = _quality_summary(dense, groups, quality)
+        minor_samples, minor_groups = _compact_quality_counts(
+            raw, observed, sites, residues, groups, quality,
+        )
+    else:
+        minor_samples = np.zeros(n, dtype=int)
+        minor_groups = np.zeros(n, dtype=int)
     counts = observed.sum(axis=0)
     means = np.zeros((n, 20), dtype=float)
     active = np.zeros((n, 20), dtype=bool)

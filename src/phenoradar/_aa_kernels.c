@@ -339,6 +339,7 @@ static PyMethodDef methods[] = {{"decode", decode, METH_VARARGS, NULL},
     {"gather_packed_columns", gather_packed_columns, METH_VARARGS, NULL},
     {"masked_counts", masked_counts, METH_VARARGS, NULL},
     {"observed_state_statistics", compact_statistics_kernel, METH_VARARGS, NULL},
+    {"compact_minor_support", compact_minor_support, METH_VARARGS, NULL},
     {NULL, NULL, 0, NULL}};
 static struct PyModuleDef module = {PyModuleDef_HEAD_INIT, "_aa_kernels", NULL, -1, methods};
 PyMODINIT_FUNC PyInit__aa_kernels(void) { return PyModule_Create(&module); }

@@ -89,6 +89,28 @@ def test_compact_statistics_keep_training_states_means_and_missing_semantics(n: 
         np.testing.assert_array_equal(new[eligible], old[eligible])
 
 
+def test_compact_quality_handles_rounding_threshold_ties_and_missing_states() -> None:
+    from phenoradar.amino_acid import _quality_summary
+    from phenoradar.amino_acid_encoding import compact_statistics
+
+    raw = np.zeros((6, 4, 20), dtype=np.float32)
+    raw[:, 0, 3] = 1
+    raw[:, 0, 12] = [0, 6e-8, 1e-7, 1.2e-7, 2e-7, 0]
+    raw[:, 1, [1, 19]] = [[1, 0], [0, 1], [0, 1], [1, 0], [.5, .5], [0, 0]]
+    raw[5, :2] = np.nan
+    raw[:, 2, 5] = 1
+    sites, residues = np.nonzero(np.any(raw > 0, axis=0))
+    groups = np.array([7, 0, 7, 2, 2, 3])
+    quality = settings().site_filter
+    eligible, samples, group_counts = _quality_summary(raw, groups, quality)
+    result = compact_statistics(
+        raw[:, sites, residues], np.isfinite(raw[:, :, 0]), sites, residues, groups, quality,
+        audit=True,
+    )
+    for actual, expected in zip(result[:3], (eligible, samples, group_counts), strict=True):
+        np.testing.assert_array_equal(actual, expected)
+
+
 def test_encoding_can_spill_after_buffering_without_changing_columns() -> None:
     from phenoradar.amino_acid_encoding import FoldEncoding
 
