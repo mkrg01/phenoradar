@@ -103,7 +103,7 @@ def _site_label(site: dict[str, Any]) -> str:
     return f"{name}\n{address}" if name else address
 
 
-def _composition_figure(table: pl.DataFrame) -> Figure:
+def _composition_figure(table: pl.DataFrame, *, trait_name: str = "Trait") -> Figure:
     label_col = "predicted_class" if "predicted_class" in table.columns else "trait"
     population_only = "grouping" in table.columns and table["grouping"][0] == "all_species"
     group_heading = "Population" if population_only else "Group"
@@ -130,7 +130,11 @@ def _composition_figure(table: pl.DataFrame) -> Figure:
     group_width = max(probe.get_window_extent(renderer).width for probe in probes) / fig.dpi
     for probe in probes:
         probe.remove()
-    meta_width = max(1.85, group_width + 1.55)
+    label_heading = "Predicted\nclass" if label_col == "predicted_class" else trait_name
+    trait_probe = fig.text(0, 0, label_heading, fontsize=8)
+    trait_extra = max(0., trait_probe.get_window_extent(renderer).width / fig.dpi - .36)
+    trait_probe.remove()
+    meta_width = max(1.85, group_width + 1.55) + trait_extra
     matrix_width = max(column * sites.height, 4.5)
     matrix_height = max(.65, context.height * .2215)
     width, height = meta_width + matrix_width + .55, header + matrix_height + 1.2
@@ -150,9 +154,9 @@ def _composition_figure(table: pl.DataFrame) -> Figure:
                   rotation_mode="anchor", fontsize=7.4)
     ax.tick_params(axis="x", top=True, bottom=False, labeltop=True, labelbottom=False,
                    length=0, pad=7)
-    trait_x, n_x, prob_x = meta_width - 1.20, meta_width - .81, meta_width - .30
+    trait_x = meta_width - 1.20 - trait_extra/2
+    n_x, prob_x = meta_width - .81, meta_width - .30
     prob_label = "Mean OOF p" if probability_col == "mean_oof_probability" else "Mean p"
-    label_heading = "Predicted\nclass" if label_col == "predicted_class" else "Trait"
     for title, x in [(group_heading, .03), (label_heading, trait_x),
                      ("n", n_x), (prob_label, prob_x)]:
         meta.text(x, -.3, title, ha="left" if title == group_heading else "center", va="bottom",
@@ -223,6 +227,7 @@ def write_group_trait_composition(
     *, aggregation: str, annotations: pl.DataFrame | None = None,
     stage: str = "cv",
     prediction_labels: bool = False,
+    trait_name: str = "Trait",
 ) -> list[str]:
     """Write only the composition summary, including existing accepted-only populations."""
     stem = _STEM.replace("group_trait", "group_prediction") if prediction_labels else _STEM
@@ -258,7 +263,7 @@ def write_group_trait_composition(
             table = table.rename({"trait": "predicted_class"}).with_columns(
                 pl.lit(FIXED_PROBABILITY_THRESHOLD_VALUE).alias("classification_threshold"))
         table.write_csv(table_path, separator="\t")
-        fig = _composition_figure(table)
+        fig = _composition_figure(table, trait_name=trait_name)
         figure_path.parent.mkdir(parents=True, exist_ok=True)
         # Explicit axes use measured full headers; automatic layout would move the matrix cells.
         fig.savefig(figure_path, format="svg", metadata={"Date": None})

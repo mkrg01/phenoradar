@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import importlib
 import math
 from collections.abc import Callable, Iterable, Iterator
@@ -159,6 +160,7 @@ def write_expression_tree_heatmaps(
     *, run_dir: Path, stage: str, tree_path: Path | None, predictions: pl.DataFrame,
     feature_importance: pl.DataFrame, coefficients: pl.DataFrame, tpm_path: Path,
     species_col: str, feature_col: str, value_col: str,
+    trait_name: str = "trait",
     top_feature_expression: pl.DataFrame | None = None,
     feature_limit: int = DEFAULT_TOP_FEATURES,
     orthogroup_annotations: pl.DataFrame | None = None,
@@ -186,6 +188,7 @@ def write_expression_tree_heatmaps(
         "tree_path": tree_path, "annotation": annotation, "value_col": column,
         "out_path": _stage_figures_dir(run_dir, stage) / f"tree_feature_heatmap_{suffix}.svg",
         "title": "", "cmap_name": cmap, "annotate_features": True,
+        "trait_name": trait_name,
     }) for suffix, column, cmap in [("log2_tpm", "log2_tpm_plus1", "viridis"),
                                     ("zscore", "z_score_log2_tpm", "coolwarm")]]
     results = _run_tree_svg_jobs(jobs, parallel_workers=parallel_workers,
@@ -300,6 +303,7 @@ def write_run_tree_prediction_artifacts(
                     "title": "",
                     "cmap_name": "coolwarm",
                     "annotate_features": orthogroup_annotations is not None,
+                    "trait_name": trait_col,
                 },
             )
             add_svg_job(
@@ -313,6 +317,7 @@ def write_run_tree_prediction_artifacts(
                     "title": "",
                     "cmap_name": "viridis",
                     "annotate_features": orthogroup_annotations is not None,
+                    "trait_name": trait_col,
                 },
             )
         else:
@@ -363,6 +368,7 @@ def write_run_tree_prediction_artifacts(
                     run_dir=run_dir, stage=stage, tree_path=tree_path, predictions=context,
                     tpm_path=tpm_path, species_col=species_col, feature_col=feature_col,
                     value_col=value_col, feature_importance=final_feature_importance,
+                    trait_name=trait_col,
                     coefficients=final_coefficients, feature_limit=feature_limit,
                     orthogroup_annotations=orthogroup_annotations,
                     preserve_missing=preserve_missing,
@@ -451,6 +457,7 @@ def write_predict_tree_prediction_artifacts(
         run_dir=run_dir, stage="inference", tree_path=tree_path, predictions=annotation,
         tpm_path=tpm_path, species_col=species_col, feature_col=feature_col, value_col=value_col,
         feature_importance=feature_importance, coefficients=coefficients,
+        trait_name=trait_col,
         feature_limit=feature_limit,
         orthogroup_annotations=orthogroup_annotations, preserve_missing=preserve_missing,
         zero_as_missing=zero_as_missing,
@@ -1197,6 +1204,7 @@ def _write_tree_feature_heatmap_svg(
     cmap_name: str,
     annotate_features: bool = False,
     tracks: list[str] | None = None,
+    trait_name: str = "trait",
 ) -> list[str]:
     if annotation.height == 0:
         return [f"Skipped {out_path.name}: annotation table is empty."]
@@ -1250,6 +1258,7 @@ def _write_tree_feature_heatmap_svg(
         cmap_name=cmap_name,
         annotate_features=annotate_features,
         tracks=tree_context_tracks(annotation) if tracks is None else tracks,
+        trait_name=trait_name,
         toytree_module=toytree,
     )
     return warnings
@@ -1407,6 +1416,7 @@ def _draw_toytree_feature_heatmap(
     annotate_features: bool,
     toytree_module: Any,
     tracks: list[str],
+    trait_name: str,
 ) -> None:
     feature_rows = (
         annotation.select(["feature_rank", "feature", "orthogroup_annotation"])
@@ -1429,8 +1439,6 @@ def _draw_toytree_feature_heatmap(
         feature_labels = features
         feature_titles = features
     if value_col == "residue":
-        import html
-
         # Only descriptions may be shortened: the OG and original MSA site are essential.
         feature_labels = [html.escape(_feature_heatmap_label(
             row["feature"], row.get("orthogroup_annotation") if annotate_features else None,
@@ -1456,16 +1464,19 @@ def _draw_toytree_feature_heatmap(
     ]
     heatmap_end_x = feature_xs[-1] + feature_step / 2.0
     species_x = heatmap_end_x + 12
-    feature_label_depth_px = _feature_label_depth_px(feature_labels)
+    feature_label_depth_px = _feature_label_depth_px([*feature_labels, trait_name])
     text = importlib.import_module("toyplot.text")
     left, right, _, _ = text.extents(
         tip_labels, angle=0,
         style={"font-family": "Helvetica", "font-size": "9px", "text-anchor": "start"},
     )
     species_width = max(80, math.ceil(float(max(right - left))) + 16)
+    trait_legend = [html.escape(f"{trait_name}: {value}") for value in [0, 1]]
+    left, right, _, _ = text.extents(trait_legend, angle=0, style={"font-size": "9px"})
+    sidebar_width = max(270, math.ceil(2 * (float(max(right - left)) + 32) + 35))
     canvas, axes, headers, width, tree_axes = _tree_table_canvas(
         tree, tip_labels, table_width=int(species_x) + species_width,
-        header_height=max(64, feature_label_depth_px + 16), sidebar_width=270,
+        header_height=max(64, feature_label_depth_px + 16), sidebar_width=sidebar_width,
         minimum_height=530 if value_col == "residue" else 380,
     )
 
@@ -1488,11 +1499,12 @@ def _draw_toytree_feature_heatmap(
     finite_values = [] if residues else _finite_values(annotation, value_col)
     vmin, vmax = (0.0, 1.0) if residues else _heatmap_domain(value_col, finite_values)
     for x, cell_width, track in zip(context_xs, context_widths, context_columns, strict=True):
+        heading = trait_name if track == "true_label" else _track_label(track)
         raw_values = [context_rows.get(s, {}).get(track) for s in tip_labels]
         cell_colors = ([_trait_color(v) for v in raw_values] if track == "true_label" else
                   [_continuous_color(v, vmin=0, vmax=1, cmap_name=_PROBABILITY_CMAP)
                    for v in raw_values] if track == "prob" else [])
-        cell_titles = [f"{s} {_track_label(track)}={_format_value(v)}"
+        cell_titles = [f"{s} {heading}={_format_value(v)}"
                        for s, v in zip(tip_labels, raw_values, strict=True)]
         if cell_colors:
             axes.rectangle(
@@ -1510,7 +1522,7 @@ def _draw_toytree_feature_heatmap(
             color=[_cell_text_color(c) for c in cell_colors] if cell_colors else _TEXT_COLOR,
             title=cell_titles, style={"font-size": "9px", "text-anchor": "middle"},
         )
-        headers.text(x, 0, _track_label(track), angle=90, color=_TEXT_COLOR,
+        headers.text(x, 0, html.escape(heading), angle=90, color=_TEXT_COLOR,
                      style={"font-size": "9px", "text-anchor": "start"})
     boundaries = _draw_context_boundaries(
         axes, tip_labels, context_rows, tracks, end_x=species_x + species_width - 12,
@@ -1575,7 +1587,8 @@ def _draw_toytree_feature_heatmap(
             vmin=vmin, vmax=vmax, cmap_name=cmap_name,
             y_offset=170,
         )
-    _draw_context_legend(canvas=canvas, width=width)
+    _draw_context_legend(canvas=canvas, width=width, sidebar_width=sidebar_width,
+                         labels=trait_legend)
     _draw_boundary_legend(canvas, width, boundaries, y=465 if residues else 310)
     _save_toytree_svg(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
 
@@ -1652,13 +1665,16 @@ def _cell_text_color(color: str) -> str:
     return "#000000" if luminance > .179 else "#ffffff"
 
 
-def _draw_context_legend(*, canvas: Any, width: int) -> None:
-    legend = canvas.cartesian(bounds=(width - 270, width - 35, 25, 85),
-                              show=False, xmin=0, xmax=1, ymin=0, ymax=1)
-    for value, x in [(0, .02), (1, .50)]:
-        legend.rectangle(x, x + .07, .35, .65, color=BINARY_TRAIT_COLORS[value],
+def _draw_context_legend(*, canvas: Any, width: int, sidebar_width: int, labels: list[str]) -> None:
+    legend_width = sidebar_width - 35
+    sidebar_x = width - sidebar_width
+    legend = canvas.cartesian(bounds=(sidebar_x, width - 35, 25, 85),
+                              show=False, xmin=0, xmax=legend_width, ymin=0, ymax=1)
+    for value, label in enumerate(labels):
+        x = 4 + value * legend_width/2
+        legend.rectangle(x, x + 16, .35, .65, color=BINARY_TRAIT_COLORS[value],
                          style={"stroke": "none"})
-        legend.text(x + .10, .5, f"Trait {value}", color=_TEXT_COLOR,
+        legend.text(x + 23, .5, label, color=_TEXT_COLOR,
                     style={"font-size": "9px", "text-anchor": "start"})
     locator = importlib.import_module("toyplot.locator")
     canvas.color_scale(

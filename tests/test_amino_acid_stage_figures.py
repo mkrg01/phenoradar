@@ -44,13 +44,15 @@ def test_external_group_trait_composition_has_final_prediction_labels(tmp_path: 
 
     store, sites, context, annotations = inputs(tmp_path)
     with store:
-        write_group_trait_composition(tmp_path, store, sites, context, aggregation="aa_frequency",
-                                      annotations=annotations, stage="external_test")
+        write_group_trait_composition(
+            tmp_path, store, sites, context, aggregation="aa_frequency",
+            annotations=annotations, stage="external_test", trait_name="C4",
+        )
     table = pl.read_csv(tmp_path / "external_test/tables/amino_acid_group_trait_composition.tsv",
                         separator="\t")
     assert "mean_probability" in table.columns and "mean_oof_probability" not in table.columns
     svg = (tmp_path / "external_test/figures/amino_acid_group_trait_composition.svg").read_text()
-    assert "Mean p" in svg and "OOF" not in svg
+    assert "Mean p" in svg and "OOF" not in svg and ">C4<" in svg
 
 
 def test_external_composition_without_groups_uses_all_observed_species(tmp_path: Path) -> None:

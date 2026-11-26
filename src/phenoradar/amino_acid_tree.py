@@ -91,6 +91,7 @@ def write_residue_tree(
     run_dir: Path, tree_path: Path | None, store: AlignmentStore, sites: pl.DataFrame,
     predictions: pl.DataFrame, *, aggregation: str, annotations: pl.DataFrame | None = None,
     stage: str = "cv",
+    trait_name: str = "trait",
 ) -> list[str]:
     if tree_path is None:
         return []
@@ -107,4 +108,5 @@ def write_residue_tree(
         out_path=run_dir / stage / "figures/tree_feature_heatmap_amino_acid.svg",
         title="",
         annotate_features=True,
+        trait_name=trait_name,
     )

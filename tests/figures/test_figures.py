@@ -1548,7 +1548,7 @@ def test_cv_fold_trait_probability_writes_svg(tmp_path: Path) -> None:
     assert "Fold-wise probability distribution" not in svg_text
     assert "fold=0" not in svg_text
     assert "fold=1" not in svg_text
-    assert "C4" in svg_text
+    assert ">C4: 0<" in svg_text and ">C4: 1<" in svg_text
     assert "C4=0" not in svg_text
     assert "C4=1" not in svg_text
     assert "#f7f7f7" in svg_text

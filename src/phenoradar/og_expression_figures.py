@@ -145,7 +145,9 @@ def _wrap_title(title: str, font: FontProperties, width: float) -> str:
     return "\n".join([*lines, line])
 
 
-def _distribution_page(summary: pl.DataFrame, points: pl.DataFrame, ranks: list[int]) -> Figure:
+def _distribution_page(
+    summary: pl.DataFrame, points: pl.DataFrame, ranks: list[int], *, trait_name: str = "Trait",
+) -> Figure:
     groups = summary.select("group_index", "group_id").unique().sort("group_index")["group_id"]
     ogs = [summary.filter(pl.col("og_rank") == rank).row(0, named=True) for rank in ranks]
     name_font = FontProperties(size=9, weight="bold")
@@ -153,7 +155,9 @@ def _distribution_page(summary: pl.DataFrame, points: pl.DataFrame, ranks: list[
     measure = TextToPath().get_text_width_height_descent
     group_width = max(.31, (max(measure(g, tick_font, ismath=False)[0] for g in groups) + 6) / 72)
     left, right = .62, .14
-    legend_width = 1.5
+    legend_labels = [f"{trait_name}: {trait}" for trait in [0, 1]]
+    legend_width = max(1.25, (sum(measure(label, tick_font, ismath=False)[0]
+                                  for label in legend_labels) + 32) / 72)
     names = [
         " ".join((og["orthogroup_annotation"] or "").split()) for og in ogs
     ]
@@ -179,8 +183,8 @@ def _distribution_page(summary: pl.DataFrame, points: pl.DataFrame, ranks: list[
     fig = plt.figure(figsize=(width, height), facecolor="white")
     handles = [
         Line2D([], [], marker="o", ms=4, lw=0, color=BINARY_TRAIT_COLORS[trait],
-               markeredgecolor="none", label=f"Trait {trait}")
-        for trait in [0, 1]
+               markeredgecolor="none", label=label)
+        for trait, label in enumerate(legend_labels)
     ]
     cursor = height - .13
     fig.legend(handles=handles, ncol=2, frameon=False, loc="upper right",
@@ -245,7 +249,7 @@ def _distribution_page(summary: pl.DataFrame, points: pl.DataFrame, ranks: list[
     return fig
 
 
-def _heatmap_figure(summary: pl.DataFrame) -> Figure:
+def _heatmap_figure(summary: pl.DataFrame, *, trait_name: str = "Trait") -> Figure:
     ogs = summary.unique("og_rank", maintain_order=True).sort("og_rank")
     context = summary.select("group_index", "group_id", "trait", "n_total").unique().sort(
         "group_index", "trait")
@@ -265,7 +269,11 @@ def _heatmap_figure(summary: pl.DataFrame) -> Figure:
     group_width = max(t.get_window_extent(renderer).width for t in probes)/fig.dpi
     for t in probes:
         t.remove()
-    metadata_width, matrix_width = max(1.6, group_width+1.25), max(4.5, column*ogs.height)
+    trait_probe = fig.text(0, 0, trait_name, fontsize=8)
+    trait_extra = max(0., trait_probe.get_window_extent(renderer).width / fig.dpi - .36)
+    trait_probe.remove()
+    metadata_width = max(1.6, group_width + 1.25) + trait_extra
+    matrix_width = max(4.5, column*ogs.height)
     height = header + max(.7, context.height*.22) + 1.15
     width = metadata_width + matrix_width + .5
     fig.set_size_inches(width, height)
@@ -292,7 +300,7 @@ def _heatmap_figure(summary: pl.DataFrame) -> Figure:
         ax.axvline(j, color="white", lw=.25)
     for r in range(1, context.height):
         ax.axhline(r, color="white", lw=.25)
-    trait_x, n_x = metadata_width-.76, metadata_width-.3
+    trait_x, n_x = metadata_width - .76 - trait_extra/2, metadata_width - .3
     for r, row in enumerate(context.iter_rows(named=True)):
         if row["trait"] == 0:
             if row["group_index"] % 2 == 0:
@@ -309,7 +317,7 @@ def _heatmap_figure(summary: pl.DataFrame) -> Figure:
         for missing_index in np.flatnonzero(~np.isfinite(matrix[r])):
             ax.text(missing_index+.5, r+.5, "NA", ha="center", va="center",
                     fontsize=5.5, color="#444444")
-    for x, label in [(.02, "Group"), (trait_x, "Trait"), (n_x, "n total")]:
+    for x, label in [(.02, "Group"), (trait_x, trait_name), (n_x, "n total")]:
         meta.text(x, -.25, label, ha="left" if x == .02 else "center", va="bottom", fontsize=8)
     cax = fig.add_axes((.30, .40/height, .55, .12/height))
     cbar = fig.colorbar(image, cax=cax, orientation="horizontal")
@@ -365,7 +373,7 @@ def write_group_trait_expression(
             rank_width = max(2, len(str(max(ranks))))
             for og in summary.unique("og_rank", maintain_order=True).iter_rows(named=True):
                 rank = og["og_rank"]
-                fig = _distribution_page(summary, points, [rank])
+                fig = _distribution_page(summary, points, [rank], trait_name=config.data.trait_col)
                 og_id = quote(og["orthogroup"], safe="")
                 fig.savefig(og_dir / f"{rank:0{rank_width}d}_{og_id}.svg",
                             metadata={"Date": None})
@@ -373,10 +381,11 @@ def write_group_trait_expression(
             with PdfPages(figure_dir / f"{_DISTRIBUTION}.pdf", metadata={"CreationDate": None,
                                                                  "ModDate": None}) as pdf:
                 for start in range(0, len(ranks), 4):
-                    fig = _distribution_page(summary, points, ranks[start:start+4])
+                    fig = _distribution_page(summary, points, ranks[start:start+4],
+                                             trait_name=config.data.trait_col)
                     pdf.savefig(fig)
                     plt.close(fig)
-            fig = _heatmap_figure(summary)
+            fig = _heatmap_figure(summary, trait_name=config.data.trait_col)
             fig.savefig(figure_dir / f"{_HEATMAP}.svg", metadata={"Date": None})
             fig.savefig(figure_dir / f"{_HEATMAP}.pdf",
                         metadata={"CreationDate": None, "ModDate": None})

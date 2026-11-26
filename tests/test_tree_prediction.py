@@ -605,9 +605,9 @@ def test_write_run_tree_prediction_artifacts_writes_annotation_without_tree_extr
         assert 'rotate(-90.0)"><text x="0"' in svg_text
         assert "rotate(90.0)" not in svg_text
         assert "rotate(65.0)" not in svg_text
-        assert ">trait<" in svg_text
-        assert "sp1 trait=0" in svg_text
-        assert "sp2 trait=1" in svg_text
+        assert ">C4<" in svg_text
+        assert "sp1 C4=0" in svg_text
+        assert "sp2 C4=1" in svg_text
         assert ">prob<" in svg_text
         assert ">0.20<" in svg_text
         assert ">0.80<" in svg_text

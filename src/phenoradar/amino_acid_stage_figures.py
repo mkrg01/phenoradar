@@ -72,6 +72,7 @@ def write_prediction_interpretation(
     warnings = write_residue_tree(
         run_dir, tree_path, store, sites, context, stage=stage,
         aggregation=config.preprocess.amino_acid.aggregation, annotations=annotations,
+        trait_name=config.data.trait_col,
     )
     tables = run_dir / stage / "tables"
     tables.mkdir(parents=True, exist_ok=True)
@@ -88,6 +89,7 @@ def write_prediction_interpretation(
         run_dir, store, sites, context, stage=stage,
         aggregation=config.preprocess.amino_acid.aggregation, annotations=annotations,
         prediction_labels=stage in {"inference", "predict"},
+        trait_name=config.data.trait_col,
     ))
     if expression is not None:
         from phenoradar import figures
@@ -123,6 +125,7 @@ def write_prediction_interpretation(
                 tpm_path=Path(config.data.tpm_path),
                 species_col=config.data.species_col, feature_col=config.data.feature_col,
                 value_col=config.data.value_col, top_feature_expression=raw,
+                trait_name=config.data.trait_col,
                 feature_limit=limit, orthogroup_annotations=annotations,
                 preserve_missing=missing.method == "neutral",
                 zero_as_missing=config.preprocess.expression.missing_expression.zero_as_missing,

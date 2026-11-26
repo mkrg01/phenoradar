@@ -2733,7 +2733,7 @@ def _cv_fold_trait_probability(
             facecolor=to_rgba(trait_to_color[trait], 0.28),
             edgecolor=trait_to_color[trait],
             linewidth=0.8,
-            label=str(trait),
+            label=f"{trait_name}: {trait}",
         )
         for trait in traits
     ]
@@ -2747,7 +2747,6 @@ def _cv_fold_trait_probability(
         framealpha=0.95,
         facecolor="white",
         edgecolor="#dddddd",
-        title=trait_name,
         handlelength=1.1,
         handleheight=0.6,
         columnspacing=0.9,

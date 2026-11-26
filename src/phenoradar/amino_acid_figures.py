@@ -356,12 +356,14 @@ def write_amino_acid_figures(
                 oof,
                 aggregation=config.preprocess.amino_acid.aggregation,
                 annotations=annotations,
+                trait_name=config.data.trait_col,
             )
         )
         warnings.extend(write_group_trait_composition(
             run_dir, store, top_sites, oof,
             aggregation=config.preprocess.amino_acid.aggregation,
             annotations=annotations,
+            trait_name=config.data.trait_col,
         ))
     _frequency_by_confusion(run_dir, oof, limit, annotations)
     _site_filter_funnel(

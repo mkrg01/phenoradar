@@ -42,19 +42,20 @@ def test_tree_context_color_and_partition_identity(tmp_path: Path, shared: bool)
     original = annotation.clone()
     output = tmp_path / "heatmap.svg"
     assert _write_tree_feature_heatmap_svg(tree_path=tree, annotation=annotation,
-        value_col="log2_tpm_plus1", out_path=output, title="", cmap_name="viridis") == []
+        value_col="log2_tpm_plus1", out_path=output, title="", cmap_name="viridis",
+        trait_name="C4") == []
     assert annotation.equals(original)
     for path in [output, tmp_path / "accepted_only/heatmap.svg"]:
         text = visible(path)
         assert "Classification outcome" not in text
         assert "OOF confusion group" not in path.read_text()
-        assert {"trait", "prob", "group", "Trait 0", "Trait 1", "Predicted probability"} <= text
+        assert {"C4", "prob", "group", "C4: 0", "C4: 1", "Predicted probability"} <= text
         assert ("fold" in text) != shared
         # Non-LOGO must retain Fold even when the accepted subset happens to be bijective.
         assert "stroke-dasharray" in path.read_text()
         rectangles = [e for e in ET.parse(path).getroot().iter() if e.tag.endswith("}rect")]
         context_cells = [e for e in rectangles if any(
-            child.tag.endswith("}title") and (" trait=" in (child.text or "")
+            child.tag.endswith("}title") and (" C4=" in (child.text or "")
                                              or " prob=" in (child.text or ""))
             for child in e)]
         assert len(context_cells) == (6 if path.parent.name == "accepted_only" else 8)

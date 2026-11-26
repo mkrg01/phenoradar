@@ -355,6 +355,8 @@ contains the selected species/OGs: one SVG per OG in
 `og_expression_by_group_trait.pdf` and `og_expression_group_trait_heatmap.svg`/`.pdf`.
 Groups follow ascending ID order (numeric for numeric IDs) in all of these displays,
 regardless of tree order. Regeneration removes the retired numbered page SVGs.
+Observed classes use the configured trait name in figure headings and legends,
+such as `C4: 0` and `C4: 1`.
 AA selects unique OGs among the PSS-ranked sites;
 expression selects the top-importance OGs; combined uses their union. Distributions
 show one point per species, sorted within group and observed trait, with boxes for
