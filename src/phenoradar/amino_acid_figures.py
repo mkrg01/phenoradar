@@ -362,7 +362,6 @@ def write_amino_acid_figures(
             run_dir, store, top_sites, oof,
             aggregation=config.preprocess.amino_acid.aggregation,
             annotations=annotations,
-            tree_path=Path(config.data.tree_path) if config.data.tree_path else None,
         ))
     _frequency_by_confusion(run_dir, oof, limit, annotations)
     _site_filter_funnel(

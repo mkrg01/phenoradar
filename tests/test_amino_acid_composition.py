@@ -89,6 +89,25 @@ def test_full_labels_grouped_legend_and_accepted_population(tmp_path: Path) -> N
     plt.close(fig)
 
 
+@pytest.mark.parametrize(("stage", "predicted"), [("cv", False), ("inference", True)])
+def test_composition_uses_numeric_group_order(tmp_path: Path, stage: str, predicted: bool) -> None:
+    store, sites, predictions, _ = inputs(tmp_path)
+    predictions = predictions.with_columns(pl.Series("group_id", ["10", "2", "1", "2", "10"]))
+    label = "prediction" if predicted else "trait"
+    stem = f"amino_acid_group_{label}_composition"
+    with store:
+        write_group_trait_composition(tmp_path, store, sites, predictions,
+                                      aggregation="aa_frequency", stage=stage,
+                                      prediction_labels=predicted)
+    table = pl.read_csv(tmp_path / stage / "tables" / f"{stem}.tsv", separator="\t",
+                        schema_overrides={"group_id": pl.String})
+    assert table["group_id"].unique(maintain_order=True).to_list() == ["1", "2", "10"]
+    fig = _composition_figure(table)
+    labels = [t.get_text() for t in fig.axes[0].texts if t.get_position()[0] == .03]
+    assert labels == ["Group", "1", "2", "10"]
+    plt.close(fig)
+
+
 def test_no_sites_or_accepted_species_writes_explicit_empty_figure(tmp_path: Path) -> None:
     store, sites, predictions, _ = inputs(tmp_path)
     predictions = predictions.with_columns(pl.lit("abstained").alias("decision_status"))

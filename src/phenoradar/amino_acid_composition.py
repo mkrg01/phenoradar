@@ -16,7 +16,7 @@ from matplotlib.patches import Patch, Rectangle
 
 from phenoradar.amino_acid import ALPHABET, PREDICTION_BATCH_SIZE, AlignmentStore
 from phenoradar.colors import BINARY_TRAIT_COLORS
-from phenoradar.cv_display import ordered_prediction_groups as _group_order
+from phenoradar.cv_display import ordered_prediction_groups
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
@@ -33,7 +33,6 @@ _STEM = "amino_acid_group_trait_composition"
 def build_group_trait_composition(
     store: AlignmentStore, sites: pl.DataFrame, predictions: pl.DataFrame,
     *, aggregation: str, annotations: pl.DataFrame | None = None,
-    tree_path: Path | None = None,
     oof: bool = True,
 ) -> pl.DataFrame:
     """Aggregate raw observations in species batches; missing species get no weight.
@@ -52,7 +51,7 @@ def build_group_trait_composition(
     predictions = predictions.with_columns(pl.col("group_id").cast(pl.String))
     rows = []
     row_species = []
-    for group in _group_order(predictions, tree_path):
+    for group in ordered_prediction_groups(predictions):
         for trait in [0, 1]:
             subset = predictions.filter((pl.col("group_id") == group) & (pl.col("label") == trait))
             if subset.is_empty():
@@ -222,7 +221,6 @@ def _composition_figure(table: pl.DataFrame) -> Figure:
 def write_group_trait_composition(
     run_dir: Path, store: AlignmentStore, sites: pl.DataFrame, predictions: pl.DataFrame,
     *, aggregation: str, annotations: pl.DataFrame | None = None,
-    tree_path: Path | None = None,
     stage: str = "cv",
     prediction_labels: bool = False,
 ) -> list[str]:
@@ -244,7 +242,7 @@ def write_group_trait_composition(
     for suffix, population in prediction_figure_populations({"oof": predictions}):
         table = build_group_trait_composition(
             store, sites, population["oof"], aggregation=aggregation,
-            annotations=annotations, tree_path=tree_path, oof=stage == "cv",
+            annotations=annotations, oof=stage == "cv",
         )
         figure_path = population_figure_path(run_dir / stage / "figures" / f"{stem}.svg", suffix)
         table_path = population_figure_path(run_dir / stage / "tables" / f"{stem}.tsv", suffix)

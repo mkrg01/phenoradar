@@ -342,7 +342,7 @@ AA/combined runs instead write `tree_feature_heatmap_amino_acid.svg`.
 They also write `amino_acid_group_trait_composition.svg` and its matching TSV:
 equal-species residue compositions at the same PSS-ranked sites, by split group and
 observed trait, with species counts, mean OOF probability and observed-site fractions.
-This summary is available without a tree. Full annotation names are retained and
+Groups follow ascending ID order (numeric for numeric IDs). Full annotation names are retained and
 the legend groups residues sharing a Zappo color.
 
 All feature modes also write CV OG-expression diagnostics when `data.tpm_path`

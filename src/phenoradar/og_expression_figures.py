@@ -21,7 +21,7 @@ from matplotlib.ticker import MaxNLocator
 from phenoradar.colors import BINARY_TRAIT_COLORS
 from phenoradar.config import AppConfig
 from phenoradar.cv import CVError, ExpressionMatrixBuilder
-from phenoradar.cv_display import with_cv_groups
+from phenoradar.cv_display import ordered_prediction_groups, with_cv_groups
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
@@ -78,8 +78,7 @@ def expression_tables(
     ).height:
         raise ValueError("OG expression requires groups and observed binary labels")
     predictions = predictions.with_columns(pl.col("group_id").cast(pl.String))
-    groups = sorted(predictions["group_id"].unique().to_list(),
-                    key=lambda value: (0, int(value), value) if value.isdigit() else (1, 0, value))
+    groups = ordered_prediction_groups(predictions)
     lookup = _orthogroup_annotation_lookup(annotations)
     observed = values.join(predictions.select("species", "group_id", "label"), on="species",
                            how="inner", validate="m:1").with_columns(

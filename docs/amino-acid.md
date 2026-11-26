@@ -507,8 +507,8 @@ sites by split group and observed trait. Each cell shows the mean residue freque
 giving equal weight to species with an observed site. TPM weights apply only within
 species. Missing sites are excluded from the mean; the stripe below each cell shows
 the observed fraction of species. Rows include the species count and mean OOF
-probability. Groups follow the tree order when available; species absent from the
-tree remain included. Full annotation names wrap without truncation, and the Zappo
+probability. Groups follow ascending ID order (numeric for numeric IDs), and the
+summary includes species absent from the tree. Full annotation names wrap, and the Zappo
 legend combines residues sharing a color. The matching TSV retains all 20 residue
 means, total/observed counts, group, trait, PSS and site identifiers. Accepted-only
 figures and tables are written in their respective `accepted_only/` directories.

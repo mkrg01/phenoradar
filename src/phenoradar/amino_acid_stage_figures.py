@@ -85,7 +85,7 @@ def write_prediction_interpretation(
         if context["label"].is_not_null().any():
             write_frequency_by_confusion(run_dir, context, limit, annotations, stage=stage)
     warnings.extend(write_group_trait_composition(
-        run_dir, store, sites, context, stage=stage, tree_path=tree_path,
+        run_dir, store, sites, context, stage=stage,
         aggregation=config.preprocess.amino_acid.aggregation, annotations=annotations,
         prediction_labels=stage in {"inference", "predict"},
     ))
