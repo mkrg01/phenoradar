@@ -122,7 +122,11 @@ report:
     enabled: false  # amino_acid and combined runs only
     top_orthogroups: 20
     orthodb_release: null  # e.g. v12.2 when the annotation filename does not identify it
+    cache_dir: runs/.phenoradar_cache/site_resources
+    mafft_exe: mafft
+    pymol_exe: pymol
     render: false  # true writes the PDF and PyMOL session
+  cell_type_expression: null  # configure h5ad_path and gene_to_orthogroup_path to enable
 
 runtime:
   seed: 42
