@@ -84,18 +84,22 @@ def test_rank_og_sums_sites_before_applying_limit(
 
 
 @pytest.mark.parametrize(
-    ("mode", "stage", "report_format"),
+    ("mode", "stage", "report_format", "formats"),
     [
-        ("expression", "cv_only", "compact"),
-        ("expression", "full_run", "compact"),
-        ("amino_acid", "cv_only", "compact"),
-        ("amino_acid", "full_run", "full"),
-        ("combined", "cv_only", "full"),
-        ("combined", "full_run", "compact"),
+        ("expression", "cv_only", "compact", None),
+        ("expression", "full_run", "compact", None),
+        ("amino_acid", "cv_only", "compact", None),
+        ("amino_acid", "full_run", "full", None),
+        ("combined", "cv_only", "full", None),
+        ("combined", "full_run", "compact", None),
+        ("expression", "cv_only", "compact", ["pdf"]),
+        ("amino_acid", "cv_only", "compact", ["svg", "pdf"]),
+        ("combined", "cv_only", "compact", ["svg"]),
     ],
 )
-def test_run_writes_two_atlas_svg_figures(
+def test_run_writes_two_atlas_figures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, stage: str, report_format: str,
+    formats: list[str] | None,
 ) -> None:
     ad = pytest.importorskip("anndata")
     path = (fixture_config(tmp_path, "aa_frequency") if mode == "amino_acid"
@@ -103,7 +107,18 @@ def test_run_writes_two_atlas_svg_figures(
     config = yaml.safe_load(path.read_text())
     config["data"]["feature_mode"] = mode
     config["runtime"]["execution_stage"] = stage
-    config["figures"] = {"top_features": 1}
+    config["figures"] = {"top_features": 1, "formats": formats}
+    if formats is not None:
+        tree = tmp_path / "tree.nwk"
+        tree.write_text("((s0,s1),(s2,s3),(s4,s5),(s6,s7),external,unknown);\n")
+        config["data"]["tree_path"] = str(tree)
+        config["runtime"]["n_jobs"] = 2
+        if mode == "amino_acid":
+            tpm = tmp_path / "expression.tsv"
+            tpm.write_text("species\torthogroup\ttpm\n" + "".join(
+                f"s{i}\tOG1\t{i + 1}\n" for i in range(8)
+            ))
+            config["data"]["tpm_path"] = str(tpm)
     config["report"] = {
         "amino_acid_tables": report_format,
         "cell_type_expression": {
@@ -134,17 +149,35 @@ def test_run_writes_two_atlas_svg_figures(
     run = next(directory for directory in (tmp_path / "runs").iterdir() if directory.is_dir()
                and not directory.name.startswith("."))
     figure_dir = run / ("model" if stage == "full_run" else "cv") / "figures"
-    paths = sorted(run.glob("*/figures/cell_type_expression_*.svg"))
-    assert paths == [
-        figure_dir / "cell_type_expression_cpm.svg",
-        figure_dir / "cell_type_expression_zscore.svg",
-    ]
-    for figure, scale in zip(paths, ("CPM", "Row z-score"), strict=True):
-        labels = [node.text for node in ET.parse(figure).iter("{http://www.w3.org/2000/svg}text")]
-        assert scale in labels
-        assert labels.index("Type b") < labels.index("Type a")
-        assert ("Sequence group (OG1)" in labels) == (mode == "amino_acid")
-        assert ("Expression group (EXPR)" in labels) == (mode != "amino_acid")
+    selected = formats or ["svg"]
+    stems = {"cell_type_expression_cpm": "CPM", "cell_type_expression_zscore": "Row z-score"}
+    assert set(run.glob("*/figures/cell_type_expression_*")) == {
+        figure_dir / f"{stem}.{extension}" for extension in selected for stem in stems
+    }
+    for stem, scale in stems.items():
+        if "pdf" in selected:
+            assert (figure_dir / f"{stem}.pdf").read_bytes().startswith(b"%PDF-")
+        if "svg" in selected:
+            figure = figure_dir / f"{stem}.svg"
+            labels = [node.text for node in ET.parse(figure).iter("{http://www.w3.org/2000/svg}text")]
+            assert scale in labels
+            assert labels.index("Type b") < labels.index("Type a")
+            assert ("Sequence group (OG1)" in labels) == (mode == "amino_acid")
+            assert ("Expression group (EXPR)" in labels) == (mode != "amino_acid")
+    if formats is not None:
+        cv_figures = run / "cv/figures"
+        expected = ["cv_confusion_matrix", "og_expression_group_trait_heatmap"]
+        if mode == "expression":
+            expected.append("tree_feature_heatmap_zscore")
+        elif mode == "amino_acid":
+            expected.append("tree_feature_heatmap_amino_acid")
+        for stem in expected:
+            assert {path.suffix for path in cv_figures.glob(f"{stem}.*")} == {
+                f".{extension}" for extension in selected
+            }
+        distributions = cv_figures / "og_expression_by_group_trait"
+        assert distributions.with_suffix(".pdf").exists() == ("pdf" in selected)
+        assert bool(list(distributions.glob("*.svg"))) == ("svg" in selected)
 
 
 def test_combined_atlas_uses_both_rankings_and_displays_overlap_once(tmp_path: Path) -> None:

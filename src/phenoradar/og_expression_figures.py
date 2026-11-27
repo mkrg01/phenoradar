@@ -24,16 +24,18 @@ from matplotlib.transforms import offset_copy
 
 from phenoradar.colors import BINARY_TRAIT_COLORS
 from phenoradar.config import AppConfig
+from phenoradar.config.schema import FigureFormat
 from phenoradar.cv import CVError, ExpressionMatrixBuilder
 from phenoradar.cv_display import ordered_prediction_groups, with_cv_groups
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
-    write_population_message_svg,
+    write_population_message,
 )
 from phenoradar.figures import (
     _feature_address,
     _orthogroup_annotation_lookup,
+    _save_figure,
     _top_feature_importance_features,
 )
 from phenoradar.tree_prediction import _cell_text_color
@@ -344,6 +346,7 @@ def write_group_trait_expression(
     if values.is_empty():
         return ["OG expression figures skipped: "
                 "no selected species/OG coordinates in data.tpm_path."]
+    formats: tuple[FigureFormat, ...] = tuple(config.figures.formats or ("svg", "pdf"))
     for suffix, population in prediction_figure_populations({"cv": predictions}):
         figure_dir = population_figure_path(run_dir / "cv/figures" / "placeholder", suffix).parent
         table_dir = population_figure_path(run_dir / "cv/tables" / "placeholder", suffix).parent
@@ -351,14 +354,18 @@ def write_group_trait_expression(
         table_dir.mkdir(parents=True, exist_ok=True)
         og_dir = figure_dir / _DISTRIBUTION
         og_dir.mkdir(parents=True, exist_ok=True)
-        # Remove retired page SVGs and individual OGs no longer selected.
+        # Remove retired page SVGs, stale OG plots and the previous format selection.
         for path in [*figure_dir.glob(f"{_DISTRIBUTION}_*.svg"),
-                     *og_dir.glob("*.svg"),
-                     figure_dir / f"{_DISTRIBUTION}.pdf", figure_dir / f"{_HEATMAP}.pdf"]:
+                     *og_dir.glob("*.svg"), *og_dir.glob("*.pdf"),
+                     figure_dir / f"{_DISTRIBUTION}.pdf",
+                     figure_dir / f"{_HEATMAP}.svg", figure_dir / f"{_HEATMAP}.pdf"]:
             path.unlink(missing_ok=True)
         if population["cv"].is_empty():
             for path in [og_dir / "no_accepted_species.svg", figure_dir / f"{_HEATMAP}.svg"]:
-                write_population_message_svg(path, "No accepted species.")
+                write_population_message(
+                    path, "No accepted species.",
+                    formats=formats if config.figures.formats is not None else ("svg",),
+                )
             for name in ["og_expression_group_trait_summary", "og_expression_species"]:
                 (table_dir / f"{name}.tsv").unlink(missing_ok=True)
             continue
@@ -371,23 +378,29 @@ def write_group_trait_expression(
                              "axes.spines.right": False, "axes.linewidth": .65}):
             ranks = summary["og_rank"].unique(maintain_order=True).to_list()
             rank_width = max(2, len(str(max(ranks))))
-            for og in summary.unique("og_rank", maintain_order=True).iter_rows(named=True):
-                rank = og["og_rank"]
-                fig = _distribution_page(summary, points, [rank], trait_name=config.data.trait_col)
-                og_id = quote(og["orthogroup"], safe="")
-                fig.savefig(og_dir / f"{rank:0{rank_width}d}_{og_id}.svg",
-                            metadata={"Date": None})
-                plt.close(fig)
-            with PdfPages(figure_dir / f"{_DISTRIBUTION}.pdf", metadata={"CreationDate": None,
-                                                                 "ModDate": None}) as pdf:
-                for start in range(0, len(ranks), 4):
-                    fig = _distribution_page(summary, points, ranks[start:start+4],
-                                             trait_name=config.data.trait_col)
-                    pdf.savefig(fig)
-                    plt.close(fig)
+            if "svg" in formats:
+                for og in summary.unique("og_rank", maintain_order=True).iter_rows(named=True):
+                    rank = og["og_rank"]
+                    fig = _distribution_page(
+                        summary, points, [rank], trait_name=config.data.trait_col,
+                    )
+                    og_id = quote(og["orthogroup"], safe="")
+                    _save_figure(
+                        fig, og_dir / f"{rank:0{rank_width}d}_{og_id}.svg",
+                        formats=("svg",), layout=False,
+                    )
+            if "pdf" in formats:
+                with PdfPages(
+                    figure_dir / f"{_DISTRIBUTION}.pdf",
+                    metadata={"CreationDate": None, "ModDate": None},
+                ) as pdf:
+                    for start in range(0, len(ranks), 4):
+                        fig = _distribution_page(
+                            summary, points, ranks[start:start + 4],
+                            trait_name=config.data.trait_col,
+                        )
+                        pdf.savefig(fig)
+                        plt.close(fig)
             fig = _heatmap_figure(summary, trait_name=config.data.trait_col)
-            fig.savefig(figure_dir / f"{_HEATMAP}.svg", metadata={"Date": None})
-            fig.savefig(figure_dir / f"{_HEATMAP}.pdf",
-                        metadata={"CreationDate": None, "ModDate": None})
-            plt.close(fig)
+            _save_figure(fig, figure_dir / f"{_HEATMAP}.svg", formats=formats, layout=False)
     return []

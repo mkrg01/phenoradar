@@ -17,14 +17,14 @@ from phenoradar.phylogenetic_imputation import PhylogeneticImputationArtifacts
 @pytest.fixture
 def rendered(monkeypatch: pytest.MonkeyPatch) -> list[Figure]:
     result: list[Figure] = []
-    save = figures._save_svg_figure
+    save = figures._save_figure
 
     def capture(fig: Figure, path: Path) -> None:
         save(fig, path)
         result.append(fig)
 
-    monkeypatch.setattr(figures, "_save_svg_figure", capture)
-    monkeypatch.setattr("phenoradar.phylogenetic_figures._save_svg_figure", capture)
+    monkeypatch.setattr(figures, "_save_figure", capture)
+    monkeypatch.setattr("phenoradar.phylogenetic_figures._save_figure", capture)
     return result
 
 

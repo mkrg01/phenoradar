@@ -90,13 +90,22 @@ def test_predict_all_tpm_species_without_metadata_or_training(
     args = ["predict", "--model-bundle", str(bundle_dir), "--n-jobs", "2"]
     if use_config:
         config = tmp_path / "predict.yml"
-        config.write_text(yaml.safe_dump({"data": {"tpm_path": str(tpm)}}))
+        config.write_text(yaml.safe_dump({
+            "data": {"tpm_path": str(tpm)}, "figures": {"formats": ["pdf"]},
+        }))
         args += ["-c", str(config)]
     else:
         args += ["--tpm-path", str(tpm)]
     result = CliRunner().invoke(app, args)
     assert result.exit_code == 0, result.output
     run = next((tmp_path / "runs").glob("*_predict_*"))
+    figure = run / "inference/figures/predict_probability_distribution"
+    if use_config:
+        assert figure.with_suffix(".pdf").read_bytes().startswith(b"%PDF-")
+        assert not figure.with_suffix(".svg").exists()
+    else:
+        assert figure.with_suffix(".svg").exists()
+        assert not figure.with_suffix(".pdf").exists()
     actual = pl.read_csv(run / "inference/tables/prediction_inference.tsv", separator="\t")
     assert actual["species"].to_list() == expected["species"].to_list()
     np.testing.assert_allclose(actual["prob"], expected["prob"], atol=1e-8)

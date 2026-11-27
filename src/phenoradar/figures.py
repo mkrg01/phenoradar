@@ -1,4 +1,4 @@
-"""Deterministic SVG figure generation for run/predict/report artifacts."""
+"""Vector figure generation for run, predict, and report artifacts."""
 
 from __future__ import annotations
 
@@ -36,14 +36,19 @@ from sklearn.metrics import (
 
 from phenoradar.abstention import prediction_label_expr
 from phenoradar.colors import BINARY_TRAIT_COLORS, CONFUSION_GROUP_COLORS, CONFUSION_GROUP_ORDER
-from phenoradar.config.schema import DEFAULT_TOP_FEATURES
+from phenoradar.config.schema import DEFAULT_TOP_FEATURES, FigureFormat
 from phenoradar.cv_display import fold_group_labels
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
     remove_legacy_population_figure,
 )
-from phenoradar.figure_runtime import FigureWorkers, candidate_pdf_worker_count
+from phenoradar.figure_runtime import (
+    FigureWorkers,
+    candidate_pdf_worker_count,
+    figure_formats,
+    use_figure_formats,
+)
 from phenoradar.group_summary import GroupSummaryError, finite_group_probabilities
 from phenoradar.metrics import (
     FIXED_PROBABILITY_THRESHOLD_NAME,
@@ -331,17 +336,27 @@ def _compact_bottom_margin(height_px: int) -> float:
     return min(0.24, max(0.065, 42 / height_px))
 
 
-def _save_svg_figure(fig: Figure, out_path: Path) -> None:
-    _publication_layout(fig)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(
-        out_path,
-        format="svg",
-        dpi=_FIG_DPI,
-        metadata={"Date": None},
-    )
-    remove_legacy_population_figure(out_path)
-    plt.close(fig)
+def _save_figure(
+    fig: Figure, out_path: Path, *,
+    formats: tuple[FigureFormat, ...] | None = None, layout: bool = True,
+) -> None:
+    try:
+        if layout:
+            _publication_layout(fig)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        for extension in formats or figure_formats.get() or ("svg",):
+            path = out_path.with_suffix(f".{extension}")
+            fig.savefig(
+                path,
+                format=extension,
+                dpi=_FIG_DPI if layout else "figure",
+                metadata={"Date": None} if extension == "svg" else {
+                    "Creator": "PhenoRadar", "CreationDate": None, "ModDate": None,
+                },
+            )
+            remove_legacy_population_figure(path)
+    finally:
+        plt.close(fig)
 
 
 def _publication_layout(fig: Figure) -> None:
@@ -515,10 +530,12 @@ def _execute_figure_job(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
     catch_figure_error: bool,
+    formats: tuple[FigureFormat, ...] | None,
 ) -> tuple[str, list[str], float, float]:
     started = perf_counter()
     try:
-        func(*args, **kwargs)
+        with use_figure_formats(formats):
+            func(*args, **kwargs)
     except FigureError as exc:
         if catch_figure_error:
             return name, [str(exc)], started, perf_counter()
@@ -533,6 +550,7 @@ def _run_figure_jobs(
 ) -> list[str]:
     if not jobs:
         return []
+    formats = figure_formats.get()
     worker_count = max(1, min(int(parallel_workers), len(jobs)))
     if worker_count == 1:
         sequential_warnings: list[str] = []
@@ -543,6 +561,7 @@ def _run_figure_jobs(
                 args,
                 kwargs,
                 catch_figure_error,
+                formats,
             )
             if timing_recorder is not None:
                 timing_recorder.record_interval(started, ended, scope="figure_job", stage=name)
@@ -562,6 +581,7 @@ def _run_figure_jobs(
                 args,
                 kwargs,
                 catch_figure_error,
+                formats,
             ): index
             for index, (name, func, args, kwargs, catch_figure_error) in enumerate(jobs)
         }
@@ -598,7 +618,7 @@ def _write_message_figure(
         fontsize=_MONO_FONTSIZE,
         fontfamily="monospace",
     )
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def _plot_horizontal_values(
@@ -663,7 +683,7 @@ def _plot_horizontal_values(
         top=0.96,
         bottom=_compact_bottom_margin(height_px),
     )
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def _format_float(value: float | None) -> str:
@@ -839,7 +859,7 @@ def _cv_metrics_overview(metrics_cv: pl.DataFrame, out_path: Path) -> None:
     _legend_above(ax)
 
     fig.subplots_adjust(left=0.08, right=0.99, top=0.96, bottom=0.18)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 @_prediction_population_figures("oof_predictions")
@@ -948,7 +968,7 @@ def _group_bootstrap_metrics_figure(
     ax.grid(axis="x", color=_GRID_COLOR, linewidth=0.5)
     ax.set_axisbelow(True)
     fig.subplots_adjust(left=0.31, right=0.985, top=0.89, bottom=0.16)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def _cv_loss_by_split(
@@ -1038,7 +1058,7 @@ def _cv_loss_by_split(
     _legend_above(ax)
 
     fig.subplots_adjust(left=0.09, right=0.99, top=0.96, bottom=0.16)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def _final_refit_loss_by_split(loss_by_split_final_refit: pl.DataFrame, out_path: Path) -> None:
@@ -1252,7 +1272,7 @@ def _feature_importance_top(
                 top=0.985,
                 bottom=_compact_bottom_margin(height_px),
             )
-            _save_svg_figure(fig, out_path)
+            _save_figure(fig, out_path)
             return
 
     max_value = max(values) if values else 1.0
@@ -1305,7 +1325,7 @@ def _feature_importance_top(
         top=0.985,
         bottom=_compact_bottom_margin(height_px),
     )
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def _feature_importance_by_fold_heatmap(
@@ -1469,7 +1489,7 @@ def _feature_importance_by_fold_heatmap(
         top=0.98,
         bottom=_compact_bottom_margin(height_px),
     )
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def _coefficients_signed_top(
@@ -1624,7 +1644,7 @@ def _coefficients_signed_top(
                 top=0.985,
                 bottom=_compact_bottom_margin(height_px),
             )
-            _save_svg_figure(fig, out_path)
+            _save_figure(fig, out_path)
             return
 
     max_abs = max(abs(v) for v in values) if values else 1.0
@@ -1683,7 +1703,7 @@ def _coefficients_signed_top(
         top=0.985,
         bottom=_compact_bottom_margin(height_px),
     )
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def _feature_detail_labels(
@@ -1874,20 +1894,22 @@ def _write_feature_values_by_confusion(
                 label_col=label_col,
             )
 
-        _save_svg_figure(render(features), path)
-        with PdfPages(
-            path.with_suffix(".pdf"),
-            metadata={
-                "CreationDate": None,
-                "ModDate": None,
-                "Title": f"{context} feature distributions",
-            },
-        ) as pdf:
-            for start in range(0, len(features) if not frame.is_empty() else 1, 6):
-                page = render(features[start : start + 6])
-                _publication_layout(page)
-                pdf.savefig(page)
-                plt.close(page)
+        formats = figure_formats.get() or ("svg", "pdf")
+        if "svg" in formats:
+            # Use the single-page plot for SVG and the paginated layout for PDF.
+            _save_figure(render(features), path, formats=("svg",))
+        if "pdf" in formats:
+            pdf_path = path.with_suffix(".pdf")
+            pdf_path.parent.mkdir(parents=True, exist_ok=True)
+            with PdfPages(pdf_path, metadata={
+                "CreationDate": None, "ModDate": None, "Title": f"{context} feature distributions",
+            }) as pdf:
+                for start in range(0, len(features) if not frame.is_empty() else 1, 6):
+                    page = render(features[start : start + 6])
+                    _publication_layout(page)
+                    pdf.savefig(page)
+                    plt.close(page)
+            remove_legacy_population_figure(pdf_path)
 
 
 def _top_feature_expression_by_confusion(
@@ -2025,7 +2047,7 @@ def _predict_probability_distribution(
     ax.yaxis.set_major_locator(MaxNLocator(integer=True))
 
     fig.subplots_adjust(left=0.10, right=0.98, top=0.96, bottom=0.16)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 @_prediction_population_figures("pred_predict")
@@ -2101,7 +2123,7 @@ def _predict_uncertainty(pred_predict: pl.DataFrame, out_path: Path, *, required
         top=0.98,
         bottom=0.12,
     )
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def _deterministic_offsets(count: int, spread: float) -> np.ndarray:
@@ -2259,7 +2281,7 @@ def _species_probability_by_trait(
     ax.set_axisbelow(True)
 
     fig.subplots_adjust(left=0.13, right=0.98, top=0.90, bottom=0.16)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 @_prediction_population_figures("oof_predictions", "pred_inference")
@@ -2433,7 +2455,7 @@ def _species_probability_cv_and_inference(
     ax.set_axisbelow(True)
 
     fig.subplots_adjust(left=0.13, right=0.98, top=0.90, bottom=0.16)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 @_prediction_population_figures("grouped_predictions")
@@ -2606,7 +2628,7 @@ def write_group_probability_figure(
         top=1.0 - (16 + 14 * int(np.ceil(len(legend_handles) / 3))) / height_px,
         bottom=_compact_bottom_margin(height_px),
     )
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 @_prediction_population_figures("oof_predictions")
@@ -2755,7 +2777,7 @@ def _cv_fold_trait_probability(
     )
 
     fig.subplots_adjust(left=0.095, right=0.995, top=0.89, bottom=0.14)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def _cv_curve_inputs(oof_predictions: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:
@@ -2836,7 +2858,7 @@ def _roc_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     _legend_above(ax, ncol=1)
 
     fig.subplots_adjust(left=0.16, right=0.98, top=0.92, bottom=0.14)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def _pr_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
@@ -2873,7 +2895,7 @@ def _pr_curve_cv(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
     _legend_above(ax, ncol=1)
 
     fig.subplots_adjust(left=0.16, right=0.98, top=0.92, bottom=0.14)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 @_prediction_population_figures("oof_predictions", require_two_labels=True)
@@ -2911,7 +2933,7 @@ def _roc_curve_external(y_true: np.ndarray, prob: np.ndarray, out_path: Path) ->
     _legend_above(ax, ncol=1)
 
     fig.subplots_adjust(left=0.13, right=0.98, top=0.98, bottom=0.14)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def _pr_curve_external(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> None:
@@ -2945,7 +2967,7 @@ def _pr_curve_external(y_true: np.ndarray, prob: np.ndarray, out_path: Path) -> 
     _legend_above(ax, ncol=1)
 
     fig.subplots_adjust(left=0.13, right=0.98, top=0.98, bottom=0.14)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 @_prediction_population_figures("pred_external_test", require_two_labels=True)
@@ -3032,7 +3054,7 @@ def _prediction_calibration(
     counts.set_ylabel("Species count")
     counts.set_xlim(0, 1)
     counts.set_xlabel("Predicted probability")
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def _binary_metric_summary_from_counts(
@@ -3152,7 +3174,7 @@ def _prediction_confusion_matrix(
     colorbar.ax.tick_params(labelsize=_TICK_FONTSIZE)
 
     fig.subplots_adjust(left=0.12, right=0.98, top=0.96, bottom=0.16)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 @_prediction_population_figures("oof_predictions", "pred_external_test")
@@ -3317,7 +3339,7 @@ def _cv_external_metric_comparison(
     _legend_above(ax, ncol=2)
 
     fig.subplots_adjust(left=0.10, right=0.99, top=0.86, bottom=0.16)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def _single_report_metric_name(
@@ -4018,13 +4040,14 @@ def _model_selection_curve(
         bbox_to_anchor=(0.5, 0.01),
     )
     fig.subplots_adjust(left=0.10, right=0.995, top=0.93, bottom=0.18, wspace=0.30, hspace=0.48)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
     # Re-rendering must not leave the retired plot or the other rule's plot beside it.
     prefix = "final_refit_" if selection_scope == "final_refit" else ""
     for stem in ("model_selection_trials", "model_selection_one_se_curve", "model_selection"):
-        obsolete = out_path.with_name(f"{prefix}{stem}.svg")
-        if obsolete != out_path:
-            obsolete.unlink(missing_ok=True)
+        for extension in ("svg", "pdf"):
+            obsolete = out_path.with_name(f"{prefix}{stem}.{extension}")
+            if obsolete.stem != out_path.stem:
+                obsolete.unlink(missing_ok=True)
 
 
 def _feature_filter_funnel(
@@ -4209,7 +4232,7 @@ def _feature_filter_funnel(
     ]
     _legend_above(ax, handles=legend_handles, align="right")
     fig.subplots_adjust(left=0.08, right=0.99, top=0.96, bottom=0.16)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def _non_zero_feature_count_by_fold(
@@ -4362,7 +4385,7 @@ def _non_zero_feature_count_by_fold(
     ax.set_axisbelow(True)
 
     fig.subplots_adjust(left=0.12, right=0.995, top=0.90, bottom=0.15)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def _feature_set_jaccard_heatmap(
@@ -4463,7 +4486,7 @@ def _feature_set_jaccard_heatmap(
     colorbar.set_label("Jaccard similarity", fontsize=_LABEL_FONTSIZE)
     colorbar.ax.tick_params(labelsize=_TICK_FONTSIZE)
     fig.subplots_adjust(left=0.12, right=0.92, top=0.98, bottom=0.16)
-    _save_svg_figure(fig, out_path)
+    _save_figure(fig, out_path)
 
 
 def write_run_figures(
@@ -4505,7 +4528,7 @@ def write_run_figures(
     group_bootstrap_metrics: pl.DataFrame | None = None,
     cv_group_labels: dict[str, str] | None = None,
 ) -> list[str]:
-    """Write run-level SVG figures under <run_dir>/<stage>/figures."""
+    """Write run-level figures under <run_dir>/<stage>/figures."""
     stage_dirs = _stage_figure_dirs(run_dir)
     cv_dir = stage_dirs["cv"]
     model_dir = stage_dirs["model"]
@@ -5561,7 +5584,7 @@ def write_predict_figures(
     require_uncertainty: bool = False,
     stage: str = "inference",
 ) -> None:
-    """Write predict-level SVG figures under <run_dir>/inference/figures."""
+    """Write predict-level figures under <run_dir>/<stage>/figures."""
     inference_dir = run_dir / stage / "figures"
     inference_dir.mkdir(parents=True, exist_ok=True)
     _predict_probability_distribution(

@@ -396,12 +396,24 @@ reach either endpoint when deciding whether to expand the range.
 | `evaluation.group_bootstrap.confidence_level` | `0.95` | Value strictly between 0 and 1 |
 | `summary.group_col` | `family` | Metadata column for grouped summaries and display labels |
 | `figures.top_features` | `20` | Number of displayed global or species-local features, from 1 to 100 |
+| `figures.formats` | `null` | Use each figure's default, or select `[svg]`, `[pdf]`, or `[svg, pdf]` |
 | `runtime.seed` | `42` | Reproducible splitting, sampling, and model fitting |
 | `runtime.n_jobs` | `1` | Positive CPU upper bound for parallel work |
 | `runtime.execution_stage` | `cv_only` | `cv_only` or `full_run`; CLI `--execution-stage` overrides it |
 
 The group bootstrap resamples `split.group_col` from pooled out-of-fold (OOF)
 predictions without refitting. Its seed derives from `runtime.seed`.
+
+Select output formats for figures from `run` (including studies) and `predict`:
+
+```yaml
+figures:
+  formats: [svg, pdf]
+```
+
+Each format uses the same output directory and basename. Existing multi-page
+plots keep their pagination in PDF. Standalone evidence and structure reports
+use their dedicated PDF output.
 
 Candidate-evidence PDF rendering uses up to `runtime.n_jobs` workers, bounded by
 the number of PDFs and 80% of the available memory budget at an estimated 1.5 GiB

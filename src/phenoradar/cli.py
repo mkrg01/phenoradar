@@ -53,7 +53,7 @@ from phenoradar.expression_input_cache import (
     identify_source,
     source_signature,
 )
-from phenoradar.figure_runtime import FigureWorkers
+from phenoradar.figure_runtime import FigureWorkers, use_figure_formats
 from phenoradar.figures import (
     FigureError,
     figure_annotation_features,
@@ -1657,7 +1657,10 @@ def _run_single(
     )
 
     figure_generation_started = timing_recorder.start()
-    with FigureWorkers(_artifact_parallel_workers(resolved)) as figure_workers:
+    with (
+        use_figure_formats(resolved.figures.formats),
+        FigureWorkers(_artifact_parallel_workers(resolved)) as figure_workers,
+    ):
         figure_warnings: list[str] = []
         with timing_recorder.measure(scope="figures", stage="annotation_load"):
             try:
@@ -2216,7 +2219,8 @@ def _run_condition_study(
         write_condition_manifest(study_dir, manifest_rows)
 
     try:
-        report_artifacts = generate_study_report(study_dir, manifest_rows)
+        with use_figure_formats(condition_set.conditions[0].config.figures.formats):
+            report_artifacts = generate_study_report(study_dir, manifest_rows)
     except Exception as exc:
         study_metadata["status"] = "report_failed"
         study_metadata["end_time"] = datetime.now(UTC).isoformat()
@@ -2552,6 +2556,7 @@ def predict(
                            if sequence_inputs.data.tree_path else None),
                 tpm_path=(Path(sequence_inputs.data.tpm_path)
                           if combined and sequence_inputs.data.tpm_path else None),
+                figure_formats=sequence_inputs.figures.formats,
             )
         except (AlignmentError, CVError, OSError, ValueError) as exc:
             raise typer.BadParameter(str(exc)) from exc
@@ -2666,11 +2671,12 @@ def predict(
     tree_path = getattr(resolved.data, "tree_path", None)
     figures_started = timing_recorder.start()
     try:
-        write_predict_figures(
-            run_dir=run_dir,
-            pred_predict=pred_predict,
-            require_uncertainty=len(bundle.models) > 1,
-        )
+        with use_figure_formats(resolved.figures.formats):
+            write_predict_figures(
+                run_dir=run_dir,
+                pred_predict=pred_predict,
+                require_uncertainty=len(bundle.models) > 1,
+            )
     except FigureError as exc:
         raise typer.BadParameter(str(exc)) from exc
     if evidence.features.height > 0:
@@ -2698,27 +2704,28 @@ def predict(
                 for entry, model in zip(bundle_preprocess_entries(bundle), bundle.models,
                                         strict=True)
             ])
-            tree_warnings = write_predict_tree_prediction_artifacts(
-                run_dir=run_dir,
-                tree_path=Path(tree_path),
-                metadata_path=(
-                    Path(resolved.data.metadata_path)
-                    if resolved.data.metadata_path is not None
-                    else None
-                ),
-                species_col=resolved.data.species_col,
-                trait_col=resolved.data.trait_col,
-                group_col=contrast_group_col or "group_id",
-                pred_predict=pred_predict,
-                tpm_path=Path(resolved.data.tpm_path),
-                feature_col=resolved.data.feature_col, value_col=resolved.data.value_col,
-                feature_importance=interpretation.feature_importance,
-                coefficients=interpretation.coefficients,
-                feature_limit=resolved.figures.top_features,
-                orthogroup_annotations=bundle.orthogroup_annotations,
-                preserve_missing=bundle.missing_expression_method == "neutral",
-                zero_as_missing=bundle.zero_as_missing,
-            )
+            with use_figure_formats(resolved.figures.formats):
+                tree_warnings = write_predict_tree_prediction_artifacts(
+                    run_dir=run_dir,
+                    tree_path=Path(tree_path),
+                    metadata_path=(
+                        Path(resolved.data.metadata_path)
+                        if resolved.data.metadata_path is not None
+                        else None
+                    ),
+                    species_col=resolved.data.species_col,
+                    trait_col=resolved.data.trait_col,
+                    group_col=contrast_group_col or "group_id",
+                    pred_predict=pred_predict,
+                    tpm_path=Path(resolved.data.tpm_path),
+                    feature_col=resolved.data.feature_col, value_col=resolved.data.value_col,
+                    feature_importance=interpretation.feature_importance,
+                    coefficients=interpretation.coefficients,
+                    feature_limit=resolved.figures.top_features,
+                    orthogroup_annotations=bundle.orthogroup_annotations,
+                    preserve_missing=bundle.missing_expression_method == "neutral",
+                    zero_as_missing=bundle.zero_as_missing,
+                )
         except TreePredictionError as exc:
             raise typer.BadParameter(str(exc)) from exc
         predict_warnings.extend(tree_warnings)

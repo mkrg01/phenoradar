@@ -20,9 +20,9 @@ from phenoradar.cv_display import ordered_prediction_groups
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
-    write_population_message_svg,
+    write_population_message,
 )
-from phenoradar.figures import _orthogroup_annotation_lookup
+from phenoradar.figures import _orthogroup_annotation_lookup, _save_figure
 from phenoradar.metrics import FIXED_PROBABILITY_THRESHOLD_VALUE
 from phenoradar.residue_colors import ZAPPO_GROUPS, residue_color
 from phenoradar.tree_prediction import _PROBABILITY_CMAP, _cell_text_color
@@ -253,7 +253,7 @@ def write_group_trait_composition(
         table_path = population_figure_path(run_dir / stage / "tables" / f"{stem}.tsv", suffix)
         if table.is_empty():
             table_path.unlink(missing_ok=True)
-            write_population_message_svg(figure_path, "No observed groups or positive-PSS sites.")
+            write_population_message(figure_path, "No observed groups or positive-PSS sites.")
             continue
         table_path.parent.mkdir(parents=True, exist_ok=True)
         if stage != "cv":
@@ -264,8 +264,6 @@ def write_group_trait_composition(
                 pl.lit(FIXED_PROBABILITY_THRESHOLD_VALUE).alias("classification_threshold"))
         table.write_csv(table_path, separator="\t")
         fig = _composition_figure(table, trait_name=trait_name)
-        figure_path.parent.mkdir(parents=True, exist_ok=True)
         # Explicit axes use measured full headers; automatic layout would move the matrix cells.
-        fig.savefig(figure_path, format="svg", metadata={"Date": None})
-        plt.close(fig)
+        _save_figure(fig, figure_path, layout=False)
     return []

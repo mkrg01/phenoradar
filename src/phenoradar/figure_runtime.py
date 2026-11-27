@@ -1,11 +1,30 @@
-"""Reuse figure workers across sequential groups of rendering jobs."""
+"""Scope figure formats and reuse workers across groups of rendering jobs."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
+from contextvars import ContextVar
 from multiprocessing import get_context
 
+from phenoradar.config.schema import FigureFormat
 from phenoradar.resource_budget import memory_budget
+
+figure_formats: ContextVar[tuple[FigureFormat, ...] | None] = ContextVar(
+    "figure_formats", default=None,
+)
+
+
+@contextmanager
+def use_figure_formats(formats: Sequence[FigureFormat] | None) -> Iterator[None]:
+    """Apply a format selection within one run or a spawned rendering job."""
+    token = figure_formats.set(None if formats is None else tuple(formats))
+    try:
+        yield
+    finally:
+        figure_formats.reset(token)
+
 
 # Include headroom over the measured memory footprint of a PDF process.
 _CANDIDATE_PDF_WORKER_BYTES = 1536 * 1024**2

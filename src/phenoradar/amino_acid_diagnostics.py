@@ -134,7 +134,7 @@ def write_site_scores(
         ],
         ncol=2,
     )
-    figures._save_svg_figure(fig, path)
+    figures._save_figure(fig, path)
 
 
 def write_site_stability(
@@ -173,7 +173,7 @@ def write_site_stability(
     ax.grid(axis="x", linewidth=0.5)
     ax.set_axisbelow(True)
     figures._legend_above(ax, ncol=2)
-    figures._save_svg_figure(fig, run_dir / "cv/figures/amino_acid_site_stability_top.svg")
+    figures._save_figure(fig, run_dir / "cv/figures/amino_acid_site_stability_top.svg")
 
 
 def write_frequency_by_confusion(

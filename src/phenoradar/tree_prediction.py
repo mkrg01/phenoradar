@@ -1,4 +1,4 @@
-"""Phylogenetic tree prediction annotations and optional SVG figures."""
+"""Phylogenetic tree prediction annotations and optional figures."""
 
 from __future__ import annotations
 
@@ -21,16 +21,16 @@ import polars as pl
 
 from phenoradar.abstention import prediction_label_expr
 from phenoradar.colors import BINARY_TRAIT_COLORS
-from phenoradar.config.schema import DEFAULT_TOP_FEATURES
+from phenoradar.config.schema import DEFAULT_TOP_FEATURES, FigureFormat
 from phenoradar.contrast_metadata import canonical_metadata
 from phenoradar.cv_display import tree_context_tracks
 from phenoradar.figure_population import (
     population_figure_path,
     prediction_figure_populations,
     remove_legacy_population_figure,
-    write_population_message_svg,
+    write_population_message,
 )
-from phenoradar.figure_runtime import FigureWorkers
+from phenoradar.figure_runtime import FigureWorkers, figure_formats, use_figure_formats
 from phenoradar.metrics import (
     FIXED_PROBABILITY_THRESHOLD_NAME,
     FIXED_PROBABILITY_THRESHOLD_VALUE,
@@ -83,7 +83,7 @@ def _tree_population_figures(func: Callable[..., list[str]]) -> Callable[..., li
         for suffix, inputs in populations:
             minimum = 1 if "value_col" in inputs else 2
             if suffix and inputs["annotation"]["species"].n_unique() < minimum:
-                write_population_message_svg(
+                write_population_message(
                     inputs["out_path"], "No accepted species; heatmap unavailable."
                     if minimum == 1 else "Fewer than two accepted species; tree unavailable."
                 )
@@ -110,9 +110,11 @@ def _execute_tree_svg_job(
     name: str,
     func: Callable[..., list[str]],
     kwargs: dict[str, Any],
+    formats: tuple[FigureFormat, ...] | None,
 ) -> tuple[str, list[str], float, float]:
     started = perf_counter()
-    warnings = func(**kwargs)
+    with use_figure_formats(formats):
+        warnings = func(**kwargs)
     return name, warnings, started, perf_counter()
 
 
@@ -125,11 +127,12 @@ def _run_tree_svg_jobs(
 ) -> list[list[str]]:
     if not jobs:
         return []
+    formats = figure_formats.get()
     worker_count = max(1, min(int(parallel_workers), len(jobs)))
     if worker_count == 1:
         results = []
         for name, func, kwargs in jobs:
-            _, warnings, started, ended = _execute_tree_svg_job(name, func, kwargs)
+            _, warnings, started, ended = _execute_tree_svg_job(name, func, kwargs, formats)
             if timing_recorder is not None:
                 timing_recorder.record_interval(started, ended, scope="tree_figure_job", stage=name)
             results.append(warnings)
@@ -142,7 +145,7 @@ def _run_tree_svg_jobs(
         else ProcessPoolExecutor(max_workers=worker_count, mp_context=get_context("spawn"))
     ) as executor:
         future_to_index = {
-            executor.submit(_execute_tree_svg_job, name, func, kwargs): index
+            executor.submit(_execute_tree_svg_job, name, func, kwargs, formats): index
             for index, (name, func, kwargs) in enumerate(jobs)
         }
         for future in as_completed(future_to_index):
@@ -225,7 +228,7 @@ def write_run_tree_prediction_artifacts(
     final_coefficients: pl.DataFrame | None = None,
     pred_inference: pl.DataFrame | None = None,
 ) -> list[str]:
-    """Write run-level tree annotation TSVs and optional Toytree SVG figures."""
+    """Write run-level tree annotation TSVs and optional Toytree figures."""
     if tree_path is None:
         remove_retired_prediction_trees(run_dir)
         return []
@@ -421,7 +424,7 @@ def write_predict_tree_prediction_artifacts(
     orthogroup_annotations: pl.DataFrame | None = None,
     preserve_missing: bool = False, zero_as_missing: bool = False,
 ) -> list[str]:
-    """Write predict-level tree annotation TSV and optional Toytree SVG figure."""
+    """Write predict-level tree annotation TSV and optional Toytree figures."""
     if tree_path is None:
         remove_retired_prediction_trees(run_dir)
         return []
@@ -1147,7 +1150,7 @@ def _write_tree_prediction_svg(
     except ImportError:
         return [
             f"Skipped {out_path.name}: Toytree is unavailable. Reinstall phenoradar or "
-            "install toytree manually to enable SVG output."
+            "install toytree manually to enable tree figures."
         ]
 
     try:
@@ -1213,7 +1216,7 @@ def _write_tree_feature_heatmap_svg(
     except ImportError:
         return [
             f"Skipped {out_path.name}: Toytree is unavailable. Reinstall phenoradar or "
-            "install toytree manually to enable SVG output."
+            "install toytree manually to enable tree figures."
         ]
 
     try:
@@ -1368,7 +1371,7 @@ def _draw_toytree_heatmap(
         title=tip_labels,
         style={"font-size": "9px", "text-anchor": "start"},
     )
-    _save_toytree_svg(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
+    _save_toytree_figure(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
 
 
 def _feature_heatmap_label(
@@ -1590,14 +1593,17 @@ def _draw_toytree_feature_heatmap(
     _draw_context_legend(canvas=canvas, width=width, sidebar_width=sidebar_width,
                          labels=trait_legend)
     _draw_boundary_legend(canvas, width, boundaries, y=465 if residues else 310)
-    _save_toytree_svg(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
+    _save_toytree_figure(canvas=canvas, out_path=out_path, toytree_module=toytree_module)
 
 
-def _save_toytree_svg(*, canvas: Any, out_path: Path, toytree_module: Any) -> None:
+def _save_toytree_figure(*, canvas: Any, out_path: Path, toytree_module: Any) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    toytree_module.save(canvas, str(out_path))
-    _ensure_svg_white_background(out_path)
-    remove_legacy_population_figure(out_path)
+    for extension in figure_formats.get() or ("svg",):
+        path = out_path.with_suffix(f".{extension}")
+        toytree_module.save(canvas, str(path))
+        if extension == "svg":
+            _ensure_svg_white_background(path)
+        remove_legacy_population_figure(path)
 
 
 def _ensure_svg_white_background(svg_path: Path) -> None:
@@ -1686,8 +1692,8 @@ def _draw_context_legend(*, canvas: Any, width: int, sidebar_width: int, labels:
 
 
 _BOUNDARY_STYLES = {
-    "group_id": {"stroke": "#909090", "stroke-width": "0.8px", "stroke-dasharray": "2,2"},
-    "fold_id": {"stroke": "#555555", "stroke-width": "0.8px", "stroke-dasharray": "5,3"},
+    "group_id": {"stroke": "#909090", "stroke-width": 0.8, "stroke-dasharray": "2,2"},
+    "fold_id": {"stroke": "#555555", "stroke-width": 0.8, "stroke-dasharray": "5,3"},
 }
 
 
@@ -1785,7 +1791,7 @@ def _draw_residue_legend(*, canvas: Any, width: int, y_offset: int = 0) -> None:
     for i, (letters, label, color) in enumerate(groups):
         y = 9.5 - i
         legend.rectangle(.02, .08, y - .25, y + .25, color=color,
-                         style={"stroke": "#999999", "stroke-width": ".5px"})
+                         style={"stroke": "#999999", "stroke-width": 0.5})
         legend.text(.12, y, f"{letters}: {label}", color=_TEXT_COLOR,
                     style={"font-size": "9px", "text-anchor": "start"})
 

@@ -16,7 +16,8 @@ from scipy import sparse
 
 from phenoradar.config import AppConfig
 from phenoradar.config.schema import CellTypeExpressionConfig
-from phenoradar.figures import FigureError, _feature_axis_labels, _save_svg_figure
+from phenoradar.figure_runtime import use_figure_formats
+from phenoradar.figures import FigureError, _feature_axis_labels, _save_figure
 from phenoradar.og_expression_figures import expression_orthogroups
 from phenoradar.orthogroup_annotation import load_orthogroup_annotations
 
@@ -200,7 +201,7 @@ def _plot(
         bar.set_ticks(ticks, labels=[f"{value:,}" for value in ticks])
         bar.set_label(scale_label)
         bar.ax.tick_params(length=2.5, width=0.6)
-        _save_svg_figure(fig, path)
+        _save_figure(fig, path)
 
 
 def write_cell_type_expression_figures(
@@ -238,7 +239,10 @@ def write_cell_type_expression_figures(
     )
     labels = _feature_axis_labels(orthogroups, annotations)
     out = run_dir / stage / "figures"
-    _plot(out / "cell_type_expression_cpm.svg", labels, cell_types, cpm, zscore=False)
     standardized = row_zscores(cpm)
-    _plot(out / "cell_type_expression_zscore.svg", labels, cell_types, standardized, zscore=True)
+    with use_figure_formats(config.figures.formats):
+        _plot(out / "cell_type_expression_cpm.svg", labels, cell_types, cpm, zscore=False)
+        _plot(
+            out / "cell_type_expression_zscore.svg", labels, cell_types, standardized, zscore=True,
+        )
     return warnings

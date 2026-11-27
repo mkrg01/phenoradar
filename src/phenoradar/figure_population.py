@@ -1,4 +1,4 @@
-"""Prediction populations shared by SVG figures."""
+"""Prediction populations shared by figures."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from xml.etree import ElementTree as ET
 
 import polars as pl
 
+from phenoradar.config.schema import FigureFormat
+from phenoradar.figure_runtime import figure_formats
 from phenoradar.metrics import FIXED_PROBABILITY_THRESHOLD_VALUE
 
 _SVG_NS = "http://www.w3.org/2000/svg"
@@ -58,8 +60,22 @@ def remove_legacy_population_figure(path: Path) -> None:
         legacy.unlink(missing_ok=True)
 
 
-def write_population_message_svg(path: Path, message: str) -> None:
+def write_population_message(
+    path: Path, message: str, *, formats: tuple[FigureFormat, ...] | None = None,
+) -> None:
     """Make undefined populations explicit, including trees with too few tips."""
+    selected = formats or figure_formats.get() or ("svg",)
+    if "pdf" in selected:
+        from matplotlib.figure import Figure
+
+        from phenoradar.figures import _save_figure
+
+        fig = Figure(figsize=(7.5, 1.875), facecolor="white")
+        fig.text(15 / 720, 1 - 65 / 180, message, fontsize=9)
+        _save_figure(fig, path, formats=("pdf",), layout=False)
+    if "svg" not in selected:
+        return
+    path = path.with_suffix(".svg")
     root = ET.Element(
         f"{{{_SVG_NS}}}svg",
         {

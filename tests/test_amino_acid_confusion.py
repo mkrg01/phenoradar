@@ -31,13 +31,13 @@ def test_confusion_points_preserve_species_values_counts_and_deterministic_posit
     annotations = pl.DataFrame({"feature": ["OG1"],
                                 "orthogroup_annotation": ["Test kinase"]})
     captured = []
-    save = figures._save_svg_figure
+    save = figures._save_figure
 
-    def record(figure, path):
+    def record(figure, path, **kwargs):
         captured.append(figure)
-        save(figure, path)
+        save(figure, path, **kwargs)
 
-    monkeypatch.setattr(figures, "_save_svg_figure", record)
+    monkeypatch.setattr(figures, "_save_figure", record)
     _frequency_by_confusion(tmp_path, oof, 2, annotations)
     axes = captured[-1].axes
     offsets = [np.asarray(points.get_offsets()) for points in axes[0].collections]

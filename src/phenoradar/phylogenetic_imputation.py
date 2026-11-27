@@ -617,6 +617,7 @@ def interpret_unknown_predictions(
         return PhylogeneticImputationArtifacts(
             warnings=["Skipped phylogenetic imputation: data.tree_path is unset."]
         )
+    from phenoradar.figure_runtime import use_figure_formats
     from phenoradar.phylogenetic_figures import write_phylogenetic_figures
 
     metadata_trait = config.data.trait_col
@@ -645,9 +646,10 @@ def interpret_unknown_predictions(
         return PhylogeneticImputationArtifacts(
             warnings=[f"Skipped phylogenetic imputation: {exc}"]
         )
-    write_phylogenetic_figures(
-        artifacts,
-        run_dir=run_dir,
-        branch_length_mode=config.phylogenetic_imputation.branch_length_mode,
-    )
+    with use_figure_formats(config.figures.formats):
+        write_phylogenetic_figures(
+            artifacts,
+            run_dir=run_dir,
+            branch_length_mode=config.phylogenetic_imputation.branch_length_mode,
+        )
     return artifacts

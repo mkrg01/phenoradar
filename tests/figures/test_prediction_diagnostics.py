@@ -42,13 +42,13 @@ def test_cv_and_external_diagnostics_share_populations_and_counts(
     )
     original = cv.clone()
     rendered: dict[Path, Figure] = {}
-    save = figures._save_svg_figure
+    save = figures._save_figure
 
     def record(fig: Figure, path: Path) -> None:
         rendered[path] = fig
         save(fig, path)
 
-    monkeypatch.setattr(figures, "_save_svg_figure", record)
+    monkeypatch.setattr(figures, "_save_figure", record)
     for name, data, label in [
         ("cv", cv, "label"),
         ("external", cv.rename({"label": "true_label"}), "true_label"),
@@ -85,13 +85,13 @@ def test_expression_and_frequency_share_layout_counts_and_species_values(
         {"species": list("abcd"), "feature": [feature] * 4, "frequency": [0.0, 0.2, 0.4, None]}
     ).write_csv(tables / "top_amino_acid_frequencies.tsv", separator="\t")
     rendered: dict[Path, Figure] = {}
-    save = figures._save_svg_figure
+    save = figures._save_figure
 
-    def record(fig: Figure, path: Path) -> None:
+    def record(fig: Figure, path: Path, **kwargs) -> None:
         rendered[path] = fig
-        save(fig, path)
+        save(fig, path, **kwargs)
 
-    monkeypatch.setattr(figures, "_save_svg_figure", record)
+    monkeypatch.setattr(figures, "_save_figure", record)
     write_frequency_by_confusion(tmp_path, predictions, 1)
     expression_path = tmp_path / "expression.svg"
     figures._top_feature_expression_by_confusion(

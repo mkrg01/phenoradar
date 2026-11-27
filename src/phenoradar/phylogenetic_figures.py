@@ -14,7 +14,7 @@ from matplotlib.colors import ListedColormap, Normalize
 from matplotlib.patches import Patch
 
 from phenoradar.colors import BINARY_TRAIT_COLORS
-from phenoradar.figures import _legend_above, _save_svg_figure
+from phenoradar.figures import _legend_above, _save_figure
 from phenoradar.phylogenetic_imputation import PhylogeneticImputationArtifacts
 
 
@@ -75,7 +75,7 @@ def _comparison_scatter(artifacts: PhylogeneticImputationArtifacts, path: Path) 
         label="Expression minus phylogenetic probability",
         location="bottom", use_gridspec=False, shrink=0.9,
     )
-    _save_svg_figure(fig, path)
+    _save_figure(fig, path)
 
 
 def _tree_coordinates(tree: Any) -> tuple[list[Any], dict[Any, float], dict[Any, float]]:
@@ -223,7 +223,7 @@ def _tree_comparison(
         ncol=3,
         fontsize=6,
     )
-    _save_svg_figure(fig, path)
+    _save_figure(fig, path)
 
 
 def write_phylogenetic_figures(

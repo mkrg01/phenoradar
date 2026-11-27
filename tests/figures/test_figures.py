@@ -1586,13 +1586,13 @@ def test_single_model_nonzero_counts_use_bars_without_redundant_labels(
     })
     path = tmp_path / "non_zero_feature_count_by_fold.svg"
     figures = []
-    save = figures_mod._save_svg_figure
+    save = figures_mod._save_figure
 
     def capture(fig, out_path):
         figures.append(fig)
         save(fig, out_path)
 
-    monkeypatch.setattr(figures_mod, "_save_svg_figure", capture)
+    monkeypatch.setattr(figures_mod, "_save_figure", capture)
     figures_mod._non_zero_feature_count_by_fold(data, path,
                                                fold_groups={"1": "A", "2": "B", "10": "C"})
     ax = figures[0].axes[0]

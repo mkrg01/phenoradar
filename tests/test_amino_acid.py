@@ -496,11 +496,18 @@ def test_cli_run_and_predict_need_no_tpm(tmp_path: Path, monkeypatch) -> None:
         app, ["predict", "--model-bundle", str(runs[0] / "model_bundle"), "--quiet"]
     )
     assert result.exit_code == 0, result.output + repr(result.exception)
+    predict_config = yaml.safe_load(config.read_text())
+    predict_config["figures"] = {"formats": ["pdf"]}
+    config.write_text(yaml.safe_dump(predict_config))
     result = runner.invoke(
         app,
         ["predict", "--model-bundle", str(runs[0] / "model_bundle"), "-c", str(config), "--quiet"],
     )
     assert result.exit_code == 0, result.output + repr(result.exception)
+    for extension in ("svg", "pdf"):
+        assert len(list((tmp_path / "runs").glob(
+            f"*_predict_*/predict/figures/predict_probability_distribution.{extension}",
+        ))) == 1
     metadata = json.loads((runs[0] / "run_metadata.json").read_text())
     assert metadata["feature_mode"] == "amino_acid"
 

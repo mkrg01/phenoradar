@@ -7,6 +7,7 @@ import polars as pl
 
 from phenoradar.abstention import abstention_summary
 from phenoradar.config import AppConfig, PredictConfig
+from phenoradar.figure_runtime import use_figure_formats
 from phenoradar.figures import FigureError, write_group_probability_figure
 from phenoradar.group_summary import GroupSummaryError, build_group_summary_artifacts
 from phenoradar.timing import TimingRecorder
@@ -57,13 +58,14 @@ def write_group_summary_artifacts(
         )
     figure_started = None if timing_recorder is None else timing_recorder.start()
     try:
-        write_group_probability_figure(
-            grouped_predictions=artifacts.predictions,
-            out_path=figures_dir / f"probability_by_{artifacts.suffix}.svg",
-            group_label=artifacts.group_label,
-            source_table_name=source_table_name,
-            figure_name=f"probability_by_{artifacts.suffix}.svg",
-        )
+        with use_figure_formats(config.figures.formats):
+            write_group_probability_figure(
+                grouped_predictions=artifacts.predictions,
+                out_path=figures_dir / f"probability_by_{artifacts.suffix}.svg",
+                group_label=artifacts.group_label,
+                source_table_name=source_table_name,
+                figure_name=f"probability_by_{artifacts.suffix}.svg",
+            )
     except FigureError as exc:
         return [str(exc)]
     finally:

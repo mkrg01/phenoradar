@@ -230,8 +230,10 @@ selection records the derived requested count. See
 
 ## Figures and species evidence
 
-Most figures are SVGs under the matching stage. `figures.top_features` limits
-global or species-local features; optional OG annotations replace ID-only labels.
+Most figures default to SVG under the matching stage. Set `figures.formats` to
+write SVG, PDF, or both for standard run, study, and prediction figures.
+`figures.top_features` limits global or species-local features; optional OG
+annotations replace ID-only labels. Paths below use the default file extensions.
 
 Artwork keeps axis labels, units, panel identifiers and graphical keys; explanatory
 prose is omitted from the figure canvas.
@@ -274,7 +276,7 @@ the mean prediction, observed positive fraction, and species counts per bin.
 ### Cell-type expression
 
 With [an atlas configured](configuration.md#cell-type-expression),
-`cell_type_expression_cpm.svg` and `cell_type_expression_zscore.svg` are written
+`cell_type_expression_cpm` and `cell_type_expression_zscore` are written
 to `cv/figures/` for CV-only runs and `model/figures/` for full runs. Both use
 `viridis` and label OGs with their IDs and any available OrthoDB annotations.
 Expression mode ranks OGs by mean model feature importance. Amino-acid mode

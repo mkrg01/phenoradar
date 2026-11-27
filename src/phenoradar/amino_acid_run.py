@@ -49,6 +49,7 @@ from phenoradar.amino_acid_sparse import (
 from phenoradar.combined import ExpressionInput, ExpressionTransform, fit_expression
 from phenoradar.config import AppConfig
 from phenoradar.config.io import write_resolved_config
+from phenoradar.config.schema import FigureFormat
 from phenoradar.cv import (
     InnerCvPreprocessedFold,
     SelectedCandidate,
@@ -78,6 +79,7 @@ from phenoradar.cv import (
     _tpe_trial_params,
     _with_native_thread_limit,
 )
+from phenoradar.figure_runtime import use_figure_formats
 from phenoradar.fold_identity import configure_fold_seed_ids, seed_scope
 from phenoradar.glmnet import SPARSE_INDEX_LIMIT, GlmnetLogisticRegression
 from phenoradar.group_bootstrap import run_oof_group_bootstrap
@@ -854,7 +856,7 @@ def run_amino_acid(
     tpm_cache = (
         Path(config.data.sequence_tpm_cache_dir) if config.data.sequence_tpm_cache_dir else None
     )
-    with ExitStack() as stack:
+    with use_figure_formats(config.figures.formats), ExitStack() as stack:
         reports = stack.enter_context(AAReportWriter(tables, compact=compact_reports(config)))
         expression = (
             stack.enter_context(ExpressionInput(config, all_species, training_species))
@@ -1244,6 +1246,7 @@ def predict_amino_acid(
     summary_group_col: str | None = None,
     warning_messages: list[str] | None = None,
     tree_path: Path | None = None,
+    figure_formats: list[FigureFormat] | None = None,
 ) -> Path:
     from phenoradar.config import load_and_resolve_config
 
@@ -1258,6 +1261,7 @@ def predict_amino_acid(
         if sha256_file(bundle / name) != manifest["files"][name]:
             raise AlignmentError(f"Bundle checksum mismatch: {name}")
     config = load_and_resolve_config([bundle / "resolved_config.yml"])
+    config.figures.formats = figure_formats
     if tree_path is not None:
         config.data.tree_path = str(tree_path)
     combined = manifest.get("feature_mode") == "combined"
@@ -1294,7 +1298,7 @@ def predict_amino_acid(
         raise AlignmentError(
             "Initial sequence prediction requires species in the frozen alignments"
         )
-    with ExitStack() as stack:
+    with use_figure_formats(config.figures.formats), ExitStack() as stack:
         expression = (
             stack.enter_context(ExpressionInput(config, targets, [])) if combined else None
         )

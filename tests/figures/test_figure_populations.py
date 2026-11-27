@@ -36,13 +36,13 @@ def test_confusion_and_comparison_evaluate_the_same_population(
     original = external.clone()
     cv = external.rename({"true_label": "label"}).with_columns(pl.lit("0").alias("fold_id"))
     rendered: dict[Path, Figure] = {}
-    save_svg = figures._save_svg_figure
+    save_svg = figures._save_figure
 
     def capture(fig: Figure, path: Path) -> None:
         rendered[path] = fig
         save_svg(fig, path)
 
-    monkeypatch.setattr(figures, "_save_svg_figure", capture)
+    monkeypatch.setattr(figures, "_save_figure", capture)
     figures._prediction_confusion_matrix(
         external, tmp_path / "confusion.svg", label_col="true_label"
     )

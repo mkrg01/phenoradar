@@ -20,6 +20,7 @@ from pydantic import (
 from phenoradar.contrast_metadata import canonical_column, canonical_config_fields
 
 ExecutionStage = Literal["cv_only", "full_run"]
+FigureFormat = Literal["svg", "pdf"]
 OuterCvStrategy = Literal["logo", "group_kfold", "stratified_group_kfold"]
 SamplingStrategy = Literal["all_samples", "group_balanced"]
 WeightingMode = Literal["none", "group_label_inverse"]
@@ -573,6 +574,14 @@ class FiguresConfig(StrictModel):
     """Figure output controls."""
 
     top_features: PositiveInt = Field(default=DEFAULT_TOP_FEATURES, le=100)
+    formats: list[FigureFormat] | None = Field(default=None, min_length=1)
+
+    @field_validator("formats")
+    @classmethod
+    def distinct_formats(cls, formats: list[FigureFormat] | None) -> list[FigureFormat] | None:
+        if formats is not None and len(formats) != len(set(formats)):
+            raise ValueError("figures.formats must not contain duplicate formats")
+        return formats
 
 
 class RuntimeConfig(StrictModel):

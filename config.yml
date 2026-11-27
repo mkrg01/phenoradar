@@ -106,6 +106,7 @@ evaluation:
 
 figures:
   top_features: 20
+  formats: null  # defaults by figure. Choices: [svg], [pdf], [svg, pdf]
 
 phylogenetic_imputation:
   enabled: true  # choices: true, false; expression inference only

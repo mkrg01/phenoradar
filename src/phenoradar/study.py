@@ -15,6 +15,7 @@ import numpy as np
 import polars as pl
 
 from phenoradar.config import ConfigConditionSet
+from phenoradar.figure_runtime import figure_formats
 from phenoradar.metrics import metric_higher_is_better
 from phenoradar.provenance import ProvenanceError, dataset_fingerprint
 
@@ -379,9 +380,11 @@ def _pairwise_rows(
 
 def _save_figure_formats(fig: Any, base_path: Path) -> tuple[Path, ...]:
     paths: list[Path] = []
-    for extension in ("svg", "pdf", "png"):
+    for extension in figure_formats.get() or ("svg", "pdf", "png"):
         path = base_path.with_suffix(f".{extension}")
-        metadata = {"Date": None} if extension == "svg" else None
+        metadata = {"Date": None} if extension == "svg" else (
+            {"CreationDate": None, "ModDate": None} if extension == "pdf" else None
+        )
         fig.savefig(path, dpi=300, bbox_inches="tight", metadata=metadata)
         paths.append(path)
     plt.close(fig)
