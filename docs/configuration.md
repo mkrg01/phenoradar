@@ -428,6 +428,32 @@ Set `report.structure.enabled: true` to map sites after amino-acid or combined
 runs. See [structure annotation](site-structure-annotation.md) for options and
 PyMOL outputs.
 
+### Cell-type expression
+
+Install the optional AnnData reader with `pip install 'phenoradar[atlas]'` (or
+`uv sync --extra atlas` from a checkout). Add the atlas to the run YAML:
+
+```yaml
+report:
+  cell_type_expression:
+    h5ad_path: atlas.h5ad
+    gene_to_orthogroup_path: gene_to_orthogroup.tsv.gz
+    cell_type_col: cell_type
+    cell_types: [mesophyll, bundle_sheath, epidermis, guard, phloem, xylem]
+```
+
+The H5AD can contain individual cells or nuclei, or raw counts already summed
+into pseudobulks. Put gene IDs in `var_names`, cell-type labels in
+`obs[cell_type_col]` (default `cell_type`), and raw counts in `X` or in the layer
+named by `counts_layer`. The TSV or TSV.GZ must have `gene_id` and `orthogroup`
+headers. Gene IDs must match `var_names` and OG IDs must use the same OrthoDB
+release and level as the model. Each distinct gene–OG pair is counted once.
+Omit `cell_types` to use first appearance order, excluding blank and `unknown`
+labels. An explicit list sets both the subset and the order.
+
+See [cell-type expression outputs](output-artifacts.md#cell-type-expression)
+for the ranking, scaling, and file names.
+
 ## Prediction settings
 
 Expression `predict` requires a bundle and an explicit TPM path through

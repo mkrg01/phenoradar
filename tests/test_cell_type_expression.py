@@ -1,0 +1,191 @@
+import gzip
+from pathlib import Path
+from xml.etree import ElementTree as ET
+
+import numpy as np
+import polars as pl
+import pytest
+import yaml
+from scipy import sparse
+from test_amino_acid import fixture_config
+from test_combined import combined_config
+from typer.testing import CliRunner
+
+from phenoradar.cell_type_expression import (
+    _read_cpm,
+    rank_site_orthogroups,
+    row_zscores,
+    write_cell_type_expression_figures,
+)
+from phenoradar.cli import app
+from phenoradar.config import AppConfig
+from phenoradar.config.schema import CellTypeExpressionConfig
+from phenoradar.figures import FigureError
+
+
+@pytest.mark.parametrize("representation", ["dense", "sparse", "layer"])
+def test_cpm_pools_counts_and_preserves_missing_values(
+    tmp_path: Path, representation: str,
+) -> None:
+    ad = pytest.importorskip("anndata")
+    counts = np.array([[1, 3, 6], [2, 1, 7], [0, 1, 4], [0, 0, 0], [50, 0, 0]])
+    atlas = ad.AnnData(X=sparse.csr_matrix(counts) if representation == "sparse" else counts)
+    atlas.obs["custom_type"] = ["A", "A", "B", "Empty", "Unknown"]
+    atlas.var_names = ["gene1", "gene2", "background"]
+    layer = None
+    if representation == "layer":
+        layer = "counts"
+        atlas.layers[layer] = sparse.csr_matrix(counts)
+        atlas.X = np.log1p(counts)
+    path = tmp_path / "atlas.h5ad"
+    atlas.write_h5ad(path)
+    mapping = tmp_path / "mapping.tsv.gz"
+    with gzip.open(mapping, "wt") as handle:
+        handle.write(
+            "gene_id\torthogroup\n"
+            "gene1\tOG_A\ngene1\tOG_A\ngene2\tOG_A\ngene1\tOG_B\n"
+            "absent\tOG_absent\n",
+        )
+    config = CellTypeExpressionConfig(
+        h5ad_path=str(path), gene_to_orthogroup_path=str(mapping), cell_type_col="custom_type",
+        cell_types=["B", "A", "Empty"], counts_layer=layer,
+    )
+    labels, cpm, warnings = _read_cpm(config, ["OG_A", "OG_B", "OG_absent"])
+    assert labels == ["B", "A", "Empty"]
+    np.testing.assert_allclose(
+        cpm, [[200_000, 350_000, np.nan], [0, 150_000, np.nan], [np.nan] * 3],
+    )
+    expected_z = 1 / np.sqrt(2)
+    np.testing.assert_allclose(
+        row_zscores(cpm), [[-expected_z, expected_z, np.nan]] * 2 + [[np.nan] * 3],
+    )
+    assert np.isnan(row_zscores(np.array([[1.0, 1.0], [np.nan, 0.0]]))).all()
+    assert "2 of 3" in warnings[0]
+    config.cell_types = None
+    assert _read_cpm(config, ["OG_A"])[0] == ["A", "B", "Empty"]
+    if representation == "layer":
+        config.counts_layer = None
+        with pytest.raises(FigureError, match="nonnegative raw counts"):
+            _read_cpm(config, ["OG_A"])
+
+
+@pytest.mark.parametrize(
+    ("filename", "score"),
+    [("amino_acid_site_scores.tsv", "normalized_pss"),
+     ("amino_acid_site_pss.tsv", "normalized_score")],
+)
+def test_rank_og_sums_sites_before_applying_limit(
+    tmp_path: Path, filename: str, score: str,
+) -> None:
+    (tmp_path / filename).write_text(
+        f"orthogroup\t{score}\nOG1\t0.4\nOG2\t0.3\nOG2\t0.2\nOG3\t0\n",
+    )
+    assert rank_site_orthogroups(tmp_path, 1) == ["OG2"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "stage", "report_format"),
+    [
+        ("expression", "cv_only", "compact"),
+        ("expression", "full_run", "compact"),
+        ("amino_acid", "cv_only", "compact"),
+        ("amino_acid", "full_run", "full"),
+        ("combined", "cv_only", "full"),
+        ("combined", "full_run", "compact"),
+    ],
+)
+def test_run_writes_two_atlas_svg_figures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, stage: str, report_format: str,
+) -> None:
+    ad = pytest.importorskip("anndata")
+    path = (fixture_config(tmp_path, "aa_frequency") if mode == "amino_acid"
+            else combined_config(tmp_path))
+    config = yaml.safe_load(path.read_text())
+    config["data"]["feature_mode"] = mode
+    config["runtime"]["execution_stage"] = stage
+    config["figures"] = {"top_features": 1}
+    config["report"] = {
+        "amino_acid_tables": report_format,
+        "cell_type_expression": {
+            "h5ad_path": "atlas.h5ad",
+            "gene_to_orthogroup_path": "mapping.tsv",
+            "cell_types": ["type_b", "type_a"],
+        },
+    }
+    # Expression and residues encode the same signal. At this penalty the
+    # combined fit attributes the signal to expression alone.
+    if mode == "combined":
+        config["model_selection"]["search_space"]["amino_acid_penalty_ratio"] = [1]
+    elif mode == "expression":
+        config["model_selection"]["search_space"].pop("amino_acid_penalty_ratio")
+    annotation = tmp_path / "ogs.tsv"
+    annotation.write_text("OG1\t3193\tSequence group\nEXPR\t3193\tExpression group\n")
+    config["data"]["orthogroup_annotation_path"] = str(annotation)
+    path.write_text(yaml.safe_dump(config))
+    atlas = ad.AnnData(X=np.array([[2, 1, 7], [1, 3, 6]]))
+    atlas.obs["cell_type"] = ["type_a", "type_b"]
+    atlas.var_names = ["seq_gene", "expr_gene", "background"]
+    atlas.write_h5ad(tmp_path / "atlas.h5ad")
+    (tmp_path / "mapping.tsv").write_text("gene_id\torthogroup\nseq_gene\tOG1\nexpr_gene\tEXPR\n")
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["run", "-c", str(path), "--quiet"], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    run = next(directory for directory in (tmp_path / "runs").iterdir() if directory.is_dir()
+               and not directory.name.startswith("."))
+    figure_dir = run / ("model" if stage == "full_run" else "cv") / "figures"
+    paths = sorted(run.glob("*/figures/cell_type_expression_*.svg"))
+    assert paths == [
+        figure_dir / "cell_type_expression_cpm.svg",
+        figure_dir / "cell_type_expression_zscore.svg",
+    ]
+    for figure, scale in zip(paths, ("CPM", "Row z-score"), strict=True):
+        labels = [node.text for node in ET.parse(figure).iter("{http://www.w3.org/2000/svg}text")]
+        assert scale in labels
+        assert labels.index("Type b") < labels.index("Type a")
+        assert ("Sequence group (OG1)" in labels) == (mode == "amino_acid")
+        assert ("Expression group (EXPR)" in labels) == (mode != "amino_acid")
+
+
+def test_combined_atlas_uses_both_rankings_and_displays_overlap_once(tmp_path: Path) -> None:
+    ad = pytest.importorskip("anndata")
+    atlas_path = tmp_path / "atlas.h5ad"
+    data = ad.AnnData(X=np.array([[1, 2, 3, 4], [3, 2, 1, 4]]))
+    data.obs["cell_type"] = ["A", "B"]
+    data.var_names = ["g1", "g2", "g3", "background"]
+    data.write_h5ad(atlas_path)
+    mapping = tmp_path / "mapping.tsv"
+    mapping.write_text("gene_id\torthogroup\ng1\tOG1\ng2\tOG2\ng3\tOG3\n")
+    config = AppConfig.model_validate({
+        "data": {"feature_mode": "combined", "alignment_dir": "unused"},
+        "preprocess": {
+            "amino_acid": {"aggregation": "aa_frequency"},
+            "expression": {
+                "missing_expression": {"method": "neutral"}, "absent_feature_fill": "nan",
+            },
+        },
+        "model_selection": {"search_space": {"alpha": [1]}},
+        "phylogenetic_imputation": {"enabled": False},
+        "figures": {"top_features": 2},
+        "runtime": {"execution_stage": "full_run"},
+        "report": {"cell_type_expression": {
+            "h5ad_path": str(atlas_path), "gene_to_orthogroup_path": str(mapping),
+        }},
+    })
+    tables = tmp_path / "model/tables"
+    tables.mkdir(parents=True)
+    (tables / "amino_acid_site_scores.tsv").write_text(
+        "orthogroup\tnormalized_pss\nOG3\t0.6\nOG2\t0.3\nOG4\t0.1\n",
+    )
+    importance = pl.DataFrame({
+        "feature": ['["expression","OG1"]', '["expression","OG2"]', '["expression","OG0"]',
+                    '["OG5",1,"A"]'],
+        "importance_mean": [0.7, 0.2, 0.1, 0.9],
+    })
+    warnings = write_cell_type_expression_figures(
+        tmp_path, config, expression_importance=importance,
+    )
+    assert warnings == []
+    figure = tmp_path / "model/figures/cell_type_expression_cpm.svg"
+    labels = [node.text for node in ET.parse(figure).iter("{http://www.w3.org/2000/svg}text")]
+    assert [label for label in labels if label and label.startswith("OG")] == ["OG1", "OG2", "OG3"]

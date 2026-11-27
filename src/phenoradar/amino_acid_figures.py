@@ -319,6 +319,16 @@ def write_amino_acid_figures(
         list(dict.fromkeys([*top_sites["orthogroup"].to_list(), *expression_ogs])),
         annotations=annotations,
     ))
+    if getattr(config.report, "cell_type_expression", None) is not None:
+        from phenoradar.cell_type_expression import write_cell_type_expression_figures
+
+        warnings.extend(write_cell_type_expression_figures(
+            run_dir, config, expression_importance=(
+                final_importance
+                if config.runtime.execution_stage == "full_run"
+                else expression_importance
+            ) if expression is not None else None,
+        ))
     warnings.extend(
         write_run_tree_prediction_artifacts(
             run_dir=run_dir,

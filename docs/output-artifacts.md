@@ -271,6 +271,29 @@ These evaluation figures use the same implementation in expression, amino-acid,
 and combined modes. Calibration uses ten equal-width probability bins and shows
 the mean prediction, observed positive fraction, and species counts per bin.
 
+### Cell-type expression
+
+With [an atlas configured](configuration.md#cell-type-expression),
+`cell_type_expression_cpm.svg` and `cell_type_expression_zscore.svg` are written
+to `cv/figures/` for CV-only runs and `model/figures/` for full runs. Both use
+`viridis` and label OGs with their IDs and any available OrthoDB annotations.
+Expression mode ranks OGs by mean model feature importance. Amino-acid mode
+sums within-model normalized position-specific scores (PSS) across sites and
+fitted models for each OG. Only positive scores enter the ranking.
+`figures.top_features` applies per modality. Combined mode lists the top
+expression OGs followed by the top amino-acid OGs, with an overlapping OG shown
+once. Runs with no positively ranked OGs record a warning.
+
+For each cell type, CPM divides the sum of counts for the genes mapped to an OG
+by the sum for all genes in that cell type and multiplies by one million. The
+CPM figure uses `log1p` color scaling with a CPM colorbar scaled to the plotted
+values. The z-score figure centers each OG across displayed cell types and
+divides by the sample standard deviation. Unmapped OGs and zero-count libraries
+are shown as NA. Rows with
+fewer than two observed cell types or no variation also have NA z-scores.
+
+### Expression and residue frequency
+
 Expression and residue-frequency distributions also share their renderer: two
 columns, TP/FN/TN/FP order (also used by tree legends), one point per observed species,
 available / total counts,

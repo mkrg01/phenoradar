@@ -888,6 +888,15 @@ def _run_single(
     )
     _log(f"Configuration resolved (execution_stage={resolved.runtime.execution_stage}).")
 
+    atlas_config = getattr(resolved.report, "cell_type_expression", None)
+    if atlas_config is not None:
+        from phenoradar.cell_type_expression import validate_atlas_inputs
+
+        try:
+            validate_atlas_inputs(atlas_config)
+        except FigureError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
     if getattr(resolved.data, "feature_mode", "expression") in {"amino_acid", "combined"}:
         from phenoradar.amino_acid import AlignmentError
         from phenoradar.amino_acid_run import run_amino_acid
@@ -898,7 +907,7 @@ def _run_single(
                 resolved, destination, split_override=split_artifacts_override,
                 study_context=study_context, progress=_log,
             )
-        except (AlignmentError, CVError, SplitError, OSError) as exc:
+        except (AlignmentError, CVError, FigureError, SplitError, OSError) as exc:
             raise typer.BadParameter(str(exc)) from exc
         typer.echo(f"Wrote {resolved.data.feature_mode} run artifacts at {result}")
         return result
@@ -1813,6 +1822,20 @@ def _run_single(
                     cv_artifacts.feature_importance, resolved.figures.top_features),
                 annotations=orthogroup_annotations,
             ))
+        if atlas_config is not None:
+            from phenoradar.cell_type_expression import write_cell_type_expression_figures
+
+            with timing_recorder.measure(scope="figures", stage="cell_type_expression"):
+                try:
+                    figure_warnings.extend(write_cell_type_expression_figures(
+                        run_dir, resolved, expression_importance=(
+                            cv_artifacts.feature_importance
+                            if final_refit_artifacts is None
+                            else final_refit_feature_importance
+                        ),
+                    ))
+                except FigureError as exc:
+                    raise typer.BadParameter(str(exc)) from exc
         with timing_recorder.measure(scope="figures", stage="cv_species_evidence"):
             if (
                 isinstance(cv_species_evidence, pl.DataFrame)

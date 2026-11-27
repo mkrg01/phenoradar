@@ -516,11 +516,32 @@ class StructureReportConfig(StrictModel):
     render: bool = False
 
 
+class CellTypeExpressionConfig(StrictModel):
+    """An annotated count atlas and its gene-to-orthogroup mapping."""
+
+    h5ad_path: str = Field(min_length=1)
+    gene_to_orthogroup_path: str = Field(min_length=1)
+    cell_type_col: str = Field(default="cell_type", min_length=1)
+    counts_layer: str | None = Field(default=None, min_length=1)
+    cell_types: list[str] | None = None
+
+    @field_validator("cell_types")
+    @classmethod
+    def validate_cell_types(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        labels = [value.strip() for value in values]
+        if not labels or not all(labels) or len(set(labels)) != len(labels):
+            raise ValueError("cell_types must contain unique, nonempty labels")
+        return labels
+
+
 class ReportConfig(StrictModel):
     """Interpretation table retention; independent of fitting and prediction."""
 
     amino_acid_tables: Literal["compact", "full"] = "compact"
     structure: StructureReportConfig = Field(default_factory=StructureReportConfig)
+    cell_type_expression: CellTypeExpressionConfig | None = None
 
 
 class GroupBootstrapConfig(StrictModel):
