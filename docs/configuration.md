@@ -463,6 +463,10 @@ release and level as the model. Each distinct gene–OG pair is counted once.
 Omit `cell_types` to use first appearance order, excluding blank and `unknown`
 labels. An explicit list sets both the subset and the order.
 
+With an atlas, full runs in expression mode with signed coefficients or in
+amino-acid mode also test cell-type enrichment using all selected final-model
+OGs. The test uses `runtime.seed` for reproducible background draws.
+
 See [cell-type expression outputs](output-artifacts.md#cell-type-expression)
 for the ranking, scaling, and file names.
 

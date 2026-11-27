@@ -294,6 +294,23 @@ divides by the sample standard deviation. Unmapped OGs and zero-count libraries
 are shown as NA. Rows with
 fewer than two observed cell types or no variation also have NA z-scores.
 
+In eligible full runs, `model/figures/cell_type_enrichment_null` shows the
+observed mean OG expression share (%) against the simulated null for each cell
+type. The figure follows `figures.formats`. `model/tables/cell_type_enrichment.tsv`
+records the observed and expected shares, central 95% of the null distribution,
+and raw and Holm-adjusted one-sided p values.
+
+A nonzero coefficient in any final model member selects an OG in expression
+mode or a site in amino-acid mode. In amino-acid mode, any selected site selects
+its OG. The background includes all retained OGs with positive atlas counts
+across the included cell types. For each of 50,000 draws, sample the observed
+number of OGs without replacement. Expression mode samples uniformly.
+Amino-acid mode weights each draw by the number of distinct retained alignment
+positions per OG. Each OG contributes equally when averaging its fractions of
+total CPM. Types with zero library counts are excluded, and Holm correction
+covers the tested cell types in the run. Testing requires at least two cell
+types and both selected and unselected OGs with atlas counts.
+
 ### Expression and residue frequency
 
 Expression and residue-frequency distributions also share their renderer: two

@@ -320,6 +320,7 @@ def write_amino_acid_figures(
         annotations=annotations,
     ))
     if getattr(config.report, "cell_type_expression", None) is not None:
+        from phenoradar.cell_type_enrichment import amino_acid_candidates
         from phenoradar.cell_type_expression import write_cell_type_expression_figures
 
         warnings.extend(write_cell_type_expression_figures(
@@ -328,6 +329,10 @@ def write_amino_acid_figures(
                 if config.runtime.execution_stage == "full_run"
                 else expression_importance
             ) if expression is not None else None,
+            enrichment_candidates=(
+                amino_acid_candidates(members)
+                if config.data.feature_mode == "amino_acid" and members is not None else None
+            ),
         ))
     warnings.extend(
         write_run_tree_prediction_artifacts(

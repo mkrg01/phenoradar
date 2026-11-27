@@ -1826,6 +1826,7 @@ def _run_single(
                 annotations=orthogroup_annotations,
             ))
         if atlas_config is not None:
+            from phenoradar.cell_type_enrichment import expression_candidates
             from phenoradar.cell_type_expression import write_cell_type_expression_figures
 
             with timing_recorder.measure(scope="figures", stage="cell_type_expression"):
@@ -1835,6 +1836,10 @@ def _run_single(
                             cv_artifacts.feature_importance
                             if final_refit_artifacts is None
                             else final_refit_feature_importance
+                        ),
+                        enrichment_candidates=(
+                            expression_candidates(final_refit_artifacts.coefficients_by_model)
+                            if final_refit_artifacts is not None else None
                         ),
                     ))
                 except FigureError as exc:

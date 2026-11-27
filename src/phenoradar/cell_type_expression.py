@@ -14,6 +14,7 @@ from matplotlib.colors import FuncNorm, Normalize
 from numpy.typing import NDArray
 from scipy import sparse
 
+from phenoradar.cell_type_enrichment import write_cell_type_enrichment
 from phenoradar.config import AppConfig
 from phenoradar.config.schema import CellTypeExpressionConfig
 from phenoradar.figure_runtime import use_figure_formats
@@ -52,7 +53,8 @@ def rank_site_orthogroups(tables_dir: Path, limit: int) -> list[str]:
 
 
 def _read_cpm(
-    config: CellTypeExpressionConfig, orthogroups: list[str],
+    config: CellTypeExpressionConfig, orthogroups: list[str], *,
+    ranked_orthogroups: list[str] | None = None,
 ) -> tuple[list[str], NDArray[np.float64], list[str]]:
     try:
         ad = import_module("anndata")
@@ -130,9 +132,11 @@ def _read_cpm(
             totals = gene_counts[:, indices_by_og[og]].sum(axis=1)
             cpm[i, observed_types] = totals[observed_types] / library_sizes[observed_types] * 1e6
     warnings: list[str] = []
-    if len(indices_by_og) < len(orthogroups):
+    ranked = orthogroups if ranked_orthogroups is None else ranked_orthogroups
+    n_matched = sum(og in indices_by_og for og in ranked)
+    if n_matched < len(ranked):
         warnings.append(
-            f"Cell-type expression: {len(indices_by_og)} of {len(orthogroups)} ranked OGs "
+            f"Cell-type expression: {n_matched} of {len(ranked)} ranked OGs "
             "matched atlas genes. Unmatched rows are displayed as NA."
         )
     if not np.all(observed_types):
@@ -206,14 +210,16 @@ def _plot(
 
 def write_cell_type_expression_figures(
     run_dir: Path, config: AppConfig, *, expression_importance: pl.DataFrame | None = None,
+    enrichment_candidates: pl.DataFrame | None = None,
 ) -> list[str]:
-    """Write one CPM and one row-standardized heatmap for the active mode."""
+    """Write ranked heatmaps and, when final-model candidates are supplied, enrichment."""
     atlas = getattr(config.report, "cell_type_expression", None)
     if atlas is None:
         return []
     stage = "model" if config.runtime.execution_stage == "full_run" else "cv"
     limit = config.figures.top_features
     orthogroups = []
+    warnings: list[str] = []
     if expression_importance is not None and {"feature", "importance_mean"}.issubset(
         expression_importance.columns,
     ):
@@ -228,21 +234,42 @@ def write_cell_type_expression_figures(
             ranked_sites = rank_site_orthogroups(run_dir / stage / "tables", limit)
             orthogroups = list(dict.fromkeys([*orthogroups, *ranked_sites]))
         if not orthogroups:
-            return ["Cell-type expression: no orthogroups with positive model importance."]
-        cell_types, cpm, warnings = _read_cpm(atlas, orthogroups)
+            warnings.append("Cell-type expression: no orthogroups with positive model importance.")
+        candidate_ogs = (
+            enrichment_candidates["orthogroup"].to_list()
+            if enrichment_candidates is not None else []
+        )
+        atlas_ogs = list(dict.fromkeys([*orthogroups, *candidate_ogs]))
+        if not atlas_ogs and enrichment_candidates is None:
+            return warnings
+        cell_types, cpm, atlas_warnings = _read_cpm(
+            atlas, atlas_ogs, ranked_orthogroups=orthogroups,
+        )
+        warnings.extend(atlas_warnings)
     except (OSError, ValueError, TypeError, KeyError, pl.exceptions.PolarsError) as exc:
         raise FigureError(f"Could not read cell-type expression inputs: {exc}") from exc
 
-    annotation_path = config.data.orthogroup_annotation_path
-    annotations = load_orthogroup_annotations(
-        Path(annotation_path) if annotation_path is not None else None, feature_names=orthogroups,
-    )
-    labels = _feature_axis_labels(orthogroups, annotations)
     out = run_dir / stage / "figures"
-    standardized = row_zscores(cpm)
     with use_figure_formats(config.figures.formats):
-        _plot(out / "cell_type_expression_cpm.svg", labels, cell_types, cpm, zscore=False)
-        _plot(
-            out / "cell_type_expression_zscore.svg", labels, cell_types, standardized, zscore=True,
-        )
+        if orthogroups:
+            annotation_path = config.data.orthogroup_annotation_path
+            annotations = load_orthogroup_annotations(
+                Path(annotation_path) if annotation_path is not None else None,
+                feature_names=orthogroups,
+            )
+            labels = _feature_axis_labels(orthogroups, annotations)
+            ranked_cpm = cpm[:len(orthogroups)]
+            _plot(
+                out / "cell_type_expression_cpm.svg", labels, cell_types, ranked_cpm, zscore=False,
+            )
+            _plot(
+                out / "cell_type_expression_zscore.svg", labels, cell_types,
+                row_zscores(ranked_cpm), zscore=True,
+            )
+        if enrichment_candidates is not None:
+            indices = {og: i for i, og in enumerate(atlas_ogs)}
+            candidate_cpm = cpm[[indices[og] for og in candidate_ogs]]
+            warnings.extend(write_cell_type_enrichment(
+                run_dir, enrichment_candidates, cell_types, candidate_cpm, seed=config.runtime.seed,
+            ))
     return warnings

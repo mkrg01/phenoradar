@@ -11,6 +11,7 @@ from test_amino_acid import fixture_config
 from test_combined import combined_config
 from typer.testing import CliRunner
 
+from phenoradar.cell_type_enrichment import _null_means
 from phenoradar.cell_type_expression import (
     _read_cpm,
     rank_site_orthogroups,
@@ -83,6 +84,17 @@ def test_rank_og_sums_sites_before_applying_limit(
     assert rank_site_orthogroups(tmp_path, 1) == ["OG2"]
 
 
+def test_site_weighted_null_draws_distinct_ogs_with_successive_weights() -> None:
+    draws = _null_means(np.eye(3), 2, np.array([1., 2., 5.]), 48, 30_000)
+    assert np.isin(draws, [0., 0.5]).all()
+    np.testing.assert_array_equal(draws.sum(axis=1), 1)
+    # The missing OG probabilities are obtained by summing both possible draw orders.
+    expected = 1 - np.array([2 / 8 * 5 / 6 + 5 / 8 * 2 / 3,
+                             1 / 8 * 5 / 7 + 5 / 8 * 1 / 3,
+                             1 / 8 * 2 / 7 + 2 / 8 * 1 / 6])
+    np.testing.assert_allclose(2 * draws.mean(axis=0), expected, atol=0.012, rtol=0)
+
+
 @pytest.mark.parametrize(
     ("mode", "stage", "report_format", "formats"),
     [
@@ -90,6 +102,7 @@ def test_rank_og_sums_sites_before_applying_limit(
         ("expression", "full_run", "compact", None),
         ("amino_acid", "cv_only", "compact", None),
         ("amino_acid", "full_run", "full", None),
+        ("amino_acid", "full_run", "compact", ["svg", "pdf"]),
         ("combined", "cv_only", "full", None),
         ("combined", "full_run", "compact", None),
         ("expression", "cv_only", "compact", ["pdf"]),
@@ -97,7 +110,7 @@ def test_rank_og_sums_sites_before_applying_limit(
         ("combined", "cv_only", "compact", ["svg"]),
     ],
 )
-def test_run_writes_two_atlas_figures(
+def test_run_writes_atlas_figures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, stage: str, report_format: str,
     formats: list[str] | None,
 ) -> None:
@@ -108,6 +121,14 @@ def test_run_writes_two_atlas_figures(
     config["data"]["feature_mode"] = mode
     config["runtime"]["execution_stage"] = stage
     config["figures"] = {"top_features": 1, "formats": formats}
+    expect_enrichment = stage == "full_run" and mode in {"expression", "amino_acid"}
+    if expect_enrichment and mode == "amino_acid":
+        config["preprocess"]["amino_acid"]["ranked_site_filter"] = {"method": "none"}
+        alignments = Path(config["data"]["alignment_dir"])
+        extension = next(alignments.iterdir()).suffix
+        (alignments / f"NOISE{extension}").write_text("".join(
+            f">s{i}_gene\n{'AAA' if (i // 2) % 2 else 'VVV'}\n" for i in range(8)
+        ))
     if formats is not None:
         tree = tmp_path / "tree.nwk"
         tree.write_text("((s0,s1),(s2,s3),(s4,s5),(s6,s7),external,unknown);\n")
@@ -137,11 +158,13 @@ def test_run_writes_two_atlas_figures(
     annotation.write_text("OG1\t3193\tSequence group\nEXPR\t3193\tExpression group\n")
     config["data"]["orthogroup_annotation_path"] = str(annotation)
     path.write_text(yaml.safe_dump(config))
-    atlas = ad.AnnData(X=np.array([[2, 1, 7], [1, 3, 6]]))
+    atlas = ad.AnnData(X=np.array([[2, 1, 3, 4], [1, 3, 1, 5]]))
     atlas.obs["cell_type"] = ["type_a", "type_b"]
-    atlas.var_names = ["seq_gene", "expr_gene", "background"]
+    atlas.var_names = ["seq_gene", "expr_gene", "noise_gene", "background"]
     atlas.write_h5ad(tmp_path / "atlas.h5ad")
-    (tmp_path / "mapping.tsv").write_text("gene_id\torthogroup\nseq_gene\tOG1\nexpr_gene\tEXPR\n")
+    (tmp_path / "mapping.tsv").write_text(
+        "gene_id\torthogroup\nseq_gene\tOG1\nexpr_gene\tEXPR\nnoise_gene\tNOISE\n",
+    )
 
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(app, ["run", "-c", str(path), "--quiet"], catch_exceptions=False)
@@ -164,6 +187,34 @@ def test_run_writes_two_atlas_figures(
             assert labels.index("Type b") < labels.index("Type a")
             assert ("Sequence group (OG1)" in labels) == (mode == "amino_acid")
             assert ("Expression group (EXPR)" in labels) == (mode != "amino_acid")
+    enrichment = run / "model/tables/cell_type_enrichment.tsv"
+    assert enrichment.is_file() == expect_enrichment
+    assert set(run.glob("*/figures/cell_type_enrichment*")) == (
+        {figure_dir / f"cell_type_enrichment_null.{extension}" for extension in selected}
+        if expect_enrichment else set()
+    )
+    if expect_enrichment:
+        table = pl.read_csv(enrichment, separator="\t")
+        assert table["cell_type"].to_list() == ["type_b", "type_a"]
+        assert table["n_draws"].to_list() == [50_000, 50_000]
+        assert table["n_selected_analyzed"].to_list() == [1, 1]
+        assert table["n_eligible_analyzed"].to_list() == [2, 2]
+        p = table["p_enrichment"].min()
+        assert table["p_holm"].min() == pytest.approx(min(1, 2 * p))
+        if mode == "expression":
+            assert table["observed_pct"][0] == pytest.approx(75)
+            assert table["expected_pct"][0] == pytest.approx(50)
+        else:
+            assert table["observed_pct"][0] == pytest.approx(100 / 3)
+            assert table["expected_pct"][0] == pytest.approx(0.4 * 100 / 3 + 0.6 * 25, abs=0.1)
+        if "svg" in selected:
+            root = ET.parse(figure_dir / "cell_type_enrichment_null.svg").getroot()
+            labels = list(root.itertext())
+            assert "Null distribution" in labels and "Mean share of OG expression (%)" in labels
+            assert "Type b" in labels and "Type a" in labels
+            assert not any("selected OGs analyzed" in text or " mode" in text for text in labels)
+        if "pdf" in selected:
+            assert (figure_dir / "cell_type_enrichment_null.pdf").read_bytes().startswith(b"%PDF-")
     if formats is not None:
         cv_figures = run / "cv/figures"
         expected = ["cv_confusion_matrix", "og_expression_group_trait_heatmap"]
